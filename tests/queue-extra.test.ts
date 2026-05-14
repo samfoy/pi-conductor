@@ -313,3 +313,27 @@ test("SpawnQueue.removeQueued: removing a queued entry decrements queue size and
     assert.equal(reg.get(r2.placeholderRun.id)?.status, "queued");
   });
 });
+
+test("SpawnQueue.enqueueOrSpawn: parentMessages snapshot is captured on the PendingSpawn", () => {
+  withFakeHome((home) => {
+    const reg = new RunRegistry();
+    reg.register(makeRun("filler-1", "running"));
+    const queue = new SpawnQueue(reg, 1);
+
+    const parentMessages: any[] = [
+      { role: "user", content: "earlier the user said this", timestamp: 0 },
+    ];
+    const r = queue.enqueueOrSpawn({
+      persona: makePersona("scribe"),
+      task: "summarize",
+      mode: "background",
+      cwd: home,
+      timeoutMs: 60_000,
+      parentMessages,
+    });
+    assert.equal(r.kind, "queued");
+    if (r.kind !== "queued") return;
+    // The pending entry should carry the snapshot through to drain time.
+    assert.deepEqual(r.pending.parentMessages, parentMessages);
+  });
+});

@@ -24,6 +24,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { applyEvent } from "./event-handler.ts";
+import { filterParentContext } from "./context-filter.ts";
+import { seedSessionFile } from "./session-seed.ts";
 import {
   emptyUsage,
   isTerminal,
@@ -230,6 +232,91 @@ export function buildPiArgs(opts: PiArgsOptions): string[] {
   return args;
 }
 
+// ── Spawn invocation planner (inherit_context) ──────────────────────
+
+export interface PlanSpawnOptions {
+  /** Persona being spawned. Drives inheritContext mode. */
+  persona: Persona;
+  /**
+   * Snapshot of the parent conductor's conversation at spawn time.
+   * Required for inherit_context: filtered / full to take effect.
+   * Empty array (or omitted) → behave as inherit_context: none.
+   */
+  parentMessages?: AgentMessage[];
+  /** Where pi should write/read the sub-agent's session file. */
+  sessionDir: string;
+  /** Persona system-prompt body (used in fresh mode only). */
+  systemPrompt: string;
+  /** Task prompt — becomes the trailing positional argv. */
+  prompt: string;
+  /** Sub-agent cwd (used as the seeded session header's cwd). */
+  cwd: string;
+  model?: string;
+  thinking?: ThinkingLevel;
+}
+
+export interface PlanSpawnResult {
+  mode: "fresh" | "resume";
+  piArgs: string[];
+  /** Set when we seeded a session file; equals the path passed via --session. */
+  seededSessionPath?: string;
+}
+
+/**
+ * Decide how to invoke pi for a sub-agent spawn based on the persona's
+ * `inherit_context` setting and the snapshot of parent messages provided.
+ *
+ *   inherit_context: "none"     → fresh session (no parent context).
+ *   inherit_context: "filtered" → seed a session file with parent prose +
+ *                                 file ops (filterParentContext). Falls back
+ *                                 to fresh if the filter result is empty.
+ *   inherit_context: "full"     → seed a session file with every parent
+ *                                 message verbatim. Falls back to fresh
+ *                                 when there are no parent messages.
+ *
+ * Side effect: writes the seeded JSONL to disk when seeding. Pure with
+ * respect to the rest of the spawn pipeline (no subprocess, no registry).
+ */
+export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
+  const { persona, parentMessages = [], sessionDir, systemPrompt, prompt, cwd, model, thinking } = opts;
+
+  let seedMessages: AgentMessage[] | null = null;
+  if (persona.inheritContext === "filtered" && parentMessages.length > 0) {
+    const filtered = filterParentContext(parentMessages);
+    if (filtered.length > 0) seedMessages = filtered;
+  } else if (persona.inheritContext === "full" && parentMessages.length > 0) {
+    seedMessages = parentMessages;
+  }
+
+  if (seedMessages) {
+    const seededSessionPath = join(sessionDir, "seeded.jsonl");
+    seedSessionFile(seededSessionPath, seedMessages, cwd);
+    return {
+      mode: "resume",
+      seededSessionPath,
+      piArgs: buildPiArgs({
+        kind: "resume",
+        sessionPath: seededSessionPath,
+        prompt,
+        model,
+        thinking,
+      }),
+    };
+  }
+
+  return {
+    mode: "fresh",
+    piArgs: buildPiArgs({
+      kind: "fresh",
+      sessionDir,
+      systemPrompt,
+      prompt,
+      model,
+      thinking,
+    }),
+  };
+}
+
 // ── Run registry ─────────────────────────────────────────────────────
 
 export type RunListener = (run: Run) => void;
@@ -307,6 +394,14 @@ export interface SpawnOptions {
   timeoutMs: number;
   /** Optional pre-allocated id (for queue draining). */
   preAllocatedId?: string;
+  /**
+   * Snapshot of the parent conductor's conversation at spawn time.
+   * When the persona has `inherit_context: filtered` or `full` and this
+   * is non-empty, planSpawnPiArgs() seeds a JSONL session file from the
+   * (filtered) parent messages and the sub-agent boots resuming that file
+   * via `pi --session`. Empty/omitted → fresh session, no parent context.
+   */
+  parentMessages?: AgentMessage[];
   /** Streamed tool-call hint callback for foreground rendering. */
   onUpdate?: (run: Run) => void;
   /** Fired when the run reaches a terminal status (completed/failed/killed/timeout). */
@@ -345,26 +440,35 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
   opts.registry.register(run);
   void writeRecord(run);
 
-  // Construct prompt + args.
+  // Construct prompt + args. When the persona has inherit_context=filtered
+  // (or full) and we have a parent-message snapshot, planSpawnPiArgs seeds a
+  // session file with the filtered transcript and we boot resuming it.
   const prompt = buildSubAgentPrompt(opts.persona, opts.task);
   const sessionDir = join(dir, "session");
   mkdirSync(sessionDir, { recursive: true });
-  const piArgs = buildPiArgs({
-    kind: "fresh",
+  const plan = planSpawnPiArgs({
+    persona: opts.persona,
+    parentMessages: opts.parentMessages,
     sessionDir,
     systemPrompt: opts.persona.systemPrompt,
     prompt,
+    cwd: opts.cwd,
     model: opts.model,
     thinking: opts.thinking,
   });
+  // When we seeded a session, populate run.sessionPath up-front so callers
+  // (e.g. ensemble_send mid-run) can find it without waiting for finalize().
+  if (plan.seededSessionPath) run.sessionPath = plan.seededSessionPath;
 
-  const done = runPiSubprocess(run, piArgs, {
+  const done = runPiSubprocess(run, plan.piArgs, {
     registry: opts.registry,
     cwd: opts.cwd,
     timeoutMs: opts.timeoutMs,
     onUpdate: opts.onUpdate,
     onComplete: opts.onComplete,
-    sessionDir,
+    // Only let the subprocess discover a session file when we didn't pre-seed
+    // one — in resume mode the path is fixed.
+    sessionDir: plan.seededSessionPath ? undefined : sessionDir,
   });
   return { run, done };
 }

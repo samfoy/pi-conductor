@@ -16,6 +16,7 @@ import { elapsedStr, formatUsage, getFinalText, pauseRun, resolveTimeoutMs, resu
 import { SpawnQueue } from "./queue.ts";
 import { formatCompletionNotification } from "./notifications.ts";
 import type { FocusedStreamModel } from "./focused-stream-model.ts";
+import type { AgentMessage } from "@mariozechner/pi-agent-core";
 
 interface RegisterToolsOpts {
   getCwd: () => string;
@@ -23,6 +24,13 @@ interface RegisterToolsOpts {
   getQueue: () => SpawnQueue;
   /** Returns the shared FocusedStreamModel (drives the focused-stream overlay). */
   getModel: () => FocusedStreamModel;
+  /**
+   * Snapshot of the parent conductor's messages at spawn time. Used by
+   * inherit_context: filtered/full to seed the sub-agent's session with
+   * the parent's relevant history. Returns an empty array when there's
+   * nothing to inherit.
+   */
+  getParentMessages: () => AgentMessage[];
   /** Push a `<sub-agent-completed>` notification into the parent conversation. */
   pushCompletionNotification: (run: Run) => void;
   /**
@@ -198,6 +206,9 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         model,
         thinking,
         timeoutMs,
+        // Snapshot parent context at spawn time. Honors inherit_context
+        // (filtered/full) inside spawnRun via planSpawnPiArgs.
+        parentMessages: opts.getParentMessages(),
         onUpdate: foreground ? () => {} : undefined, // foreground uses our own onUpdate below
         onComplete: foreground
           ? undefined

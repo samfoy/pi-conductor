@@ -15,6 +15,7 @@ import {
   spawnRun,
   type SpawnOptions,
 } from "./runs.ts";
+import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { Persona, Run, SpawnMode, ThinkingLevel } from "./types.ts";
 import { emptyUsage } from "./types.ts";
 import { mkdirSync } from "node:fs";
@@ -36,6 +37,12 @@ export interface PendingSpawn {
   thinking?: ThinkingLevel;
   timeoutMs: number;
   enqueuedAt: number;
+  /**
+   * Snapshot of the parent conductor's messages at enqueue time. Plumbed
+   * through to the eventual spawnRun so a queued sub-agent inherits the
+   * conductor's intent at the moment it was queued, not at drain time.
+   */
+  parentMessages?: AgentMessage[];
   /** Non-foreground onComplete plumbed through from the spawner. */
   onComplete?: (run: Run) => void;
 }
@@ -116,6 +123,7 @@ export class SpawnQueue {
       thinking: opts.thinking,
       timeoutMs: opts.timeoutMs,
       enqueuedAt: Date.now(),
+      parentMessages: opts.parentMessages,
       onComplete: opts.onComplete,
     };
     this.pending.push(pending);
@@ -169,6 +177,7 @@ export class SpawnQueue {
         thinking: next.thinking,
         timeoutMs: next.timeoutMs,
         preAllocatedId: next.id,
+        parentMessages: next.parentMessages,
         onComplete: next.onComplete,
       });
     }

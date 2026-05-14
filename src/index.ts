@@ -15,7 +15,9 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { buildSessionContext } from "@mariozechner/pi-coding-agent";
 import { Key } from "@mariozechner/pi-tui";
+import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { registerCommands } from "./commands.ts";
 import { registerTools } from "./tools.ts";
 import { RunRegistry } from "./runs.ts";
@@ -153,6 +155,30 @@ export default function (pi: ExtensionAPI): void {
     getRegistry: () => registry,
     getQueue: () => queue,
     getModel: () => focusModel,
+    /**
+     * Snapshot the parent conductor's conversation for inherit_context.
+     * Walks the current session's tree from leaf to root via
+     * buildSessionContext (handles compaction + branch summaries) and
+     * returns the resolved AgentMessage[] the LLM would see.
+     *
+     * Defensive: returns [] when there's no live ctx (e.g. between
+     * session_start and first turn) or when the sessionManager API
+     * throws.
+     */
+    getParentMessages: (): AgentMessage[] => {
+      try {
+        const ctx = ctxRef;
+        if (!ctx) return [];
+        const sm = ctx.sessionManager;
+        if (!sm) return [];
+        const entries = sm.getEntries();
+        const leafId = sm.getLeafId();
+        const result = buildSessionContext(entries, leafId);
+        return result.messages ?? [];
+      } catch {
+        return [];
+      }
+    },
     openFocusedOverlay,
     getConductorMode: () => conductorModeOn,
     setConductorMode: (on: boolean) => {

@@ -62,6 +62,7 @@ function setup() {
     getRegistry: () => reg,
     getQueue: () => queue,
     getModel: () => model,
+    getParentMessages: () => [],
     openFocusedOverlay: (id?: string) => {
       opens.push(id);
     },

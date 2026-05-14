@@ -68,6 +68,7 @@ function setup(extraRuns: Run[] = []) {
     getRegistry: () => reg,
     getQueue: () => queue,
     getModel: () => model,
+    getParentMessages: () => [],
     openFocusedOverlay: () => {},
     pushCompletionNotification: (r: Run) => completions.push(r),
   });
