@@ -114,6 +114,7 @@ test(
         `unexpected terminal status after spawn: ${after1.status}`,
       );
       const turnsAfter1 = after1.usage.turns;
+      const messagesAfter1 = after1.messages.length;
       assert.ok(after1.sessionPath, "sessionPath must be discovered after spawn");
       if (!after1.sessionPath) return;
       assert.ok(existsSync(after1.sessionPath), "sessionPath must exist on disk");
@@ -137,6 +138,17 @@ test(
       assert.ok(
         after2.usage.turns > turnsAfter1,
         `expected at least one new assistant turn after send (was ${turnsAfter1}, now ${after2.usage.turns})`,
+      );
+      // D4 guard: pin pi's resume semantics. If `pi --session <path>` ever
+      // starts replaying old events to stdout (instead of just emitting
+      // the new turn), `applyEvent` would append duplicates and the message
+      // delta would jump well above the expected 1–2 new entries. Tightening
+      // this assertion makes a future pi behavior change loud, not silent.
+      const newMessages = after2.messages.length - messagesAfter1;
+      assert.ok(
+        newMessages >= 1 && newMessages <= 4,
+        `expected 1–4 new messages after a single resume turn (got ${newMessages}). ` +
+          `If this fails high, pi may have started replaying old events on resume.`,
       );
 
       // Transcript on disk should contain both turns' assistant text.
