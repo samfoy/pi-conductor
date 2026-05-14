@@ -257,6 +257,7 @@ ensemble_list()
   - For **background** spawns: returns `{ status: "queued", queue_position: N, agent_id }` immediately. Sub-agent is enqueued FIFO. When a slot opens, it starts and emits the standard completion notification.
   - For **foreground** spawns: **auto-downgrades to background.** Returns `{ status: "queued-as-background", queue_position: N, agent_id }` immediately. The conductor's turn continues; when a slot opens, the sub-agent runs; completion arrives as a notification card. The conductor system prompt explicitly notes this auto-downgrade can happen and instructs the LLM to handle it gracefully (no second spawn, no panic).
 - **Paused:** sub-agent is alive but not consuming tokens. Pause/resume is reflected in the ensemble panel as `⏸ paused` and counts against `maxConcurrent` (it's still a running sub-agent, just stopped).
+- **`ensemble_send` bypasses the concurrency cap.** A send is a *resume*, not a new spawn — queueing it would hang the conductor's foreground tool call until an unrelated sub-agent finishes, which is worse UX than just running it. The conductor system prompt instructs the LLM not to fan out parallel sends to the same sub-agent. Sends still respect status gating (running/paused/queued sub-agents are rejected).
 
 ## TUI surface (the differentiator)
 

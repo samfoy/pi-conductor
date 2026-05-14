@@ -55,6 +55,7 @@ Each persona has its own system prompt (run \`/conductor show <name>\` to read i
 There are at most ${opts.maxConcurrent} concurrent sub-agents. When the cap is hit:
 - **Background spawns** are queued FIFO and return \`status: queued\`.
 - **Foreground spawns auto-downgrade to background** and return \`status: queued-as-background\`. **Do not spawn again** to retry — the sub-agent is enqueued and will run when a slot opens. Acknowledge the queueing in your response and continue with other work.
+- **\`ensemble_send\` bypasses the cap.** A send is a resume, not a new spawn, so it does not count against \`maxConcurrent\` or get queued. Don't fan out parallel sends to the same sub-agent or use sends as a way around the cap — send when you actually want a follow-up turn from that sub-agent.
 
 ## 5. Sub-agent results
 

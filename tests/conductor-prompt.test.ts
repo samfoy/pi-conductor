@@ -103,6 +103,11 @@ test("buildConductorSystemPrompt: documents ensemble_send / pause / resume", () 
   assert.match(out, /`ensemble_resume`/);
 });
 
+test("buildConductorSystemPrompt: warns the LLM that ensemble_send bypasses the concurrency cap", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  assert.match(out, /bypass(es)? the (concurrency )?cap/i);
+});
+
 test("buildConductorSystemPrompt: describes sub-agent completion XML envelope", () => {
   const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
   assert.match(out, /<sub-agent-completed>/);
