@@ -27,6 +27,7 @@ import {
   type RunRegistry,
 } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
+import { buildDoctorReport } from "./doctor.ts";
 
 interface RegisterCommandsOpts {
   getCwd: () => string;
@@ -190,80 +191,13 @@ async function runDoctor(
   opts: RegisterCommandsOpts,
   ctx: ExtensionCommandContext,
 ): Promise<void> {
-  const cwd = opts.getCwd();
-  const cfg = loadConfig(cwd);
-  const resolved = await resolvePersonas({ cwd, personaOverrides: cfg.personaOverrides });
-
-  const lines: string[] = ["pi-conductor doctor", ""];
-
-  lines.push(`## Personas (${resolved.personas.size} resolved)`);
-  if (resolved.personas.size === 0) {
-    lines.push("  ✗ no personas resolved");
-  } else {
-    const counts = countBySource(resolved);
-    lines.push(`  ✓ builtin=${counts.builtin}, user=${counts.user}, project=${counts.project}`);
-  }
-
-  const shadowed = [...resolved.shadowed.entries()].filter(([, list]) => list.length > 1);
-  if (shadowed.length > 0) {
-    lines.push("");
-    lines.push("## Shadowed (overridden) personas");
-    for (const [name, list] of shadowed) {
-      const winning = list[list.length - 1]!;
-      lines.push(`  ${name}: ${list.length} sources, winning = ${winning.source}`);
-      for (const p of list) {
-        const marker = p === winning ? "  ✓" : "   ";
-        lines.push(`    ${marker} ${p.source.padEnd(8)} ${p.sourcePath}`);
-      }
-    }
-  }
-
-  if (resolved.errors.length > 0) {
-    lines.push("");
-    lines.push(`## Parse errors (${resolved.errors.length})`);
-    for (const e of resolved.errors) {
-      lines.push(`  ✗ ${e.path}`);
-      lines.push(`    ${e.reason}`);
-    }
-  }
-
-  const unknownOverrides = Object.keys(cfg.personaOverrides).filter(
-    (n) => !resolved.shadowed.has(n),
-  );
-  if (unknownOverrides.length > 0) {
-    lines.push("");
-    lines.push("## Unknown persona overrides");
-    for (const n of unknownOverrides) {
-      lines.push(`  ⚠ override "${n}" does not match any persona`);
-    }
-  }
-
-  lines.push("");
-  lines.push("## Config files");
-  const userPath = userConfigPath();
-  const projectPath = projectConfigPath(cwd);
-  lines.push(`  user:    ${existsSync(userPath) ? "✓" : "·"} ${userPath}`);
-  lines.push(`  project: ${existsSync(projectPath) ? "✓" : "·"} ${projectPath}`);
-
-  lines.push("");
-  lines.push("## Resolved config");
-  lines.push(`  defaultTimeoutMinutes: ${cfg.defaultTimeoutMinutes}`);
-  lines.push(`  maxConcurrent:         ${cfg.maxConcurrent}`);
-  lines.push(`  queueOnConcurrencyCap: ${cfg.queueOnConcurrencyCap}`);
-  lines.push(`  defaultSpawnMode:      ${cfg.defaultSpawnMode}`);
-  lines.push(`  autoOpenFocusOnSpawn:  ${cfg.autoOpenFocusOnSpawn}`);
-  lines.push(`  personaOverrides:      ${Object.keys(cfg.personaOverrides).length} entries`);
-  lines.push(`  conductorMode:         ${opts.getConductorMode() ? "ON" : "off"}`);
-
-  const registry = opts.getRegistry();
-  const queue = opts.getQueue();
-  lines.push("");
-  lines.push("## Runtime");
-  lines.push(`  active:       ${registry.countActive()}`);
-  lines.push(`  queued:       ${queue.size()}`);
-  lines.push(`  total tracked: ${registry.list().length}`);
-
-  ctx.ui.notify(lines.join("\n"), "info");
+  const report = await buildDoctorReport({
+    cwd: opts.getCwd(),
+    registry: opts.getRegistry(),
+    queue: opts.getQueue(),
+    conductorMode: opts.getConductorMode(),
+  });
+  ctx.ui.notify(report, "info");
 }
 
 function runStatus(opts: RegisterCommandsOpts, ctx: ExtensionCommandContext): void {
@@ -395,12 +329,4 @@ function statusGlyph(s: string): string {
     default:
       return "·";
   }
-}
-
-function countBySource(resolved: PersonaResolution): Record<string, number> {
-  const counts: Record<string, number> = { builtin: 0, user: 0, project: 0 };
-  for (const p of resolved.personas.values()) {
-    counts[p.source] = (counts[p.source] ?? 0) + 1;
-  }
-  return counts;
 }

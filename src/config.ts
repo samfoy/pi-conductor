@@ -4,7 +4,16 @@
  * Loads from ~/.pi/agent/extensions/conductor/config.json (user) and
  * <project>/.pi/conductor.json (project, overrides user).
  *
- * Unknown fields are ignored. Malformed JSON falls back to defaults with a logged warning.
+ * Two entry points:
+ *   - loadConfig(cwd): ConductorConfig
+ *       Silent-fallback for hot paths (every spawn re-reads config; we
+ *       don't want chatty console.warn logs in the agent loop).
+ *   - loadConfigWithErrors(cwd): { config, errors[] }
+ *       Used by /conductor doctor to surface malformed config files to
+ *       the user without crashing the session.
+ *
+ * Unknown fields are ignored (forward-compat). Bad-typed values silently
+ * fall back to defaults — captured by the existing config tests.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -20,12 +29,30 @@ export function projectConfigPath(cwd: string): string {
   return join(cwd, ".pi", "conductor.json");
 }
 
-function safeReadJson(path: string): unknown {
-  if (!existsSync(path)) return null;
+export interface ConfigLoadError {
+  path: string;
+  reason: string;
+}
+
+export interface LoadConfigResult {
+  config: ConductorConfig;
+  errors: ConfigLoadError[];
+}
+
+interface ReadResult {
+  value: unknown;
+  error?: ConfigLoadError;
+}
+
+function safeReadJson(path: string): ReadResult {
+  if (!existsSync(path)) return { value: null };
   try {
-    return JSON.parse(readFileSync(path, "utf-8"));
-  } catch {
-    return null;
+    return { value: JSON.parse(readFileSync(path, "utf-8")) };
+  } catch (e) {
+    return {
+      value: null,
+      error: { path, reason: (e as Error).message },
+    };
   }
 }
 
@@ -67,9 +94,30 @@ function mergeConfig(base: ConductorConfig, raw: unknown): ConductorConfig {
   return out;
 }
 
-export function loadConfig(cwd: string): ConductorConfig {
+/**
+ * Load config and return both the resolved config and any file-load errors.
+ * Use this when surfacing config health to the user (e.g. /conductor doctor).
+ */
+export function loadConfigWithErrors(cwd: string): LoadConfigResult {
   let cfg = { ...DEFAULT_CONFIG };
-  cfg = mergeConfig(cfg, safeReadJson(userConfigPath()));
-  cfg = mergeConfig(cfg, safeReadJson(projectConfigPath(cwd)));
-  return cfg;
+  const errors: ConfigLoadError[] = [];
+
+  const u = safeReadJson(userConfigPath());
+  if (u.error) errors.push(u.error);
+  cfg = mergeConfig(cfg, u.value);
+
+  const p = safeReadJson(projectConfigPath(cwd));
+  if (p.error) errors.push(p.error);
+  cfg = mergeConfig(cfg, p.value);
+
+  return { config: cfg, errors };
+}
+
+/**
+ * Silent-fallback wrapper around loadConfigWithErrors. Use this in hot
+ * paths (every ensemble_spawn invocation re-reads config). Errors are
+ * discarded — surfacing them is /conductor doctor's job.
+ */
+export function loadConfig(cwd: string): ConductorConfig {
+  return loadConfigWithErrors(cwd).config;
 }
