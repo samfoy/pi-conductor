@@ -496,6 +496,109 @@ function mapFromRegistry(r: RunRegistry): Map<string, Run> {
   return m;
 }
 
+// ── ensemble_send ───────────────────────────────────────────────────────
+
+export interface SendToRunOptions {
+  registry: RunRegistry;
+  timeoutMs: number;
+  onUpdate?: (run: Run) => void;
+  onComplete?: (run: Run) => void;
+}
+
+export type SendToRunResult =
+  | { kind: "started"; run: Run; done: Promise<Run> }
+  | { kind: "rejected"; reason: string };
+
+/**
+ * Continue an existing sub-agent's pi session with a new user-role message.
+ *
+ * Spawns a fresh `pi` subprocess pointed at the run's `sessionPath` via
+ * `pi --mode json -p --session <path>` and reuses the same event-loop
+ * plumbing as `spawnRun` so the run's messages, usage, and lastToolCall
+ * accumulate across the original spawn AND any subsequent sends.
+ *
+ * Returns synchronously:
+ *   - `{ kind: "started", run, done }` on success. The Run is mutated in
+ *     place: status flips back to "running", terminal fields are cleared,
+ *     and the registry is notified. `done` resolves when the new
+ *     subprocess reaches a terminal status.
+ *   - `{ kind: "rejected", reason }` if the run is in a state that can't
+ *     be sent to (running, paused, queued) or has no resumable session.
+ */
+export function sendToRun(
+  run: Run,
+  message: string,
+  opts: SendToRunOptions,
+): SendToRunResult {
+  // Status gating.
+  if (run.status === "running") {
+    return {
+      kind: "rejected",
+      reason: `sub-agent ${run.id} is currently running; wait for it to finish before sending.`,
+    };
+  }
+  if (run.status === "paused") {
+    return {
+      kind: "rejected",
+      reason: `sub-agent ${run.id} is paused; resume it first via /conductor resume ${run.id}.`,
+    };
+  }
+  if (run.status === "queued") {
+    return {
+      kind: "rejected",
+      reason: `sub-agent ${run.id} is queued and has not started yet; wait for it to start before sending.`,
+    };
+  }
+  if (!run.sessionPath) {
+    return {
+      kind: "rejected",
+      reason: `sub-agent ${run.id} has no resumable session on disk (sessionPath unset).`,
+    };
+  }
+  if (!existsSync(run.sessionPath)) {
+    return {
+      kind: "rejected",
+      reason: `sub-agent ${run.id} session file is missing on disk: ${run.sessionPath}`,
+    };
+  }
+  const trimmed = message.trim();
+  if (!trimmed) {
+    return {
+      kind: "rejected",
+      reason: `cannot send an empty message to sub-agent ${run.id}.`,
+    };
+  }
+
+  // Reset terminal state so listeners and the panel see this as a fresh run.
+  run.status = "running";
+  run.finishedAt = undefined;
+  run.exitCode = undefined;
+  run.errorMessage = undefined;
+  run.stopReason = undefined;
+  run.lastToolCall = undefined;
+  opts.registry.notify(run);
+
+  const piArgs = buildPiArgs({
+    kind: "resume",
+    sessionPath: run.sessionPath,
+    prompt: trimmed,
+    model: run.model,
+    thinking: run.thinking,
+  });
+
+  const done = runPiSubprocess(run, piArgs, {
+    registry: opts.registry,
+    cwd: run.cwd,
+    timeoutMs: opts.timeoutMs,
+    onUpdate: opts.onUpdate,
+    onComplete: opts.onComplete,
+    // Re-discover sessionPath on finalize — the file path is stable but the
+    // mtime updates, which lets future sends still find it.
+    sessionDir: dirname(run.sessionPath),
+  });
+  return { kind: "started", run, done };
+}
+
 // ── Termination helpers ──────────────────────────────────────────────
 
 export function forceTerminate(
