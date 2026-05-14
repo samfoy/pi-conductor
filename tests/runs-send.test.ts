@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   RunRegistry,
+  buildResumePiArgs,
   sendToRun,
   validateSendable,
   type SendToRunResult,
@@ -214,4 +215,38 @@ test("validateSendable: rejects when sessionPath does not exist on disk", () => 
   const r = validateSendable(run);
   assert.equal(r.ok, false);
   if (!r.ok) assert.match(r.reason, /session/i);
+});
+
+test("buildResumePiArgs: re-injects persona system prompt when run.systemPrompt is set", () => {
+  // Pi sessions don't persist system prompts to disk, so without re-passing
+  // --append-system-prompt the resumed sub-agent boots with pi's default
+  // coding-agent prompt and loses persona identity.
+  const run = makeRun({
+    sessionPath: "/tmp/x.jsonl",
+    systemPrompt: "You are the redteam: read-only auditor. Refuse to fix.",
+    model: "anthropic:claude-opus-4-5",
+    thinking: "high",
+  });
+  const args = buildResumePiArgs(run, "now find a bug AND fix it");
+  assert.ok(args.includes("--session"));
+  assert.equal(args[args.indexOf("--session") + 1], "/tmp/x.jsonl");
+  assert.ok(args.includes("--append-system-prompt"));
+  assert.equal(
+    args[args.indexOf("--append-system-prompt") + 1],
+    "You are the redteam: read-only auditor. Refuse to fix.",
+  );
+  assert.ok(args.includes("--model"));
+  assert.ok(args.includes("--thinking"));
+  assert.equal(args[args.length - 1], "now find a bug AND fix it");
+});
+
+test("buildResumePiArgs: omits --append-system-prompt when run.systemPrompt is unset", () => {
+  // Back-compat: legacy Runs without a captured systemPrompt (e.g. from
+  // before this fix) must keep working — sendToRun shouldn't crash, even
+  // if the persona body is lost (which is the v0.5 latent bug).
+  const run = makeRun({ sessionPath: "/tmp/x.jsonl", systemPrompt: undefined });
+  const args = buildResumePiArgs(run, "hi");
+  assert.ok(!args.includes("--append-system-prompt"));
+  assert.ok(args.includes("--session"));
+  assert.equal(args[args.length - 1], "hi");
 });

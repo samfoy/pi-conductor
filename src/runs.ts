@@ -248,6 +248,37 @@ export function buildPiArgs(opts: PiArgsOptions): string[] {
   return args;
 }
 
+// ── Resume invocation builder (used by ensemble_send) ──────────────────────────────
+
+/**
+ * Build the argv passed to `pi` when resuming an existing sub-agent's
+ * session via `ensemble_send`. Pure: no I/O, no subprocess.
+ *
+ * Re-injects `run.systemPrompt` via `--append-system-prompt` so the
+ * sub-agent keeps its persona on resume — pi sessions don't persist
+ * system prompts to disk. When `run.systemPrompt` is unset (legacy
+ * Runs from before this field existed), no system prompt is passed and
+ * the sub-agent inherits pi's default coding-agent prompt; the run
+ * still resumes correctly, just without persona identity. New runs
+ * always populate the field at spawn time.
+ */
+export function buildResumePiArgs(run: Run, message: string): string[] {
+  if (!run.sessionPath) {
+    throw new Error(
+      `buildResumePiArgs called on run ${run.id} without sessionPath; ` +
+        `validateSendable should have rejected this earlier`,
+    );
+  }
+  return buildPiArgs({
+    kind: "resume",
+    sessionPath: run.sessionPath,
+    prompt: message,
+    model: run.model,
+    thinking: run.thinking,
+    systemPrompt: run.systemPrompt,
+  });
+}
+
 // ── Spawn invocation planner (inherit_context) ──────────────────────
 
 export interface PlanSpawnOptions {
@@ -472,6 +503,9 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     transcriptPath: join(dir, "transcript.jsonl"),
     finalPath: join(dir, "final.md"),
     sessionPath: undefined,
+    // Capture the persona body now so future ensemble_send calls can
+    // re-pass it on resume. Pi doesn't persist system prompts to disk.
+    systemPrompt: opts.persona.systemPrompt,
   };
   opts.registry.register(run);
   void writeRecord(run);
@@ -775,13 +809,7 @@ export function sendToRun(
   // through a free-function call — capture it explicitly.
   const sessionPath = run.sessionPath as string;
 
-  const piArgs = buildPiArgs({
-    kind: "resume",
-    sessionPath,
-    prompt: trimmed,
-    model: run.model,
-    thinking: run.thinking,
-  });
+  const piArgs = buildResumePiArgs(run, trimmed);
 
   const done = runPiSubprocess(run, piArgs, {
     registry: opts.registry,

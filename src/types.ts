@@ -184,6 +184,15 @@ export interface Run {
    * predating v0.5.
    */
   sessionPath?: string;
+  /**
+   * Persona system-prompt body captured at spawn time. Pi sessions do NOT
+   * persist system prompts to disk, so any resume (`pi --session <path>`)
+   * needs us to re-pass `--append-system-prompt` or the sub-agent boots
+   * with pi's default coding-agent prompt and loses its persona identity.
+   * Optional for back-compat with Run records persisted before this field
+   * existed.
+   */
+  systemPrompt?: string;
 
   /** Working directory of the subprocess. */
   cwd: string;
@@ -217,6 +226,7 @@ export interface RunRecord {
   transcriptPath: string;
   finalPath: string;
   sessionPath?: string;
+  systemPrompt?: string;
 }
 
 export function toRunRecord(r: Run): RunRecord {
@@ -240,6 +250,7 @@ export function toRunRecord(r: Run): RunRecord {
     transcriptPath: r.transcriptPath,
     finalPath: r.finalPath,
     sessionPath: r.sessionPath,
+    systemPrompt: r.systemPrompt,
   };
 }
 
