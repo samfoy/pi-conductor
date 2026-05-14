@@ -3,8 +3,8 @@
 **Date:** 2026-05-14
 **Repo:** `~/scratch/pi-conductor/`  (git-init'd, master branch only, never pushed)
 **Author:** Sam Painter (samfp@)
-**Last commit:** `76357d2 feat(v0.3): focused stream overlay (Ctrl+G)`
-**Test state:** 189 passing + 1 skipped (gated live integration), unit suite ~2.3s.
+**Last commit:** `e6b166d feat(tools): ensemble_pause / ensemble_resume LLM-callable tools` (and follow-ups for docs)
+**Test state:** 233 passing + 1 skipped live (216 + 1 gated under unit run), unit suite ~2.5s; live integration suite passes end-to-end at ~57s when `CONDUCTOR_LIVE_TESTS=1`.
 
 This document is a self-contained briefing so a fresh pi session (or a new agent) can pick up the project without losing context. Read this end-to-end before doing any work.
 
@@ -127,29 +127,32 @@ CONTRIBUTING.md           — TDD rules, conventions.
 
 ---
 
-## 5. What works today (v0.3 shipped)
+## 5. What works today (v0.5 shipped)
 
 - **Persona discovery + resolution** with builtin/user/project layering
 - **16 starter personas** covering full SDLC (see decision-log table)
-- **Tools**: `ensemble_list`, `ensemble_status`, `ensemble_spawn`, `ensemble_focus`
+- **Tools**: `ensemble_list`, `ensemble_status`, `ensemble_spawn`, `ensemble_send`, `ensemble_pause`, `ensemble_resume`, `ensemble_focus`
 - **Slash commands**: `/conductor list | show | doctor | on | off | status | stop | pause | resume | queue | focus`
 - **Spawn**: foreground (default, blocks + returns completion card) or background (returns immediately, completion arrives via `<sub-agent-completed>` notification message)
+- **Resumable sessions on disk** — every sub-agent now writes to `<runDir>/session/<timestamp>_<uuid>.jsonl`. `Run.sessionPath` is populated on finalize so future sends can resume the session via `pi --session <path>`.
+- **`ensemble_send`** — continues a finished sub-agent's session with a new user message. Reuses the same `applyEvent` plumbing so the run's messages, usage, and lastToolCall accumulate across the original spawn AND any subsequent sends.
+- **Overlay `s` keybinding** — prompts for a follow-up message and dispatches via `sendToRun`. Footer shows `s send`.
 - **Concurrency cap + FIFO queue** with foreground→background auto-downgrade when full
-- **Pause/resume/stop** via SIGSTOP/SIGCONT/SIGTERM; `stop` works on running OR queued sub-agents
+- **Pause/resume/stop** via SIGSTOP/SIGCONT/SIGTERM; `stop` works on running OR queued sub-agents; pause/resume now also exposed as LLM-callable tools
 - **Ensemble panel** (always-visible `belowEditor` widget when ≥1 sub-agent active or recently-finished within 8s)
-- **Conductor mode system prompt** injected via `before_agent_start` when `PI_CONDUCTOR_MODE=1` env or `/conductor on`
-- **Focused stream overlay** (Ctrl+G) — full-screen drilldown of one sub-agent's live transcript with per-agent scroll, global fold flags, kill-from-overlay
+- **Conductor mode system prompt** injected via `before_agent_start` when `PI_CONDUCTOR_MODE=1` env or `/conductor on`. The prompt now documents `ensemble_send` / `ensemble_pause` / `ensemble_resume` for the LLM.
+- **Focused stream overlay** (Ctrl+G) — full-screen drilldown of one sub-agent's live transcript with per-agent scroll, global fold flags, kill-from-overlay, send-from-overlay
 - **Doctor surfaces malformed config** files via `loadConfigWithErrors`
+- **`getPiInvocation`** now honors `PI_BIN` and only re-uses `process.argv[1]` when it actually looks like pi's CLI, so the live integration test can run under `tsx`.
 - **Pre-commit hook** gates every commit on the test suite
 
 What does NOT work yet:
-- **v0.4** — inline-streamed foreground transcript. Foreground today blocks the parent's tool call, but the user only sees the final completion card; live progress visibility comes from the panel widget. The PRD spec was that foreground would stream the sub-agent's messages inline in the parent conversation. That's the v0.4 target.
-- **v0.5** — `ensemble_send` (continue a finished/running sub-agent's session via `pi --session`). The PRD says `ensemble_send(agent_id, message)`. Not built.
-- **v0.6** — `inherit_context: filtered` (port the parent's filtered conversation into the sub-agent's session). Currently every spawn is `--no-session` with no parent context. The PRD says: reimplement (don't port pi-subagents' `shared/fork-context.ts`). Not built.
+- **v0.4** — inline-streamed foreground transcript. Foreground today blocks the parent's tool call, but the user only sees the final completion card; live progress visibility comes from the panel widget + Ctrl+G overlay. The PRD spec was that foreground would stream the sub-agent's messages inline in the parent conversation. That's still the v0.4 target.
+- **v0.6** — `inherit_context: filtered` (port the parent's filtered conversation into the sub-agent's session). Currently every spawn starts with no parent context. The PRD says: reimplement (don't port pi-subagents' `shared/fork-context.ts`). Not built.
 
 ---
 
-## 6. Test layout (190 tests, 12 files, 2.3s)
+## 6. Test layout (~233 tests, 15 files, ~2.5s)
 
 ```
 tests/
@@ -170,7 +173,14 @@ tests/
 │                                       renderFooter
 ├── focused-stream-model.test.ts      — FocusedStreamModel state machine
 ├── focused-stream-overlay.test.ts    — FocusedStreamOverlay Component dispatch
-└── ensemble-focus.test.ts            — ensemble_focus tool model effect
+├── ensemble-focus.test.ts            — ensemble_focus tool model effect
+├── ensemble-send.test.ts             — ensemble_send tool: registration,
+│                                       agent_id validation, status gating,
+│                                       terminal-state acceptance
+├── ensemble-pause-resume.test.ts     — ensemble_pause / ensemble_resume tool
+│                                       registration + status gating
+└── runs-send.test.ts                 — sendToRun helper: rejection paths
+                                        + status flip + terminal-field reset
 ```
 
 Run all: `npm test`. Run live: `CONDUCTOR_LIVE_TESTS=1 npm test` (needs AWS creds for pi).
@@ -210,12 +220,12 @@ The agent will inject its final report when done. Switch to its tmux window to m
 
 ## 9. What to do next (priority order)
 
-1. **Wait for `dedup-fix` to finish.** Read its report, verify the fix, optionally apply tweaks. Don't start new conductor work until this lands or you'll keep hitting the same false-positive blockers.
-2. **Hand-test v0.3 end-to-end.** Load the extension via `pi -e ~/scratch/pi-conductor/src/index.ts`, run `/conductor list`, `/conductor doctor`, spawn a real `inspector` sub-agent, hit Ctrl+G to drop into the overlay, validate the keybindings work in practice. The user has not test-driven v0.3 yet.
-3. **Decide v0.4 vs v0.5 vs v0.6 ordering.** PRD says v0.4 next (inline-streamed foreground transcript). My instinct: **v0.5 (`ensemble_send`)** is more useful day-to-day because it unlocks the "continue a worker's loaded context" pattern that team-mode validated. v0.4 is a polish item.
-4. **Optional polish before more features:**
-   - `/conductor history` — browse past runs from `~/.pi/agent/conductor/runs/`. Listed in PRD slash commands but not implemented.
-   - Run-record GC — open question #12 in the PRD.
+1. **Hand-test v0.5 end-to-end.** Load the extension via `pi -e ~/scratch/pi-conductor/src/index.ts`, run `/conductor doctor`, spawn an `inspector` sub-agent, wait for it to finish, then call `ensemble_send` from the conductor to verify the resumed session feels right. Drop into Ctrl+G and try the `s` keybinding too.
+2. **v0.6 — `inherit_context: filtered`.** Port the parent's filtered conversation into the sub-agent's session. PRD says: reimplement, don't reach into pi-subagents' `shared/fork-context.ts`. Filtering rules: drop tool calls, drop conductor system prompt, keep prose. The subagent should boot with the user's intent already loaded.
+3. **v0.4 — inline-streamed foreground transcript.** Foreground today blocks the parent's tool call but the user only sees the final completion card. Stream the sub-agent's messages inline in the parent conversation. v0.4 is a polish item; v0.6 is the bigger win.
+4. **Run-record GC** — open question #12 in the PRD. Sessions accumulate under `~/.pi/agent/conductor/runs/` and never get cleaned up. Decide a policy.
+5. **Session-aware history browser** (`/conductor history`) — listed in PRD slash commands but not implemented. Useful once we have many runs on disk.
+6. **Optional cleanup:** `pauseRun` / `resumeRun` happy paths still aren't unit-tested (they call `process.kill` directly). A `signaler` injection point would unlock them.
 
 ---
 
@@ -303,7 +313,7 @@ If you're a fresh agent reading this:
 2. The user is committed to **TDD** for this project. Every change ships with a test. The pre-commit hook enforces.
 3. The user prefers **the `edit` tool over scripted edits**. Don't reach for python heredocs.
 4. **16 personas** are shipped; their lineage is autoloop; their adaptation rules are in PRD §"Adapting an external role definition to a conductor persona".
-5. **v0.3 just shipped** — focused stream overlay, Ctrl+G keybinding. **v0.4/v0.5/v0.6 are the next three milestones.**
+5. **v0.5 just shipped** — `ensemble_send` resumes a finished sub-agent's session via `pi --session`; `ensemble_pause` / `ensemble_resume` are LLM-callable; overlay `s` key dispatches sends. **v0.4 (inline foreground stream) and v0.6 (filtered context inheritance) are the next two milestones.**
 6. **A subagent is fixing tool-dedup in tmux right now.** Wait for it to finish before doing more conductor work, since the dedup bug was friction during this session.
 7. **PRD.md is the source of truth.** Read it before proposing design changes.
 

@@ -2,7 +2,7 @@
 
 A pi extension that turns the parent pi session into an **orchestrator** driving a roster of **persona-based sub-agents** with first-class TUI visibility.
 
-> **v0.1 — read-only scaffold.** Persona discovery, listing, and inspection. Spawning, the ensemble panel, and the focused stream view land in v0.2+.
+> **v0.5 — send & resume.** Persona discovery, full ensemble roster (`spawn`, `send`, `pause`, `resume`, `status`, `list`, `focus`), focused-stream overlay with the `s` keybinding to send follow-ups inline.
 
 See [`PRD.md`](./PRD.md) for the full design and decision log.
 
@@ -11,6 +11,15 @@ See [`PRD.md`](./PRD.md) for the full design and decision log.
 Pi already has good options for sub-agents (`pi-essentials/subagent`, `pi-mono/team-mode`, `pi-subagents`). They each leave one gap: **you can't watch a sub-agent stream live inside pi's TUI.** You either tail a tmux pane, read a log file, or see a status widget that shows tool-call hints but not the actual reasoning.
 
 pi-conductor closes that gap. The parent pi session is the conductor, sub-agents are subprocesses, and the user can drop into any sub-agent's live transcript view at will — without leaving pi.
+
+## v0.5 — what works today
+
+- Everything from v0.1–v0.4 (persona discovery + roster, all tools listed below, queue with auto-downgrade, ensemble panel, conductor mode prompt, focused-stream overlay).
+- **`ensemble_send(agent_id, message, foreground?)`** — continue an existing sub-agent's session with a new user-role message. Works on finished sub-agents too — resumes via `pi --session <path>`. Foreground default streams tool-call hints inline; background notifies via the standard `<sub-agent-completed>` card.
+- **`ensemble_pause(agent_id)`** / **`ensemble_resume(agent_id)`** — LLM-callable wrappers around SIGSTOP / SIGCONT. The corresponding slash commands (`/conductor pause` / `/conductor resume`) are unchanged.
+- **Resumable sessions on disk** — every spawn now writes its session JSONL into `<runDir>/session/`; `Run.sessionPath` is populated on finalize so `ensemble_send` can resume the sub-agent at any later point.
+- **Focused-stream `s` keybinding** — prompts the user for a follow-up message and dispatches it through `sendToRun` for the focused sub-agent. Footer now shows `s send`.
+- **`getPiInvocation` fix** — honors a `PI_BIN` env override and only re-uses `process.argv[1]` when it actually looks like pi's CLI. Live integration tests can now exercise spawn + send end-to-end via `CONDUCTOR_LIVE_TESTS=1`.
 
 ## v0.3 — what works today
 
@@ -43,9 +52,8 @@ pi-conductor closes that gap. The parent pi session is the conductor, sub-agents
 
 Per the [PRD](./PRD.md):
 
-- **v0.4** — inline-streamed foreground transcript (currently foreground blocks but renders only the final completion card; we want the live stream to render in the parent conversation).
-- **v0.5** — `ensemble_send` (continue a sub-agent's session via `pi --session`), and `s` keybinding inside the overlay to send a message.
 - **v0.6** — `inherit_context: filtered` (port the parent's filtered conversation into the sub-agent's session).
+- **v0.7+** — inline-streamed foreground transcript, history browser, run-record GC.
 
 ## Install
 
@@ -136,8 +144,8 @@ pi-conductor does **not** replace `pi-essentials/subagent`. Different tools (`en
 - [x] v0.1 — Read-only scaffold
 - [x] v0.2 — Background spawning + ensemble panel + queue + conductor mode
 - [x] v0.3 — Focused stream overlay (Ctrl+G)
-- [ ] v0.4 — Foreground spawning with inline-streamed transcript (currently foreground returns the result card)
-- [ ] v0.5 — Send / pause / resume / kill (kill works via /conductor stop and overlay 'k'; send is the missing piece)
+- [x] v0.5 — `ensemble_send` + `ensemble_pause` / `ensemble_resume` + overlay `s` keybinding
+- [ ] v0.4 — Inline-streamed foreground transcript (foreground currently returns the result card; the live stream is via the panel + Ctrl+G overlay)
 - [ ] v0.6 — Filtered context inheritance + history browser
 
 ## License
