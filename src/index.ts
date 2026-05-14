@@ -27,7 +27,7 @@ import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
 import { FocusedStreamModel } from "./focused-stream-model.ts";
 import { FocusedStreamOverlay } from "./focused-stream-overlay.ts";
-import { forceTerminate } from "./runs.ts";
+import { forceTerminate, sendToRun } from "./runs.ts";
 import type { Run } from "./types.ts";
 
 export default function (pi: ExtensionAPI): void {
@@ -64,6 +64,9 @@ export default function (pi: ExtensionAPI): void {
               // Refresh the model so the next render reflects the kill.
               focusModel.refresh();
             },
+            onSend: (id: string) => {
+              void promptAndSendToRun(id);
+            },
           });
           // Re-render whenever a registered run changes state so the live
           // transcript stays current.
@@ -81,6 +84,49 @@ export default function (pi: ExtensionAPI): void {
       .finally(() => {
         overlayOpen = false;
       });
+  }
+
+  /**
+   * Prompt the user for a one-shot follow-up message to the focused
+   * sub-agent, then dispatch it via sendToRun. Mirrors the behavior of
+   * the LLM-callable ensemble_send tool but driven by a TUI keybinding.
+   * Result is delivered via a `<sub-agent-completed>` notification card so
+   * the conductor (LLM) sees the reply too.
+   */
+  async function promptAndSendToRun(agentId: string): Promise<void> {
+    const ctx = ctxRef;
+    if (!ctx) return;
+    const run = registry.get(agentId);
+    if (!run) {
+      ctx.ui.notify(`agent_id "${agentId}" not found.`, "warning");
+      return;
+    }
+    let message: string | undefined;
+    try {
+      message = await ctx.ui.input(
+        `Send to ${agentId}`,
+        "Type a follow-up message; Esc to cancel.",
+      );
+    } catch {
+      // Stale ctx or user dismissed — silently abort.
+      return;
+    }
+    if (!message || !message.trim()) return;
+    const cfg = loadConfig(cwd);
+    const ov = cfg.personaOverrides[run.persona] ?? {};
+    const timeoutMs = (ov.timeoutMinutes ?? cfg.defaultTimeoutMinutes) * 60_000;
+    const result = sendToRun(run, message, {
+      registry,
+      timeoutMs,
+      onComplete: (r) => opts.pushCompletionNotification(r),
+    });
+    if (result.kind === "rejected") {
+      try {
+        ctx.ui.notify(result.reason, "warning");
+      } catch {
+        // ctx may have gone stale
+      }
+    }
   }
 
   let conductorModeOn =
