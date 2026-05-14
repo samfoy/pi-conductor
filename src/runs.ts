@@ -319,6 +319,44 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     model: opts.model,
     thinking: opts.thinking,
   });
+
+  const done = runPiSubprocess(run, piArgs, {
+    registry: opts.registry,
+    cwd: opts.cwd,
+    timeoutMs: opts.timeoutMs,
+    onUpdate: opts.onUpdate,
+    onComplete: opts.onComplete,
+    sessionDir,
+  });
+  return { run, done };
+}
+
+// ── Shared subprocess plumbing ─────────────────────────────────────────
+
+interface RunPiSubprocessOpts {
+  registry: RunRegistry;
+  cwd: string;
+  timeoutMs: number;
+  onUpdate?: (run: Run) => void;
+  onComplete?: (run: Run) => void;
+  /** When provided, finalize() will populate run.sessionPath from this dir. */
+  sessionDir?: string;
+}
+
+/**
+ * Spawn `pi` with the supplied argv, attach event handlers that mutate the
+ * supplied Run, and return a promise that resolves when the run reaches a
+ * terminal status.
+ *
+ * Used by both `spawnRun` (fresh spawn, with --session-dir) and `sendToRun`
+ * (resume, with --session <path>) so both paths share identical event
+ * handling, transcript appending, finalize semantics, and timeout logic.
+ */
+function runPiSubprocess(
+  run: Run,
+  piArgs: string[],
+  opts: RunPiSubprocessOpts,
+): Promise<Run> {
   const invocation = getPiInvocation(piArgs);
 
   let proc: ChildProcess;
@@ -336,7 +374,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     void writeRecord(run);
     void writeFinal(run);
     if (opts.onComplete) opts.onComplete(run);
-    return { run, done: Promise.resolve(run) };
+    return Promise.resolve(run);
   }
   run.proc = proc;
 
@@ -372,10 +410,11 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     }
     // Discover the pi session file pi created in <runDir>/session/. Used by
     // ensemble_send to resume this sub-agent later via `pi --session <path>`.
-    if (!run.sessionPath) {
-      const found = findSessionFile(sessionDir);
+    if (opts.sessionDir && !run.sessionPath) {
+      const found = findSessionFile(opts.sessionDir);
       if (found) run.sessionPath = found;
     }
+    run.proc = undefined;
     opts.registry.notify(run);
     try {
       proc.kill();
@@ -448,7 +487,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
   });
 
   proc.unref();
-  return { run, done };
+  return done;
 }
 
 function mapFromRegistry(r: RunRegistry): Map<string, Run> {
