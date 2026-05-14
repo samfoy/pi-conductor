@@ -3,8 +3,8 @@
 **Date:** 2026-05-14
 **Repo:** `~/scratch/pi-conductor/`  (git-init'd, master branch only, never pushed)
 **Author:** Sam Painter (samfp@)
-**Last commit:** `e6b166d feat(tools): ensemble_pause / ensemble_resume LLM-callable tools` (and follow-ups for docs)
-**Test state:** 233 passing + 1 skipped live (216 + 1 gated under unit run), unit suite ~2.5s; live integration suite passes end-to-end at ~57s when `CONDUCTOR_LIVE_TESTS=1`.
+**Last commit:** `a937904 test(integration): add live test for inherit_context=filtered` (after v0.6 milestone)
+**Test state:** 282 passing + 3 skipped live, unit suite ~3s; the new `inherit_context=filtered` live test passes end-to-end in ~12s under `CONDUCTOR_LIVE_TESTS=1`.
 
 This document is a self-contained briefing so a fresh pi session (or a new agent) can pick up the project without losing context. Read this end-to-end before doing any work.
 
@@ -73,13 +73,14 @@ The user explicitly asked for TDD as the project standard. The pre-commit hook e
 
 ---
 
-## 4. Architecture (current state, v0.3)
+## 4. Architecture (current state, v0.6)
 
 ```
 src/
 ├── index.ts               — Extension entry. Wires lifecycle, registry,
 │                            queue, focus model, ensemble panel widget,
-│                            conductor system prompt, Ctrl+G keybinding.
+│                            conductor system prompt, Ctrl+G keybinding,
+│                            getParentMessages snapshot for inherit_context.
 ├── types.ts               — Persona, Run, RunStatus, Usage, ConductorConfig,
 │                            PersonaOverride, EventEffect.
 ├── personas.ts            — Frontmatter parser + layered loader
@@ -87,14 +88,27 @@ src/
 ├── config.ts              — loadConfig + loadConfigWithErrors (errors-aware).
 ├── doctor.ts              — Pure buildDoctorReport(opts): string.
 ├── runs.ts                — RunRegistry, spawnRun (subprocess + JSON parser),
-│                            forceTerminate, pauseRun, resumeRun, formatters
+│                            planSpawnPiArgs (decides fresh vs seeded
+│                            resume per inherit_context), forceTerminate,
+│                            pauseRun, resumeRun, formatters
 │                            (formatTokens, formatUsage, elapsedStr,
 │                            getFinalText, allocateRunId, buildSubAgentPrompt,
 │                            buildPiArgs).
+├── context-filter.ts      — Pure filterParentContext(messages, opts).
+│                            Drops ensemble_*/subagent tool calls + results,
+│                            ensemble-notification CustomMessages, !!-prefix
+│                            bash. Reimplemented per locked PRD decision
+│                            (no dep on pi-subagents/shared/fork-context.ts).
+├── session-seed.ts        — seedSessionFile(path, messages, cwd): writes
+│                            a pi-format JSONL session header + linear
+│                            parentId chain so `pi --session <path>` resumes
+│                            with the seeded transcript as history.
 ├── event-handler.ts       — Pure applyEvent(run, event): EventEffect.
 │                            Extracted from spawnRun's processLine closure
 │                            so every event variant is unit-testable.
 ├── queue.ts               — SpawnQueue: FIFO + auto-downgrade-on-full.
+│                            PendingSpawn snapshots parentMessages at
+│                            enqueue time (v0.6).
 ├── notifications.ts       — formatCompletionNotification(run): string.
 ├── conductor-prompt.ts    — buildConductorSystemPrompt({ personas,
 │                            maxConcurrent }).
@@ -107,6 +121,7 @@ src/
 ├── focused-stream-overlay.ts — Thin Component layer that consumes the
 │                               model + renderer.
 ├── tools.ts               — ensemble_list, ensemble_status, ensemble_spawn,
+│                            ensemble_send, ensemble_pause, ensemble_resume,
 │                            ensemble_focus.
 └── commands.ts            — /conductor list | show | doctor | on | off |
                              status | stop | pause | resume | queue | focus.
@@ -115,7 +130,7 @@ personas/  — 16 markdown files, one per starter persona. Each has YAML-ish
              frontmatter + system-prompt body + ## Source footer documenting
              lineage from autoloop.
 
-tests/     — 12 test files, 190 tests total (1 gated). See §6.
+tests/     — 18 test files, 282 tests total (3 live-gated). See §6.
 
 hooks/pre-commit          — runs npm test, rejects on red.
 scripts/install-hooks.sh  — one-time setup: git config core.hooksPath hooks.
@@ -127,48 +142,58 @@ CONTRIBUTING.md           — TDD rules, conventions.
 
 ---
 
-## 5. What works today (v0.5 shipped)
+## 5. What works today (v0.6 shipped)
 
 - **Persona discovery + resolution** with builtin/user/project layering
 - **16 starter personas** covering full SDLC (see decision-log table)
 - **Tools**: `ensemble_list`, `ensemble_status`, `ensemble_spawn`, `ensemble_send`, `ensemble_pause`, `ensemble_resume`, `ensemble_focus`
 - **Slash commands**: `/conductor list | show | doctor | on | off | status | stop | pause | resume | queue | focus`
 - **Spawn**: foreground (default, blocks + returns completion card) or background (returns immediately, completion arrives via `<sub-agent-completed>` notification message)
-- **Resumable sessions on disk** — every sub-agent now writes to `<runDir>/session/<timestamp>_<uuid>.jsonl`. `Run.sessionPath` is populated on finalize so future sends can resume the session via `pi --session <path>`.
+- **Resumable sessions on disk** — every sub-agent writes to `<runDir>/session/`. `Run.sessionPath` is populated up-front when seeded (v0.6) or on finalize (v0.5). Future `ensemble_send` calls resume via `pi --session <path>`.
 - **`ensemble_send`** — continues a finished sub-agent's session with a new user message. Reuses the same `applyEvent` plumbing so the run's messages, usage, and lastToolCall accumulate across the original spawn AND any subsequent sends.
+- **`inherit_context: filtered` / `full` (v0.6)** — personas with these settings boot the sub-agent on a seeded JSONL session containing the conductor's transcript. `filtered` drops orchestration noise (`ensemble_*`, `subagent` tool calls + results, `<sub-agent-completed>` cards, `!!`-prefix bash); `full` passes everything verbatim. `none` (default) keeps the existing fresh-spawn behavior. Pure planner `planSpawnPiArgs` decides per-spawn; `filterParentContext` is the pure filter; `seedSessionFile` writes the JSONL.
 - **Overlay `s` keybinding** — prompts for a follow-up message and dispatches via `sendToRun`. Footer shows `s send`.
-- **Concurrency cap + FIFO queue** with foreground→background auto-downgrade when full
-- **Pause/resume/stop** via SIGSTOP/SIGCONT/SIGTERM; `stop` works on running OR queued sub-agents; pause/resume now also exposed as LLM-callable tools
+- **Concurrency cap + FIFO queue** with foreground→background auto-downgrade when full. `parentMessages` snapshots flow through `PendingSpawn` so a queued sub-agent inherits the conductor's intent at enqueue time, not at drain time.
+- **Pause/resume/stop** via SIGSTOP/SIGCONT/SIGTERM; `stop` works on running OR queued sub-agents; pause/resume also exposed as LLM-callable tools
 - **Ensemble panel** (always-visible `belowEditor` widget when ≥1 sub-agent active or recently-finished within 8s)
-- **Conductor mode system prompt** injected via `before_agent_start` when `PI_CONDUCTOR_MODE=1` env or `/conductor on`. The prompt now documents `ensemble_send` / `ensemble_pause` / `ensemble_resume` for the LLM.
+- **Conductor mode system prompt** injected via `before_agent_start` when `PI_CONDUCTOR_MODE=1` env or `/conductor on`. Documents `ensemble_send` / `ensemble_pause` / `ensemble_resume` for the LLM.
 - **Focused stream overlay** (Ctrl+G) — full-screen drilldown of one sub-agent's live transcript with per-agent scroll, global fold flags, kill-from-overlay, send-from-overlay
 - **Doctor surfaces malformed config** files via `loadConfigWithErrors`
-- **`getPiInvocation`** now honors `PI_BIN` and only re-uses `process.argv[1]` when it actually looks like pi's CLI, so the live integration test can run under `tsx`.
+- **`getPiInvocation`** honors `PI_BIN` and only re-uses `process.argv[1]` when it actually looks like pi's CLI; live integration tests can run under `tsx`.
 - **Pre-commit hook** gates every commit on the test suite
 
 What does NOT work yet:
 - **v0.4** — inline-streamed foreground transcript. Foreground today blocks the parent's tool call, but the user only sees the final completion card; live progress visibility comes from the panel widget + Ctrl+G overlay. The PRD spec was that foreground would stream the sub-agent's messages inline in the parent conversation. That's still the v0.4 target.
-- **v0.6** — `inherit_context: filtered` (port the parent's filtered conversation into the sub-agent's session). Currently every spawn starts with no parent context. The PRD says: reimplement (don't port pi-subagents' `shared/fork-context.ts`). Not built.
+- **`/conductor history`** — listed in PRD slash commands but not implemented. Sessions accumulate under `~/.pi/agent/conductor/runs/`; a browser would surface them.
+- **Run-record GC** — still no policy; sessions live forever.
+- **`inherit_skills: true`** — PRD lists this as a v1 frontmatter field; currently parsed but unused. Would need to port the parent's skill catalog to the child's prompt.
 
 ---
 
-## 6. Test layout (~233 tests, 15 files, ~2.5s)
+## 6. Test layout (~282 tests, 18 files, ~3s)
 
 ```
 tests/
 ├── personas.test.ts                  — Frontmatter parser + persona resolver basics
 ├── builtins.test.ts                  — All 16 shipped personas load cleanly
 ├── queue.test.ts                     — RunRegistry + SpawnQueue mechanics
-├── queue-extra.test.ts               — Queue edge cases
-├── spawn.integration.test.ts         — GATED live test (CONDUCTOR_LIVE_TESTS=1)
+├── queue-extra.test.ts               — Queue edge cases + parentMessages snapshot
+├── spawn.integration.test.ts         — GATED live tests (CONDUCTOR_LIVE_TESTS=1):
+│                                       spawn, ensemble_send, inherit_context=filtered
 ├── notifications.test.ts             — formatCompletionNotification
 ├── conductor-prompt.test.ts          — buildConductorSystemPrompt
 ├── config.test.ts                    — loadConfig defaults + merge
 ├── config-errors.test.ts             — loadConfigWithErrors error reporting
+├── context-filter.test.ts            — filterParentContext: every include /
+│                                       exclude rule (v0.6)
 ├── doctor.test.ts                    — buildDoctorReport
+├── plan-spawn.test.ts                — planSpawnPiArgs: inherit_context matrix
+│                                       (none / filtered / full) (v0.6)
 ├── runs-helpers.test.ts              — formatTokens, formatUsage, elapsedStr,
 │                                       getFinalText, etc.
 ├── event-handler.test.ts             — applyEvent (every event variant)
+├── session-seed.test.ts              — seedSessionFile: header shape, parentId
+│                                       chain, JSON round-trip (v0.6)
 ├── transcript.test.ts                — renderTranscript / renderHeader /
 │                                       renderFooter
 ├── focused-stream-model.test.ts      — FocusedStreamModel state machine
@@ -220,12 +245,13 @@ The agent will inject its final report when done. Switch to its tmux window to m
 
 ## 9. What to do next (priority order)
 
-1. **Hand-test v0.5 end-to-end.** Load the extension via `pi -e ~/scratch/pi-conductor/src/index.ts`, run `/conductor doctor`, spawn an `inspector` sub-agent, wait for it to finish, then call `ensemble_send` from the conductor to verify the resumed session feels right. Drop into Ctrl+G and try the `s` keybinding too.
-2. **v0.6 — `inherit_context: filtered`.** Port the parent's filtered conversation into the sub-agent's session. PRD says: reimplement, don't reach into pi-subagents' `shared/fork-context.ts`. Filtering rules: drop tool calls, drop conductor system prompt, keep prose. The subagent should boot with the user's intent already loaded.
-3. **v0.4 — inline-streamed foreground transcript.** Foreground today blocks the parent's tool call but the user only sees the final completion card. Stream the sub-agent's messages inline in the parent conversation. v0.4 is a polish item; v0.6 is the bigger win.
+1. **Hand-test v0.6 end-to-end.** Load the extension (`pi -e ~/scratch/pi-conductor/src/index.ts`), turn conductor mode on, give the conductor some context ("my codeword is X; please remember it"), then spawn a persona that has `inherit_context: filtered` and ask it to repeat the codeword. The sub-agent should know it without you re-stating it in the task prompt.
+2. **v0.4 — inline-streamed foreground transcript.** Foreground today blocks the parent's tool call but the user only sees the final completion card. Stream the sub-agent's messages inline in the parent conversation.
+3. **`/conductor history`** — listed in PRD slash commands but not implemented. Browse past runs from `~/.pi/agent/conductor/runs/`. Useful now that v0.5 + v0.6 leave more session files on disk.
 4. **Run-record GC** — open question #12 in the PRD. Sessions accumulate under `~/.pi/agent/conductor/runs/` and never get cleaned up. Decide a policy.
-5. **Session-aware history browser** (`/conductor history`) — listed in PRD slash commands but not implemented. Useful once we have many runs on disk.
-6. **Optional cleanup:** `pauseRun` / `resumeRun` happy paths still aren't unit-tested (they call `process.kill` directly). A `signaler` injection point would unlock them.
+5. **`inherit_skills: true`** — PRD lists this as a v1 frontmatter field; currently parsed but unused. Port the parent's skill catalog to the child's prompt at spawn time.
+6. **Audit which shipped personas should default to `inherit_context: filtered`.** Currently most personas set `filtered` in frontmatter but every spawn was effectively `none` until v0.6. Now that filtering really runs, walk each persona and confirm whether its `filtered` setting is right (or if it should be `none` for read-only specialists where extra context is just noise).
+7. **Optional cleanup:** `pauseRun` / `resumeRun` happy paths still aren't unit-tested (they call `process.kill` directly). A `signaler` injection point would unlock them.
 
 ---
 

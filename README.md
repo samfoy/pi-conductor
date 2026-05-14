@@ -2,7 +2,7 @@
 
 A pi extension that turns the parent pi session into an **orchestrator** driving a roster of **persona-based sub-agents** with first-class TUI visibility.
 
-> **v0.5 — send & resume.** Persona discovery, full ensemble roster (`spawn`, `send`, `pause`, `resume`, `status`, `list`, `focus`), focused-stream overlay with the `s` keybinding to send follow-ups inline.
+> **v0.6 — filtered context inheritance.** Sub-agents can now inherit a filtered slice of the conductor's conversation via `inherit_context: filtered`. Drops orchestration noise (`ensemble_*`, `subagent` tool calls, `<sub-agent-completed>` cards) while preserving user/assistant prose, file ops, branch + compaction summaries.
 
 See [`PRD.md`](./PRD.md) for the full design and decision log.
 
@@ -11,6 +11,14 @@ See [`PRD.md`](./PRD.md) for the full design and decision log.
 Pi already has good options for sub-agents (`pi-essentials/subagent`, `pi-mono/team-mode`, `pi-subagents`). They each leave one gap: **you can't watch a sub-agent stream live inside pi's TUI.** You either tail a tmux pane, read a log file, or see a status widget that shows tool-call hints but not the actual reasoning.
 
 pi-conductor closes that gap. The parent pi session is the conductor, sub-agents are subprocesses, and the user can drop into any sub-agent's live transcript view at will — without leaving pi.
+
+## v0.6 — what works today
+
+- Everything from v0.1–v0.5 (persona discovery + roster, all tools, queue, panel, conductor mode prompt, focused-stream overlay, send/resume, pause/resume).
+- **`inherit_context: filtered`** — personas with this setting now boot their sub-agent with a seeded session containing the conductor's filtered conversation. The filter (`filterParentContext`) keeps user prose, assistant prose, `read`/`write`/`bash` tool calls + results, and branch/compaction summaries; it drops `ensemble_*` and `subagent` orchestration calls, `<sub-agent-completed>` notification cards, and any `!!`-prefix bash entries (`excludeFromContext`).
+- **`inherit_context: full`** — same plumbing but with no filter; the sub-agent inherits the conductor's transcript verbatim. Useful for handoff personas where every detail matters.
+- **Reimplemented in-tree** per locked PRD decision — we do NOT depend on `pi-subagents/shared/fork-context.ts`. Filter rules are short, pure, and unit-tested.
+- **Pure planner** — `planSpawnPiArgs` decides between fresh spawn (`pi --session-dir`) and seeded resume (`pi --session <seeded.jsonl>`) based on `inherit_context` + parent message snapshot. Falls back to fresh when nothing survives the filter.
 
 ## v0.5 — what works today
 
@@ -52,8 +60,8 @@ pi-conductor closes that gap. The parent pi session is the conductor, sub-agents
 
 Per the [PRD](./PRD.md):
 
-- **v0.6** — `inherit_context: filtered` (port the parent's filtered conversation into the sub-agent's session).
-- **v0.7+** — inline-streamed foreground transcript, history browser, run-record GC.
+- **v0.4** — inline-streamed foreground transcript (foreground currently returns the result card; the live stream is via the panel + Ctrl+G overlay).
+- **v0.7+** — history browser, run-record GC, worktree per persona.
 
 ## Install
 
@@ -145,8 +153,9 @@ pi-conductor does **not** replace `pi-essentials/subagent`. Different tools (`en
 - [x] v0.2 — Background spawning + ensemble panel + queue + conductor mode
 - [x] v0.3 — Focused stream overlay (Ctrl+G)
 - [x] v0.5 — `ensemble_send` + `ensemble_pause` / `ensemble_resume` + overlay `s` keybinding
+- [x] v0.6 — Filtered context inheritance (`inherit_context: filtered` / `full`)
 - [ ] v0.4 — Inline-streamed foreground transcript (foreground currently returns the result card; the live stream is via the panel + Ctrl+G overlay)
-- [ ] v0.6 — Filtered context inheritance + history browser
+- [ ] v0.7 — History browser, run-record GC, worktree per persona
 
 ## License
 
