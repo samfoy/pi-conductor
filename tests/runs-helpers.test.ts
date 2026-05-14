@@ -13,8 +13,10 @@
  *   - allocateRunId yields persona-prefixed ids that don't collide with the registry
  *   - buildSubAgentPrompt prepends the nesting guard and renders default_reads
  *   - buildSubAgentPrompt omits the default_reads section when none are configured
- *   - buildPiArgs always includes --mode json -p --no-session and --append-system-prompt
+ *   - buildPiArgs always includes --mode json -p and --append-system-prompt
+ *   - buildPiArgs adds --session-dir for fresh spawns and --session for resumes
  *   - buildPiArgs only adds --model / --thinking when provided
+ *   - buildPiArgs in resume mode omits the prompt when message is undefined
  *   - pauseRun is a no-op for non-running statuses
  *   - resumeRun is a no-op for non-paused statuses
  *   - forceTerminate is a no-op once the run is already terminal
@@ -262,10 +264,20 @@ test("buildSubAgentPrompt: lists every default_read as a bullet", () => {
 
 // ── buildPiArgs ───────────────────────────────────────────────────────
 
-test("buildPiArgs: always emits json mode, -p, --no-session, append-system-prompt, prompt", () => {
-  const args = buildPiArgs({ systemPrompt: "SYS", prompt: "PROMPT" });
+test("buildPiArgs(fresh): emits json mode, -p, --session-dir, append-system-prompt, prompt", () => {
+  const args = buildPiArgs({
+    kind: "fresh",
+    sessionDir: "/tmp/sess",
+    systemPrompt: "SYS",
+    prompt: "PROMPT",
+  });
   // Required base flags
-  assert.deepEqual(args.slice(0, 4), ["--mode", "json", "-p", "--no-session"]);
+  assert.deepEqual(args.slice(0, 3), ["--mode", "json", "-p"]);
+  // Session is on disk for resumability
+  assert.equal(args.includes("--no-session"), false, "fresh spawn must not pass --no-session");
+  const sd = args.indexOf("--session-dir");
+  assert.ok(sd > 0, "--session-dir must be present in fresh mode");
+  assert.equal(args[sd + 1], "/tmp/sess");
   // Append-system-prompt with the body
   const i = args.indexOf("--append-system-prompt");
   assert.ok(i > 0, "--append-system-prompt must be present");
@@ -274,14 +286,38 @@ test("buildPiArgs: always emits json mode, -p, --no-session, append-system-promp
   assert.equal(args[args.length - 1], "PROMPT");
 });
 
+test("buildPiArgs(resume): emits --session <path> + the message, omits --append-system-prompt", () => {
+  const args = buildPiArgs({
+    kind: "resume",
+    sessionPath: "/tmp/sess/abc.jsonl",
+    prompt: "another question",
+  });
+  assert.deepEqual(args.slice(0, 3), ["--mode", "json", "-p"]);
+  const s = args.indexOf("--session");
+  assert.ok(s > 0, "--session must be present in resume mode");
+  assert.equal(args[s + 1], "/tmp/sess/abc.jsonl");
+  // Resume reuses the session's existing system prompt; we don't re-inject it.
+  assert.equal(args.includes("--append-system-prompt"), false);
+  assert.equal(args.includes("--session-dir"), false);
+  // Prompt is the last positional
+  assert.equal(args[args.length - 1], "another question");
+});
+
 test("buildPiArgs: omits --model and --thinking when not provided", () => {
-  const args = buildPiArgs({ systemPrompt: "S", prompt: "P" });
+  const args = buildPiArgs({
+    kind: "fresh",
+    sessionDir: "/tmp/sess",
+    systemPrompt: "S",
+    prompt: "P",
+  });
   assert.equal(args.includes("--model"), false);
   assert.equal(args.includes("--thinking"), false);
 });
 
 test("buildPiArgs: includes --model when set", () => {
   const args = buildPiArgs({
+    kind: "fresh",
+    sessionDir: "/tmp/sess",
     systemPrompt: "S",
     prompt: "P",
     model: "anthropic/claude-opus-4-1",
@@ -292,7 +328,13 @@ test("buildPiArgs: includes --model when set", () => {
 });
 
 test("buildPiArgs: includes --thinking when set", () => {
-  const args = buildPiArgs({ systemPrompt: "S", prompt: "P", thinking: "high" });
+  const args = buildPiArgs({
+    kind: "fresh",
+    sessionDir: "/tmp/sess",
+    systemPrompt: "S",
+    prompt: "P",
+    thinking: "high",
+  });
   const i = args.indexOf("--thinking");
   assert.ok(i > 0);
   assert.equal(args[i + 1], "high");

@@ -112,22 +112,46 @@ export function buildSubAgentPrompt(persona: Persona, task: string): string {
 /**
  * Build the argv passed to `pi --mode json -p`.
  *
- * The persona's system prompt body becomes pi's system prompt addendum so the
- * sub-agent operates with the right role discipline. We also pass --no-session
- * for clean isolation; v0.6 will switch to --session for resumable workers.
+ * Two modes:
+ *   - `kind: "fresh"`  — starts a new session in `sessionDir`. The persona's
+ *     system prompt body is appended via `--append-system-prompt`.
+ *   - `kind: "resume"` — continues an existing session at `sessionPath`.
+ *     System prompt is NOT re-injected (the existing session already has it).
+ *
+ * In both modes the prompt becomes the trailing positional argument and is
+ * delivered to the sub-agent as a user-role message.
  */
-export function buildPiArgs(opts: {
-  systemPrompt: string;
-  prompt: string;
-  model?: string;
-  thinking?: ThinkingLevel;
-}): string[] {
-  const args: string[] = ["--mode", "json", "-p", "--no-session"];
+export type PiArgsOptions =
+  | {
+      kind: "fresh";
+      sessionDir: string;
+      systemPrompt: string;
+      prompt: string;
+      model?: string;
+      thinking?: ThinkingLevel;
+    }
+  | {
+      kind: "resume";
+      sessionPath: string;
+      prompt: string;
+      model?: string;
+      thinking?: ThinkingLevel;
+    };
+
+export function buildPiArgs(opts: PiArgsOptions): string[] {
+  const args: string[] = ["--mode", "json", "-p"];
+  if (opts.kind === "fresh") {
+    args.push("--session-dir", opts.sessionDir);
+  } else {
+    args.push("--session", opts.sessionPath);
+  }
   if (opts.model) args.push("--model", opts.model);
   if (opts.thinking) args.push("--thinking", opts.thinking);
-  // Pi exposes --append-system-prompt for system prompt addenda; we use that
-  // for the persona body so pi's own system prompt logic still runs.
-  args.push("--append-system-prompt", opts.systemPrompt);
+  if (opts.kind === "fresh") {
+    // Pi exposes --append-system-prompt for system prompt addenda; we use that
+    // for the persona body so pi's own system prompt logic still runs.
+    args.push("--append-system-prompt", opts.systemPrompt);
+  }
   args.push(opts.prompt);
   return args;
 }
@@ -248,7 +272,11 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
 
   // Construct prompt + args.
   const prompt = buildSubAgentPrompt(opts.persona, opts.task);
+  const sessionDir = join(dir, "session");
+  mkdirSync(sessionDir, { recursive: true });
   const piArgs = buildPiArgs({
+    kind: "fresh",
+    sessionDir,
     systemPrompt: opts.persona.systemPrompt,
     prompt,
     model: opts.model,
