@@ -265,6 +265,12 @@ test("renderFooter: includes c (collapse) and t (thinking) hints", () => {
   assert.match(joined, /\bt\b/);
 });
 
+test("renderFooter: includes 's' send hint", () => {
+  const joined = renderFooter(80).join("\n");
+  assert.match(joined, /\bs\b/);
+  assert.match(joined, /send/i);
+});
+
 test("renderFooter: never exceeds the requested width", () => {
   const lines = renderFooter(30);
   for (const line of lines) {

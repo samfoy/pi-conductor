@@ -52,6 +52,7 @@ const FOOTER_HINTS = [
   "Esc close",
   "Tab/Sh-Tab cycle",
   "↑↓ scroll",
+  "s send",
   "c collapse",
   "t thinking",
   "k kill",
