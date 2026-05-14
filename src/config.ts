@@ -50,7 +50,15 @@ function mergeConfig(base: ConductorConfig, raw: unknown): ConductorConfig {
     out.defaultSpawnMode = r.defaultSpawnMode;
   }
   if (r.personaOverrides && typeof r.personaOverrides === "object") {
-    out.personaOverrides = { ...out.personaOverrides, ...(r.personaOverrides as Record<string, never>) };
+    // Field-level merge per persona name. A project entry that touches
+    // `thinking` does not blow away a user entry's `model`.
+    const incoming = r.personaOverrides as Record<string, Record<string, unknown>>;
+    const merged = { ...out.personaOverrides } as Record<string, Record<string, unknown>>;
+    for (const [name, fields] of Object.entries(incoming)) {
+      if (!fields || typeof fields !== "object") continue;
+      merged[name] = { ...(merged[name] ?? {}), ...fields };
+    }
+    out.personaOverrides = merged as unknown as ConductorConfig["personaOverrides"];
   }
   if (typeof r.conductorPromptPath === "string") {
     out.conductorPromptPath = r.conductorPromptPath;

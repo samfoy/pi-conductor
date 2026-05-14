@@ -124,7 +124,7 @@ test("loadConfig: malformed project JSON falls back, user config still applies",
   }
 });
 
-test("loadConfig: personaOverrides merge across user and project layers", () => {
+test("loadConfig: personaOverrides merge across user and project layers (field-level)", () => {
   const fx = setup();
   try {
     writeUserConfig(
@@ -140,18 +140,36 @@ test("loadConfig: personaOverrides merge across user and project layers", () => 
       fx,
       JSON.stringify({
         personaOverrides: {
-          oracle: { thinking: "medium" }, // overrides user's oracle entry
+          oracle: { thinking: "medium" }, // project overrides one field on the user's oracle entry
           builder: { timeoutMinutes: 60 }, // new entry
         },
       }),
     );
     const cfg = loadConfig(fx.projectDir);
-    // Project oracle wins (replaces user's oracle entry, since merge is shallow per-name)
-    assert.deepEqual(cfg.personaOverrides.oracle, { thinking: "medium" });
-    // User-only entry survives
+    // Field-level merge: project's `thinking: medium` overrides user's `thinking: high`,
+    // but user's `model` survives because project didn't touch it.
+    assert.deepEqual(cfg.personaOverrides.oracle, {
+      model: "anthropic/claude-opus-4-1",
+      thinking: "medium",
+    });
+    // User-only entry survives unchanged.
     assert.deepEqual(cfg.personaOverrides.redteam, { disabled: true });
-    // Project-only entry present
+    // Project-only entry present.
     assert.deepEqual(cfg.personaOverrides.builder, { timeoutMinutes: 60 });
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: project can clear a user-set field by setting it to undefined-equivalent", () => {
+  // Sanity: setting a field to a falsy value at the project layer overrides
+  // the user's value. (We don't introduce a special 'clear' sentinel.)
+  const fx = setup();
+  try {
+    writeUserConfig(fx, JSON.stringify({ personaOverrides: { oracle: { disabled: true } } }));
+    writeProjectConfig(fx, JSON.stringify({ personaOverrides: { oracle: { disabled: false } } }));
+    const cfg = loadConfig(fx.projectDir);
+    assert.equal(cfg.personaOverrides.oracle.disabled, false);
   } finally {
     teardown(fx);
   }
