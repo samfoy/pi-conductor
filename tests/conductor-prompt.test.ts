@@ -96,6 +96,13 @@ test("buildConductorSystemPrompt: documents the three ensemble tools", () => {
   assert.match(out, /`ensemble_status`/);
 });
 
+test("buildConductorSystemPrompt: documents ensemble_send / pause / resume", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  assert.match(out, /`ensemble_send`/);
+  assert.match(out, /`ensemble_pause`/);
+  assert.match(out, /`ensemble_resume`/);
+});
+
 test("buildConductorSystemPrompt: describes sub-agent completion XML envelope", () => {
   const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
   assert.match(out, /<sub-agent-completed>/);

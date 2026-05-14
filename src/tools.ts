@@ -12,7 +12,7 @@ import { Type } from "@sinclair/typebox";
 import type { Persona, PersonaOverride, Run, RunStatus, ThinkingLevel } from "./types.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
-import { elapsedStr, formatUsage, getFinalText, sendToRun, type RunRegistry } from "./runs.ts";
+import { elapsedStr, formatUsage, getFinalText, pauseRun, resumeRun, sendToRun, type RunRegistry } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
 import { formatCompletionNotification } from "./notifications.ts";
 import type { FocusedStreamModel } from "./focused-stream-model.ts";
@@ -38,6 +38,8 @@ export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   registerStatusTool(pi, opts);
   registerSpawnTool(pi, opts);
   registerSendTool(pi, opts);
+  registerPauseTool(pi, opts);
+  registerResumeTool(pi, opts);
   registerFocusTool(pi, opts);
 }
 
@@ -400,6 +402,99 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           mode: "background",
           persona: result.run.persona,
         },
+      };
+    },
+  });
+}
+
+// ── ensemble_pause / ensemble_resume ───────────────────────────────────────
+
+function registerPauseTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
+  pi.registerTool({
+    name: "ensemble_pause",
+    label: "Pause sub-agent",
+    description:
+      "SIGSTOP a running sub-agent. The process is alive but not consuming tokens. " +
+      "Use ensemble_resume to continue. Useful for cost control while the user reviews partial output.",
+    promptSnippet: "Pause a running sub-agent",
+    promptGuidelines: [
+      "Use ensemble_pause to halt token consumption on a long-running sub-agent without killing it.",
+      "The sub-agent must be in 'running' status; paused/queued/terminal sub-agents are rejected.",
+    ],
+    parameters: Type.Object({
+      agent_id: Type.String({ description: "agent_id of the sub-agent to pause." }),
+    }),
+    async execute(_id, params) {
+      const registry = opts.getRegistry();
+      const run = registry.get(params.agent_id);
+      type PauseDetails = { error?: string; status?: string; agent_id?: string; persona?: string };
+      if (!run) {
+        const r = errorResult(
+          `agent_id "${params.agent_id}" not found. Run ensemble_status to see active sub-agents.`,
+        );
+        return r as { content: typeof r.content; details: PauseDetails };
+      }
+      if (run.status !== "running") {
+        const r = errorResult(
+          `cannot pause sub-agent ${run.id}: status is ${run.status} (must be 'running').`,
+        );
+        return r as { content: typeof r.content; details: PauseDetails };
+      }
+      const ok = pauseRun(run, registry);
+      if (!ok) {
+        const r = errorResult(
+          `pause failed for ${run.id}: process handle missing or signal rejected.`,
+        );
+        return r as { content: typeof r.content; details: PauseDetails };
+      }
+      return {
+        content: [{ type: "text" as const, text: `paused: ${run.id}` }],
+        details: { status: "paused", agent_id: run.id, persona: run.persona } as PauseDetails,
+      };
+    },
+  });
+}
+
+function registerResumeTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
+  pi.registerTool({
+    name: "ensemble_resume",
+    label: "Resume sub-agent",
+    description:
+      "SIGCONT a paused sub-agent. The sub-agent must have been paused via ensemble_pause first.",
+    promptSnippet: "Resume a paused sub-agent",
+    promptGuidelines: [
+      "Use ensemble_resume to continue a sub-agent previously paused via ensemble_pause.",
+      "The sub-agent must be in 'paused' status; running/queued/terminal sub-agents are rejected.",
+    ],
+    parameters: Type.Object({
+      agent_id: Type.String({ description: "agent_id of the sub-agent to resume." }),
+    }),
+    async execute(_id, params) {
+      const registry = opts.getRegistry();
+      const run = registry.get(params.agent_id);
+      type ResumeDetails = { error?: string; status?: string; agent_id?: string; persona?: string };
+      if (!run) {
+        const r = errorResult(
+          `agent_id "${params.agent_id}" not found. Run ensemble_status to see active sub-agents.`,
+        );
+        return r as { content: typeof r.content; details: ResumeDetails };
+      }
+      if (run.status !== "paused") {
+        const r = errorResult(
+          `cannot resume sub-agent ${run.id}: status is ${run.status} (must be 'paused').`,
+        );
+        return r as { content: typeof r.content; details: ResumeDetails };
+      }
+      const ok = resumeRun(run, registry);
+      if (!ok) {
+        const r = errorResult(
+          `resume failed for ${run.id}: process handle missing or signal rejected.`,
+        );
+        return r as { content: typeof r.content; details: ResumeDetails };
+      }
+      return {
+        content: [{ type: "text" as const, text: `resumed: ${run.id}` }],
+        details: { status: "running", agent_id: run.id, persona: run.persona } as ResumeDetails,
       };
     },
   });

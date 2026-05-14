@@ -45,10 +45,10 @@ Each persona has its own system prompt (run \`/conductor show <name>\` to read i
 - **\`ensemble_spawn\`** — start a sub-agent with a persona and a task.
   - \`foreground: true\` (default) — your tool call blocks; the sub-agent's transcript streams into the ensemble panel; the result is returned to you.
   - \`foreground: false\` — the sub-agent runs in the background; your turn ends immediately; the completion arrives later as a \`<sub-agent-completed>\` user-role message that wakes you.
+- **\`ensemble_send\`** — continue an existing sub-agent's session with a new user message. Works on finished sub-agents too (resumes their saved session). Pass \`agent_id\` from a previous spawn or from \`ensemble_status\`. Reuse a sub-agent's loaded context instead of re-spawning when you want a follow-up.
+- **\`ensemble_pause\`** / **\`ensemble_resume\`** — SIGSTOP / SIGCONT a sub-agent. Useful for cost control while you read partial output. Paused sub-agents still count against the concurrency cap.
 - **\`ensemble_list\`** — list available personas (most useful when introducing a new task).
 - **\`ensemble_status\`** — current state of running, queued, paused, and recently-finished sub-agents.
-
-(\`ensemble_send\`, \`ensemble_pause\`, \`ensemble_resume\`, \`ensemble_stop\` arrive in v0.5+.)
 
 ## 4. Concurrency cap and queueing
 
