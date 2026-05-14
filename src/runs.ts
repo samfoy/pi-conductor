@@ -1,0 +1,590 @@
+/**
+ * pi-conductor — Run registry and subprocess spawning.
+ *
+ * One sub-agent = one `pi --mode json -p --no-session` subprocess. We stream
+ * its JSON events, mutate the Run state, persist transcript + record, and
+ * surface live updates to the ensemble panel and (optionally) the parent
+ * tool call's onUpdate stream.
+ *
+ * Foreground vs background:
+ *   - foreground: caller awaits spawnRun(). Promise resolves on terminal.
+ *   - background: caller does NOT await; on terminal, the registered
+ *     onComplete callback is fired (the entry point uses this to push
+ *     a <sub-agent-completed> notification card).
+ *
+ * Concurrency cap: the queue lives in queue.ts. spawnRun() is the entry that
+ * may be called either directly (slot available) or by the queue draining.
+ */
+
+import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync } from "node:fs";
+import { mkdir, writeFile, appendFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import {
+  emptyUsage,
+  isTerminal,
+  toRunRecord,
+  type Persona,
+  type Run,
+  type RunStatus,
+  type SpawnMode,
+  type ThinkingLevel,
+} from "./types.ts";
+
+// ── Storage paths ─────────────────────────────────────────────────────
+
+export function runsRoot(): string {
+  return join(homedir(), ".pi", "agent", "conductor", "runs");
+}
+
+export function runDir(id: string): string {
+  return join(runsRoot(), id);
+}
+
+// ── Id allocation ────────────────────────────────────────────────────
+
+const PRONOUNCEABLE_CHARS = "abcdefghijklmnpqrstuvwxyz0123456789"; // no o, easy to read
+
+function shortHash(): string {
+  let s = "";
+  for (let i = 0; i < 4; i++) {
+    s += PRONOUNCEABLE_CHARS[Math.floor(Math.random() * PRONOUNCEABLE_CHARS.length)];
+  }
+  return s;
+}
+
+/** Generate a stable, human-friendly id like `oracle-7f3a`. Collisions are vanishingly rare; we still re-roll. */
+export function allocateRunId(persona: string, registry: Map<string, Run>): string {
+  for (let i = 0; i < 32; i++) {
+    const id = `${persona}-${shortHash()}`;
+    if (!registry.has(id) && !existsSync(runDir(id))) return id;
+  }
+  // Last resort — append timestamp for uniqueness.
+  return `${persona}-${shortHash()}-${Date.now()}`;
+}
+
+// ── pi invocation discovery (lifted from pi-essentials) ──────────────
+
+function getPiInvocation(args: string[]): { command: string; args: string[] } {
+  const currentScript = process.argv[1];
+  const isBunVirtual = currentScript?.startsWith("/$bunfs/root/");
+  if (currentScript && !isBunVirtual && existsSync(currentScript)) {
+    return { command: process.execPath, args: [currentScript, ...args] };
+  }
+  const execName = (process.execPath.split("/").pop() || "").toLowerCase();
+  if (!/^(node|bun)(\.exe)?$/.test(execName)) {
+    return { command: process.execPath, args };
+  }
+  return { command: "pi", args };
+}
+
+// ── Prompt construction ──────────────────────────────────────────────
+
+const SUBAGENT_NESTING_GUARD = [
+  "IMPORTANT: You are running as a pi-conductor sub-agent. Do NOT attempt to spawn",
+  "further sub-agents (no calls to ensemble_spawn, subagent, agent, delegate, etc).",
+  "Complete the entire task yourself and return your findings.",
+].join(" ");
+
+/**
+ * Build the prompt sent to the sub-agent.
+ *
+ * The persona's system prompt body is passed via `pi --system-prompt-replace`
+ * (see buildPiArgs). The user-facing prompt here is the task plus a
+ * nesting-guard preface and any default_reads instructions.
+ */
+export function buildSubAgentPrompt(persona: Persona, task: string): string {
+  const parts: string[] = [SUBAGENT_NESTING_GUARD, ""];
+  if (persona.defaultReads.length > 0) {
+    parts.push("Read these files first if they exist (they are part of your context):");
+    for (const f of persona.defaultReads) parts.push(`  - ${f}`);
+    parts.push("");
+  }
+  parts.push("## Task");
+  parts.push("");
+  parts.push(task);
+  return parts.join("\n");
+}
+
+/**
+ * Build the argv passed to `pi --mode json -p`.
+ *
+ * The persona's system prompt body becomes pi's system prompt addendum so the
+ * sub-agent operates with the right role discipline. We also pass --no-session
+ * for clean isolation; v0.6 will switch to --session for resumable workers.
+ */
+export function buildPiArgs(opts: {
+  systemPrompt: string;
+  prompt: string;
+  model?: string;
+  thinking?: ThinkingLevel;
+}): string[] {
+  const args: string[] = ["--mode", "json", "-p", "--no-session"];
+  if (opts.model) args.push("--model", opts.model);
+  if (opts.thinking) args.push("--thinking", opts.thinking);
+  // Pi exposes --append-system-prompt for system prompt addenda; we use that
+  // for the persona body so pi's own system prompt logic still runs.
+  args.push("--append-system-prompt", opts.systemPrompt);
+  args.push(opts.prompt);
+  return args;
+}
+
+// ── Run registry ─────────────────────────────────────────────────────
+
+export type RunListener = (run: Run) => void;
+
+/** Reasons we report when forcing a terminal state externally. */
+export type TerminationReason = "killed" | "timeout";
+
+export class RunRegistry {
+  private runs = new Map<string, Run>();
+  private listeners = new Set<RunListener>();
+
+  list(): Run[] {
+    return [...this.runs.values()];
+  }
+
+  get(id: string): Run | undefined {
+    return this.runs.get(id);
+  }
+
+  has(id: string): boolean {
+    return this.runs.has(id);
+  }
+
+  register(run: Run): void {
+    this.runs.set(run.id, run);
+    this.notify(run);
+  }
+
+  countActive(): number {
+    let n = 0;
+    for (const r of this.runs.values()) {
+      if (!isTerminal(r.status) && r.status !== "queued") n++;
+    }
+    return n;
+  }
+
+  countQueued(): number {
+    let n = 0;
+    for (const r of this.runs.values()) {
+      if (r.status === "queued") n++;
+    }
+    return n;
+  }
+
+  /** Subscribe to any run state change. Returns an unsubscribe fn. */
+  onChange(fn: RunListener): () => void {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+
+  notify(run: Run): void {
+    for (const fn of this.listeners) {
+      try {
+        fn(run);
+      } catch {
+        // listener errors must never crash the spawner
+      }
+    }
+  }
+}
+
+// ── Spawn ────────────────────────────────────────────────────────────
+
+export interface SpawnOptions {
+  registry: RunRegistry;
+  persona: Persona;
+  task: string;
+  mode: SpawnMode;
+  cwd: string;
+  /** Resolved model. Falls back to undefined (inherit). */
+  model?: string;
+  /** Resolved thinking. Falls back to undefined (inherit). */
+  thinking?: ThinkingLevel;
+  /** Hard timeout. */
+  timeoutMs: number;
+  /** Optional pre-allocated id (for queue draining). */
+  preAllocatedId?: string;
+  /** Streamed tool-call hint callback for foreground rendering. */
+  onUpdate?: (run: Run) => void;
+  /** Fired when the run reaches a terminal status (completed/failed/killed/timeout). */
+  onComplete?: (run: Run) => void;
+}
+
+/**
+ * Spawn a sub-agent. Returns the Run immediately (status="running").
+ * Resolves the returned promise when the run reaches a terminal status.
+ *
+ * Foreground/background semantics are the caller's choice — both run the
+ * same subprocess; the difference is only how the caller awaits.
+ */
+export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
+  const id = opts.preAllocatedId ?? allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
+  const dir = runDir(id);
+  mkdirSync(dir, { recursive: true });
+
+  const run: Run = {
+    id,
+    persona: opts.persona.name,
+    task: opts.task,
+    model: opts.model,
+    thinking: opts.thinking,
+    mode: opts.mode,
+    status: "running",
+    startTime: Date.now(),
+    messages: [],
+    usage: emptyUsage(),
+    cwd: opts.cwd,
+    recordPath: join(dir, "record.json"),
+    transcriptPath: join(dir, "transcript.jsonl"),
+    finalPath: join(dir, "final.md"),
+  };
+  opts.registry.register(run);
+  void writeRecord(run);
+
+  // Construct prompt + args.
+  const prompt = buildSubAgentPrompt(opts.persona, opts.task);
+  const piArgs = buildPiArgs({
+    systemPrompt: opts.persona.systemPrompt,
+    prompt,
+    model: opts.model,
+    thinking: opts.thinking,
+  });
+  const invocation = getPiInvocation(piArgs);
+
+  let proc: ChildProcess;
+  try {
+    proc = spawn(invocation.command, invocation.args, {
+      cwd: opts.cwd,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (e) {
+    run.status = "failed";
+    run.errorMessage = `spawn failed: ${(e as Error).message}`;
+    run.finishedAt = Date.now();
+    opts.registry.notify(run);
+    void writeRecord(run);
+    void writeFinal(run);
+    if (opts.onComplete) opts.onComplete(run);
+    return { run, done: Promise.resolve(run) };
+  }
+  run.proc = proc;
+
+  // Hard timeout.
+  run.timeoutTimer = setTimeout(() => {
+    if (run.status === "running" || run.status === "paused") {
+      forceTerminate(run, "timeout", opts.registry, opts.onComplete);
+    }
+  }, opts.timeoutMs);
+
+  // Stream parsing.
+  let buffer = "";
+  let stderr = "";
+  let finalized = false;
+  let donePromiseResolve: (r: Run) => void;
+  const done = new Promise<Run>((resolve) => {
+    donePromiseResolve = resolve;
+  });
+
+  const finalize = (terminal: RunStatus, exitCode?: number) => {
+    if (finalized) return;
+    finalized = true;
+    if (run.timeoutTimer) {
+      clearTimeout(run.timeoutTimer);
+      run.timeoutTimer = undefined;
+    }
+    if (buffer.trim()) processLine(buffer);
+    run.status = terminal;
+    run.exitCode = exitCode;
+    run.finishedAt = Date.now();
+    if (terminal === "failed" && !run.errorMessage) {
+      run.errorMessage = stderr.trim() || `pi subprocess exited with code ${exitCode}`;
+    }
+    opts.registry.notify(run);
+    try {
+      proc.kill();
+    } catch {
+      // already dead
+    }
+    // Persist record + final BEFORE resolving done so callers awaiting
+    // result.done can read both files immediately.
+    Promise.all([writeRecord(run), writeFinal(run)])
+      .catch(() => {})
+      .finally(() => {
+        if (opts.onComplete) {
+          try {
+            opts.onComplete(run);
+          } catch {
+            // never crash the spawner on listener errors
+          }
+        }
+        donePromiseResolve(run);
+      });
+  };
+
+  const processLine = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+
+    // Append every parseable JSON line to the transcript.
+    void appendFile(run.transcriptPath, line + "\n").catch(() => {});
+
+    let event: any;
+    try {
+      event = JSON.parse(trimmed);
+    } catch {
+      return;
+    }
+
+    if (event.type === "agent_end") {
+      finalize("completed", 0);
+      return;
+    }
+
+    if (event.type === "turn_end" && event.message) {
+      const msg = event.message as AgentMessage;
+      const content = (msg as any).content;
+      const hasToolCall = Array.isArray(content)
+        ? content.some((p: any) => p.type === "toolCall")
+        : false;
+      const errored = (msg as any).stopReason === "error" || (msg as any).stopReason === "aborted";
+      if (!hasToolCall && !errored) {
+        finalize("completed", 0);
+        return;
+      }
+    }
+
+    if (event.type === "message_end" && event.message) {
+      const msg = event.message as AgentMessage;
+      run.messages.push(msg);
+      if (msg.role === "assistant") {
+        run.usage.turns += 1;
+        const u = (msg as any).usage;
+        if (u) {
+          run.usage.input += u.input || 0;
+          run.usage.output += u.output || 0;
+          run.usage.cacheRead += u.cacheRead || 0;
+          run.usage.cacheWrite += u.cacheWrite || 0;
+          run.usage.cost += u.cost?.total || 0;
+        }
+        const m = (msg as any).model;
+        if (m && !run.model) run.model = m;
+        const sr = (msg as any).stopReason;
+        if (sr) run.stopReason = sr;
+        const em = (msg as any).errorMessage;
+        if (em && !run.errorMessage) run.errorMessage = em;
+
+        const content = (msg as any).content;
+        if (Array.isArray(content)) {
+          for (const part of content) {
+            if ((part as any).type === "toolCall") {
+              run.lastToolCall = formatToolCallShort(
+                (part as any).name,
+                (part as any).arguments,
+              );
+            }
+          }
+        }
+      }
+      opts.registry.notify(run);
+      if (opts.onUpdate) opts.onUpdate(run);
+    }
+
+    if (event.type === "tool_result_end" && event.message) {
+      run.messages.push(event.message as AgentMessage);
+      opts.registry.notify(run);
+      if (opts.onUpdate) opts.onUpdate(run);
+    }
+  };
+
+  proc.stdout?.on("data", (data: Buffer) => {
+    buffer += data.toString();
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    for (const line of lines) processLine(line);
+  });
+
+  proc.stderr?.on("data", (data: Buffer) => {
+    stderr += data.toString();
+  });
+
+  proc.on("close", (code) => {
+    if (finalized) return;
+    if ((code ?? 0) === 0) finalize("completed", 0);
+    else finalize("failed", code ?? 0);
+  });
+
+  proc.on("error", () => {
+    run.errorMessage = "failed to spawn pi process";
+    finalize("failed", 1);
+  });
+
+  proc.unref();
+  return { run, done };
+}
+
+function mapFromRegistry(r: RunRegistry): Map<string, Run> {
+  const m = new Map<string, Run>();
+  for (const x of r.list()) m.set(x.id, x);
+  return m;
+}
+
+// ── Termination helpers ──────────────────────────────────────────────
+
+export function forceTerminate(
+  run: Run,
+  reason: TerminationReason,
+  registry: RunRegistry,
+  onComplete?: (r: Run) => void,
+): void {
+  if (isTerminal(run.status)) return;
+  if (run.timeoutTimer) {
+    clearTimeout(run.timeoutTimer);
+    run.timeoutTimer = undefined;
+  }
+  if (run.proc) {
+    try {
+      run.proc.kill("SIGTERM");
+    } catch {
+      // already dead
+    }
+    // Force-kill after 2s if it hasn't exited.
+    setTimeout(() => {
+      try {
+        run.proc?.kill("SIGKILL");
+      } catch {
+        // already dead
+      }
+    }, 2000).unref();
+  }
+  run.status = reason === "timeout" ? "timeout" : "killed";
+  run.finishedAt = Date.now();
+  registry.notify(run);
+  void writeRecord(run);
+  void writeFinal(run);
+  if (onComplete) {
+    try {
+      onComplete(run);
+    } catch {
+      // ignore
+    }
+  }
+}
+
+export function pauseRun(run: Run, registry: RunRegistry): boolean {
+  if (run.status !== "running") return false;
+  if (!run.proc?.pid) return false;
+  try {
+    process.kill(run.proc.pid, "SIGSTOP");
+  } catch {
+    return false;
+  }
+  run.status = "paused";
+  run.pausedAt = Date.now();
+  registry.notify(run);
+  void writeRecord(run);
+  return true;
+}
+
+export function resumeRun(run: Run, registry: RunRegistry): boolean {
+  if (run.status !== "paused") return false;
+  if (!run.proc?.pid) return false;
+  try {
+    process.kill(run.proc.pid, "SIGCONT");
+  } catch {
+    return false;
+  }
+  run.status = "running";
+  run.pausedAt = undefined;
+  registry.notify(run);
+  void writeRecord(run);
+  return true;
+}
+
+// ── Persistence ──────────────────────────────────────────────────────
+
+async function writeRecord(run: Run): Promise<void> {
+  try {
+    await mkdir(dirname(run.recordPath), { recursive: true });
+    await writeFile(run.recordPath, JSON.stringify(toRunRecord(run), null, 2));
+  } catch {
+    // best-effort
+  }
+}
+
+async function writeFinal(run: Run): Promise<void> {
+  try {
+    await mkdir(dirname(run.finalPath), { recursive: true });
+    await writeFile(run.finalPath, getFinalText(run.messages) || "(no output)");
+  } catch {
+    // best-effort
+  }
+}
+
+// ── Helpers (lifted/adapted from pi-essentials) ──────────────────────
+
+export function getFinalText(messages: AgentMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg && msg.role === "assistant" && Array.isArray((msg as any).content)) {
+      const texts: string[] = [];
+      for (const part of (msg as any).content) {
+        if ((part as any).type === "text") texts.push((part as any).text);
+      }
+      if (texts.length > 0) return texts.join("").trim();
+    }
+  }
+  return "";
+}
+
+export function formatTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 10000) return `${(n / 1000).toFixed(1)}k`;
+  if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+export function formatUsage(u: { turns: number; input: number; output: number; cost: number }): string {
+  const parts: string[] = [];
+  if (u.turns) parts.push(`${u.turns}t`);
+  if (u.input) parts.push(`↑${formatTokens(u.input)}`);
+  if (u.output) parts.push(`↓${formatTokens(u.output)}`);
+  if (u.cost) parts.push(`$${u.cost.toFixed(3)}`);
+  return parts.join(" ");
+}
+
+export function elapsedStr(start: number, end?: number): string {
+  const s = ((end || Date.now()) - start) / 1000;
+  if (s < 60) return `${Math.round(s)}s`;
+  const m = s / 60;
+  if (m < 60) return `${m.toFixed(1)}m`;
+  return `${(m / 60).toFixed(1)}h`;
+}
+
+function shortenPath(p: string): string {
+  const home = homedir();
+  return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
+}
+
+function formatToolCallShort(name: string, args: Record<string, any>): string {
+  switch (name) {
+    case "bash": {
+      const cmd = (args?.command as string) ?? "...";
+      return `$ ${cmd.length > 50 ? cmd.slice(0, 50) + "…" : cmd}`;
+    }
+    case "read":
+      return `read ${shortenPath((args?.file_path || args?.path || "...") as string)}`;
+    case "write":
+      return `write ${shortenPath((args?.file_path || args?.path || "...") as string)}`;
+    case "edit":
+      return `edit ${shortenPath((args?.file_path || args?.path || "...") as string)}`;
+    case "grep":
+      return `grep ${(args?.pattern as string) ?? "..."}`;
+    default:
+      return name;
+  }
+}

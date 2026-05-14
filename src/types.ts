@@ -2,6 +2,9 @@
  * pi-conductor — Shared types.
  */
 
+import type { ChildProcess } from "node:child_process";
+import type { AgentMessage } from "@mariozechner/pi-agent-core";
+
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
 export const THINKING_LEVELS: ThinkingLevel[] = [
@@ -97,3 +100,140 @@ export const DEFAULT_CONFIG: ConductorConfig = {
   personaOverrides: {},
   conductorPromptPath: null,
 };
+
+// ── Run lifecycle types (v0.2) ────────────────────────────────────────
+
+export type RunStatus =
+  | "queued"
+  | "running"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "killed"
+  | "timeout";
+
+export type SpawnMode = "foreground" | "background";
+
+export interface Usage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: number;
+  turns: number;
+}
+
+export function emptyUsage(): Usage {
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
+}
+
+/**
+ * One sub-agent run.
+ *
+ * The runtime mutates these fields as the subprocess streams its JSON events.
+ * Persistence to disk happens via `runs.ts` — record.json is written on every
+ * status change; transcript.jsonl is appended per stream event.
+ */
+export interface Run {
+  /** Stable id, e.g. `oracle-7f3a`. Used by ensemble_send/stop/etc. */
+  id: string;
+  /** Persona name as resolved at spawn time. */
+  persona: string;
+  /** The task prompt the LLM gave us. default_reads contents are NOT inlined — they are passed as separate prompt prefix. */
+  task: string;
+  /** Resolved model id at spawn time (after persona/override resolution). May be undefined when inheriting. */
+  model?: string;
+  /** Resolved thinking level at spawn time. */
+  thinking?: ThinkingLevel;
+  /** foreground or background. "queued-as-background" auto-downgrades and lands here as "background". */
+  mode: SpawnMode;
+  /** Lifecycle status. */
+  status: RunStatus;
+  /** ms since epoch. */
+  startTime: number;
+  /** ms since epoch; set when status transitions to a terminal state. */
+  finishedAt?: number;
+  /** ms timestamp of last pause; cleared on resume. */
+  pausedAt?: number;
+
+  /** Exit code of the pi subprocess; set on close. */
+  exitCode?: number;
+  /** Stop reason from the last assistant message: stop | error | aborted | … */
+  stopReason?: string;
+  /** First error message we saw on stderr or in an aborted message. */
+  errorMessage?: string;
+
+  /** Streamed messages from the sub-agent. */
+  messages: AgentMessage[];
+  /** Aggregate usage across all of the sub-agent's assistant messages. */
+  usage: Usage;
+  /** Latest tool-call summary for the live widget (e.g. "$ git diff"). */
+  lastToolCall?: string;
+
+  /** Path to record.json for this run. */
+  recordPath: string;
+  /** Path to transcript.jsonl for this run. */
+  transcriptPath: string;
+  /** Path to final.md (last assistant text). Written on terminal status. */
+  finalPath: string;
+
+  /** Working directory of the subprocess. */
+  cwd: string;
+
+  /** The subprocess; cleared on close. */
+  proc?: ChildProcess;
+  /** Hard timeout timer; cleared on close. */
+  timeoutTimer?: NodeJS.Timeout;
+  /** Watchers (intervals etc) that need cleanup. */
+  watcher?: NodeJS.Timeout;
+}
+
+/** Persisted record.json shape (subset of Run, no proc/timer references). */
+export interface RunRecord {
+  id: string;
+  persona: string;
+  task: string;
+  model?: string;
+  thinking?: ThinkingLevel;
+  mode: SpawnMode;
+  status: RunStatus;
+  startTime: number;
+  finishedAt?: number;
+  pausedAt?: number;
+  exitCode?: number;
+  stopReason?: string;
+  errorMessage?: string;
+  usage: Usage;
+  cwd: string;
+  recordPath: string;
+  transcriptPath: string;
+  finalPath: string;
+}
+
+export function toRunRecord(r: Run): RunRecord {
+  return {
+    id: r.id,
+    persona: r.persona,
+    task: r.task,
+    model: r.model,
+    thinking: r.thinking,
+    mode: r.mode,
+    status: r.status,
+    startTime: r.startTime,
+    finishedAt: r.finishedAt,
+    pausedAt: r.pausedAt,
+    exitCode: r.exitCode,
+    stopReason: r.stopReason,
+    errorMessage: r.errorMessage,
+    usage: r.usage,
+    cwd: r.cwd,
+    recordPath: r.recordPath,
+    transcriptPath: r.transcriptPath,
+    finalPath: r.finalPath,
+  };
+}
+
+export const TERMINAL_STATUSES: RunStatus[] = ["completed", "failed", "killed", "timeout"];
+export function isTerminal(s: RunStatus): boolean {
+  return TERMINAL_STATUSES.includes(s);
+}

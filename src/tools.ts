@@ -1,24 +1,38 @@
 /**
  * pi-conductor — Tools registered with pi.
  *
- * v0.1 ships only read-only tools: ensemble_list and ensemble_status.
- * Spawning, sending, pausing, etc. arrive in v0.2+.
+ * v0.2 lineup:
+ *   - ensemble_list   (read-only, persona registry)
+ *   - ensemble_status (live registry view)
+ *   - ensemble_spawn  (foreground default, with auto-downgrade-on-queue)
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import type { Persona } from "./types.ts";
+import type { Persona, PersonaOverride, Run, RunStatus, ThinkingLevel } from "./types.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
+import { elapsedStr, formatUsage, getFinalText, type RunRegistry } from "./runs.ts";
+import { SpawnQueue } from "./queue.ts";
+import { formatCompletionNotification } from "./notifications.ts";
 
 interface RegisterToolsOpts {
-  /** Returns the current cwd (provided by the extension lifecycle hooks). */
   getCwd: () => string;
+  getRegistry: () => RunRegistry;
+  getQueue: () => SpawnQueue;
+  /** Push a `<sub-agent-completed>` notification into the parent conversation. */
+  pushCompletionNotification: (run: Run) => void;
 }
 
 export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
-  // ── ensemble_list ──────────────────────────────────────────────────
+  registerListTool(pi, opts);
+  registerStatusTool(pi, opts);
+  registerSpawnTool(pi, opts);
+}
 
+// ── ensemble_list ────────────────────────────────────────────────────
+
+function registerListTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   pi.registerTool({
     name: "ensemble_list",
     label: "List personas",
@@ -35,15 +49,10 @@ export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
     async execute(_id, _params) {
       const cwd = opts.getCwd();
       const cfg = loadConfig(cwd);
-      const resolved = await resolvePersonas({
-        cwd,
-        personaOverrides: cfg.personaOverrides,
-      });
-
+      const resolved = await resolvePersonas({ cwd, personaOverrides: cfg.personaOverrides });
       const personas = [...resolved.personas.values()].sort((a, b) =>
         a.name.localeCompare(b.name),
       );
-
       return {
         content: [{ type: "text" as const, text: formatPersonaListForLLM(personas) }],
         details: {
@@ -54,39 +63,230 @@ export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       };
     },
   });
+}
 
-  // ── ensemble_status ────────────────────────────────────────────────
+// ── ensemble_status ──────────────────────────────────────────────────
 
+function registerStatusTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   pi.registerTool({
     name: "ensemble_status",
     label: "Sub-agent status",
     description:
-      "Report status of currently-running, queued, paused, and recently-finished sub-agents. " +
-      "v0.1 stub — will return live state once spawning lands in v0.2.",
+      "Report status of currently-running, queued, paused, and recently-finished sub-agents in this session.",
     promptSnippet: "Check status of conductor sub-agents",
     promptGuidelines: [
-      "ensemble_status is a stub in v0.1; it will report empty until v0.2 ships spawning.",
+      "Use ensemble_status when you need to know which sub-agents are alive (e.g. before deciding whether to spawn another).",
+      "Background sub-agents push completion notifications automatically; you don't need to poll.",
     ],
     parameters: Type.Object({
       agent_id: Type.Optional(
         Type.String({ description: "Filter to a specific agent_id; omit for all." }),
       ),
     }),
-    async execute(_id, _params) {
+    async execute(_id, params) {
+      const registry = opts.getRegistry();
+      const queue = opts.getQueue();
+      const all = registry.list();
+      const filtered = params?.agent_id ? all.filter((r) => r.id === params.agent_id) : all;
+
+      const groups = groupByStatus(filtered);
+      const queueList = queue.list().map((p) => ({
+        id: p.id,
+        persona: p.persona.name,
+        requestedMode: p.requestedMode,
+        enqueuedAt: p.enqueuedAt,
+      }));
+
       return {
         content: [
           {
             type: "text" as const,
-            text: "No sub-agents are running. (Spawning lands in pi-conductor v0.2.)",
+            text: formatStatusForLLM(groups, queueList.length),
           },
         ],
-        details: { running: [], queued: [], paused: [], finished: [] },
+        details: {
+          running: groups.running.map(toStatusSummary),
+          queued: groups.queued.map(toStatusSummary),
+          paused: groups.paused.map(toStatusSummary),
+          finished: [
+            ...groups.completed,
+            ...groups.failed,
+            ...groups.killed,
+            ...groups.timeout,
+          ].map(toStatusSummary),
+          queueDetail: queueList,
+        },
       };
     },
   });
 }
 
-// ── Formatting helpers ────────────────────────────────────────────────
+// ── ensemble_spawn ───────────────────────────────────────────────────
+
+function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
+  pi.registerTool({
+    name: "ensemble_spawn",
+    label: "Spawn sub-agent",
+    description:
+      "Launch a focused sub-agent using a persona. " +
+      "Foreground (default): blocks until the sub-agent completes; result is returned. " +
+      "Background: returns immediately; completion arrives as a <sub-agent-completed> user-role message that wakes you. " +
+      "When the concurrency cap is reached, foreground spawns auto-downgrade to background.",
+    promptSnippet: "Spawn a persona-based sub-agent (foreground or background)",
+    promptGuidelines: [
+      "Use ensemble_list first if you don't know which personas are available.",
+      "Write fully self-contained task prompts — the sub-agent doesn't see your conversation.",
+      "For read-only personas (oracle, redteam, inspector, analyst, profiler, investigator), prefer parallel background spawns.",
+      "For write-capable personas (builder, simplifier), run one at a time per set of files.",
+      "Foreground spawns may auto-downgrade to background under load — handle the queued-as-background return cleanly without re-spawning.",
+    ],
+    parameters: Type.Object({
+      persona: Type.String({
+        description: "Persona name. Run ensemble_list to see what's available.",
+      }),
+      task: Type.String({
+        description:
+          "Self-contained task prompt for the sub-agent. Include file paths, constraints, and acceptance criteria.",
+      }),
+      foreground: Type.Optional(
+        Type.Boolean({
+          description:
+            "true (default) blocks until done and streams the sub-agent into the ensemble panel; false runs in background and notifies on completion.",
+        }),
+      ),
+    }),
+    async execute(_id, params, signal, onUpdate) {
+      const cwd = opts.getCwd();
+      const cfg = loadConfig(cwd);
+      const resolved = await resolvePersonas({ cwd, personaOverrides: cfg.personaOverrides });
+      const persona = resolved.personas.get(params.persona);
+      if (!persona) {
+        return errorResult(
+          `persona "${params.persona}" not found. Run ensemble_list to see what's available.`,
+        );
+      }
+
+      const foreground = params.foreground !== false;
+      const mode = foreground ? "foreground" : "background";
+      const queue = opts.getQueue();
+      const registry = opts.getRegistry();
+
+      const ov = cfg.personaOverrides[persona.name] ?? {};
+      const model = resolveModel(persona, ov);
+      const thinking = resolveThinking(persona, ov);
+      const timeoutMs = (ov.timeoutMinutes ?? persona.timeoutMinutes ?? cfg.defaultTimeoutMinutes) * 60_000;
+
+      // Wire abort signal to cancel a running sub-agent.
+      const result = queue.enqueueOrSpawn({
+        persona,
+        task: params.task,
+        mode,
+        cwd,
+        model,
+        thinking,
+        timeoutMs,
+        onUpdate: foreground ? () => {} : undefined, // foreground uses our own onUpdate below
+        onComplete: foreground
+          ? undefined
+          : (run) => opts.pushCompletionNotification(run),
+      });
+
+      if (result.kind === "queued") {
+        const p = result.placeholderRun;
+        const downgradedNote = result.downgraded
+          ? "Foreground spawn auto-downgraded to background because the concurrency cap is full. " +
+            "The sub-agent is queued; completion will arrive as a <sub-agent-completed> notification."
+          : "Spawn queued; completion will arrive as a <sub-agent-completed> notification.";
+        // Make sure the completion notification fires when this queued run eventually finishes.
+        registry.onChange((run) => {
+          if (run.id === p.id && isTerminalStatus(run.status)) {
+            opts.pushCompletionNotification(run);
+          }
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                `${result.downgraded ? "queued-as-background" : "queued"}: ${p.id}\n` +
+                `persona=${p.persona} queue_position=${result.queuePosition}\n\n` +
+                downgradedNote,
+            },
+          ],
+          details: {
+            status: result.downgraded ? "queued-as-background" : "queued",
+            agent_id: p.id,
+            queue_position: result.queuePosition,
+            persona: p.persona,
+          },
+        };
+      }
+
+      // result.kind === "spawned"
+      if (foreground) {
+        // Stream tool-call hints via onUpdate while we wait for completion.
+        const unsub = registry.onChange((r) => {
+          if (r.id !== result.run.id) return;
+          if (onUpdate) {
+            onUpdate({
+              content: [
+                {
+                  type: "text" as const,
+                  text: formatStreamingPreview(r),
+                },
+              ],
+              details: { agent_id: r.id, status: r.status, lastToolCall: r.lastToolCall },
+            });
+          }
+        });
+
+        // Honor abort.
+        signal?.addEventListener("abort", () => {
+          try {
+            result.run.proc?.kill("SIGTERM");
+          } catch {
+            // already dead
+          }
+        });
+
+        try {
+          const finished = await result.done;
+          return foregroundFinalResult(finished);
+        } finally {
+          unsub();
+        }
+      }
+
+      // background path
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text:
+              `running: ${result.run.id}\n` +
+              `persona=${result.run.persona} mode=background\n\n` +
+              `Spawned in background. Continue with other work; completion will arrive as a <sub-agent-completed> notification.`,
+          },
+        ],
+        details: {
+          status: "running",
+          agent_id: result.run.id,
+          mode: "background",
+          persona: result.run.persona,
+        },
+      };
+    },
+  });
+}
+
+// ── Formatting / helpers ─────────────────────────────────────────────
+
+function resolveModel(p: Persona, ov: PersonaOverride): string | undefined {
+  return ov.model ?? p.model;
+}
+function resolveThinking(p: Persona, ov: PersonaOverride): ThinkingLevel | undefined {
+  return ov.thinking ?? p.thinking;
+}
 
 function personaSummary(p: Persona): Record<string, unknown> {
   return {
@@ -116,4 +316,134 @@ function formatPersonaListForLLM(personas: Persona[]): string {
     lines.push(`  ${" ".repeat(14)}   [${cfg.join(", ")}]`);
   }
   return lines.join("\n");
+}
+
+interface StatusGroups {
+  running: Run[];
+  queued: Run[];
+  paused: Run[];
+  completed: Run[];
+  failed: Run[];
+  killed: Run[];
+  timeout: Run[];
+}
+
+function groupByStatus(runs: Run[]): StatusGroups {
+  const g: StatusGroups = {
+    running: [],
+    queued: [],
+    paused: [],
+    completed: [],
+    failed: [],
+    killed: [],
+    timeout: [],
+  };
+  for (const r of runs) g[r.status].push(r);
+  return g;
+}
+
+function toStatusSummary(r: Run) {
+  return {
+    id: r.id,
+    persona: r.persona,
+    status: r.status,
+    elapsed: elapsedStr(r.startTime, r.finishedAt),
+    usage: formatUsage(r.usage),
+    lastToolCall: r.lastToolCall,
+    transcriptPath: r.transcriptPath,
+  };
+}
+
+function formatStatusForLLM(g: StatusGroups, queueSize: number): string {
+  const lines: string[] = [];
+  const counts: string[] = [];
+  if (g.running.length) counts.push(`${g.running.length} running`);
+  if (g.paused.length) counts.push(`${g.paused.length} paused`);
+  if (g.queued.length || queueSize) counts.push(`${g.queued.length} queued`);
+  const finished = g.completed.length + g.failed.length + g.killed.length + g.timeout.length;
+  if (finished) counts.push(`${finished} finished`);
+  lines.push(counts.length === 0 ? "No sub-agents." : `Sub-agents: ${counts.join(", ")}.`);
+
+  const groupOrder: Array<[string, Run[]]> = [
+    ["Running", g.running],
+    ["Paused", g.paused],
+    ["Queued", g.queued],
+    ["Completed", g.completed],
+    ["Failed", g.failed],
+    ["Killed", g.killed],
+    ["Timeout", g.timeout],
+  ];
+  for (const [label, list] of groupOrder) {
+    if (list.length === 0) continue;
+    lines.push("");
+    lines.push(`${label}:`);
+    for (const r of list) {
+      const u = formatUsage(r.usage);
+      const usagePart = u ? `[${u}]` : "";
+      const hint = r.lastToolCall ? ` → ${r.lastToolCall}` : "";
+      lines.push(
+        `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint}`,
+      );
+    }
+  }
+  return lines.join("\n");
+}
+
+function formatStreamingPreview(r: Run): string {
+  const u = formatUsage(r.usage);
+  const usagePart = u ? ` [${u}]` : "";
+  const hint = r.lastToolCall ? ` → ${r.lastToolCall}` : " starting…";
+  return `${r.persona}:${r.id} ${r.status} ${elapsedStr(r.startTime)}${usagePart}${hint}`;
+}
+
+function foregroundFinalResult(r: Run) {
+  const elapsed = elapsedStr(r.startTime, r.finishedAt);
+  if (r.status !== "completed") {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text:
+            `## ✗ \`${r.persona}\` ${r.status} (${elapsed})\n\n` +
+            (r.errorMessage ?? "(no error message)") +
+            `\n\nTranscript: ${r.transcriptPath}`,
+        },
+      ],
+      details: {
+        status: r.status,
+        agent_id: r.id,
+        persona: r.persona,
+        errorMessage: r.errorMessage,
+        transcriptPath: r.transcriptPath,
+      },
+    };
+  }
+  const finalText = getFinalText(r.messages) || "(no output)";
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: formatCompletionNotification(r),
+      },
+    ],
+    details: {
+      status: "completed",
+      agent_id: r.id,
+      persona: r.persona,
+      finalText,
+      usage: r.usage,
+      transcriptPath: r.transcriptPath,
+    },
+  };
+}
+
+function errorResult(text: string) {
+  return {
+    content: [{ type: "text" as const, text }],
+    details: { error: text },
+  };
+}
+
+function isTerminalStatus(s: RunStatus): boolean {
+  return s === "completed" || s === "failed" || s === "killed" || s === "timeout";
 }

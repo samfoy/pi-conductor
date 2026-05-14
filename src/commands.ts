@@ -1,31 +1,62 @@
 /**
  * pi-conductor — Slash commands.
  *
- * v0.1 ships read-only commands:
+ * v0.2 lineup:
  *   /conductor list                  — list resolved personas
  *   /conductor show <persona>        — display a persona's full file
  *   /conductor doctor                — health check
- *
- * Spawning, sending, pausing, focus, history land in v0.2+.
+ *   /conductor on | off              — toggle PI_CONDUCTOR_MODE for this session
+ *   /conductor status                — alias for ensemble_status formatting
+ *   /conductor stop <agent-id|all>   — kill a running sub-agent
+ *   /conductor pause <agent-id|all>  — SIGSTOP
+ *   /conductor resume <agent-id|all> — SIGCONT
+ *   /conductor queue                 — show the spawn queue
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { existsSync } from "node:fs";
-import type { PersonaResolution } from "./types.ts";
+import type { PersonaResolution, Run } from "./types.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig, projectConfigPath, userConfigPath } from "./config.ts";
+import {
+  elapsedStr,
+  forceTerminate,
+  formatUsage,
+  pauseRun,
+  resumeRun,
+  type RunRegistry,
+} from "./runs.ts";
+import { SpawnQueue } from "./queue.ts";
 
 interface RegisterCommandsOpts {
   getCwd: () => string;
+  getRegistry: () => RunRegistry;
+  getQueue: () => SpawnQueue;
+  /** Read/write the conductor-mode flag for this session. */
+  getConductorMode: () => boolean;
+  setConductorMode: (on: boolean) => void;
 }
+
+const SUBCOMMANDS = [
+  "list",
+  "show",
+  "doctor",
+  "on",
+  "off",
+  "status",
+  "stop",
+  "pause",
+  "resume",
+  "queue",
+];
 
 export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): void {
   pi.registerCommand("conductor", {
-    description: "pi-conductor: list, show, or check sub-agent personas",
+    description: "pi-conductor: list, show, doctor, on/off, status, stop/pause/resume/queue",
     getArgumentCompletions: (prefix: string) => {
-      const subs = ["list", "show", "doctor"];
-      const items = subs.map((s) => ({ value: s, label: s }));
-      const filtered = items.filter((i) => i.value.startsWith(prefix.split(/\s+/)[0] ?? ""));
+      const items = SUBCOMMANDS.map((s) => ({ value: s, label: s }));
+      const head = prefix.split(/\s+/)[0] ?? "";
+      const filtered = items.filter((i) => i.value.startsWith(head));
       return filtered.length > 0 ? filtered : null;
     },
     handler: async (rawArgs, ctx) => {
@@ -44,9 +75,35 @@ export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): 
         case "doctor":
           await runDoctor(opts, ctx);
           return;
+        case "on":
+          opts.setConductorMode(true);
+          ctx.ui.notify(
+            "conductor mode ON — system prompt addendum will be injected at every turn.",
+            "info",
+          );
+          return;
+        case "off":
+          opts.setConductorMode(false);
+          ctx.ui.notify("conductor mode OFF.", "info");
+          return;
+        case "status":
+          runStatus(opts, ctx);
+          return;
+        case "stop":
+          runStop(opts, ctx, subRest);
+          return;
+        case "pause":
+          runPause(opts, ctx, subRest);
+          return;
+        case "resume":
+          runResume(opts, ctx, subRest);
+          return;
+        case "queue":
+          runQueueCmd(opts, ctx);
+          return;
         default:
           ctx.ui.notify(
-            `unknown subcommand: ${sub}. Try /conductor list | show <name> | doctor`,
+            `unknown subcommand: ${sub}. Try one of: ${SUBCOMMANDS.join(", ")}.`,
             "warning",
           );
       }
@@ -116,7 +173,9 @@ async function runShow(
   lines.push(`thinking: ${p.thinking ?? "<inherited>"}`);
   lines.push(`inherit_context: ${p.inheritContext}`);
   lines.push(`inherit_skills: ${p.inheritSkills}`);
-  lines.push(`default_reads: ${p.defaultReads.length === 0 ? "(none)" : p.defaultReads.join(", ")}`);
+  lines.push(
+    `default_reads: ${p.defaultReads.length === 0 ? "(none)" : p.defaultReads.join(", ")}`,
+  );
   lines.push(`worktree: ${p.worktree}`);
   lines.push(`timeout_minutes: ${p.timeoutMinutes}`);
   lines.push("");
@@ -137,24 +196,20 @@ async function runDoctor(
 
   const lines: string[] = ["pi-conductor doctor", ""];
 
-  // Personas summary.
   lines.push(`## Personas (${resolved.personas.size} resolved)`);
   if (resolved.personas.size === 0) {
     lines.push("  ✗ no personas resolved");
   } else {
     const counts = countBySource(resolved);
-    lines.push(
-      `  ✓ builtin=${counts.builtin}, user=${counts.user}, project=${counts.project}`,
-    );
+    lines.push(`  ✓ builtin=${counts.builtin}, user=${counts.user}, project=${counts.project}`);
   }
 
-  // Shadowed (overridden) personas.
   const shadowed = [...resolved.shadowed.entries()].filter(([, list]) => list.length > 1);
   if (shadowed.length > 0) {
     lines.push("");
     lines.push("## Shadowed (overridden) personas");
     for (const [name, list] of shadowed) {
-      const winning = list[list.length - 1];
+      const winning = list[list.length - 1]!;
       lines.push(`  ${name}: ${list.length} sources, winning = ${winning.source}`);
       for (const p of list) {
         const marker = p === winning ? "  ✓" : "   ";
@@ -163,7 +218,6 @@ async function runDoctor(
     }
   }
 
-  // Parse errors.
   if (resolved.errors.length > 0) {
     lines.push("");
     lines.push(`## Parse errors (${resolved.errors.length})`);
@@ -173,7 +227,6 @@ async function runDoctor(
     }
   }
 
-  // Unknown overrides.
   const unknownOverrides = Object.keys(cfg.personaOverrides).filter(
     (n) => !resolved.shadowed.has(n),
   );
@@ -185,7 +238,6 @@ async function runDoctor(
     }
   }
 
-  // Config file resolution.
   lines.push("");
   lines.push("## Config files");
   const userPath = userConfigPath();
@@ -193,7 +245,6 @@ async function runDoctor(
   lines.push(`  user:    ${existsSync(userPath) ? "✓" : "·"} ${userPath}`);
   lines.push(`  project: ${existsSync(projectPath) ? "✓" : "·"} ${projectPath}`);
 
-  // Resolved settings.
   lines.push("");
   lines.push("## Resolved config");
   lines.push(`  defaultTimeoutMinutes: ${cfg.defaultTimeoutMinutes}`);
@@ -202,8 +253,148 @@ async function runDoctor(
   lines.push(`  defaultSpawnMode:      ${cfg.defaultSpawnMode}`);
   lines.push(`  autoOpenFocusOnSpawn:  ${cfg.autoOpenFocusOnSpawn}`);
   lines.push(`  personaOverrides:      ${Object.keys(cfg.personaOverrides).length} entries`);
+  lines.push(`  conductorMode:         ${opts.getConductorMode() ? "ON" : "off"}`);
+
+  const registry = opts.getRegistry();
+  const queue = opts.getQueue();
+  lines.push("");
+  lines.push("## Runtime");
+  lines.push(`  active:       ${registry.countActive()}`);
+  lines.push(`  queued:       ${queue.size()}`);
+  lines.push(`  total tracked: ${registry.list().length}`);
 
   ctx.ui.notify(lines.join("\n"), "info");
+}
+
+function runStatus(opts: RegisterCommandsOpts, ctx: ExtensionCommandContext): void {
+  const registry = opts.getRegistry();
+  const queue = opts.getQueue();
+  const all = registry.list();
+  if (all.length === 0 && queue.size() === 0) {
+    ctx.ui.notify("no sub-agents.", "info");
+    return;
+  }
+
+  const lines: string[] = [];
+  for (const r of all) lines.push(formatRunRow(r));
+  if (queue.size() > 0) {
+    lines.push("");
+    lines.push(`Queue (${queue.size()}):`);
+    for (const p of queue.list()) {
+      lines.push(`  ${p.id.padEnd(20)} ${p.persona.name.padEnd(14)} (requested=${p.requestedMode})`);
+    }
+  }
+  ctx.ui.notify(lines.join("\n"), "info");
+}
+
+function runStop(
+  opts: RegisterCommandsOpts,
+  ctx: ExtensionCommandContext,
+  arg: string,
+): void {
+  const registry = opts.getRegistry();
+  if (!arg) {
+    ctx.ui.notify("usage: /conductor stop <agent-id|all>", "warning");
+    return;
+  }
+  const targets = arg === "all" ? registry.list() : [registry.get(arg)].filter(Boolean) as Run[];
+  if (targets.length === 0) {
+    ctx.ui.notify(`no sub-agent matching "${arg}"`, "warning");
+    return;
+  }
+  let n = 0;
+  for (const r of targets) {
+    if (r.status === "queued") {
+      opts.getQueue().removeQueued(r.id);
+      n++;
+    } else if (r.status === "running" || r.status === "paused") {
+      forceTerminate(r, "killed", registry);
+      n++;
+    }
+  }
+  ctx.ui.notify(`stopped ${n} sub-agent(s)`, "info");
+}
+
+function runPause(
+  opts: RegisterCommandsOpts,
+  ctx: ExtensionCommandContext,
+  arg: string,
+): void {
+  const registry = opts.getRegistry();
+  if (!arg) {
+    ctx.ui.notify("usage: /conductor pause <agent-id|all>", "warning");
+    return;
+  }
+  const targets =
+    arg === "all" ? registry.list().filter((r) => r.status === "running") : [registry.get(arg)].filter(Boolean) as Run[];
+  let n = 0;
+  for (const r of targets) {
+    if (pauseRun(r, registry)) n++;
+  }
+  ctx.ui.notify(`paused ${n} sub-agent(s)`, "info");
+}
+
+function runResume(
+  opts: RegisterCommandsOpts,
+  ctx: ExtensionCommandContext,
+  arg: string,
+): void {
+  const registry = opts.getRegistry();
+  if (!arg) {
+    ctx.ui.notify("usage: /conductor resume <agent-id|all>", "warning");
+    return;
+  }
+  const targets =
+    arg === "all" ? registry.list().filter((r) => r.status === "paused") : [registry.get(arg)].filter(Boolean) as Run[];
+  let n = 0;
+  for (const r of targets) {
+    if (resumeRun(r, registry)) n++;
+  }
+  ctx.ui.notify(`resumed ${n} sub-agent(s)`, "info");
+}
+
+function runQueueCmd(opts: RegisterCommandsOpts, ctx: ExtensionCommandContext): void {
+  const queue = opts.getQueue();
+  if (queue.size() === 0) {
+    ctx.ui.notify("queue is empty.", "info");
+    return;
+  }
+  const lines: string[] = [`Queue (${queue.size()}):`];
+  for (const [i, p] of queue.list().entries()) {
+    const waited = elapsedStr(p.enqueuedAt);
+    lines.push(
+      `  ${i + 1}. ${p.id.padEnd(20)} ${p.persona.name.padEnd(14)} requested=${p.requestedMode} waited=${waited}`,
+    );
+  }
+  ctx.ui.notify(lines.join("\n"), "info");
+}
+
+function formatRunRow(r: Run): string {
+  const u = formatUsage(r.usage);
+  const usagePart = u ? `[${u}]` : "";
+  const hint = r.lastToolCall ? ` → ${r.lastToolCall}` : "";
+  return `  ${statusGlyph(r.status)} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint}`;
+}
+
+function statusGlyph(s: string): string {
+  switch (s) {
+    case "queued":
+      return "◌";
+    case "running":
+      return "●";
+    case "paused":
+      return "⏸";
+    case "completed":
+      return "✓";
+    case "failed":
+      return "✗";
+    case "killed":
+      return "■";
+    case "timeout":
+      return "⏱";
+    default:
+      return "·";
+  }
 }
 
 function countBySource(resolved: PersonaResolution): Record<string, number> {
@@ -213,5 +404,3 @@ function countBySource(resolved: PersonaResolution): Record<string, number> {
   }
   return counts;
 }
-
-// (no Persona type alias needed)
