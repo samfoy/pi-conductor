@@ -12,7 +12,16 @@ Pi already has good options for sub-agents (`pi-essentials/subagent`, `pi-mono/t
 
 pi-conductor closes that gap. The parent pi session is the conductor, sub-agents are subprocesses, and the user can drop into any sub-agent's live transcript view at will — without leaving pi.
 
-## v0.1 — what works today
+## v0.3 — what works today
+
+- Everything from v0.1 + v0.2 (persona discovery + roster, `ensemble_list`, `ensemble_status`, `ensemble_spawn` foreground/background, queue with auto-downgrade, ensemble panel, conductor mode prompt, pause/resume/stop, `/conductor` slash commands, doctor with config error surfacing, applyEvent extracted for testability).
+- **`ensemble_focus(agent_id?)`** — LLM-callable tool that opens the focused-stream overlay on a sub-agent. Omit `agent_id` to open on the most recently active sub-agent.
+- **`/conductor focus <agent-id>`** — user-facing slash command equivalent.
+- **`Ctrl+G`** — keybinding that opens the overlay on the most recently active sub-agent.
+- **Focused stream overlay** — full-screen drilldown that renders one sub-agent's live transcript: header (persona, id, status, elapsed, usage), turn-separated assistant messages with collapsible tool calls and toggleable thinking blocks, footer with keybinding hints.
+  - `Esc` close, `Tab`/`Shift+Tab` cycle, `↑/↓` scroll, `PgUp/PgDn` page scroll, `c` toggle tool-call collapse, `t` toggle thinking visibility, `k` kill the focused sub-agent.
+  - Scroll position is per-agent; fold flags are global.
+  - Live updates: the overlay re-renders as the sub-agent emits events.
 
 - **Persona discovery + resolution** — markdown files with frontmatter; layered builtin → user → project precedence.
 - **16 starter personas** covering the full SDLC, adapted from external role definitions:
@@ -30,17 +39,13 @@ pi-conductor closes that gap. The parent pi session is the conductor, sub-agents
   - `/conductor show <name>` — display a persona's full file (system prompt + frontmatter).
   - `/conductor doctor` — health check: persona counts by source, shadowed entries, parse errors, unknown overrides, config file resolution.
 
-## Coming in v0.2+
+## Coming next
 
 Per the [PRD](./PRD.md):
 
-- `ensemble_spawn` (foreground default, with inline streaming and an `Esc`-to-detach UX)
-- `ensemble_send`, `ensemble_pause`, `ensemble_resume`, `ensemble_stop`, `ensemble_focus`
-- Ensemble panel (always-visible widget when ≥1 sub-agent is active)
-- Focused stream overlay (Ctrl+G) — full-screen drilldown rendering one sub-agent's live transcript exactly as pi would render it for the parent
-- Inline-visible folded `<sub-agent-completed>` cards
-- Concurrency cap with FIFO queue; foreground-while-queued auto-downgrades to background
-- Filtered context inheritance (reimplemented, not ported)
+- **v0.4** — inline-streamed foreground transcript (currently foreground blocks but renders only the final completion card; we want the live stream to render in the parent conversation).
+- **v0.5** — `ensemble_send` (continue a sub-agent's session via `pi --session`), and `s` keybinding inside the overlay to send a message.
+- **v0.6** — `inherit_context: filtered` (port the parent's filtered conversation into the sub-agent's session).
 
 ## Install
 
@@ -128,11 +133,11 @@ pi-conductor does **not** replace `pi-essentials/subagent`. Different tools (`en
 
 ## Status
 
-- [x] v0.1 — Read-only scaffold (this release)
-- [ ] v0.2 — Background spawning + ensemble panel
-- [ ] v0.3 — Focused stream overlay (Ctrl+G)
-- [ ] v0.4 — Foreground spawning with inline streaming
-- [ ] v0.5 — Send / pause / resume / kill
+- [x] v0.1 — Read-only scaffold
+- [x] v0.2 — Background spawning + ensemble panel + queue + conductor mode
+- [x] v0.3 — Focused stream overlay (Ctrl+G)
+- [ ] v0.4 — Foreground spawning with inline-streamed transcript (currently foreground returns the result card)
+- [ ] v0.5 — Send / pause / resume / kill (kill works via /conductor stop and overlay 'k'; send is the missing piece)
 - [ ] v0.6 — Filtered context inheritance + history browser
 
 ## License

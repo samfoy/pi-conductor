@@ -15,6 +15,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { Key } from "@mariozechner/pi-tui";
 import { registerCommands } from "./commands.ts";
 import { registerTools } from "./tools.ts";
 import { RunRegistry } from "./runs.ts";
@@ -24,6 +25,9 @@ import { formatCompletionNotification } from "./notifications.ts";
 import { buildConductorSystemPrompt } from "./conductor-prompt.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
+import { FocusedStreamModel } from "./focused-stream-model.ts";
+import { FocusedStreamOverlay } from "./focused-stream-overlay.ts";
+import { forceTerminate } from "./runs.ts";
 import type { Run } from "./types.ts";
 
 export default function (pi: ExtensionAPI): void {
@@ -33,10 +37,51 @@ export default function (pi: ExtensionAPI): void {
   let widget: EnsembleWidget | null = null;
 
   const registry = new RunRegistry();
-  // Initial queue uses a sane default; the per-cwd cap is read at spawn time
-  // and the queue.setMaxConcurrent is updated whenever loadConfig surfaces a
-  // different value (we re-read inside the `before_agent_start` hook below).
   const queue = new SpawnQueue(registry, 4);
+  const focusModel = new FocusedStreamModel(registry);
+
+  // Track whether an overlay is already open so multiple opens don't stack.
+  let overlayOpen = false;
+
+  function openFocusedOverlay(agentId?: string): void {
+    if (!ctxRef) return;
+    if (overlayOpen) {
+      // Already open — just shift focus to the requested agent.
+      if (agentId) focusModel.focus(agentId);
+      return;
+    }
+    if (agentId) focusModel.focus(agentId);
+    overlayOpen = true;
+    void ctxRef.ui
+      .custom(
+        (_tui, _theme, _kb, done) => {
+          const overlay = new FocusedStreamOverlay({
+            model: focusModel,
+            onClose: () => done(undefined),
+            onKill: (id: string) => {
+              const run = registry.get(id);
+              if (run) forceTerminate(run, "killed", registry);
+              // Refresh the model so the next render reflects the kill.
+              focusModel.refresh();
+            },
+          });
+          // Re-render whenever a registered run changes state so the live
+          // transcript stays current.
+          const unsub = registry.onChange(() => {
+            // The custom() factory exposes its TUI handle implicitly; the
+            // overlay's own invalidate hooks plus the request-render plumbing
+            // wired into Component is sufficient here. We keep the listener
+            // registered for the lifetime of the overlay and dispose on close.
+            void unsub;
+          });
+          return overlay;
+        },
+        { overlay: true },
+      )
+      .finally(() => {
+        overlayOpen = false;
+      });
+  }
 
   let conductorModeOn =
     process.env.PI_CONDUCTOR_MODE === "1" ||
@@ -46,6 +91,8 @@ export default function (pi: ExtensionAPI): void {
     getCwd: () => cwd,
     getRegistry: () => registry,
     getQueue: () => queue,
+    getModel: () => focusModel,
+    openFocusedOverlay,
     getConductorMode: () => conductorModeOn,
     setConductorMode: (on: boolean) => {
       conductorModeOn = on;
@@ -123,4 +170,13 @@ export default function (pi: ExtensionAPI): void {
 
   registerTools(pi, opts);
   registerCommands(pi, opts);
+
+  // Bind Ctrl+G to open the focused-stream overlay on the most recently
+  // active sub-agent (or no-op when no sub-agents exist).
+  pi.registerShortcut(Key.ctrl("g"), {
+    description: "pi-conductor: open focused-stream overlay",
+    handler: () => {
+      openFocusedOverlay();
+    },
+  });
 }

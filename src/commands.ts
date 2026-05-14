@@ -36,6 +36,8 @@ interface RegisterCommandsOpts {
   /** Read/write the conductor-mode flag for this session. */
   getConductorMode: () => boolean;
   setConductorMode: (on: boolean) => void;
+  /** Open the focused-stream overlay (no-op when no UI ctx). */
+  openFocusedOverlay: (id?: string) => void;
 }
 
 const SUBCOMMANDS = [
@@ -49,6 +51,7 @@ const SUBCOMMANDS = [
   "pause",
   "resume",
   "queue",
+  "focus",
 ];
 
 export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): void {
@@ -101,6 +104,9 @@ export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): 
           return;
         case "queue":
           runQueueCmd(opts, ctx);
+          return;
+        case "focus":
+          runFocus(opts, ctx, subRest);
           return;
         default:
           ctx.ui.notify(
@@ -301,6 +307,26 @@ function runQueueCmd(opts: RegisterCommandsOpts, ctx: ExtensionCommandContext): 
     );
   }
   ctx.ui.notify(lines.join("\n"), "info");
+}
+
+
+function runFocus(
+  opts: RegisterCommandsOpts,
+  ctx: ExtensionCommandContext,
+  arg: string,
+): void {
+  const id = arg.trim() || undefined;
+  if (id) {
+    const registry = opts.getRegistry();
+    if (!registry.get(id)) {
+      ctx.ui.notify(
+        `agent_id "${id}" not found. Run /conductor status to see active sub-agents.`,
+        "warning",
+      );
+      return;
+    }
+  }
+  opts.openFocusedOverlay(id);
 }
 
 function formatRunRow(r: Run): string {

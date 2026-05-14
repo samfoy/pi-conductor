@@ -15,19 +15,29 @@ import { loadConfig } from "./config.ts";
 import { elapsedStr, formatUsage, getFinalText, type RunRegistry } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
 import { formatCompletionNotification } from "./notifications.ts";
+import type { FocusedStreamModel } from "./focused-stream-model.ts";
 
 interface RegisterToolsOpts {
   getCwd: () => string;
   getRegistry: () => RunRegistry;
   getQueue: () => SpawnQueue;
+  /** Returns the shared FocusedStreamModel (drives the focused-stream overlay). */
+  getModel: () => FocusedStreamModel;
   /** Push a `<sub-agent-completed>` notification into the parent conversation. */
   pushCompletionNotification: (run: Run) => void;
+  /**
+   * Request that the focused-stream overlay open. When `id` is supplied,
+   * the model is set to focus that agent first. No-op when there is no
+   * UI context (e.g. headless tests).
+   */
+  openFocusedOverlay: (id?: string) => void;
 }
 
 export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   registerListTool(pi, opts);
   registerStatusTool(pi, opts);
   registerSpawnTool(pi, opts);
+  registerFocusTool(pi, opts);
 }
 
 // ── ensemble_list ────────────────────────────────────────────────────
@@ -274,6 +284,77 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           mode: "background",
           persona: result.run.persona,
         },
+      };
+    },
+  });
+}
+
+// ── ensemble_focus ───────────────────────────────────────────────────
+
+function registerFocusTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
+  pi.registerTool({
+    name: "ensemble_focus",
+    label: "Focus a sub-agent",
+    description:
+      "Request the focused-stream overlay open on a specific sub-agent. " +
+      "When agent_id is omitted, opens the overlay on the currently-focused " +
+      "(most recently active) sub-agent. The user controls the overlay with " +
+      "Esc (close), Tab/Shift+Tab (cycle), arrows (scroll), c (collapse tool " +
+      "calls), t (thinking visibility), k (kill).",
+    promptSnippet: "Open the focused-stream overlay on a sub-agent",
+    promptGuidelines: [
+      "Use ensemble_focus when you want to draw the user's attention to a particular sub-agent's live transcript.",
+      "Pass agent_id when you have a specific sub-agent in mind; omit it to open the overlay on the most recently active one.",
+    ],
+    parameters: Type.Object({
+      agent_id: Type.Optional(
+        Type.String({ description: "agent_id of the sub-agent to focus on (omit for most-recent)." }),
+      ),
+    }),
+    async execute(_id, params) {
+      const model = opts.getModel();
+      const id = params?.agent_id;
+      type FocusDetails = {
+        opened: boolean;
+        agent_id?: string;
+        error?: string;
+      };
+
+      if (id) {
+        const ok = model.focus(id);
+        if (!ok) {
+          const details: FocusDetails = { opened: false, agent_id: id, error: "agent_id not found" };
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `agent_id "${id}" not found. Run ensemble_status to see active sub-agents.`,
+              },
+            ],
+            details,
+          };
+        }
+        opts.openFocusedOverlay(id);
+        const details: FocusDetails = { opened: true, agent_id: id };
+        return {
+          content: [{ type: "text" as const, text: `Focused stream opened on ${id}.` }],
+          details,
+        };
+      }
+
+      const focused = model.focused();
+      if (!focused) {
+        const details: FocusDetails = { opened: false };
+        return {
+          content: [{ type: "text" as const, text: "No sub-agents to focus on." }],
+          details,
+        };
+      }
+      opts.openFocusedOverlay(focused.id);
+      const details: FocusDetails = { opened: true, agent_id: focused.id };
+      return {
+        content: [{ type: "text" as const, text: `Focused stream opened on ${focused.id}.` }],
+        details,
       };
     },
   });

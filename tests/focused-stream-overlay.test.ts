@@ -1,0 +1,177 @@
+/**
+ * Tests for the FocusedStreamOverlay Component layer.
+ *
+ * Most of the logic is in transcript.ts (rendering) and
+ * focused-stream-model.ts (state). These tests verify the thin Component
+ * wiring: handleInput dispatches to the right model methods, and render
+ * produces lines from the model's current view.
+ */
+
+import test from "node:test";
+import assert from "node:assert/strict";
+import { FocusedStreamOverlay } from "../src/focused-stream-overlay.ts";
+import { FocusedStreamModel } from "../src/focused-stream-model.ts";
+import { RunRegistry } from "../src/runs.ts";
+import { emptyUsage, type Run } from "../src/types.ts";
+
+function makeRun(id: string): Run {
+  return {
+    id,
+    persona: id.split("-")[0]!,
+    task: "test",
+    mode: "background",
+    status: "running",
+    startTime: Date.now(),
+    messages: [],
+    usage: emptyUsage(),
+    cwd: "/tmp",
+    recordPath: `/tmp/${id}/record.json`,
+    transcriptPath: `/tmp/${id}/transcript.jsonl`,
+    finalPath: `/tmp/${id}/final.md`,
+  };
+}
+
+function setup(): { reg: RunRegistry; model: FocusedStreamModel; overlay: FocusedStreamOverlay; closed: boolean } {
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  reg.register(makeRun("b-2"));
+  const model = new FocusedStreamModel(reg);
+  let closed = false;
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {
+      closed = true;
+    },
+    onKill: () => {},
+  });
+  return {
+    reg,
+    model,
+    overlay,
+    get closed() {
+      return closed;
+    },
+  } as any;
+}
+
+// ── render ────────────────────────────────────────────────────────────
+
+test("FocusedStreamOverlay.render: returns a header + (empty) transcript + footer for a fresh run", () => {
+  const { overlay } = setup();
+  const lines = overlay.render(80);
+  assert.ok(Array.isArray(lines));
+  assert.ok(lines.length >= 4, "expected header + footer at minimum");
+  // Header should mention the focused persona.
+  const joined = lines.join("\n");
+  assert.match(joined, /a-1|b-2/);
+  // Footer should mention Esc.
+  assert.match(joined, /Esc/);
+});
+
+test("FocusedStreamOverlay.render: empty registry shows a placeholder", () => {
+  const reg = new RunRegistry();
+  const model = new FocusedStreamModel(reg);
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {},
+    onKill: () => {},
+  });
+  const lines = overlay.render(80);
+  const joined = lines.join("\n");
+  assert.match(joined, /no sub-agents/i);
+});
+
+test("FocusedStreamOverlay.render: lines never exceed the requested width", () => {
+  const { overlay } = setup();
+  const lines = overlay.render(40);
+  for (const line of lines) {
+    assert.ok(line.length <= 40, `line too long (${line.length}): "${line}"`);
+  }
+});
+
+// ── handleInput → model dispatch ──────────────────────────────────────
+
+test("FocusedStreamOverlay.handleInput: Tab cycles to next agent", () => {
+  const { overlay, model } = setup();
+  model.focus("a-1");
+  overlay.handleInput("\t"); // raw tab
+  assert.equal(model.focused()?.id, "b-2");
+});
+
+test("FocusedStreamOverlay.handleInput: Esc fires onClose", () => {
+  let closeCount = 0;
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  const model = new FocusedStreamModel(reg);
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {
+      closeCount += 1;
+    },
+    onKill: () => {},
+  });
+  overlay.handleInput("\x1b"); // ESC
+  assert.equal(closeCount, 1);
+});
+
+test("FocusedStreamOverlay.handleInput: 'c' toggles tool-call collapse", () => {
+  const { overlay, model } = setup();
+  const before = model.collapseToolCalls();
+  overlay.handleInput("c");
+  assert.notEqual(model.collapseToolCalls(), before);
+});
+
+test("FocusedStreamOverlay.handleInput: 't' toggles thinking visibility", () => {
+  const { overlay, model } = setup();
+  const before = model.showThinking();
+  overlay.handleInput("t");
+  assert.notEqual(model.showThinking(), before);
+});
+
+test("FocusedStreamOverlay.handleInput: arrow-down / arrow-up scroll the transcript", () => {
+  const { overlay, model } = setup();
+  model.focus("a-1");
+  overlay.handleInput("\x1b[B"); // ESC[B = down arrow
+  overlay.handleInput("\x1b[B");
+  assert.equal(model.scrollOffset() > 0, true, "expected scroll offset > 0");
+  overlay.handleInput("\x1b[A"); // ESC[A = up arrow
+  // After two downs and one up, offset is non-zero but smaller.
+  assert.ok(model.scrollOffset() < 2);
+});
+
+test("FocusedStreamOverlay.handleInput: 'k' fires onKill with focused agent id", () => {
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  const model = new FocusedStreamModel(reg);
+  const killed: string[] = [];
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {},
+    onKill: (id: string) => killed.push(id),
+  });
+  model.focus("a-1");
+  overlay.handleInput("k");
+  assert.deepEqual(killed, ["a-1"]);
+});
+
+test("FocusedStreamOverlay.handleInput: unknown keys are no-ops", () => {
+  const { overlay, model } = setup();
+  const before = {
+    focused: model.focused()?.id,
+    collapse: model.collapseToolCalls(),
+    thinking: model.showThinking(),
+    scroll: model.scrollOffset(),
+  };
+  overlay.handleInput("z");
+  overlay.handleInput("Z");
+  overlay.handleInput("\x1bz");
+  assert.deepEqual(
+    {
+      focused: model.focused()?.id,
+      collapse: model.collapseToolCalls(),
+      thinking: model.showThinking(),
+      scroll: model.scrollOffset(),
+    },
+    before,
+  );
+});
