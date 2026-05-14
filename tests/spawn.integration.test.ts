@@ -118,6 +118,13 @@ test(
       assert.ok(after1.sessionPath, "sessionPath must be discovered after spawn");
       if (!after1.sessionPath) return;
       assert.ok(existsSync(after1.sessionPath), "sessionPath must exist on disk");
+      // The persona system prompt must be captured on Run so the resume
+      // path of buildResumePiArgs can re-pass it (pi sessions don't
+      // persist system prompts to disk).
+      assert.ok(
+        after1.systemPrompt && after1.systemPrompt.length > 0,
+        "Run.systemPrompt must be captured at spawn time so ensemble_send can re-inject it",
+      );
 
       // Send a follow-up. The sub-agent should resume from the same session
       // and produce a second assistant turn.
