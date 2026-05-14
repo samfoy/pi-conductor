@@ -324,6 +324,35 @@ function trimLeadingNonUser(messages: AgentMessage[]): AgentMessage[] {
 }
 
 /**
+ * Synthetic <filtered-history> sentinel prepended to seeded sessions when
+ * `filterParentContext` actually removed parent content. Tells the
+ * sub-agent that its inherited transcript is incomplete, so it shouldn't
+ * trust dangling references like "the inspector said X" without a
+ * matching tool result — those orchestration calls were dropped.
+ */
+function filteredHistorySentinel(): AgentMessage {
+  return {
+    role: "user",
+    content:
+      "<filtered-history>\n" +
+      "The transcript above and below this note is a FILTERED slice of a parent " +
+      "conductor's conversation. The following entry types were dropped before " +
+      "you saw this transcript:\n" +
+      "  - Orchestration tool calls (ensemble_*, subagent) and their results\n" +
+      "  - Sub-agent completion notifications (`<sub-agent-completed>` cards)\n" +
+      "  - The conductor's internal reasoning (`thinking` blocks)\n" +
+      "  - Bash commands marked with the `!!` excludeFromContext flag\n\n" +
+      "If you see assistant prose that references prior orchestration (\"I spawned " +
+      "X\", \"the inspector reported Y\", etc.) treat those statements with " +
+      "skepticism — you do NOT have the actual tool calls or results to verify " +
+      "them. Focus on the user's prose, file reads/writes you can see, and the " +
+      "task prompt below.\n" +
+      "</filtered-history>",
+    timestamp: 0,
+  } as AgentMessage;
+}
+
+/**
  * Decide how to invoke pi for a sub-agent spawn based on the persona's
  * `inherit_context` setting and the snapshot of parent messages provided.
  *
@@ -342,13 +371,33 @@ export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
   const { persona, parentMessages = [], sessionDir, systemPrompt, prompt, cwd, model, thinking } = opts;
 
   let seedMessages: AgentMessage[] | null = null;
+  // Did filtering actually remove anything? If yes, prepend a sentinel
+  // so the sub-agent knows its transcript is filtered and doesn't trust
+  // dangling assistant references to dropped orchestration.
+  let dropped = false;
   if (persona.inheritContext === "filtered" && parentMessages.length > 0) {
     const filtered = filterParentContext(parentMessages);
+    dropped = filtered.length !== parentMessages.length;
+    // Also detect block-level filtering on assistant messages even when
+    // the message count matches (e.g. a thinking block was dropped but
+    // the assistant prose survived).
+    if (!dropped) {
+      for (let i = 0; i < parentMessages.length; i++) {
+        if ((filtered[i] as any) !== (parentMessages[i] as any)) {
+          dropped = true;
+          break;
+        }
+      }
+    }
     const trimmed = trimLeadingNonUser(filtered);
     if (trimmed.length > 0) seedMessages = trimmed;
   } else if (persona.inheritContext === "full" && parentMessages.length > 0) {
     const trimmed = trimLeadingNonUser(parentMessages);
     if (trimmed.length > 0) seedMessages = trimmed;
+  }
+
+  if (seedMessages && dropped) {
+    seedMessages = [filteredHistorySentinel(), ...seedMessages];
   }
 
   if (seedMessages) {

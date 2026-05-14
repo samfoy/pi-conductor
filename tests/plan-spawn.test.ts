@@ -134,6 +134,63 @@ test("planSpawnPiArgs: inheritContext=filtered with parent messages → resume +
   }
 });
 
+test("planSpawnPiArgs: filtered seed without dropped content → no <filtered-history> sentinel", () => {
+  const dir = tmpSessionDir();
+  try {
+    // No orchestration noise to drop. The sub-agent sees a clean transcript
+    // and we don't want to clutter it with a sentinel that lies about
+    // missing turns.
+    const result = planSpawnPiArgs({
+      persona: persona({ inheritContext: "filtered" }),
+      parentMessages: [user("hi"), user("do X")],
+      sessionDir: dir,
+      systemPrompt: "sys",
+      prompt: "go",
+      cwd: "/work",
+    });
+    assert.equal(result.mode, "resume");
+    const lines = readFileSync(result.seededSessionPath!, "utf8").trim().split("\n");
+    const seededRoles = lines.slice(1).map((l) => JSON.parse(l).message.role);
+    assert.deepEqual(seededRoles, ["user", "user"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("planSpawnPiArgs: filtered seed WITH dropped content → prepends a <filtered-history> sentinel", () => {
+  const dir = tmpSessionDir();
+  try {
+    // Parent had orchestration content (will be dropped) AND user prose
+    // (will survive). The sentinel must land BEFORE the surviving prose so
+    // the sub-agent reads it before any potentially-misleading dangling
+    // reference.
+    const result = planSpawnPiArgs({
+      persona: persona({ inheritContext: "filtered" }),
+      parentMessages: [
+        user("hi"),
+        assistantToolCall("ensemble_spawn", "tc1"),
+      ],
+      sessionDir: dir,
+      systemPrompt: "sys",
+      prompt: "go",
+      cwd: "/work",
+    });
+    assert.equal(result.mode, "resume");
+    const lines = readFileSync(result.seededSessionPath!, "utf8").trim().split("\n");
+    const entries = lines.slice(1).map((l) => JSON.parse(l));
+    // First seeded entry should be the sentinel (a user-role message).
+    assert.equal(entries[0].message.role, "user");
+    const text = typeof entries[0].message.content === "string"
+      ? entries[0].message.content
+      : entries[0].message.content[0].text;
+    assert.match(text, /filtered-history|filtered/i);
+    // The user's actual prose must come AFTER the sentinel.
+    assert.equal(entries[1].message.role, "user");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("planSpawnPiArgs: filtered seed starting with non-user message → falls back to fresh", () => {
   const dir = tmpSessionDir();
   try {
