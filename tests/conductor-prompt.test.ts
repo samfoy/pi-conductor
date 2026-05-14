@@ -118,3 +118,22 @@ test("buildConductorSystemPrompt: tells the conductor not to address the persona
   const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
   assert.match(out, /Never thank the sub-agent/i);
 });
+
+test("buildConductorSystemPrompt: explains inherit_context and the parent-snapshot semantics", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  // The LLM needs to understand that personas with inherit_context: filtered
+  // (the shipped default) carry a slice of the conductor's conversation —
+  // so it doesn't redundantly restate context the sub-agent already has.
+  assert.match(out, /inherit_context/i);
+  assert.match(out, /filtered/i);
+});
+
+test("buildConductorSystemPrompt: warns about stale parent snapshots in batched spawns", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  // When the LLM batches several ensemble_spawn calls in a single turn,
+  // every queued sub-agent freezes its parent-context snapshot at enqueue
+  // time — they all see identical parent context (the state before any
+  // sibling sub-agent ran). The prompt should make this explicit so the
+  // LLM doesn't expect later siblings to see earlier siblings' work.
+  assert.match(out, /(snapshot|enqueue)/i);
+});

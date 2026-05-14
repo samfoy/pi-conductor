@@ -91,7 +91,16 @@ Read-only personas (\`inspector\`, \`analyst\`, \`oracle\`, \`redteam\`, \`profi
 
 Write-capable personas (\`builder\`, \`simplifier\`) should run one at a time per set of files to avoid contention. Worktree isolation lands in v2.
 
-## 8. When to use which persona
+## 8. Context inheritance (\`inherit_context\`)
+
+Most personas declare \`inherit_context: filtered\` in their frontmatter, which means the sub-agent boots with a *filtered slice* of YOUR conversation already in its session: user prose, assistant prose, file reads/writes, and branch/compaction summaries. Orchestration noise (other \`ensemble_*\` and \`subagent\` calls, \`<sub-agent-completed>\` cards, \`thinking\` blocks, \`!!\`-prefix bash) is dropped before the sub-agent sees it. So:
+
+- **Don't restate context the sub-agent already has.** If the user just told you "the auth module lives at src/auth/", a filtered sub-agent already saw that line. Don't paste it again into the task prompt — just refer to it.
+- **Snapshots are taken at \`ensemble_spawn\` time and frozen.** When you batch several spawns in one turn, every queued sub-agent shares the SAME parent-context snapshot — the state before any of them ran. Don't expect later siblings in the same batch to see earlier siblings' work; they won't.
+- **\`inherit_context: full\`** passes the entire transcript verbatim. **\`none\`** boots fresh. The persona file decides; the conductor doesn't.
+- A sub-agent that sees \`<filtered-history>\` in its context has been told its inherited transcript is incomplete — dangling references to orchestration are normal there, not bugs.
+
+## 9. When to use which persona
 
 Common shapes (suggested, not enforced):
 

@@ -267,3 +267,86 @@ test(
     }
   },
 );
+
+test(
+  "spawn integration: inherit_context=full seeds the entire parent transcript verbatim",
+  { skip: !RUN_LIVE ? "set CONDUCTOR_LIVE_TESTS=1 to enable (uses real pi subprocess + AWS creds)" : false, timeout: 180_000 },
+  async () => {
+    const tmpCwd = mkdtempSync(join(tmpdir(), "conductor-live-cwd-"));
+    try {
+      const resolved = await resolvePersonas({ cwd: tmpCwd });
+      const baseInspector = resolved.personas.get("inspector");
+      assert.ok(baseInspector, "inspector persona must be resolvable");
+      const inspector = { ...baseInspector, inheritContext: "full" as const };
+
+      const registry = new RunRegistry();
+      const queue = new SpawnQueue(registry, 4);
+
+      const MARKER = "GREEN_PENGUIN_8821";
+      const parentMessages: any[] = [
+        {
+          role: "user",
+          content: `Earlier I told you my secret codeword is ${MARKER}.`,
+          timestamp: 0,
+        },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: `Got it — your codeword is ${MARKER}.` },
+          ],
+          api: "anthropic-messages",
+          provider: "anthropic",
+          model: "claude-sonnet-4-5",
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          },
+          stopReason: "stop",
+          timestamp: 0,
+        },
+      ];
+
+      const result = queue.enqueueOrSpawn({
+        persona: inspector,
+        task:
+          "What was the codeword? Reply with just the codeword and nothing else. Do not call any tools.",
+        mode: "background",
+        cwd: tmpCwd,
+        timeoutMs: 120_000,
+        parentMessages,
+      });
+      assert.equal(result.kind, "spawned");
+      if (result.kind !== "spawned") return;
+
+      const finished = await result.done;
+      assert.ok(
+        finished.status === "completed" || finished.status === "failed",
+        `unexpected terminal status: ${finished.status}`,
+      );
+      assert.ok(finished.sessionPath?.endsWith("seeded.jsonl"));
+      // full mode does NOT prepend the <filtered-history> sentinel.
+      const sessionRaw = readFileSync(finished.sessionPath!, "utf8");
+      assert.ok(
+        !/<filtered-history>/.test(sessionRaw),
+        "inherit_context=full must NOT prepend the filtered-history sentinel",
+      );
+      assert.match(sessionRaw, new RegExp(MARKER));
+      const finalText = readFileSync(finished.finalPath, "utf8");
+      assert.match(
+        finalText,
+        new RegExp(MARKER),
+        `sub-agent must reproduce the parent's seeded marker in its reply (got: ${finalText.slice(0, 200)})`,
+      );
+    } finally {
+      try {
+        rmSync(tmpCwd, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+    }
+  },
+);
