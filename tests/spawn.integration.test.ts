@@ -163,3 +163,107 @@ test(
     }
   },
 );
+
+test(
+  "spawn integration: inherit_context=filtered seeds parent prose into the sub-agent's session",
+  { skip: !RUN_LIVE ? "set CONDUCTOR_LIVE_TESTS=1 to enable (uses real pi subprocess + AWS creds)" : false, timeout: 180_000 },
+  async () => {
+    const tmpCwd = mkdtempSync(join(tmpdir(), "conductor-live-cwd-"));
+    try {
+      const resolved = await resolvePersonas({ cwd: tmpCwd });
+      const baseInspector = resolved.personas.get("inspector");
+      assert.ok(baseInspector, "inspector persona must be resolvable");
+      // Override inheritContext for this spawn so we exercise the seeded
+      // resume path without having to ship a new persona.
+      const inspector = { ...baseInspector, inheritContext: "filtered" as const };
+
+      const registry = new RunRegistry();
+      const queue = new SpawnQueue(registry, 4);
+
+      // Construct a faked parent transcript. The MARKER below is the load
+      // bearing token: it appears nowhere in the persona body or task
+      // prompt, so if the sub-agent reproduces it, the seeded parent
+      // history is what taught it.
+      const MARKER = "PURPLE_OCTOPUS_4419";
+      const parentMessages: any[] = [
+        {
+          role: "user",
+          content:
+            `Earlier I told you my secret codeword is ${MARKER}. Please remember it for later.`,
+          timestamp: 0,
+        },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "text",
+              text: `Got it — your codeword is ${MARKER}. I'll remember it.`,
+            },
+          ],
+          api: "anthropic-messages",
+          provider: "anthropic",
+          model: "claude-sonnet-4-5",
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          },
+          stopReason: "stop",
+          timestamp: 0,
+        },
+      ];
+
+      const result = queue.enqueueOrSpawn({
+        persona: inspector,
+        task:
+          `What was the codeword the user told you earlier? Reply with just the codeword and nothing else. Do not call any tools.`,
+        mode: "background",
+        cwd: tmpCwd,
+        timeoutMs: 120_000,
+        parentMessages,
+      });
+      assert.equal(result.kind, "spawned");
+      if (result.kind !== "spawned") return;
+
+      const finished = await result.done;
+      assert.ok(
+        finished.status === "completed" || finished.status === "failed",
+        `unexpected terminal status: ${finished.status}`,
+      );
+      // The seeded session file should be the one pi actually used.
+      assert.ok(finished.sessionPath, "sessionPath should be set");
+      if (!finished.sessionPath) return;
+      assert.ok(
+        finished.sessionPath.endsWith("seeded.jsonl"),
+        `expected seeded.jsonl session path, got: ${finished.sessionPath}`,
+      );
+      // Pi resumes from the seeded file, so the seeded file is also where
+      // the new turn lands. The parent prose and the new assistant text
+      // both live there.
+      const sessionRaw = readFileSync(finished.sessionPath, "utf8");
+      assert.match(
+        sessionRaw,
+        new RegExp(MARKER),
+        "seeded session file should contain the parent's marker",
+      );
+
+      // The sub-agent's reply should reproduce the marker — the only way
+      // it can know it is from the seeded parent transcript.
+      const finalText = readFileSync(finished.finalPath, "utf8");
+      assert.match(
+        finalText,
+        new RegExp(MARKER),
+        `sub-agent must reproduce the parent's seeded marker in its reply (got: ${finalText.slice(0, 200)})`,
+      );
+    } finally {
+      try {
+        rmSync(tmpCwd, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+    }
+  },
+);
