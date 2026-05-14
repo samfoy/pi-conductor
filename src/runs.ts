@@ -105,10 +105,27 @@ export function allocateRunId(persona: string, registry: Map<string, Run>): stri
 // ── pi invocation discovery (lifted from pi-essentials) ──────────────
 
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
+  // Test-friendly override: PI_BIN=<path-to-pi-cli.js> forces a specific
+  // pi CLI invocation regardless of how the parent was started.
+  const piBinEnv = process.env.PI_BIN;
+  if (piBinEnv && existsSync(piBinEnv)) {
+    return { command: process.execPath, args: [piBinEnv, ...args] };
+  }
+
   const currentScript = process.argv[1];
   const isBunVirtual = currentScript?.startsWith("/$bunfs/root/");
+  // Only re-invoke via process.argv[1] when it looks like pi's own CLI.
+  // When the parent is something else (tsx, jest, mocha, a normal node
+  // script), this would otherwise spawn `node <foreign-script>` and crash
+  // before pi ever loads. Detect by basename + ancestor dir containing
+  // "pi-coding-agent".
   if (currentScript && !isBunVirtual && existsSync(currentScript)) {
-    return { command: process.execPath, args: [currentScript, ...args] };
+    const looksLikePi =
+      /(^|\/)(pi|cli\.js)$/.test(currentScript) &&
+      currentScript.includes("pi-coding-agent");
+    if (looksLikePi) {
+      return { command: process.execPath, args: [currentScript, ...args] };
+    }
   }
   const execName = (process.execPath.split("/").pop() || "").toLowerCase();
   if (!/^(node|bun)(\.exe)?$/.test(execName)) {
