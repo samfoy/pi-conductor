@@ -3,8 +3,8 @@
 **Date:** 2026-05-14
 **Repo:** `~/scratch/pi-conductor/`  (git-init'd, master branch only, never pushed)
 **Author:** Sam Painter (samfp@)
-**Last commit:** `a937904 test(integration): add live test for inherit_context=filtered` (after v0.6 milestone)
-**Test state:** 282 passing + 3 skipped live, unit suite ~3s; the new `inherit_context=filtered` live test passes end-to-end in ~12s under `CONDUCTOR_LIVE_TESTS=1`.
+**Last commit:** `69a443d fix(context-filter): drop thinking blocks + subagent-* CustomMessages; trim leading non-user` (post-review hardening on top of v0.6)
+**Test state:** 289 passing + 3 skipped live, unit suite ~3s; live integration suite passes (~60s) under `CONDUCTOR_LIVE_TESTS=1` covering spawn, ensemble_send resume, and inherit_context=filtered seeding.
 
 This document is a self-contained briefing so a fresh pi session (or a new agent) can pick up the project without losing context. Read this end-to-end before doing any work.
 
@@ -329,6 +329,10 @@ Plus issues surfaced by the test sweep that don't block v0.3 but are worth track
 - `SpawnQueue.setMaxConcurrent` drain trigger is tested via stubbing `queue.drain` and counting calls — mild implementation-detail. Acceptable.
 - Persona override merge is now field-level across user → project. Inside a single layer, fields still don't merge (a single layer's `personaOverrides[oracle]` is one object — nothing to merge). This is fine.
 - `/dedup-stats` command in `tool-dedup.ts` should be preserved by the in-flight fix.
+- **v0.5 `ensemble_send` may also drop the persona system prompt on resume.** Pi sessions don't persist system prompts to disk; the resume branch of `buildPiArgs` is invoked by `sendToRun` without `systemPrompt`, so a sub-agent continued via `ensemble_send` likely boots with pi's default coding-agent prompt and loses persona identity. v0.6 fixes the seeded-resume case (planSpawnPiArgs passes `systemPrompt`); the v0.5 path is untouched per the v0.6 brief's "don't touch v0.5 ensemble_send" rule. Verify by spawning a `redteam` (read-only persona), letting it finish, then `ensemble_send`-ing it a write task and observing whether it refuses. Fix: thread `persona.systemPrompt` (or a captured snapshot of it) through `Run` so `sendToRun` can re-pass it.
+- **Stale parentMessages snapshot for queued spawns.** `getParentMessages` is captured at `enqueueOrSpawn` time, so a queued sub-agent inherits the conductor's view at enqueue, not at drain. If the LLM batches several `ensemble_spawn` calls in one turn, every queued spawn sees identical parent context (the state before any sibling sub-agent had run). Documented; not yet flagged in the conductor system-prompt addendum to the LLM. Future: have `before_agent_start` warn about long queue depth, or re-snapshot at drain time.
+- **Filter false-negative for assistant prose that *quotes* a sub-agent's reply.** E.g., `"The inspector said: 'Auth uses JWT...'"` passes through as plain text and the sub-agent inherits the quoted output. Unfixable at the filter layer (it's plain prose); a `<filtered-history>` sentinel could mark filtered turns so the LLM treats quoted material with skepticism. Not implemented.
+- **Conductor `model` / `thinking_level` not preserved into the seeded session.** `buildSessionContext` may infer the parent's model from the last seeded assistant message; in resume mode pi keeps that unless `--model` is passed. Personas without an explicit `model:` therefore inherit the conductor's *current* model, not pi's user default. Acceptable for v0.6 (most personas inherit anyway), worth documenting in the persona reference.
 
 ---
 
