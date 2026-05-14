@@ -12,7 +12,7 @@ import { Type } from "@sinclair/typebox";
 import type { Persona, PersonaOverride, Run, RunStatus, ThinkingLevel } from "./types.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
-import { elapsedStr, formatUsage, getFinalText, type RunRegistry } from "./runs.ts";
+import { elapsedStr, formatUsage, getFinalText, sendToRun, type RunRegistry } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
 import { formatCompletionNotification } from "./notifications.ts";
 import type { FocusedStreamModel } from "./focused-stream-model.ts";
@@ -37,6 +37,7 @@ export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   registerListTool(pi, opts);
   registerStatusTool(pi, opts);
   registerSpawnTool(pi, opts);
+  registerSendTool(pi, opts);
   registerFocusTool(pi, opts);
 }
 
@@ -276,6 +277,121 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
               `running: ${result.run.id}\n` +
               `persona=${result.run.persona} mode=background\n\n` +
               `Spawned in background. Continue with other work; completion will arrive as a <sub-agent-completed> notification.`,
+          },
+        ],
+        details: {
+          status: "running",
+          agent_id: result.run.id,
+          mode: "background",
+          persona: result.run.persona,
+        },
+      };
+    },
+  });
+}
+
+// ── ensemble_send ─────────────────────────────────────────────────────────
+
+function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
+  pi.registerTool({
+    name: "ensemble_send",
+    label: "Send to sub-agent",
+    description:
+      "Continue an existing sub-agent's session with a new user-role message. " +
+      "Works on finished sub-agents too (resumes via pi --session). " +
+      "Foreground (default): blocks until the sub-agent's reply arrives. " +
+      "Background: returns immediately; reply arrives as a <sub-agent-completed> notification.",
+    promptSnippet: "Send a follow-up message to an existing sub-agent",
+    promptGuidelines: [
+      "Use ensemble_send when you want to continue working with a sub-agent that already has the context you care about — don't re-spawn from scratch.",
+      "The sub-agent must be in a terminal state (completed/failed/killed/timeout). Running, paused, and queued sub-agents are rejected.",
+      "Pass agent_id from a previous ensemble_spawn or ensemble_status result.",
+    ],
+    parameters: Type.Object({
+      agent_id: Type.String({
+        description: "agent_id of the sub-agent to send to. Get it from ensemble_spawn or ensemble_status.",
+      }),
+      message: Type.String({
+        description: "User-role message delivered to the sub-agent's existing session.",
+      }),
+      foreground: Type.Optional(
+        Type.Boolean({
+          description:
+            "true (default) blocks until the sub-agent finishes its reply; false runs in background and notifies on completion.",
+        }),
+      ),
+    }),
+    async execute(_id, params, signal, onUpdate) {
+      const cwd = opts.getCwd();
+      const cfg = loadConfig(cwd);
+      const registry = opts.getRegistry();
+      const run = registry.get(params.agent_id);
+      if (!run) {
+        return errorResult(
+          `agent_id "${params.agent_id}" not found. Run ensemble_status to see active sub-agents.`,
+        );
+      }
+
+      const foreground = params.foreground !== false;
+      // Per-persona timeout takes precedence over the global default.
+      const ov = cfg.personaOverrides[run.persona] ?? {};
+      const timeoutMs = (ov.timeoutMinutes ?? cfg.defaultTimeoutMinutes) * 60_000;
+
+      const result = sendToRun(run, params.message, {
+        registry,
+        timeoutMs,
+        onComplete: foreground
+          ? undefined
+          : (r) => opts.pushCompletionNotification(r),
+      });
+
+      if (result.kind === "rejected") {
+        return errorResult(result.reason);
+      }
+
+      if (foreground) {
+        // Stream tool-call hints while we wait for completion.
+        const unsub = registry.onChange((r) => {
+          if (r.id !== result.run.id) return;
+          if (onUpdate) {
+            onUpdate({
+              content: [
+                {
+                  type: "text" as const,
+                  text: formatStreamingPreview(r),
+                },
+              ],
+              details: { agent_id: r.id, status: r.status, lastToolCall: r.lastToolCall },
+            });
+          }
+        });
+
+        // Honor abort.
+        signal?.addEventListener("abort", () => {
+          try {
+            result.run.proc?.kill("SIGTERM");
+          } catch {
+            // already dead
+          }
+        });
+
+        try {
+          const finished = await result.done;
+          return foregroundFinalResult(finished);
+        } finally {
+          unsub();
+        }
+      }
+
+      // background path
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text:
+              `running: ${result.run.id}\n` +
+              `persona=${result.run.persona} mode=background (resumed)\n\n` +
+              `Send dispatched in background. Continue with other work; completion will arrive as a <sub-agent-completed> notification.`,
           },
         ],
         details: {
