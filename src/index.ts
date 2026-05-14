@@ -27,7 +27,7 @@ import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
 import { FocusedStreamModel } from "./focused-stream-model.ts";
 import { FocusedStreamOverlay } from "./focused-stream-overlay.ts";
-import { forceTerminate, sendToRun } from "./runs.ts";
+import { forceTerminate, resolveTimeoutMs, sendToRun } from "./runs.ts";
 import type { Run } from "./types.ts";
 
 export default function (pi: ExtensionAPI): void {
@@ -114,7 +114,11 @@ export default function (pi: ExtensionAPI): void {
     if (!message || !message.trim()) return;
     const cfg = loadConfig(cwd);
     const ov = cfg.personaOverrides[run.persona] ?? {};
-    const timeoutMs = (ov.timeoutMinutes ?? cfg.defaultTimeoutMinutes) * 60_000;
+    // Re-resolve the persona registry so a user-configured
+    // `timeout_minutes` on the persona is honored.
+    const resolved = await resolvePersonas({ cwd, personaOverrides: cfg.personaOverrides });
+    const persona = resolved.personas.get(run.persona);
+    const timeoutMs = resolveTimeoutMs(persona, ov, cfg);
     const result = sendToRun(run, message, {
       registry,
       timeoutMs,

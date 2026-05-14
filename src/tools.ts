@@ -12,7 +12,7 @@ import { Type } from "@sinclair/typebox";
 import type { Persona, PersonaOverride, Run, RunStatus, ThinkingLevel } from "./types.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
-import { elapsedStr, formatUsage, getFinalText, pauseRun, resumeRun, sendToRun, type RunRegistry } from "./runs.ts";
+import { elapsedStr, formatUsage, getFinalText, pauseRun, resolveTimeoutMs, resumeRun, sendToRun, type RunRegistry } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
 import { formatCompletionNotification } from "./notifications.ts";
 import type { FocusedStreamModel } from "./focused-stream-model.ts";
@@ -187,7 +187,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       const ov = cfg.personaOverrides[persona.name] ?? {};
       const model = resolveModel(persona, ov);
       const thinking = resolveThinking(persona, ov);
-      const timeoutMs = (ov.timeoutMinutes ?? persona.timeoutMinutes ?? cfg.defaultTimeoutMinutes) * 60_000;
+      const timeoutMs = resolveTimeoutMs(persona, ov, cfg);
 
       // Wire abort signal to cancel a running sub-agent.
       const result = queue.enqueueOrSpawn({
@@ -210,9 +210,13 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           ? "Foreground spawn auto-downgraded to background because the concurrency cap is full. " +
             "The sub-agent is queued; completion will arrive as a <sub-agent-completed> notification."
           : "Spawn queued; completion will arrive as a <sub-agent-completed> notification.";
-        // Make sure the completion notification fires when this queued run eventually finishes.
-        registry.onChange((run) => {
+        // Fire the completion notification exactly once when this queued
+        // run eventually finishes. Using a self-unsubscribing listener so
+        // a later ensemble_send on the same run doesn't re-fire this
+        // (sendToRun has its own onComplete plumbing).
+        const unsub = registry.onChange((run) => {
           if (run.id === p.id && isTerminalStatus(run.status)) {
+            unsub();
             opts.pushCompletionNotification(run);
           }
         });
@@ -336,8 +340,13 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 
       const foreground = params.foreground !== false;
       // Per-persona timeout takes precedence over the global default.
+      // Re-resolve the persona registry so a user-configured
+      // `timeout_minutes` on the persona is honored for sends, not just
+      // for the initial spawn.
+      const resolved = await resolvePersonas({ cwd, personaOverrides: cfg.personaOverrides });
+      const persona = resolved.personas.get(run.persona);
       const ov = cfg.personaOverrides[run.persona] ?? {};
-      const timeoutMs = (ov.timeoutMinutes ?? cfg.defaultTimeoutMinutes) * 60_000;
+      const timeoutMs = resolveTimeoutMs(persona, ov, cfg);
 
       const result = sendToRun(run, params.message, {
         registry,

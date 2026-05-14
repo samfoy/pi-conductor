@@ -81,6 +81,64 @@ test("ensemble_send tool is registered", () => {
   assert.ok(sendTool, "ensemble_send tool should be registered");
 });
 
+test(
+  "queued ensemble_spawn listener unsubscribes on first terminal transition (no double-fire on resend)",
+  async () => {
+    // Regression for R2: the spawn tool's queued path used to leak a
+    // listener that would re-fire on every subsequent terminal
+    // transition of the same Run. ensemble_send legitimately re-enters
+    // the terminal state once the resumed turn finishes; the leaked
+    // listener would dispatch a duplicate <sub-agent-completed> card.
+    //
+    // We simulate the leak directly by:
+    //   1) registering a queued placeholder Run,
+    //   2) attaching the spawn tool's completion-fire-once listener
+    //      (the very pattern installed by registerSpawnTool's queued
+    //      branch),
+    //   3) flipping the placeholder to a terminal status and asserting
+    //      pushCompletionNotification fired exactly once,
+    //   4) flipping it back to running and then terminal again, and
+    //      asserting the count did NOT increase.
+    const { dir, path } = tmpSessionFile();
+    try {
+      const placeholder = makeRun("oracle-pppp", {
+        status: "queued",
+        sessionPath: path,
+        finishedAt: undefined,
+      });
+      const reg = new RunRegistry();
+      reg.register(placeholder);
+
+      // Mirror the spawn-tool queued listener.
+      const fired: string[] = [];
+      const unsub = reg.onChange((run) => {
+        if (run.id === placeholder.id && (run.status === "completed" || run.status === "failed" || run.status === "killed" || run.status === "timeout")) {
+          unsub();
+          fired.push(run.status);
+        }
+      });
+
+      // First terminal transition.
+      placeholder.status = "completed";
+      reg.notify(placeholder);
+      assert.deepEqual(fired, ["completed"], "listener should fire on first terminal transition");
+
+      // Send-induced re-terminal transition.
+      placeholder.status = "running";
+      reg.notify(placeholder);
+      placeholder.status = "completed";
+      reg.notify(placeholder);
+      assert.deepEqual(
+        fired,
+        ["completed"],
+        "listener must NOT re-fire on subsequent terminal transitions after sendToRun-style resume",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
 test("ensemble_send rejects when agent_id is unknown", async () => {
   const { sendTool } = setup();
   assert.ok(sendTool);
@@ -175,10 +233,12 @@ for (const status of TERMINAL_STATES) {
         foreground: false,
       });
 
-      // Status flip happens synchronously inside sendToRun.
-      // Allow the microtask to run (the tool wraps in async).
-      await Promise.resolve();
-      await Promise.resolve();
+      // Status flip happens inside sendToRun once the tool finishes
+      // resolving the persona registry (filesystem I/O). Awaiting the
+      // tool's promise is the cleanest way to know that's done; with
+      // foreground:false the tool returns as soon as the subprocess
+      // is dispatched, before its events arrive.
+      await promise;
       assert.equal(run.status, "running", `run did not flip to running (status=${run.status})`);
 
       // Cleanup the spawned subprocess so the test exits cleanly.
@@ -187,8 +247,6 @@ for (const status of TERMINAL_STATES) {
       } catch {
         // already gone
       }
-      // Don't await the tool's promise — its done handler may persist a record.
-      void promise;
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

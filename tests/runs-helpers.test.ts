@@ -341,6 +341,40 @@ test("buildPiArgs: includes --thinking when set", () => {
   assert.equal(args[i + 1], "high");
 });
 
+// ── resolveTimeoutMs ─────────────────────────────────────────────
+
+import { resolveTimeoutMs } from "../src/runs.ts";
+
+test("resolveTimeoutMs: prefers override > persona > config default", () => {
+  const cfg = { defaultTimeoutMinutes: 30 } as any;
+  const persona = { timeoutMinutes: 15 } as any;
+  const ov = { timeoutMinutes: 5 } as any;
+  assert.equal(resolveTimeoutMs(persona, ov, cfg), 5 * 60_000);
+});
+
+test("resolveTimeoutMs: falls back to persona when override has no timeout", () => {
+  const cfg = { defaultTimeoutMinutes: 30 } as any;
+  const persona = { timeoutMinutes: 15 } as any;
+  const ov = {} as any;
+  assert.equal(resolveTimeoutMs(persona, ov, cfg), 15 * 60_000);
+});
+
+test("resolveTimeoutMs: falls back to config default when persona is undefined", () => {
+  const cfg = { defaultTimeoutMinutes: 30 } as any;
+  assert.equal(resolveTimeoutMs(undefined, {}, cfg), 30 * 60_000);
+});
+
+test("resolveTimeoutMs: ensemble_send must respect persona.timeoutMinutes too (regression)", () => {
+  // The bug fixed in this commit: ensemble_send used to skip the persona
+  // layer, falling straight from override to default. This test pins the
+  // contract that the helper applies to BOTH spawn and send paths.
+  const cfg = { defaultTimeoutMinutes: 30 } as any;
+  const persona = { timeoutMinutes: 60 } as any;
+  // No override — persona should win, NOT the default.
+  assert.equal(resolveTimeoutMs(persona, {}, cfg), 60 * 60_000);
+  assert.notEqual(resolveTimeoutMs(persona, {}, cfg), 30 * 60_000);
+});
+
 // ── findSessionFile ──────────────────────────────────────────────────────
 
 import { writeFileSync, mkdirSync } from "node:fs";

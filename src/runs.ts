@@ -1,10 +1,11 @@
 /**
  * pi-conductor — Run registry and subprocess spawning.
  *
- * One sub-agent = one `pi --mode json -p --no-session` subprocess. We stream
- * its JSON events, mutate the Run state, persist transcript + record, and
- * surface live updates to the ensemble panel and (optionally) the parent
- * tool call's onUpdate stream.
+ * One sub-agent = one `pi --mode json -p --session-dir <runDir>/session/`
+ * subprocess on initial spawn, or `pi --mode json -p --session <path>` when
+ * resumed via ensemble_send. We stream its JSON events, mutate the Run state,
+ * persist transcript + record, and surface live updates to the ensemble panel
+ * and (optionally) the parent tool call's onUpdate stream.
  *
  * Foreground vs background:
  *   - foreground: caller awaits spawnRun(). Promise resolves on terminal.
@@ -27,7 +28,9 @@ import {
   emptyUsage,
   isTerminal,
   toRunRecord,
+  type ConductorConfig,
   type Persona,
+  type PersonaOverride,
   type Run,
   type RunStatus,
   type SpawnMode,
@@ -42,6 +45,24 @@ export function runsRoot(): string {
 
 export function runDir(id: string): string {
   return join(runsRoot(), id);
+}
+
+// ── Timeout resolution ──────────────────────────────────────────────
+
+/**
+ * Resolve the effective timeout (in ms) for a sub-agent. Override wins,
+ * then persona, then the global config default. Used by both spawn and
+ * send paths so a user-configured `timeout_minutes` on a persona is honored
+ * for follow-up sends, not just the initial spawn.
+ */
+export function resolveTimeoutMs(
+  persona: Pick<Persona, "timeoutMinutes"> | undefined,
+  ov: Pick<PersonaOverride, "timeoutMinutes"> | undefined,
+  cfg: Pick<ConductorConfig, "defaultTimeoutMinutes">,
+): number {
+  const minutes =
+    ov?.timeoutMinutes ?? persona?.timeoutMinutes ?? cfg.defaultTimeoutMinutes;
+  return minutes * 60_000;
 }
 
 // ── Session file discovery ────────────────────────────────────────────
