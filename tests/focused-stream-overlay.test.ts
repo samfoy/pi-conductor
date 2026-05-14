@@ -154,6 +154,44 @@ test("FocusedStreamOverlay.handleInput: 'k' fires onKill with focused agent id",
   assert.deepEqual(killed, ["a-1"]);
 });
 
+test("FocusedStreamOverlay.handleInput: 's' fires onSend with focused agent id", () => {
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  const model = new FocusedStreamModel(reg);
+  const sends: string[] = [];
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {},
+    onKill: () => {},
+    onSend: (id: string) => sends.push(id),
+  });
+  model.focus("a-1");
+  overlay.handleInput("s");
+  assert.deepEqual(sends, ["a-1"]);
+});
+
+test("FocusedStreamOverlay.handleInput: 's' is a no-op when onSend is not provided", () => {
+  // Should not throw and should not move state.
+  const { overlay, model } = setup();
+  const focused = model.focused()?.id;
+  overlay.handleInput("s");
+  assert.equal(model.focused()?.id, focused);
+});
+
+test("FocusedStreamOverlay.handleInput: 's' is a no-op when no agent is focused", () => {
+  const reg = new RunRegistry();
+  const model = new FocusedStreamModel(reg);
+  const sends: string[] = [];
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {},
+    onKill: () => {},
+    onSend: (id: string) => sends.push(id),
+  });
+  overlay.handleInput("s");
+  assert.deepEqual(sends, []);
+});
+
 test("FocusedStreamOverlay.handleInput: unknown keys are no-ops", () => {
   const { overlay, model } = setup();
   const before = {

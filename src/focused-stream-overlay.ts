@@ -15,6 +15,11 @@ export interface FocusedStreamOverlayOptions {
   onClose: () => void;
   /** Called when the user requests killing the focused agent. */
   onKill: (agentId: string) => void;
+  /**
+   * Called when the user requests sending a one-shot message to the focused
+   * agent (the 's' key). Optional — when omitted, 's' is a no-op.
+   */
+  onSend?: (agentId: string) => void;
   /** Optional: triggered after every dispatched key so the TUI re-renders. */
   onChange?: () => void;
 }
@@ -64,7 +69,7 @@ export class FocusedStreamOverlay implements Component {
   }
 
   handleInput(data: string): void {
-    const { model, onClose, onKill, onChange } = this.opts;
+    const { model, onClose, onKill, onSend, onChange } = this.opts;
 
     // Esc — close.
     if (data === "\x1b" || data === "\u001b") {
@@ -119,6 +124,12 @@ export class FocusedStreamOverlay implements Component {
       case "k": {
         const focused = model.focused();
         if (focused) onKill(focused.id);
+        return;
+      }
+      case "s": {
+        if (!onSend) return;
+        const focused = model.focused();
+        if (focused) onSend(focused.id);
         return;
       }
       default:
