@@ -548,6 +548,48 @@ export type SendToRunResult =
   | { kind: "rejected"; reason: string };
 
 /**
+ * Pure pre-check for whether a run can be sent to right now. Returns the
+ * same set of rejection reasons sendToRun would, but without any side
+ * effects — callers can use this to short-circuit UI flows (e.g. the
+ * overlay's 's' keybinding) before opening an input prompt.
+ */
+export function validateSendable(
+  run: Run,
+): { ok: true } | { ok: false; reason: string } {
+  if (run.status === "running") {
+    return {
+      ok: false,
+      reason: `sub-agent ${run.id} is currently running; wait for it to finish before sending.`,
+    };
+  }
+  if (run.status === "paused") {
+    return {
+      ok: false,
+      reason: `sub-agent ${run.id} is paused; resume it first via /conductor resume ${run.id}.`,
+    };
+  }
+  if (run.status === "queued") {
+    return {
+      ok: false,
+      reason: `sub-agent ${run.id} is queued and has not started yet; wait for it to start before sending.`,
+    };
+  }
+  if (!run.sessionPath) {
+    return {
+      ok: false,
+      reason: `sub-agent ${run.id} has no resumable session on disk (sessionPath unset).`,
+    };
+  }
+  if (!existsSync(run.sessionPath)) {
+    return {
+      ok: false,
+      reason: `sub-agent ${run.id} session file is missing on disk: ${run.sessionPath}`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
  * Continue an existing sub-agent's pi session with a new user-role message.
  *
  * Spawns a fresh `pi` subprocess pointed at the run's `sessionPath` via
@@ -568,36 +610,9 @@ export function sendToRun(
   message: string,
   opts: SendToRunOptions,
 ): SendToRunResult {
-  // Status gating.
-  if (run.status === "running") {
-    return {
-      kind: "rejected",
-      reason: `sub-agent ${run.id} is currently running; wait for it to finish before sending.`,
-    };
-  }
-  if (run.status === "paused") {
-    return {
-      kind: "rejected",
-      reason: `sub-agent ${run.id} is paused; resume it first via /conductor resume ${run.id}.`,
-    };
-  }
-  if (run.status === "queued") {
-    return {
-      kind: "rejected",
-      reason: `sub-agent ${run.id} is queued and has not started yet; wait for it to start before sending.`,
-    };
-  }
-  if (!run.sessionPath) {
-    return {
-      kind: "rejected",
-      reason: `sub-agent ${run.id} has no resumable session on disk (sessionPath unset).`,
-    };
-  }
-  if (!existsSync(run.sessionPath)) {
-    return {
-      kind: "rejected",
-      reason: `sub-agent ${run.id} session file is missing on disk: ${run.sessionPath}`,
-    };
+  const check = validateSendable(run);
+  if (!check.ok) {
+    return { kind: "rejected", reason: check.reason };
   }
   const trimmed = message.trim();
   if (!trimmed) {
@@ -616,9 +631,13 @@ export function sendToRun(
   run.lastToolCall = undefined;
   opts.registry.notify(run);
 
+  // validateSendable guarantees sessionPath is set, but TS can't see
+  // through a free-function call — capture it explicitly.
+  const sessionPath = run.sessionPath as string;
+
   const piArgs = buildPiArgs({
     kind: "resume",
-    sessionPath: run.sessionPath,
+    sessionPath,
     prompt: trimmed,
     model: run.model,
     thinking: run.thinking,
@@ -632,7 +651,7 @@ export function sendToRun(
     onComplete: opts.onComplete,
     // Re-discover sessionPath on finalize — the file path is stable but the
     // mtime updates, which lets future sends still find it.
-    sessionDir: dirname(run.sessionPath),
+    sessionDir: dirname(sessionPath),
   });
   return { kind: "started", run, done };
 }

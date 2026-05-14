@@ -27,7 +27,7 @@ import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
 import { FocusedStreamModel } from "./focused-stream-model.ts";
 import { FocusedStreamOverlay } from "./focused-stream-overlay.ts";
-import { forceTerminate, resolveTimeoutMs, sendToRun } from "./runs.ts";
+import { forceTerminate, resolveTimeoutMs, sendToRun, validateSendable } from "./runs.ts";
 import type { Run } from "./types.ts";
 
 export default function (pi: ExtensionAPI): void {
@@ -99,6 +99,17 @@ export default function (pi: ExtensionAPI): void {
     const run = registry.get(agentId);
     if (!run) {
       ctx.ui.notify(`agent_id "${agentId}" not found.`, "warning");
+      return;
+    }
+    // Pre-check sendability BEFORE opening the input modal so the user
+    // doesn't waste typing a message that will be rejected anyway.
+    const check = validateSendable(run);
+    if (!check.ok) {
+      try {
+        ctx.ui.notify(check.reason, "warning");
+      } catch {
+        // ctx may have gone stale
+      }
       return;
     }
     let message: string | undefined;

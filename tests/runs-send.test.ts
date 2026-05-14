@@ -18,6 +18,7 @@ import { join } from "node:path";
 import {
   RunRegistry,
   sendToRun,
+  validateSendable,
   type SendToRunResult,
 } from "../src/runs.ts";
 import { emptyUsage, type Run } from "../src/types.ts";
@@ -160,4 +161,57 @@ test("sendToRun: a valid send flips status to running and clears terminal fields
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── validateSendable (pure pre-check used by both sendToRun and the overlay) ──
+
+test("validateSendable: returns ok for a terminal run with a valid sessionPath", () => {
+  const dir = tmpDir();
+  try {
+    const sessionFile = join(dir, "abc.jsonl");
+    writeFileSync(sessionFile, "{}\n");
+    const run = makeRun({ status: "completed", sessionPath: sessionFile });
+    const r = validateSendable(run);
+    assert.equal(r.ok, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("validateSendable: rejects running with a busy reason", () => {
+  const run = makeRun({ status: "running", sessionPath: "/tmp/x.jsonl" });
+  const r = validateSendable(run);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /running|busy/i);
+});
+
+test("validateSendable: rejects paused with a resume hint", () => {
+  const run = makeRun({ status: "paused", sessionPath: "/tmp/x.jsonl" });
+  const r = validateSendable(run);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /paused|resume/i);
+});
+
+test("validateSendable: rejects queued with a wait hint", () => {
+  const run = makeRun({ status: "queued", sessionPath: undefined });
+  const r = validateSendable(run);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /queued|wait/i);
+});
+
+test("validateSendable: rejects when sessionPath is missing", () => {
+  const run = makeRun({ status: "completed", sessionPath: undefined });
+  const r = validateSendable(run);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /session/i);
+});
+
+test("validateSendable: rejects when sessionPath does not exist on disk", () => {
+  const run = makeRun({
+    status: "completed",
+    sessionPath: "/tmp/conductor-validateSendable-nonexistent.jsonl",
+  });
+  const r = validateSendable(run);
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.reason, /session/i);
 });
