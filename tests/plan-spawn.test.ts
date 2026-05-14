@@ -117,9 +117,16 @@ test("planSpawnPiArgs: inheritContext=filtered with parent messages → resume +
     assert.ok(existsSync(result.seededSessionPath!));
     assert.ok(result.piArgs.includes("--session"));
     assert.ok(!result.piArgs.includes("--session-dir"));
-    // Resume mode does NOT pass --append-system-prompt; the seeded session
-    // already had its prompt configured at conductor-time.
-    assert.ok(!result.piArgs.includes("--append-system-prompt"));
+    // Resume-mode for SEEDED sessions MUST also pass --append-system-prompt:
+    // the seeded JSONL has no system prompt entry, so without re-injecting
+    // the persona's body the sub-agent boots with pi's default coding-agent
+    // prompt and loses its persona identity entirely.
+    assert.ok(
+      result.piArgs.includes("--append-system-prompt"),
+      "seeded resume must re-pass the persona system prompt or the persona body is lost",
+    );
+    const idx = result.piArgs.indexOf("--append-system-prompt");
+    assert.equal(result.piArgs[idx + 1], "sys");
     // Verify the prompt becomes the trailing positional argument.
     assert.equal(result.piArgs[result.piArgs.length - 1], "do the thing");
   } finally {

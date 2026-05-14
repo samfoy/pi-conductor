@@ -212,6 +212,16 @@ export type PiArgsOptions =
       prompt: string;
       model?: string;
       thinking?: ThinkingLevel;
+      /**
+       * Optional persona system prompt to re-apply on resume. Pi sessions
+       * do NOT persist the system prompt to disk — it must be re-supplied
+       * via `--append-system-prompt` on every invocation, otherwise pi
+       * boots the sub-agent with its default coding-agent prompt and the
+       * persona body is lost. Used by v0.6's seeded-resume path.
+       *
+       * v0.5's `sendToRun` does NOT pass this (preserves prior behavior).
+       */
+      systemPrompt?: string;
     };
 
 export function buildPiArgs(opts: PiArgsOptions): string[] {
@@ -226,6 +236,12 @@ export function buildPiArgs(opts: PiArgsOptions): string[] {
   if (opts.kind === "fresh") {
     // Pi exposes --append-system-prompt for system prompt addenda; we use that
     // for the persona body so pi's own system prompt logic still runs.
+    args.push("--append-system-prompt", opts.systemPrompt);
+  } else if (opts.systemPrompt) {
+    // Resume mode: re-inject the persona body when caller supplies it. Pi
+    // doesn't persist system prompts to the session file, so without this
+    // a resumed sub-agent boots with pi's default prompt and loses its
+    // persona identity.
     args.push("--append-system-prompt", opts.systemPrompt);
   }
   args.push(opts.prompt);
@@ -300,6 +316,10 @@ export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
         prompt,
         model,
         thinking,
+        // Re-inject the persona body — the seeded JSONL has no system
+        // prompt entry. Without this the sub-agent boots with pi's
+        // default coding-agent prompt and loses its persona identity.
+        systemPrompt,
       }),
     };
   }
