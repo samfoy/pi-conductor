@@ -29,11 +29,22 @@ export interface FilterOptions {
    */
   excludeToolPrefixes?: string[];
   /**
-   * `customType` values to drop entirely from the inherited transcript.
-   * Default: `ensemble-notification` (the `<sub-agent-completed>` cards
-   * the conductor injects).
+   * `customType` prefixes to drop entirely from the inherited transcript.
+   * Default: `ensemble-notification` (the `<sub-agent-completed>` cards),
+   * plus `subagent` to also drop the pi-essentials/subagent extension's
+   * leak surface (`subagent-notify`, `subagent_control_notice`,
+   * `subagent-slash-result`).
    */
+  excludeCustomTypePrefixes?: string[];
+  /** Back-compat alias for excludeCustomTypePrefixes (matched as exact equality). */
   excludeCustomTypes?: string[];
+  /**
+   * If true, drop assistant `thinking` content blocks. Thinking is the
+   * parent's internal reasoning and frequently contains orchestration
+   * plans or quotes from the conductor system-prompt addendum that we
+   * don't want leaking to the sub-agent. Default: true.
+   */
+  dropThinking?: boolean;
   /**
    * If true, drop BashExecutionMessage entries with `excludeFromContext=true`
    * (the `!!`-prefix bash convention). Default: true.
@@ -42,7 +53,7 @@ export interface FilterOptions {
 }
 
 const DEFAULT_TOOL_PREFIXES = ["ensemble_", "subagent"];
-const DEFAULT_CUSTOM_TYPES = ["ensemble-notification"];
+const DEFAULT_CUSTOM_TYPE_PREFIXES = ["ensemble-notification", "subagent"];
 
 function matchesAnyPrefix(name: string, prefixes: string[]): boolean {
   for (const p of prefixes) {
@@ -64,8 +75,13 @@ export function filterParentContext(
   opts: FilterOptions = {},
 ): AgentMessage[] {
   const excludeToolPrefixes = opts.excludeToolPrefixes ?? DEFAULT_TOOL_PREFIXES;
-  const excludeCustomTypes = opts.excludeCustomTypes ?? DEFAULT_CUSTOM_TYPES;
+  // Caller may pass exact-match excludeCustomTypes (back-compat) AND/OR
+  // prefix-based excludeCustomTypePrefixes; both apply.
+  const excludeCustomTypePrefixes =
+    opts.excludeCustomTypePrefixes ?? DEFAULT_CUSTOM_TYPE_PREFIXES;
+  const excludeCustomTypesExact = opts.excludeCustomTypes ?? [];
   const dropBashEx = opts.dropBashExcludeFromContext ?? true;
+  const dropThinking = opts.dropThinking ?? true;
 
   // Pre-pass: collect the set of toolCall ids whose tool name matches an
   // excluded prefix, so we can drop the corresponding toolResult later
@@ -101,6 +117,7 @@ export function filterParentContext(
           break;
         }
         const filtered = content.filter((block: any) => {
+          if (block?.type === "thinking" && dropThinking) return false;
           if (block?.type !== "toolCall") return true;
           if (typeof block.name !== "string") return true;
           return !matchesAnyPrefix(block.name, excludeToolPrefixes);
@@ -126,7 +143,10 @@ export function filterParentContext(
       }
       case "custom": {
         const customType = (msg as any).customType;
-        if (typeof customType === "string" && excludeCustomTypes.includes(customType)) break;
+        if (typeof customType === "string") {
+          if (excludeCustomTypesExact.includes(customType)) break;
+          if (matchesAnyPrefix(customType, excludeCustomTypePrefixes)) break;
+        }
         out.push(msg);
         break;
       }

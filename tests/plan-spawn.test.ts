@@ -134,6 +134,79 @@ test("planSpawnPiArgs: inheritContext=filtered with parent messages → resume +
   }
 });
 
+test("planSpawnPiArgs: filtered seed starting with non-user message → falls back to fresh", () => {
+  const dir = tmpSessionDir();
+  try {
+    // The parent's first surviving turn is a `read` toolResult (because the
+    // assistant turn that called `read` was a tool-call-only orchestration
+    // turn that got filtered). Anthropic and most providers reject a
+    // request whose first message is a toolResult with no preceding tool_use
+    // — so seeding a session that starts here would crash the sub-agent.
+    // Defensive: drop leading non-user entries; if nothing remains, fall back
+    // to fresh.
+    const result = planSpawnPiArgs({
+      persona: persona({ inheritContext: "filtered" }),
+      parentMessages: [
+        // Tool-call-only assistant turn (will be dropped entirely).
+        assistantToolCall("ensemble_spawn", "tc1"),
+        // toolResult that survives the filter — but starting here would
+        // crash on resume.
+        {
+          role: "toolResult",
+          toolCallId: "orphan",
+          toolName: "read",
+          content: [{ type: "text", text: "file body" }],
+          isError: false,
+          timestamp: 0,
+        } as AgentMessage,
+      ],
+      sessionDir: dir,
+      systemPrompt: "sys",
+      prompt: "do the thing",
+      cwd: "/work",
+    });
+    assert.equal(result.mode, "fresh");
+    assert.equal(result.seededSessionPath, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("planSpawnPiArgs: filtered seed with leading non-user prefix → prefix is dropped, remainder seeded", () => {
+  const dir = tmpSessionDir();
+  try {
+    // Leading toolResult must be skipped, but the user message after it
+    // anchors a valid resume.
+    const result = planSpawnPiArgs({
+      persona: persona({ inheritContext: "filtered" }),
+      parentMessages: [
+        {
+          role: "toolResult",
+          toolCallId: "orphan",
+          toolName: "read",
+          content: [{ type: "text", text: "file body" }],
+          isError: false,
+          timestamp: 0,
+        } as AgentMessage,
+        user("hi"),
+      ],
+      sessionDir: dir,
+      systemPrompt: "sys",
+      prompt: "do the thing",
+      cwd: "/work",
+    });
+    assert.equal(result.mode, "resume");
+    assert.ok(result.seededSessionPath);
+    const lines = readFileSync(result.seededSessionPath!, "utf8").trim().split("\n");
+    // Header + 1 message (the orphan toolResult was dropped, only `user` remains).
+    assert.equal(lines.length, 2);
+    const seededMsg = JSON.parse(lines[1]).message;
+    assert.equal(seededMsg.role, "user");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("planSpawnPiArgs: filtered drops orchestration-only history → falls back to fresh", () => {
   const dir = tmpSessionDir();
   try {

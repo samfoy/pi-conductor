@@ -279,6 +279,20 @@ export interface PlanSpawnResult {
 }
 
 /**
+ * Drop leading entries that aren't a `user` message. Most LLM providers
+ * (Anthropic especially) reject a request whose first message is a
+ * `toolResult` with no preceding `tool_use`, or an assistant message
+ * without a prior user turn. Filtering can leave such a prefix when
+ * earlier orchestration turns get pruned, so we trim defensively before
+ * seeding.
+ */
+function trimLeadingNonUser(messages: AgentMessage[]): AgentMessage[] {
+  let i = 0;
+  while (i < messages.length && (messages[i] as any)?.role !== "user") i++;
+  return messages.slice(i);
+}
+
+/**
  * Decide how to invoke pi for a sub-agent spawn based on the persona's
  * `inherit_context` setting and the snapshot of parent messages provided.
  *
@@ -299,9 +313,11 @@ export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
   let seedMessages: AgentMessage[] | null = null;
   if (persona.inheritContext === "filtered" && parentMessages.length > 0) {
     const filtered = filterParentContext(parentMessages);
-    if (filtered.length > 0) seedMessages = filtered;
+    const trimmed = trimLeadingNonUser(filtered);
+    if (trimmed.length > 0) seedMessages = trimmed;
   } else if (persona.inheritContext === "full" && parentMessages.length > 0) {
-    seedMessages = parentMessages;
+    const trimmed = trimLeadingNonUser(parentMessages);
+    if (trimmed.length > 0) seedMessages = trimmed;
   }
 
   if (seedMessages) {

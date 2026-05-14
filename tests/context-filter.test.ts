@@ -113,6 +113,28 @@ function customMsg(customType: string, content = ""): AgentMessage {
   } as AgentMessage;
 }
 
+function assistantThinking(thinking: string, text?: string): AgentMessage {
+  const content: any[] = [{ type: "thinking", thinking }];
+  if (text) content.push({ type: "text", text });
+  return {
+    role: "assistant",
+    content,
+    api: "anthropic-messages" as any,
+    provider: "anthropic" as any,
+    model: "claude-sonnet-4-5",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop",
+    timestamp: 0,
+  } as AgentMessage;
+}
+
 function branchSummary(summary: string): AgentMessage {
   return {
     role: "branchSummary",
@@ -320,5 +342,64 @@ test("filterParentContext: orphan toolResult (no matching call in input) is pres
   // It only gets dropped when its toolCallId belongs to an excluded call we
   // also saw in this same filter pass.
   const msgs = [toolResult("xyz", "read", "leftover")];
+  assert.deepEqual(filterParentContext(msgs), msgs);
+});
+
+test("filterParentContext: thinking blocks are dropped from assistant messages by default", () => {
+  // Thinking is the parent's internal reasoning. It often contains
+  // orchestration plans ("I'll spawn an inspector then a redteam...") and
+  // can quote the conductor system-prompt addendum verbatim. Drop it.
+  const msgs = [assistantThinking("I should spawn an inspector to find bugs", "On it.")];
+  const out = filterParentContext(msgs);
+  assert.equal(out.length, 1);
+  const blocks = (out[0] as any).content as any[];
+  assert.ok(blocks.every((b) => b.type !== "thinking"), "thinking must be filtered out");
+  assert.ok(blocks.some((b) => b.type === "text" && b.text === "On it."));
+});
+
+test("filterParentContext: thinking-only assistant message is dropped entirely", () => {
+  const msgs = [assistantThinking("internal reasoning only")];
+  assert.deepEqual(filterParentContext(msgs), []);
+});
+
+test("filterParentContext: thinking + excluded toolCall → message dropped (no remaining content)", () => {
+  const msg: AgentMessage = {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "I'll spawn an inspector" },
+      { type: "toolCall", id: "tc1", name: "ensemble_spawn", arguments: {} },
+    ] as any,
+    api: "anthropic-messages" as any,
+    provider: "anthropic" as any,
+    model: "claude-sonnet-4-5",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "toolUse",
+    timestamp: 0,
+  } as AgentMessage;
+  assert.deepEqual(filterParentContext([msg]), []);
+});
+
+test("filterParentContext: subagent-* CustomMessages are dropped (pi-essentials/subagent leak)", () => {
+  // pi-essentials/subagent emits subagent-notify, subagent_control_notice,
+  // and subagent-slash-result CustomMessages when both extensions are
+  // loaded in the same parent session. None of those should reach a
+  // pi-conductor sub-agent.
+  const msgs = [
+    customMsg("subagent-notify", "subagent X completed"),
+    customMsg("subagent_control_notice", "subagent paused"),
+    customMsg("subagent-slash-result", "slash command output"),
+  ];
+  assert.deepEqual(filterParentContext(msgs), []);
+});
+
+test("filterParentContext: unrelated CustomMessage types still pass through", () => {
+  const msgs = [customMsg("sub-task-progress", "50%"), customMsg("auto-work-logger", "x")];
   assert.deepEqual(filterParentContext(msgs), msgs);
 });
