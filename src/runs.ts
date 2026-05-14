@@ -22,6 +22,7 @@ import { mkdir, writeFile, appendFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import { applyEvent } from "./event-handler.ts";
 import {
   emptyUsage,
   isTerminal,
@@ -330,7 +331,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     const trimmed = line.trim();
     if (!trimmed) return;
 
-    // Append every parseable JSON line to the transcript.
+    // Append every parseable JSON line to the transcript (fire-and-forget I/O).
     void appendFile(run.transcriptPath, line + "\n").catch(() => {});
 
     let event: any;
@@ -340,62 +341,14 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
       return;
     }
 
-    if (event.type === "agent_end") {
-      finalize("completed", 0);
+    // Pure state-machine logic lives in applyEvent (see src/event-handler.ts).
+    // This wrapper handles I/O (transcript append) and listener notification.
+    const effect = applyEvent(run, event);
+    if (effect.kind === "finalize") {
+      finalize(effect.status, effect.exitCode);
       return;
     }
-
-    if (event.type === "turn_end" && event.message) {
-      const msg = event.message as AgentMessage;
-      const content = (msg as any).content;
-      const hasToolCall = Array.isArray(content)
-        ? content.some((p: any) => p.type === "toolCall")
-        : false;
-      const errored = (msg as any).stopReason === "error" || (msg as any).stopReason === "aborted";
-      if (!hasToolCall && !errored) {
-        finalize("completed", 0);
-        return;
-      }
-    }
-
-    if (event.type === "message_end" && event.message) {
-      const msg = event.message as AgentMessage;
-      run.messages.push(msg);
-      if (msg.role === "assistant") {
-        run.usage.turns += 1;
-        const u = (msg as any).usage;
-        if (u) {
-          run.usage.input += u.input || 0;
-          run.usage.output += u.output || 0;
-          run.usage.cacheRead += u.cacheRead || 0;
-          run.usage.cacheWrite += u.cacheWrite || 0;
-          run.usage.cost += u.cost?.total || 0;
-        }
-        const m = (msg as any).model;
-        if (m && !run.model) run.model = m;
-        const sr = (msg as any).stopReason;
-        if (sr) run.stopReason = sr;
-        const em = (msg as any).errorMessage;
-        if (em && !run.errorMessage) run.errorMessage = em;
-
-        const content = (msg as any).content;
-        if (Array.isArray(content)) {
-          for (const part of content) {
-            if ((part as any).type === "toolCall") {
-              run.lastToolCall = formatToolCallShort(
-                (part as any).name,
-                (part as any).arguments,
-              );
-            }
-          }
-        }
-      }
-      opts.registry.notify(run);
-      if (opts.onUpdate) opts.onUpdate(run);
-    }
-
-    if (event.type === "tool_result_end" && event.message) {
-      run.messages.push(event.message as AgentMessage);
+    if (effect.kind === "updated") {
       opts.registry.notify(run);
       if (opts.onUpdate) opts.onUpdate(run);
     }
@@ -563,28 +516,4 @@ export function elapsedStr(start: number, end?: number): string {
   const m = s / 60;
   if (m < 60) return `${m.toFixed(1)}m`;
   return `${(m / 60).toFixed(1)}h`;
-}
-
-function shortenPath(p: string): string {
-  const home = homedir();
-  return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
-}
-
-function formatToolCallShort(name: string, args: Record<string, any>): string {
-  switch (name) {
-    case "bash": {
-      const cmd = (args?.command as string) ?? "...";
-      return `$ ${cmd.length > 50 ? cmd.slice(0, 50) + "…" : cmd}`;
-    }
-    case "read":
-      return `read ${shortenPath((args?.file_path || args?.path || "...") as string)}`;
-    case "write":
-      return `write ${shortenPath((args?.file_path || args?.path || "...") as string)}`;
-    case "edit":
-      return `edit ${shortenPath((args?.file_path || args?.path || "...") as string)}`;
-    case "grep":
-      return `grep ${(args?.pattern as string) ?? "..."}`;
-    default:
-      return name;
-  }
 }
