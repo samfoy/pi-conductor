@@ -1,0 +1,41 @@
+{
+  "name": "@samfp/pi-conductor",
+  "version": "0.1.0",
+  "description": "pi extension that turns pi into a conductor driving persona-based sub-agents with full TUI visibility",
+  "keywords": [
+    "pi-package",
+    "extensions",
+    "conductor",
+    "subagents"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/samfoy/pi-conductor"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "files": [
+    "src",
+    "personas",
+    "PRD.md",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test --import tsx tests/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "^0.70.2",
+    "@mariozechner/pi-tui": "^0.70.2",
+    "@sinclair/typebox": "^0.34.49"
+  }
+}

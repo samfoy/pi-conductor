@@ -1,0 +1,542 @@
+# pi-conductor — PRD
+
+**Status:** Draft v0.2
+**Owner:** samfp
+**Created:** 2026-05-14
+**Last updated:** 2026-05-14
+
+## Locked decisions (v0.4)
+
+| Decision | Choice | Rationale |
+|---|---|---|
+| Name | `pi-conductor` | Orchestra metaphor: parent conducts, personas play, audience watches. |
+| Tool restrictions | **Not implemented.** | Pi has no clean way to whitelist tools in a child subprocess. Persona `tools:` field dropped from frontmatter. Personas guide tool use via prompt only — no false security. |
+| Default spawn mode | **foreground** | Streams inline in the parent conversation as it runs. Background mode still available via explicit `foreground: false`. |
+| Notification visibility | **Inline visible** | `<sub-agent-completed>` blocks render in the parent conversation as a folded summary card with persona, status, duration, usage, transcript path, and final result. The user sees them; the LLM acts on them. |
+| Pause / resume | **Supported in v1.** | `ensemble_pause` (SIGSTOP) / `ensemble_resume` (SIGCONT). Useful for cost control while the user thinks. |
+| Concurrency cap | **Queue.** | When `maxConcurrent` is hit, additional `ensemble_spawn` calls are queued FIFO and start as slots free. The orchestrator gets a `queued` status back so it can choose to wait or proceed. |
+| Persona library | Curated 16 starter personas covering the full SDLC, **adapted from external role definitions.** | Each carries the lineage of a battle-tested role (narrow scope, explicit "Do not X" rules, evidence-over-assertion, fresh-eyes framing) but stripped of event-protocol baggage. |
+| Foreground-spawn-while-queued | **Auto-downgrade to background.** | When `maxConcurrent` is hit, foreground spawns return `{ status: "queued-as-background", agent_id }` and complete via the standard `<sub-agent-completed>` notification card. The conductor system prompt notes this can happen. |
+| Filtered context inheritance | **Reimplement.** | Don't depend on pi-subagents' `shared/fork-context.ts`. Filtering rules are short and stable; owning the implementation is worth the cost. |
+| Persona discovery paths | **`~/.pi` subtree only (and project `.pi/`).** | User personas at `~/.pi/agent/conductor/personas/`; project at `<project>/.pi/conductor/personas/`. No XDG, no autoloop-style scattered locations. |
+| Foreground cancel UX | **Esc detaches; Ctrl+C kills.** | Esc converts a foreground stream into a background sub-agent (transparent transition; ensemble panel takes over visibility). Ctrl+C SIGTERMs the sub-agent and ends the parent's foreground turn with a `killed` notification. |
+| Default model per persona | **Inherit-only.** | Every persona inherits the parent's model and thinking unless explicitly overridden in the persona's frontmatter or in `personaOverrides`. No phase-aware defaults baked in. Install never references a model the user hasn't configured. |
+
+## TL;DR
+
+A pi extension that turns the parent pi session into an **orchestrator** which drives a roster of **persona-based sub-agents** covering the full SDLC — from clarification and design through planning, implementation, review, and verification. The novel piece versus existing extensions (`pi-mono/team-mode`, `pi-subagents`) is **first-class TUI visibility**: the user can watch any sub-agent stream live inside pi — no tmux switch, no "ssh into the worker," no log file tailing. The orchestrator stays in the chat, the user can drop into any sub-agent's live view at will, and personas are markdown files with configurable model, thinking, and system prompt.
+
+It does **not** replace `pi-essentials/subagent` — that extension stays as the lightweight fire-and-forget background runner. `pi-conductor` is the heavyweight, conversation-led, fully-observable counterpart for SDLC work.
+
+## Why
+
+Today's options each leave a gap:
+
+| Tool | Gap |
+|---|---|
+| `pi-essentials/subagent` (current) | Generic — no personas, no orchestration, transcript only via final return string |
+| `pi-mono/team-mode` | Excellent coordination, but worker visibility is final-message-only; you watch *progress*, not *thought* |
+| `pi-subagents` | Foreground streams in chat (good) but background runs are status-widget-only; no way to *focus* on one sub-agent |
+
+The user's goal: **see exactly what each subagent is doing, when they're doing it, without leaving pi's TUI.** That visibility is the differentiator. Everything else (personas, model config, full-SDLC roster) follows the patterns the reference extensions have already validated.
+
+## Goals
+
+1. **Orchestrator-as-conversation** — the parent pi session is the conductor. The user talks to the conductor; the conductor decides when to spawn personas.
+2. **Full-SDLC persona library** — markdown files with frontmatter (`model`, `thinking`, `system_prompt`, `inherit_context`, `worktree`). Project-level + user-level layering. Coverage from clarification → design → plan → build → review → finalize, plus specialist callouts (oracle, redteam, profiler, investigator, scribe, etc.).
+3. **Live, in-TUI sub-agent visibility** — three modes: a multi-agent dashboard widget (always-visible), a per-agent focused stream view (drilldown), and a transcript browser (history).
+4. **Configurable, not opinionated workflows** — personas are pluggable; orchestration is up to the LLM + user. The conductor system prompt suggests common shapes (`clarifier → designer → planner → builder → critic → finalizer` for greenfield work; `investigator → strategist → fixer → verifier` for debugging) but does not enforce them.
+5. **Coexist with `pi-essentials/subagent`** — different tool names, different mental model, no collision.
+
+## Non-goals
+
+- Not replacing Ralph (in-session hat choreography) or autoloop (overnight CLI loops).
+- Not a TODO-DAG / shared task graph (team-mode does that). Conductor's coordination is via natural-language synthesis between waves, not formal dependencies. (Could add later.)
+- Not a quality-gate hook framework (team-mode's `taskCompletedHook`). Could add later.
+- Not a worktree manager. Worktree support per persona may come in v2; v1 runs in cwd.
+- Not multi-coordinator / nested ensembles. One conductor, one ensemble.
+- **Not enforcing tool restrictions.** Personas describe expected tool usage in their prompts; the runtime does not gate access. (Pi's extension API doesn't expose this cleanly. Documented honestly rather than faked.)
+
+## Personas
+
+### File format
+
+```
+~/.pi/agent/conductor/personas/<name>.md   # user-level
+<project>/.pi/conductor/personas/<name>.md # project-level (overrides user)
+```
+
+Project overrides user. Names must be unique within scope. **No other discovery paths.**
+
+```markdown
+---
+name: oracle
+description: Second-opinion / drift-check before committing to an approach
+model: anthropic/claude-sonnet-4
+thinking: high
+inherit_context: filtered                  # none | filtered | full
+inherit_skills: false
+default_reads:                             # files auto-read on launch (relative to cwd)
+  - plan.md
+  - progress.md
+worktree: false
+timeout_minutes: 30
+---
+
+You are the oracle: a high-context decision-consistency subagent.
+…full system prompt body…
+```
+
+Frontmatter fields (v1):
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `name` | string | — | Required, unique per scope |
+| `description` | string | — | Shown in `/conductor list`, used by orchestrator prompt |
+| `model` | string | **parent's model (inherited)** | Provider-qualified ID, e.g. `anthropic/claude-sonnet-4`. Omit to inherit. |
+| `thinking` | enum | **parent's thinking (inherited)** | `off|minimal|low|medium|high|xhigh`. Omit to inherit. |
+| ~~`tools`~~ | — | — | **Removed.** Pi has no clean way to whitelist tools in a child subprocess. Persona prompts may describe tool boundaries but they are not enforced. |
+| `inherit_context` | enum | `filtered` | `none` (fresh), `filtered` (parent prose, no orchestration tool calls), `full` |
+| `inherit_skills` | bool | `false` | Pass parent's skill catalog to child |
+| `default_reads` | list | `[]` | Files auto-prefixed to the launch prompt as context |
+| `worktree` | bool | `false` | v2 |
+| `timeout_minutes` | number | 30 | Hard kill |
+
+### Built-in starter personas (shipped with the extension)
+
+**16 personas covering the full SDLC**, organized by phase. Each carries the lineage of a battle-tested role definition (narrow scope, explicit "Do not X" rules, evidence-over-assertion, fresh-eyes framing) but stripped of event-protocol baggage (`emit X.ready`, `STATE_DIR/progress.md` shared files) so they work as one-shot callouts the conductor synthesizes between.
+
+#### Discovery / pre-work
+
+| Persona | Lineage | Purpose |
+|---|---|---|
+| `inspector` | autoideas/scanner | Broad codebase recon — survey files, prioritize areas, find entry points. Read-only. |
+| `analyst` | autoideas/analyst | Deep-dive one area; produces structured suggestions (What/Where/Why/How/Risk/Counterargument/Confidence). Read-only. |
+| `cartographer` | autospec/clarifier + researcher | Builds `context.md` + `meta-prompt.md` for a downstream task. Writes only those artifacts. |
+
+#### Specification / design
+
+| Persona | Lineage | Purpose |
+|---|---|---|
+| `clarifier` | autospec/clarifier | Turn a vague request into concrete acceptance criteria; surface ambiguity before design. |
+| `designer` | autospec/designer | System design and architecture decisions before implementation. Writes a design document. |
+| `oracle` | autospec/critic + new framing | Decision-consistency check / drift detector. Reviews a plan or proposed approach. No edits. |
+
+#### Implementation
+
+| Persona | Lineage | Purpose |
+|---|---|---|
+| `planner` | autocode/planner | Break an approved design into ordered, atomic slices. Writes plan, no code. |
+| `builder` | autocode/build | Implement exactly one slice with verification + commit. Returns evidence. |
+| `simplifier` | autosimplify/simplifier + scoper | Apply small, safe, scoped simplifications. May edit. |
+
+#### Review / verification
+
+| Persona | Lineage | Purpose |
+|---|---|---|
+| `critic` | autocode/critic | Per-slice review with **novel verification + smoke test**. Default to rejection when evidence is incomplete. No edits. |
+| `redteam` | autoreview/checker | Adversarial review of a diff or proposal — try to break it, demand evidence. No edits. |
+| `finalizer` | autocode/finalizer | Whole-task completeness gate. Stricter than critic about end-to-end outcome and clean repo state. |
+| `verifier` | autosimplify/verifier | Independent verification of a claimed change — re-runs strongest available checks plus one novel check. |
+
+#### Debugging
+
+| Persona | Lineage | Purpose |
+|---|---|---|
+| `investigator` | autodebug/investigator | Bug root-cause hunt: Phase 0 (reframe "why doesn't X work" into concrete bug statement) → Phase 1 (reproduce + trace) → Phase 2 (pattern analysis). No fixes. |
+
+#### Other
+
+| Persona | Lineage | Purpose |
+|---|---|---|
+| `profiler` | autoperf/profiler | Identify performance hot paths and baseline measurements. No optimization, no edits. |
+| `scribe` | autodoc/writer | Documentation drafting (READMEs, docstrings, PRDs). |
+
+### Suggested orchestration shapes (not enforced)
+
+The conductor system prompt teaches — but does not require — these shapes:
+
+```
+Greenfield feature
+  clarifier → (cartographer | inspector) → designer → oracle →
+    planner → [builder → critic]×N → finalizer
+
+Bugfix
+  investigator → oracle → builder → critic → verifier
+
+Large refactor
+  inspector → analyst → designer → oracle →
+    planner → [simplifier → critic]×N → finalizer
+
+Review-only
+  redteam | critic | oracle  (often in parallel)
+
+Perf work
+  profiler → oracle → builder → verifier
+```
+
+The LLM picks the shape; the user can override.
+
+### Persona families NOT yet adapted (mineable for v1.x)
+
+If you want a persona we don't ship, the source persona files are in `<autoloop>/presets/<preset>/roles/*.md` (or write new ones). Confirmed easy to mine:
+
+- **Debugging:** `strategist` (hypothesis-and-testing), `fixer` (Phase-4 fix), `verifier` (Phase-5 quality gate)
+- **Security:** `scanner`, `analyst`, `hardener`, `reporter`
+- **Performance:** `measurer`, `optimizer`, `judge` (full perf loop beyond just `profiler`)
+- **Docs:** `auditor`, `checker`, `publisher`
+- **Review extras:** `reader`, `suggester`, `summarizer`
+- **Spec extras:** dedicated `researcher` (we folded researcher into cartographer)
+- **Ideas:** `synthesizer` (compile findings across analysts)
+
+Use the adaptation guide below; add to `~/.pi/agent/conductor/personas/` and they show up in `/conductor list`.
+
+### Adapting an external role definition to a conductor persona
+
+Adapting a role definition (e.g. one of the autoloop roles in §"Persona families NOT yet adapted") to a conductor persona is mechanical:
+
+1. **Strip event emissions.** Replace `emit tasks.ready` / `emit review.passed` etc. with "return your findings as a final message" or "write to `<output_file>` and return a summary."
+2. **Strip `STATE_DIR/*.md` references.** Either replace with `default_reads:` frontmatter (so the file is auto-prepended on launch) or scope the persona to single-shot work that doesn't need persistent shared state.
+3. **Strip topology / handoff rules.** Conductor personas don't hand off to other personas — they return to the conductor, which decides what to call next.
+4. **Keep the role discipline.** The "Do not investigate. Do not implement. Do not skip the failing test." framing is the value prop. Preserve it verbatim where possible.
+5. **Keep the verification rigor.** Phrases like *"Default to rejection when evidence is incomplete"*, *"Perform at least one verification the builder did NOT perform"*, *"Working as designed is almost never the correct conclusion"* are gold — port them.
+6. **Adjust the emit-only-this-event final rule** to a return-format spec: e.g. "Return your review as `## Review` followed by `Correct/Fixed/Blocker/Note` bullets with file paths and line numbers."
+
+Document the adaptation in a `## Source` footer in each persona file so users can trace lineage and pick up upstream improvements:
+
+```markdown
+## Source
+Adapted from a role definition with the following changes: dropped event emissions,
+dropped shared-state-file conventions, kept the role discipline and verification rigor.
+```
+
+## Tools the conductor exposes
+
+```
+ensemble_spawn(persona, task, [foreground])
+  → returns { agent_id, status }
+  - persona: string (must exist in resolved persona registry)
+  - task: string (the prompt; default_reads are auto-prepended)
+  - foreground: bool (default TRUE)
+      true  → block parent; stream sub-agent into the chat as it runs
+      false → run in background; live-update the ensemble panel
+  - status return values: "running" | "queued" (when maxConcurrent is hit) | "failed-to-start"
+
+ensemble_send(agent_id, message)
+  → continue an existing sub-agent's session (full prior context).
+    Works for finished sub-agents too — resumes via pi --session.
+
+ensemble_status([agent_id])
+  → poll-style status for the orchestrator (dashboard auto-updates anyway)
+
+ensemble_pause(agent_id)
+  → SIGSTOP the sub-agent process; record paused timestamp.
+    Useful for cost control while the user reviews partial output.
+
+ensemble_resume(agent_id)
+  → SIGCONT the sub-agent process; clear paused timestamp.
+
+ensemble_focus(agent_id)
+  → orchestrator-side hint to switch the user's TUI into the focused view
+    (the user can do this themselves via keybinding; this lets the LLM suggest)
+
+ensemble_stop(agent_id)
+  → kill a running sub-agent
+
+ensemble_list()
+  → list available personas with descriptions
+```
+
+### Spawn lifecycle
+
+- **Foreground (default):** parent blocks. Sub-agent JSON stream is rendered inline in the conversation as it arrives. On exit, the inline rendering is replaced with a folded `<sub-agent-completed>` summary card the user can expand. The conductor's turn continues with the sub-agent's final result available as the tool's return value.
+  - **Esc** during streaming: detach to background. The inline stream collapses to a status line ("→ detached to background, watch in ensemble panel"); the sub-agent keeps running; completion arrives as the standard background notification card.
+  - **Ctrl+C** during streaming: SIGTERM the sub-agent. The inline stream collapses to a `killed` notification card; the parent's turn ends. The LLM sees the killed status and reacts.
+- **Background (`foreground: false`):** parent does not block. Sub-agent runs; ensemble panel updates live. On exit, a `<sub-agent-completed>` user-role message is pushed via `pi.sendMessage({ triggerTurn: true })` (team-mode's pattern), waking the conductor.
+- **Queued (concurrency cap hit):**
+  - For **background** spawns: returns `{ status: "queued", queue_position: N, agent_id }` immediately. Sub-agent is enqueued FIFO. When a slot opens, it starts and emits the standard completion notification.
+  - For **foreground** spawns: **auto-downgrades to background.** Returns `{ status: "queued-as-background", queue_position: N, agent_id }` immediately. The conductor's turn continues; when a slot opens, the sub-agent runs; completion arrives as a notification card. The conductor system prompt explicitly notes this auto-downgrade can happen and instructs the LLM to handle it gracefully (no second spawn, no panic).
+- **Paused:** sub-agent is alive but not consuming tokens. Pause/resume is reflected in the ensemble panel as `⏸ paused` and counts against `maxConcurrent` (it's still a running sub-agent, just stopped).
+
+## TUI surface (the differentiator)
+
+Three coordinated views. All powered by `ctx.ui.custom()` overlays + `ctx.ui.setWidget()` panels.
+
+### 1. Ensemble panel (always visible when ≥1 sub-agent is active)
+
+`belowEditor` widget. Compact one-line-per-sub-agent rendering:
+
+```
+● oracle           45s   ↻ reading src/auth/validate.ts          [3t ↑12k ↓2k $0.04]
+● redteam          1m22s ↻ running git diff --stat               [5t ↑18k ↓3k $0.06]
+○ inspector (done) 3m04s ✓ returned                              [8t ↑44k ↓6k $0.18]
+```
+
+- Status glyph: `●` running, `○` done, `✗` failed, `⏸` paused
+- Live activity hint: latest tool call shortened (current `subagent.ts` already does this)
+- Usage: turns / tokens / cost
+- Keybinding hint at bottom: `Ctrl+E` open ensemble overlay · `Ctrl+G` go to focused view
+
+### 2. Focused stream overlay (Ctrl+G or `ensemble_focus`)
+
+Full-screen overlay that shows **the live transcript of one sub-agent** as if you were running pi directly in that session. Renders the same stream pi normally renders for the parent: assistant text, tool calls (collapsed by default, expandable), tool results, thinking blocks (toggleable).
+
+Controls inside the overlay:
+- `Tab` cycle to next sub-agent
+- `Esc` return to parent conversation
+- `s` send a one-shot message to this sub-agent (equivalent to `ensemble_send`)
+- `k` kill this sub-agent
+- `↑/↓ PgUp/PgDn` scroll transcript
+- `c` collapse/expand all tool calls
+- `t` toggle thinking blocks visibility
+
+Implementation: each sub-agent's JSON stream from `pi --mode json -p` is parsed not just for status but also rendered as a Component. Same parser as `pi-essentials/subagent.ts` already has — we just keep the messages around and render them.
+
+### 3. Ensemble overlay / dashboard (Ctrl+E)
+
+Multi-agent dashboard. List of running and recently-finished sub-agents with selectable rows. Selecting a row opens that sub-agent's focused stream view (#2). Also shows aggregate cost, total tokens, total elapsed.
+
+Controls:
+- `↑/↓` move selection
+- `Enter` open focused view for selected sub-agent
+- `r` rerun a finished sub-agent (with same prompt)
+- `Esc` close
+
+### 4. Inline completion card (always visible to user)
+
+When any sub-agent ends — foreground or background — a folded summary card renders inline in the parent conversation. Collapsed by default; click/key to expand.
+
+**Collapsed view:**
+```
+┌─ ✓ oracle (2m14s)  3t  ↑12k ↓2k  $0.04 ────────────────────┐
+│ Recommended: defer the migration; current trajectory will  │
+│ violate the CSDR2 invariant. [expand]                      │
+└────────────────────────────────────────────────────────────┘
+```
+
+**Expanded view:**
+```xml
+<sub-agent-completed>
+  <agent-id>oracle-7f3a</agent-id>
+  <persona>oracle</persona>
+  <status>completed</status>
+  <duration>2m14s</duration>
+  <usage><turns>3</turns><input>12000</input><output>2000</output><cost>0.04</cost></usage>
+  <result>
+    …final assistant text from the sub-agent…
+  </result>
+  <transcript>~/.pi/agent/conductor/runs/oracle-7f3a/transcript.jsonl</transcript>
+</sub-agent-completed>
+```
+
+- **For background sub-agents:** the card is injected via `pi.sendMessage({ triggerTurn: true })` so the conductor reacts. The user sees the same card.
+- **For foreground sub-agents:** the inline streaming output is replaced with the card on exit. The conductor's turn continues; the result is also returned as the tool call's return value so the LLM has it without re-parsing the XML.
+
+Identical XML shape to team-mode's `<task-notification>`. The user has validated this pattern works for keeping the LLM aware of completions; we just additionally render it as a visible card instead of as raw XML.
+
+## Orchestrator behavior
+
+When the extension is loaded **and** the env var `PI_CONDUCTOR_MODE=1` is set (or a slash command `/conductor on` is run), the parent session receives an additional system prompt that teaches it:
+
+1. The personas available, their descriptions, and when to reach for each.
+2. That `ensemble_spawn` is fire-and-forget by default — after launching, end the turn; results arrive as `<sub-agent-completed>` messages.
+3. To synthesize sub-agent findings rather than restating them.
+4. To prefer parallel fan-out for read-only personas (`inspector`, `oracle`, `redteam`) and serial for write-capable personas.
+5. Never to call sub-agents for trivial work the conductor can do directly.
+
+The prompt is loaded from `<extension>/prompts/conductor.md` and is overridable at user/project level.
+
+Without `PI_CONDUCTOR_MODE=1`, the tools are still available but no system prompt is injected — manual mode for users who want pi to call `ensemble_spawn` only when explicitly asked.
+
+## Persistence
+
+```
+~/.pi/agent/conductor/
+├── personas/                       # user-level personas
+│   └── <name>.md
+├── runs/<agent-id>/
+│   ├── record.json                 # persona, prompt, status, usage, timestamps
+│   ├── transcript.jsonl            # full streamed JSON events from pi --mode json
+│   └── final.md                    # final assistant text
+└── settings.json                   # default model overrides, persona disables
+```
+
+Transcripts live forever (until manually cleaned). Useful for `/conductor history` browsing.
+
+## Slash commands
+
+```
+/conductor on | off              # toggle PI_CONDUCTOR_MODE for this session
+/conductor list                  # list personas (with resolution: user vs project vs builtin)
+/conductor show <persona>        # cat the persona file
+/conductor spawn <persona> ...   # equivalent to ensemble_spawn (manual)
+/conductor status                # all running + last 5 finished
+/conductor focus <agent-id>      # open focused stream view
+/conductor pause  <agent-id|all> # SIGSTOP
+/conductor resume <agent-id|all> # SIGCONT
+/conductor stop   <agent-id|all> # kill
+/conductor queue                 # show the spawn queue
+/conductor history               # browse past runs
+/conductor doctor                # health check (parsable persona files, models resolvable)
+```
+
+## Keybindings
+
+| Keys | Action |
+|---|---|
+| `Ctrl+E` | Open ensemble overlay |
+| `Ctrl+G` | Open focused stream view (defaults to most-recently-active sub-agent) |
+| `Ctrl+Shift+S` | Quick spawn (interactive picker: persona → prompt) |
+
+All overridable via the standard pi keybindings file.
+
+## Settings
+
+`~/.pi/agent/extensions/conductor/config.json` (or project `.pi/conductor.json`):
+
+```jsonc
+{
+  "defaultModel": "anthropic/claude-sonnet-4",
+  "defaultThinking": "medium",
+  "defaultTimeoutMinutes": 30,
+  "maxConcurrent": 4,
+  "queueOnConcurrencyCap": true,         // false = reject instead
+  "autoOpenFocusOnSpawn": false,
+  "defaultSpawnMode": "foreground",      // "foreground" | "background"
+  "personaOverrides": {
+    "redteam": { "disabled": true },
+    "oracle":  { "model": "anthropic/claude-opus-4-1", "thinking": "high" }
+  },
+  "conductorPromptPath": null
+}
+```
+
+## Coexistence rules
+
+- Tool names are namespaced `ensemble_*` to avoid collision with `pi-essentials/subagent`'s `subagent` tool.
+- `pi-essentials/subagent` remains the right choice for one-off "go investigate this in the background while I keep coding" calls — no persona, no overhead.
+- Conductor is the right choice when you want a *bench* of named experts you'll likely call multiple times in a session, with full visibility into each.
+
+Both can be loaded simultaneously. The orchestrator system prompt explicitly notes both tools exist and explains when to reach for each.
+
+## Architecture
+
+### Process model
+
+- **Sub-agents are subprocesses** spawned with `pi --mode json -p [--session <path>]`.
+- Background mode: parent gets a streaming JSON parser, accumulates messages in memory, writes them to disk (transcript.jsonl), updates ensemble panel state, on exit pushes the `<sub-agent-completed>` notification.
+- Foreground mode: same subprocess, but parent blocks and streams JSON events through a transformer that emits them as if they were the parent's own output, then unblocks at exit.
+
+### Why subprocess, not in-process
+
+- Same as team-mode's reasoning: separate context windows, can use different models per persona, pi already supports `--mode json -p` cleanly, and crash isolation.
+- A `transient` (in-process via `createAgentSession()`) mode is a v2 option for very fast read-only personas (`inspector`).
+
+### Stream parser
+
+Reuse the JSON event parser from `pi-essentials/subagent.ts` (`turn_start`, `tool_call_start`, `tool_call_complete`, `assistant_message`, etc.). Keep messages in a per-agent `Message[]` so the focused-view renderer can display them. The renderer is a TUI Component implementing `render(width)`.
+
+### Context inheritance (`filtered` mode)
+
+When `inherit_context: filtered`, before launching the sub-agent we serialize a filtered slice of the parent's session:
+
+- **Include:** user prose, assistant prose, file reads/writes (so the sub-agent doesn't re-read what's already known), the explicit task prompt.
+- **Exclude:** prior `ensemble_*` tool calls and their results, `subagent` tool calls, slash commands, control notices, status messages, any `<sub-agent-completed>` cards.
+- **Exclude (defensive):** anything tagged `parent-only` in metadata; the conductor system-prompt block.
+
+**We reimplement this filter rather than depending on `pi-subagents/shared/fork-context.ts`.** Filtering rules are short and stable; owning the implementation avoids a dependency that may diverge. Spec'd as a pure function `filterParentContext(messages: Message[], opts) → Message[]` with unit tests covering each include/exclude rule.
+
+### Tool restriction in personas
+
+*Not implemented.* Pi has no clean way to whitelist tools in a child subprocess; faking it would mislead users. Persona prompts may describe tool boundaries but they are not enforced.
+
+## Implementation phases
+
+### v0.1 — Skeleton (this PRD + extension scaffold)
+- Extension scaffold (TypeScript, single file or small module set).
+- Persona file loader (frontmatter + body parser).
+- `ensemble_list`, `ensemble_status` tools.
+- Ensemble panel (read-only, no spawn yet).
+
+### v0.2 — Background spawning
+- `ensemble_spawn(foreground=false)` only.
+- Live ensemble panel updates from JSON stream.
+- `<sub-agent-completed>` notifications.
+- `/conductor list`, `/conductor status`, `/conductor doctor`.
+- Five built-in personas as markdown files.
+
+### v0.3 — TUI focused view
+- Focused stream overlay (Ctrl+G).
+- Transcript rendering (assistant text, tool calls collapsed, thinking toggleable).
+- Ensemble overlay (Ctrl+E) with row selection.
+
+### v0.4 — Foreground spawning
+- `ensemble_spawn(foreground=true)` streams inline in parent conversation.
+- Auto-collapse on completion to a folded summary block.
+
+### v0.5 — Send / continue / kill
+- `ensemble_send` (continue a background sub-agent's session).
+- `s` keybinding inside focused view to send.
+- `ensemble_stop` and `k` keybinding.
+
+### v0.6 — Context inheritance & history
+- `inherit_context: filtered` (port pi-subagents' fork-context filter or reimplement).
+- `/conductor history` — browse past runs from `runs/`.
+
+### v0.7+ — v2 ideas
+- Worktree per persona.
+- Quality gates (`on_complete_hook` per persona).
+- Transient (in-process) runtime for read-only personas.
+- Project-shareable persona library (a "marketplace" of `.md` files).
+- Sub-agent → conductor mid-run messaging (analogous to pi-intercom).
+
+## Open questions
+
+All v0.3 release-blocking questions resolved. Remaining items are v1.x decisions that don't gate v0.1 scaffolding:
+
+1. ~~Naming.~~ **Resolved:** `pi-conductor`.
+2. ~~Tool restriction enforcement.~~ **Resolved:** dropped; pi has no clean mechanism, and we don't fake it.
+3. ~~Foreground vs background default.~~ **Resolved:** foreground default.
+4. ~~Notification rendering.~~ **Resolved:** inline visible folded card.
+5. ~~Persona tool inheritance.~~ **Resolved (moot):** no tool restrictions.
+6. ~~Pause / resume.~~ **Resolved:** supported in v1 via SIGSTOP/SIGCONT.
+7. ~~Foreground spawn that gets queued.~~ **Resolved:** auto-downgrade to background.
+8. ~~Filtered context inheritance — port or reimplement?~~ **Resolved:** reimplement.
+9. ~~Persona discovery paths.~~ **Resolved:** `~/.pi/agent/conductor/personas/` and project `.pi/conductor/personas/` only.
+10. ~~Foreground cancellation UX.~~ **Resolved:** Esc detaches; Ctrl+C kills.
+11. ~~Default model per persona phase — phase-aware or inherit?~~ **Resolved:** inherit-only. Shipped persona files never set `model` or `thinking`; users override per-persona in `personaOverrides`. No phase-aware defaults baked into the package.
+12. **Resumable sessions for finished sub-agents.** `ensemble_send` to a *finished* sub-agent currently implies resuming via `pi --session`. Should we keep finished sub-agents' sessions alive forever (disk grows) or GC after N days? *Open.*
+13. **Worktree isolation per persona** (deferred to v2). When implemented: which personas default `worktree: true`? `builder` and `simplifier` are the obvious ones (write-capable, can run in parallel). Read-only personas should always be `false`.
+14. **Project-shareable persona library.** A vault-style "marketplace" of `.md` persona files — install via `/conductor install <url>`? *v2.*
+
+## Validation plan
+
+1. **Smoke test**: spawn `inspector` on the Rosie codebase, watch the panel update, see the final report land as `<sub-agent-completed>`.
+2. **Parallel fan-out**: ask the conductor to run `inspector` + `oracle` + `redteam` on a proposed change. Verify all three appear in the panel; verify Ctrl+G drilldown works for each; verify completions arrive in any order without confusing the conductor.
+3. **Persona override**: define a project-local `oracle` that overrides the user-level one with a different model. Verify resolution.
+4. **Coexistence**: load both `pi-essentials/subagent` and `pi-conductor`; verify the LLM picks the right tool for "investigate X in the background" (subagent) vs "have oracle review my plan" (conductor).
+5. **Long-running survival**: spawn a 20-minute `cartographer` run, do other work in the parent, verify panel updates throughout, verify completion lands cleanly.
+
+## Risks
+
+- **TUI complexity.** The focused-stream overlay is the centerpiece and the most complex piece of code. Mitigation: lift the stream parser from `pi-essentials/subagent.ts`, lift the rendering primitives from pi's own message renderer.
+- **Context inheritance bugs.** Filtering parent context to send to the child is subtle (pi-subagents has a whole module for this). Mitigation: in v0.6, start with `inherit_context: none`, add filtered later.
+- **Tool restriction may be prompt-only.** See open question #2. If so, document clearly and don't pretend it's a security boundary.
+- **Cost surprises.** Multiple sub-agents in parallel with `thinking: high` can rack up cost fast. Mitigation: ensemble panel shows running cost; settings cap `maxConcurrent`; doctor warns if all personas use high-thinking large models.
+
+## Decision log
+
+- 2026-05-14 — Codename `pi-conductor` confirmed.
+- 2026-05-14 — Will not replace `pi-essentials/subagent`; coexistence via `ensemble_*` tool namespace.
+- 2026-05-14 — Sub-agents are subprocesses (subprocess pi --mode json -p); transient/in-process is a v2 option.
+- 2026-05-14 — **Foreground by default** (was background). Background via `foreground: false`.
+- 2026-05-14 — **Tool restrictions dropped.** Pi has no clean enforcement; persona `tools:` field removed; personas describe expected tool boundaries in prompt only.
+- 2026-05-14 — **Pause/resume supported in v1** via SIGSTOP/SIGCONT.
+- 2026-05-14 — **Concurrency cap = queue (FIFO)**, not reject. Foreground-while-queued behavior still TBD (open Q #7).
+- 2026-05-14 — **Inline-visible folded completion cards** for both foreground and background sub-agents. User sees them; LLM acts on them.
+- 2026-05-14 — Starter persona library = 16 personas covering the full SDLC, organized by phase: discovery (inspector, analyst, cartographer); spec/design (clarifier, designer, oracle); implementation (planner, builder, simplifier); review/verification (critic, redteam, finalizer, verifier); debugging (investigator); other (profiler, scribe). Adaptation rules and unadopted families documented in §Personas.
+- 2026-05-14 — **Foreground spawn that gets queued auto-downgrades to background** (returns `queued-as-background` with `agent_id`; completion arrives as standard notification card).
+- 2026-05-14 — **Filtered context = reimplemented**, not ported from `pi-subagents/shared/fork-context.ts`.
+- 2026-05-14 — **Persona discovery limited to `~/.pi` subtree** (user) and project `.pi/conductor/personas/`. No XDG / no scattered locations.
+- 2026-05-14 — **Foreground cancel UX:** Esc → detach to background; Ctrl+C → kill.
+- 2026-05-14 — **Default model per persona = inherit-only.** Shipped persona files never set `model` or `thinking`; phase-aware defaults rejected to keep installs portable across provider configs. Users override per-persona in `personaOverrides`.
