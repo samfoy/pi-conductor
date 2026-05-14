@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# pi-conductor pre-commit hook.
+#
+# Runs the unit test suite. Rejects the commit on any red test.
+#
+# To activate this hook in your clone, run:
+#   git config core.hooksPath hooks
+# or:
+#   ./scripts/install-hooks.sh
+#
+# To bypass for a real emergency (almost never appropriate):
+#   git commit --no-verify
+set -euo pipefail
+
+# Find repo root regardless of where git invokes us.
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+if [[ ! -f package.json ]]; then
+  echo "pre-commit: no package.json at $repo_root, skipping" >&2
+  exit 0
+fi
+
+if [[ ! -d node_modules ]]; then
+  echo "pre-commit: node_modules missing — run 'npm install' first" >&2
+  exit 1
+fi
+
+echo "pre-commit: running npm test (unit suite)…"
+if ! npm test --silent; then
+  echo
+  echo "pre-commit: tests FAILED. Commit rejected." >&2
+  echo "pre-commit: fix the tests or the code, then commit again." >&2
+  echo "pre-commit: emergency bypass (rare): git commit --no-verify" >&2
+  exit 1
+fi
+
+echo "pre-commit: tests green."
