@@ -176,6 +176,14 @@ export interface Run {
   transcriptPath: string;
   /** Path to final.md (last assistant text). Written on terminal status. */
   finalPath: string;
+  /**
+   * Absolute path to the pi session JSONL for this sub-agent. Populated when
+   * the spawn finalizes (pi creates the file under <runDir>/session/). Used
+   * by `ensemble_send` to resume the sub-agent via `pi --session <path>`.
+   * `undefined` for runs that were queued but never spawned, or for runs
+   * predating v0.5.
+   */
+  sessionPath?: string;
 
   /** Working directory of the subprocess. */
   cwd: string;
@@ -208,6 +216,7 @@ export interface RunRecord {
   recordPath: string;
   transcriptPath: string;
   finalPath: string;
+  sessionPath?: string;
 }
 
 export function toRunRecord(r: Run): RunRecord {
@@ -230,6 +239,7 @@ export function toRunRecord(r: Run): RunRecord {
     recordPath: r.recordPath,
     transcriptPath: r.transcriptPath,
     finalPath: r.finalPath,
+    sessionPath: r.sessionPath,
   };
 }
 

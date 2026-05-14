@@ -17,7 +17,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { mkdir, writeFile, appendFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -42,6 +42,42 @@ export function runsRoot(): string {
 
 export function runDir(id: string): string {
   return join(runsRoot(), id);
+}
+
+// ── Session file discovery ────────────────────────────────────────────
+
+/**
+ * Find the pi session JSONL file inside a `--session-dir`. Pi creates one
+ * file per session; if multiple exist (e.g. after multiple `ensemble_send`
+ * invocations on different cwds), pick the most recently modified.
+ *
+ * Returns `undefined` if the dir doesn't exist or contains no .jsonl files.
+ */
+export function findSessionFile(sessionDir: string): string | undefined {
+  let entries: string[];
+  try {
+    entries = readdirSync(sessionDir);
+  } catch {
+    return undefined;
+  }
+  let bestPath: string | undefined;
+  let bestMtime = -Infinity;
+  for (const name of entries) {
+    if (!name.endsWith(".jsonl")) continue;
+    const full = join(sessionDir, name);
+    let st;
+    try {
+      st = statSync(full);
+    } catch {
+      continue;
+    }
+    if (!st.isFile()) continue;
+    if (st.mtimeMs > bestMtime) {
+      bestMtime = st.mtimeMs;
+      bestPath = full;
+    }
+  }
+  return bestPath;
 }
 
 // ── Id allocation ────────────────────────────────────────────────────
@@ -266,6 +302,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     recordPath: join(dir, "record.json"),
     transcriptPath: join(dir, "transcript.jsonl"),
     finalPath: join(dir, "final.md"),
+    sessionPath: undefined,
   };
   opts.registry.register(run);
   void writeRecord(run);
@@ -332,6 +369,12 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     run.finishedAt = Date.now();
     if (terminal === "failed" && !run.errorMessage) {
       run.errorMessage = stderr.trim() || `pi subprocess exited with code ${exitCode}`;
+    }
+    // Discover the pi session file pi created in <runDir>/session/. Used by
+    // ensemble_send to resume this sub-agent later via `pi --session <path>`.
+    if (!run.sessionPath) {
+      const found = findSessionFile(sessionDir);
+      if (found) run.sessionPath = found;
     }
     opts.registry.notify(run);
     try {

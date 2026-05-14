@@ -39,6 +39,7 @@ import {
   buildPiArgs,
   buildSubAgentPrompt,
   elapsedStr,
+  findSessionFile,
   forceTerminate,
   formatTokens,
   formatUsage,
@@ -338,6 +339,56 @@ test("buildPiArgs: includes --thinking when set", () => {
   const i = args.indexOf("--thinking");
   assert.ok(i > 0);
   assert.equal(args[i + 1], "high");
+});
+
+// ── findSessionFile ──────────────────────────────────────────────────────
+
+import { writeFileSync, mkdirSync } from "node:fs";
+
+test("findSessionFile: returns the .jsonl path when exactly one is present", () => {
+  const paths = tmpRunPaths();
+  try {
+    const sd = join(paths.dir, "session");
+    mkdirSync(sd, { recursive: true });
+    const f = join(sd, "2026-05-14T00-00-00-000Z_abc.jsonl");
+    writeFileSync(f, "{}\n");
+    assert.equal(findSessionFile(sd), f);
+  } finally {
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
+test("findSessionFile: returns undefined when no .jsonl exists", () => {
+  const paths = tmpRunPaths();
+  try {
+    const sd = join(paths.dir, "session");
+    mkdirSync(sd, { recursive: true });
+    assert.equal(findSessionFile(sd), undefined);
+  } finally {
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
+test("findSessionFile: returns undefined when the directory does not exist", () => {
+  assert.equal(findSessionFile("/dev/null/does/not/exist"), undefined);
+});
+
+test("findSessionFile: returns the most-recently-modified .jsonl when multiple exist", () => {
+  const paths = tmpRunPaths();
+  try {
+    const sd = join(paths.dir, "session");
+    mkdirSync(sd, { recursive: true });
+    const oldF = join(sd, "old.jsonl");
+    const newF = join(sd, "new.jsonl");
+    writeFileSync(oldF, "{}\n");
+    // Backdate the older file so the newer one wins.
+    const past = Date.now() / 1000 - 60;
+    require("node:fs").utimesSync(oldF, past, past);
+    writeFileSync(newF, "{}\n");
+    assert.equal(findSessionFile(sd), newF);
+  } finally {
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
 });
 
 // ── pauseRun / resumeRun / forceTerminate (state-machine only) ────────
