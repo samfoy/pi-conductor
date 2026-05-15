@@ -379,7 +379,7 @@ test("resolveTimeoutMs: ensemble_send must respect persona.timeoutMinutes too (r
 
 // ── findSessionFile ──────────────────────────────────────────────────────
 
-import { writeFileSync, mkdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, utimesSync } from "node:fs";
 
 test("findSessionFile: returns the .jsonl path when exactly one is present", () => {
   const paths = tmpRunPaths();
@@ -419,7 +419,7 @@ test("findSessionFile: returns the most-recently-modified .jsonl when multiple e
     writeFileSync(oldF, "{}\n");
     // Backdate the older file so the newer one wins.
     const past = Date.now() / 1000 - 60;
-    require("node:fs").utimesSync(oldF, past, past);
+    utimesSync(oldF, past, past);
     writeFileSync(newF, "{}\n");
     assert.equal(findSessionFile(sd), newF);
   } finally {
