@@ -16,7 +16,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { buildSessionContext } from "@mariozechner/pi-coding-agent";
-import { Key } from "@mariozechner/pi-tui";
+import { Key, matchesKey } from "@mariozechner/pi-tui";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { registerCommands } from "./commands.ts";
 import { registerTools } from "./tools.ts";
@@ -45,10 +45,12 @@ export default function (pi: ExtensionAPI): void {
   // Track whether an overlay is already open so multiple opens don't stack.
   let overlayOpen = false;
 
-  // Active foreground-detach handler (set by tools.ts via
-  // registerForegroundDetach when a foreground spawn starts; cleared in
-  // its finally). Esc keybinding fires this when no overlay is open.
-  let activeForegroundDetach: (() => void) | null = null;
+  // Note: we used to register Key.escape via pi.registerShortcut, but pi
+  // reserves `app.interrupt` (default: escape, ctrl+c) and silently drops
+  // conflicting extension shortcuts at load. Instead, foreground-detach
+  // listens to raw terminal input (ctx.ui.onTerminalInput) for the
+  // duration of each foreground spawn, intercepts bare Esc, and consumes
+  // the keystroke so pi's interrupt action doesn't also fire.
 
   function openFocusedOverlay(agentId?: string): void {
     if (!ctxRef) return;
@@ -190,23 +192,45 @@ export default function (pi: ExtensionAPI): void {
       conductorModeOn = on;
     },
     /**
-     * One-shot detach slot for the active foreground spawn. Pi tool calls
-     * run sequentially within an assistant turn, so at most one foreground
-     * spawn can be in flight — a single slot is enough. Esc fires the
-     * registered handler (resolving the detach signal); the tool then
-     * returns its detached-as-background result.
+     * One-shot detach slot for the active foreground spawn. Listens to
+     * raw terminal input via ctx.ui.onTerminalInput (interactive mode
+     * only) and intercepts a bare Esc keystroke, resolving the detach
+     * signal. Esc is consumed (`{ consume: true }`) so pi's reserved
+     * `app.interrupt` action doesn't also fire — i.e. Esc detaches
+     * cleanly without killing. Pi tool calls run sequentially within an
+     * assistant turn, so a single slot is enough.
      */
     registerForegroundDetach: () => {
       let resolveDetach: () => void = () => {};
       const detachSignal = new Promise<void>((res) => {
         resolveDetach = res;
       });
-      const handler = () => resolveDetach();
-      activeForegroundDetach = handler;
+      // Wire the raw-input listener if a UI ctx is attached. In headless
+      // contexts (e.g. RPC mode) the listener is a no-op and detach
+      // simply never fires — the foreground spawn returns its summary
+      // when the run completes, exactly as before.
+      let unsubInput: (() => void) | null = null;
+      const ctx = ctxRef;
+      if (ctx && ctx.hasUI) {
+        unsubInput = ctx.ui.onTerminalInput((data) => {
+          // Don't hijack Esc when an overlay is open — the overlay's
+          // own Esc-to-close binding takes priority.
+          if (overlayOpen) return undefined;
+          if (matchesKey(data, "escape")) {
+            resolveDetach();
+            return { consume: true };
+          }
+          return undefined;
+        });
+      }
       const unregister = () => {
-        if (activeForegroundDetach === handler) activeForegroundDetach = null;
-        // Resolve the signal too so any awaiters unblock cleanly when the
-        // tool path finishes via the completed branch and unregisters.
+        if (unsubInput) {
+          unsubInput();
+          unsubInput = null;
+        }
+        // Resolve the detach signal so any awaiters of the completed
+        // branch unblock cleanly. Promise.race semantics make this
+        // a no-op when the awaiter has already settled.
         resolveDetach();
       };
       return { detachSignal, unregister };
@@ -291,19 +315,6 @@ export default function (pi: ExtensionAPI): void {
     description: "pi-conductor: open focused-stream overlay",
     handler: () => {
       openFocusedOverlay();
-    },
-  });
-
-  // Bind Esc to detach the active foreground sub-agent (continues in
-  // background). Guarded on overlayOpen so the focused-stream overlay's
-  // internal Esc-to-close behavior still works. PRD-locked Foreground
-  // cancel UX: Esc detaches; Ctrl+C kills (the latter is wired through
-  // the tool's signal.aborted path, which already SIGTERMs the run).
-  pi.registerShortcut(Key.escape, {
-    description: "pi-conductor: detach foreground sub-agent (continues in background)",
-    handler: () => {
-      if (overlayOpen) return;
-      activeForegroundDetach?.();
     },
   });
 }

@@ -473,7 +473,7 @@ test(
 );
 
 test(
-  "spawn integration: Esc-to-detach converts a foreground spawn to background",
+  "spawn integration: awaitOrDetach against a live spawn yields detached when the signal resolves first",
   { skip: !RUN_LIVE ? "set CONDUCTOR_LIVE_TESTS=1 to enable (uses real pi subprocess + AWS creds)" : false, timeout: 180_000 },
   async () => {
     const tmpCwd = mkdtempSync(join(tmpdir(), "conductor-live-cwd-"));

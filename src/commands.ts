@@ -412,12 +412,20 @@ function runHistory(
         }
       },
       statMtime: (id: string): number => {
-        // Use the run dir's mtime; record.json is rewritten on every
-        // status change, so the dir mtime tracks last activity.
+        // Use record.json's mtime: it's rewritten on every status change,
+        // so it tracks last activity with sub-second resolution. The run
+        // dir's mtime is only updated on entry creation/deletion on most
+        // filesystems (ext4), which would order rewrites by creation
+        // time, not last activity.
         try {
-          return statSync(runDir(id)).mtimeMs;
+          return statSync(join(runDir(id), "record.json")).mtimeMs;
         } catch {
-          return 0;
+          // Fall back to dir mtime if record.json is missing.
+          try {
+            return statSync(runDir(id)).mtimeMs;
+          } catch {
+            return 0;
+          }
         }
       },
     },

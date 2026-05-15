@@ -917,8 +917,10 @@ export function forceTerminate(
 
 /**
  * Send a Unix signal to a pid. Defaults to `process.kill` but accepts an
- * injectable mock so pauseRun / resumeRun / forceTerminate happy-path
- * tests don't have to fork real processes.
+ * injectable mock so pauseRun / resumeRun happy-path tests don't have to
+ * fork real processes. forceTerminate uses `run.proc.kill(...)` directly
+ * via the ChildProcess handle and is exercised by the existing
+ * state-machine tests.
  */
 export type Signaler = (pid: number, signal: NodeJS.Signals | number) => void;
 

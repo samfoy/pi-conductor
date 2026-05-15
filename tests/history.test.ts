@@ -130,7 +130,28 @@ test("buildHistoryReport: includes a final-text excerpt when available", () => {
   assert.match(out, /JWT auth design looks solid/);
 });
 
-test("buildHistoryReport: truncates long final-text excerpts", () => {
+test("buildHistoryReport: surfaces in-flight runs with the running glyph + omits final-text excerpt", () => {
+  const deps = makeDeps([
+    {
+      id: "oracle-7f3a",
+      record: rec({
+        id: "oracle-7f3a",
+        status: "running",
+        finishedAt: undefined,
+        startTime: Date.now() - 5_000,
+      }),
+      finalText: "this should not be rendered while the run is still alive",
+    },
+  ]);
+  const out = buildHistoryReport(deps, { limit: 20 });
+  // Running glyph from the status table.
+  assert.match(out, /●/);
+  assert.match(out, /running/);
+  // The final-text "shouldn't appear yet" — the run hasn't completed.
+  assert.doesNotMatch(out, /this should not be rendered/);
+});
+
+test("buildHistoryReport: tail-truncates the final-text excerpt with ellipsis", () => {
   const deps = makeDeps([
     {
       id: "oracle-7f3a",
@@ -145,7 +166,6 @@ test("buildHistoryReport: truncates long final-text excerpts", () => {
   }
   assert.match(out, /…|\.\.\./);
 });
-
 test("buildHistoryReport: failure runs surface the error message", () => {
   const deps = makeDeps([
     {
