@@ -142,38 +142,147 @@ test("buildConductorSystemPrompt: warns about stale parent snapshots in batched 
 
 test("buildConductorSystemPrompt: §10 — includes a 'when to reach for conductor' triggers section", () => {
   const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
-  // Stable substring: the explicit §10 heading. Wording can evolve;
-  // the heading shouldn't.
-  assert.match(out, /When to reach for conductor/i);
+  // v0.7 used "When to reach for conductor"; v0.8 uses "Delegation playbook".
+  // Either heading satisfies the LLM contract — the section exists.
+  assert.match(out, /When to reach for conductor|Delegation playbook/i);
 });
 
 test("buildConductorSystemPrompt: §10 — names the high-leverage delegation cases", () => {
   const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
-  // The triggers we want the LLM to actually internalize:
-  //   1. parallel review / multiple perspectives
-  //   2. user-asked-for review or pre-mortem
-  //   3. about-to-commit sanity check via oracle
-  //   4. fresh mental model from many files
-  //   5. multi-phase work (research → design → plan → build → verify)
-  //   6. parent context heavy / noisy turn
-  //   7. task-name-to-persona mapping
-  assert.match(out, /parallel|multiple (independent )?perspectives/i);
+  // Triggers we want the LLM to internalize:
+  //   - parallel reviews / multiple perspectives ("fan out")
+  //   - reviews / pre-mortems / sanity checks
+  //   - oracle as a synchronous review gate
+  //   - phased / chained work
+  assert.match(out, /parallel|fan(-| )?out|multiple (independent )?perspectives/i);
   assert.match(out, /review|pre-mortem|second opinion|sanity check/i);
-  assert.match(out, /commit|sanity check.*oracle|oracle.*before/i);
-  assert.match(out, /fresh.*context|fresh.*mental model|specialist/i);
-  assert.match(out, /phase(s)?|chain/i);
+  assert.match(out, /oracle/i);
+  assert.match(out, /chain|phase(s)?/i);
 });
 
-test("buildConductorSystemPrompt: §10 — also names when NOT to delegate", () => {
+test("buildConductorSystemPrompt: §10 — also names when NOT to delegate (or the slip antipattern)", () => {
   const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
-  // Don't-delegate triggers are equally important so the LLM doesn't
-  // spawn-spam every turn. Look for the inverse heading or guidance.
-  assert.match(out, /Don't delegate|do not delegate|skip delegation/i);
+  // v0.7 phrased this as "Don't delegate when:". v0.8 reframes it as
+  // "the slip antipattern". Either headline counts — the warning that
+  // a "quick read" turns into a long one is the durable signal.
+  assert.match(out, /Don't delegate|do not delegate|skip delegation|slip antipattern/i);
 });
 
 test("buildConductorSystemPrompt: §10 — includes the per-turn 'ask yourself' nudge", () => {
   const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
-  // The biggest behavior changer in practice: a per-turn-start prompt
-  // that forces the LLM to consider conductor before going solo.
-  assert.match(out, /(ask yourself|at (the )?start of (every|each) (non-trivial )?(user )?turn|before any non-trivial)/i);
+  // Per-turn-start prompt that forces the LLM to consider conductor
+  // before going solo. v0.8 phrasing: "What persona owns this verb?".
+  assert.match(
+    out,
+    /(ask yourself|at (the )?start of (every|each) (non-trivial )?(user )?turn|before any non-trivial|persona owns this verb)/i,
+  );
+});
+
+// ── §1 / §1.5: strict-overseer language (v0.8) ────────────────────
+
+test("buildConductorSystemPrompt: §1 — declares the conductor a strict overseer / manager", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  assert.match(out, /strict overseer|manager/i);
+});
+
+test("buildConductorSystemPrompt: §1 — explicitly says the conductor is not the implementer", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  assert.match(out, /You are not the implementer/i);
+});
+
+test("buildConductorSystemPrompt: §1.5 — bans `edit` via MUST NOT", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  // The banned-tools list is the load-bearing piece; the test asserts
+  // the strongest words appear together (MUST NOT + edit) so a softening
+  // edit ("prefer not to use edit") would be caught.
+  assert.match(out, /MUST NOT[\s\S]{0,200}\bedit\b/);
+});
+
+test("buildConductorSystemPrompt: §1.5 — bans `write` via MUST NOT", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  assert.match(out, /MUST NOT[\s\S]{0,200}\bwrite\b/);
+});
+
+test("buildConductorSystemPrompt: §1.5 — bans `lsp_code_actions` (LSP-quick-fix slip)", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  // The LSP-quick-fix path is a frequent slip-in-disguise: it edits
+  // code while pretending to be a 'view'. Explicit ban required.
+  assert.match(out, /lsp_code_actions/);
+});
+
+test("buildConductorSystemPrompt: §1.5 — publishes a slip-detection check", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  assert.match(out, /slip/i);
+});
+
+test("buildConductorSystemPrompt: §1.5 — enumerates orientation as the narrow exception", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  // The 'You MAY' block names orientation reads (meta-docs, ls/git
+  // status, ~3 file reads). Either the word 'orientation' or the
+  // file-count cap is the durable signal.
+  assert.match(out, /orientation|3 (source )?file/i);
+});
+
+test("buildConductorSystemPrompt: §1.5 — names code-mutating tools as the principle for the ban", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  // The principle paragraph distinguishes producing-code from
+  // producing-facts. Either side of the dichotomy must appear.
+  assert.match(out, /(produce|mutate)[\s\S]{0,80}(code|facts)/i);
+});
+
+// ── §10: delegation playbook (v0.8) ────────────────────────────────
+
+test("buildConductorSystemPrompt: §10 — reframed as 'Delegation playbook'", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  assert.match(out, /Delegation playbook/i);
+});
+
+test("buildConductorSystemPrompt: §10 — pattern→persona trigger table covers the canonical verbs", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  // §10's trigger table maps user-prose verbs to personas. We assert
+  // every canonical verb's owner shows up in a backtick-wrapped name
+  // (the table's stable form).
+  for (const persona of [
+    "investigator",
+    "inspector",
+    "designer",
+    "planner",
+    "builder",
+    "oracle",
+    "profiler",
+    "clarifier",
+  ]) {
+    assert.match(out, new RegExp(`\`${persona}\``));
+  }
+});
+
+test("buildConductorSystemPrompt: §10 — names the slip antipattern explicitly", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  assert.match(out, /slip antipattern/i);
+});
+
+test("buildConductorSystemPrompt: §10 — closer triggers (finalizer/verifier) are in the trigger table (F1)", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  // F1 added rows 9 (finalizer) and 10 (verifier) to the §10 trigger
+  // table during the oracle-revision pass. Row 9 frames finalizer as
+  // the mandatory closer for greenfield/refactor/perf chains; row 10
+  // frames verifier as the closer for bug-fix chains. The 8-persona
+  // backtick-presence test above doesn't catch a regression where the
+  // row prose is dropped — finalizer appears ONLY in §10, and verifier
+  // appears in §1's reviewer list independently. Pin the row prose so
+  // a future rewrite that silently regresses the closer rows fails here.
+  assert.match(out, /finalizer[\s\S]{0,80}Mandatory closer/i);
+  assert.match(out, /verifier[\s\S]{0,80}Closer for bug-fix/i);
+});
+
+// ── §9: chain shapes (v0.8 additions) ──────────────────────────────
+
+test("buildConductorSystemPrompt: §9 — lists clarifier as the disambiguation chain", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  assert.match(out, /Ambiguous request[\s\S]{0,80}clarifier/i);
+});
+
+test("buildConductorSystemPrompt: §9 — lists inspector as the fact-finding chain", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  assert.match(out, /Fact-finding[\s\S]{0,80}inspector/i);
 });
