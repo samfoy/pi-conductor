@@ -5,7 +5,7 @@
  * values that violate the strictest provider charset (Bedrock's
  * `[a-zA-Z0-9_-]+`). When a model hallucinates XML/whitespace into a
  * tool name (witnessed in the `samfp/Rosie` session 2026-05-15:
- * `'ensemble_kill" >\n</invoke>'`, 24 bytes), every subsequent LLM turn
+ * `'ensemble_kill" >\n</invoke>'`, 26 bytes), every subsequent LLM turn
  * fails server-side validation and permanently soft-bricks the session
  * — "the wedge".
  *
