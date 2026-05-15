@@ -18,9 +18,9 @@
  * Both helpers are pure (no I/O, no TUI).
  */
 
-import { elapsedStr, formatUsage, getFinalText } from "./runs.ts";
+import { elapsedStr, formatUsage, getFinalText, type RunRegistry } from "./runs.ts";
 import { renderHeader, renderTranscript } from "./transcript.ts";
-import type { Run } from "./types.ts";
+import { isTerminal, type Run } from "./types.ts";
 
 const STATUS_GLYPH: Record<Run["status"], string> = {
   queued: "◌",
@@ -267,5 +267,54 @@ export function createUpdateThrottle<T>(
         timer = null;
       }
     },
+  };
+}
+
+// ── Post-detach completion listener ───────────────────────────────
+
+/**
+ * Wires the registry-onChange listener responsible for pushing the
+ * standard <sub-agent-completed> notification card after Esc-to-detach.
+ *
+ * Behavior:
+ *   - Subscribes to registry changes filtered by run.id; on terminal
+ *     status flip, fires `pushNotification(run)` and unsubs.
+ *   - Race-guard: if the run is ALREADY terminal at install time, fires
+ *     the notification synchronously and unsubs immediately. This handles
+ *     the microtask window where awaitOrDetach picked detach but the run
+ *     reached terminal between the race resolving and the listener
+ *     installing — registry.notify() already fired with no listener
+ *     attached, so without this guard the notification would be lost.
+ *
+ * Returns the unsubscribe function so the caller can tear down early
+ * (e.g. on session shutdown).
+ */
+export function installPostDetachCompletionListener(
+  run: Run,
+  registry: RunRegistry,
+  pushNotification: (run: Run) => void,
+): () => void {
+  let active = true;
+  const unsub = registry.onChange((r) => {
+    if (!active) return;
+    if (r.id !== run.id) return;
+    if (!isTerminal(r.status)) return;
+    active = false;
+    unsub();
+    pushNotification(r);
+  });
+  // Race-guard: synchronous re-check after registering. If the run
+  // already reached terminal in the microtask window between the
+  // detach race resolving and this function running, notify() has
+  // already fired with no listener attached — fire it now.
+  if (active && isTerminal(run.status)) {
+    active = false;
+    unsub();
+    pushNotification(run);
+  }
+  return () => {
+    if (!active) return;
+    active = false;
+    unsub();
   };
 }

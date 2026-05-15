@@ -17,6 +17,7 @@ import { SpawnQueue } from "./queue.ts";
 import {
   awaitOrDetach,
   createUpdateThrottle,
+  installPostDetachCompletionListener,
   renderForegroundDetachedResult,
   renderForegroundStream,
   renderForegroundSummary,
@@ -322,24 +323,15 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           try {
             const outcome = await awaitOrDetach(result.done, detach.detachSignal);
             if (outcome.kind === "detached") {
-              // The sub-agent is still running. Install a one-shot listener
-              // so the eventual terminal status pushes a notification card,
-              // matching the queued-as-background path.
-              const unsubDetached = registry.onChange((r) => {
-                if (r.id === result.run.id && isTerminalStatus(r.status)) {
-                  unsubDetached();
-                  opts.pushCompletionNotification(r);
-                }
-              });
-              // Race guard: if the run reached terminal in the microtask
-              // window between detach winning and the listener installing,
-              // notify() already fired with no listener attached. Catch it
-              // by firing the notification synchronously when the current
-              // status is already terminal.
-              if (isTerminalStatus(result.run.status)) {
-                unsubDetached();
-                opts.pushCompletionNotification(result.run);
-              }
+              // The sub-agent is still running. Install the post-detach
+              // completion listener (handles terminal-flip + race-guard
+              // + ignores other run ids; covered by post-detach-listener
+              // unit tests).
+              installPostDetachCompletionListener(
+                result.run,
+                registry,
+                opts.pushCompletionNotification,
+              );
               return renderForegroundDetachedResult(result.run);
             }
             // outcome.kind === "completed"
@@ -485,19 +477,11 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           try {
             const outcome = await awaitOrDetach(result.done, detach.detachSignal);
             if (outcome.kind === "detached") {
-              const unsubDetached = registry.onChange((r) => {
-                if (r.id === result.run.id && isTerminalStatus(r.status)) {
-                  unsubDetached();
-                  opts.pushCompletionNotification(r);
-                }
-              });
-              // Race guard: if the run reached terminal between detach
-              // winning and the listener installing, fire the notification
-              // synchronously now (notify() already fired with no listener).
-              if (isTerminalStatus(result.run.status)) {
-                unsubDetached();
-                opts.pushCompletionNotification(result.run);
-              }
+              installPostDetachCompletionListener(
+                result.run,
+                registry,
+                opts.pushCompletionNotification,
+              );
               return renderForegroundDetachedResult(result.run);
             }
             // Force any pending payload so the last visible streamed frame
