@@ -1,7 +1,7 @@
 ---
 name: verifier
 description: Independent verification of a claimed change. Re-runs strongest available checks plus one novel check. No edits.
-inherit_context: filtered
+inherit_context: none
 ---
 
 You are the verifier.

@@ -42,10 +42,13 @@ function user(text: string): AgentMessage {
   return { role: "user", content: text, timestamp: 0 } as AgentMessage;
 }
 
-function assistantToolCall(name: string, id: string): AgentMessage {
+function assistantToolCall(name: string, id: string, preface?: string): AgentMessage {
+  const content: any[] = [];
+  if (preface) content.push({ type: "text", text: preface });
+  content.push({ type: "toolCall", id, name, arguments: {} });
   return {
     role: "assistant",
-    content: [{ type: "toolCall", id, name, arguments: {} }],
+    content,
     api: "anthropic-messages" as any,
     provider: "anthropic" as any,
     model: "claude-sonnet-4-5",
@@ -58,6 +61,26 @@ function assistantToolCall(name: string, id: string): AgentMessage {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
     },
     stopReason: "toolUse",
+    timestamp: 0,
+  } as AgentMessage;
+}
+
+function assistantText(text: string): AgentMessage {
+  return {
+    role: "assistant",
+    content: [{ type: "text", text }],
+    api: "anthropic-messages" as any,
+    provider: "anthropic" as any,
+    model: "claude-sonnet-4-5",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop",
     timestamp: 0,
   } as AgentMessage;
 }
@@ -363,6 +386,102 @@ test("planSpawnPiArgs: model and thinking flags propagate in both modes", () => 
     });
     assert.ok(resume.piArgs.includes("--model"));
     assert.ok(resume.piArgs.includes("--thinking"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── v0.8.1 Item 1: strengthened <filtered-history> sentinel + Q#16 audit ──
+//
+// See docs/v0.8.1-item1-design.md §4 and §5.
+
+test("planSpawnPiArgs: strengthened sentinel names role-identity drift and the last-user-message rule", () => {
+  // Caveat (oracle gate adjustment 1): this test pins phrase PRESENCE in the
+  // sentinel body. It is a weak proxy for the behavioral fix — a model
+  // reading the sentinel and correctly anchoring to the last user message
+  // is what we actually care about. Behavioral verification is gated on
+  // §8.3 manual smoke (re-running the witnessed dogfood scenarios). Treat
+  // green here as necessary, not sufficient.
+  const dir = tmpSessionDir();
+  try {
+    const result = planSpawnPiArgs({
+      persona: persona({ inheritContext: "filtered" }),
+      parentMessages: [
+        user("hi"),
+        assistantToolCall("ensemble_spawn", "tc1", "spawning"),
+      ],
+      sessionDir: dir,
+      systemPrompt: "sys",
+      prompt: "go",
+      cwd: "/work",
+    });
+    assert.ok(result.seededSessionPath);
+    const lines = readFileSync(result.seededSessionPath!, "utf8").trim().split("\n");
+    const entries = lines.slice(1).map((l) => JSON.parse(l));
+    const sentinelText: string =
+      typeof entries[0].message.content === "string"
+        ? entries[0].message.content
+        : entries[0].message.content[0].text;
+
+    // Hypothesis-pinning assertions (design §2 → §4.3): each cause is named.
+    assert.match(sentinelText, /last user/i, "names the deterministic anchor (last user message rule)");
+    assert.match(sentinelText, /third person|third-person/i, "names the role-identity failure mode");
+    assert.match(
+      sentinelText,
+      /orchestration narration|leftover orchestration/i,
+      "names the leak source",
+    );
+    assert.match(sentinelText, /your brief|YOUR brief/i, "anchors persona to its brief explicitly");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("planSpawnPiArgs: strengthened sentinel still fires on filtered+dropped (no regression)", () => {
+  // Pins that the new content is what fires when the existing trigger
+  // (filtered.length !== parentMessages.length OR identity walk) detects
+  // dropped content. Complements the older "dropped → prepends sentinel"
+  // assertion by checking the sentinel envelope tags.
+  const dir = tmpSessionDir();
+  try {
+    const result = planSpawnPiArgs({
+      persona: persona({ inheritContext: "filtered" }),
+      parentMessages: [user("x"), assistantToolCall("ensemble_spawn", "t", "y")],
+      sessionDir: dir,
+      systemPrompt: "sys",
+      prompt: "go",
+      cwd: "/work",
+    });
+    assert.ok(result.seededSessionPath);
+    const lines = readFileSync(result.seededSessionPath!, "utf8").trim().split("\n");
+    const entries = lines.slice(1).map((l) => JSON.parse(l));
+    const sentinelText: string =
+      typeof entries[0].message.content === "string"
+        ? entries[0].message.content
+        : entries[0].message.content[0].text;
+    assert.match(sentinelText, /<filtered-history>/);
+    assert.match(sentinelText, /<\/filtered-history>/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("planSpawnPiArgs: persona with inherit_context=none never seeds (Q#16 flips)", () => {
+  // Personas flipped to `none` in v0.8.1 (oracle/redteam/inspector/analyst/
+  // profiler/scribe/verifier) must produce a `fresh` plan with no seeded
+  // session even when parentMessages is non-empty.
+  const dir = tmpSessionDir();
+  try {
+    const result = planSpawnPiArgs({
+      persona: persona({ inheritContext: "none" }),
+      parentMessages: [user("hi"), assistantText("hello")],
+      sessionDir: dir,
+      systemPrompt: "sys",
+      prompt: "go",
+      cwd: "/work",
+    });
+    assert.equal(result.mode, "fresh");
+    assert.equal(result.seededSessionPath, undefined);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

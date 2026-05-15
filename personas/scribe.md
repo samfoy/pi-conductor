@@ -1,7 +1,7 @@
 ---
 name: scribe
 description: Documentation drafting — READMEs, docstrings, design summaries, PRDs.
-inherit_context: filtered
+inherit_context: none
 ---
 
 You are the scribe.

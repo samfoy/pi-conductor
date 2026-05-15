@@ -177,13 +177,13 @@ test("filterParentContext: tool-call-only assistant message is dropped (excluded
   assert.deepEqual(filterParentContext(msgs), []);
 });
 
-test("filterParentContext: assistant message with prose + excluded tool call → keeps prose, drops call", () => {
+test("filterParentContext: (a') drops assistant message containing excluded tool call (prose included)", () => {
+  // v0.8.1 contract: any assistant message whose content array contains an
+  // excluded toolCall is dropped whole — the surviving text block IS the
+  // orchestration narration leak we're closing. See design §3.
   const msgs = [assistantToolCall("ensemble_spawn", "tc1", "I'll spawn an inspector")];
   const out = filterParentContext(msgs);
-  assert.equal(out.length, 1);
-  assert.deepEqual((out[0] as any).content, [
-    { type: "text", text: "I'll spawn an inspector" },
-  ]);
+  assert.deepEqual(out, []);
 });
 
 test("filterParentContext: toolResult for excluded tool call is dropped (no orphan results)", () => {
@@ -193,10 +193,10 @@ test("filterParentContext: toolResult for excluded tool call is dropped (no orph
     user("ok thanks"),
   ];
   const out = filterParentContext(msgs);
-  // Only the prose preface from the assistant + the user follow-up survive.
-  assert.equal(out.length, 2);
-  assert.equal(out[0].role, "assistant");
-  assert.equal(out[1].role, "user");
+  // Under (a'), the entire assistant orchestration turn (prose + toolCall)
+  // is dropped along with its toolResult. Only the user follow-up survives.
+  assert.equal(out.length, 1);
+  assert.equal(out[0].role, "user");
 });
 
 test("filterParentContext: read tool call + result pass through (file knowledge is useful)", () => {
@@ -300,10 +300,12 @@ test("filterParentContext: realistic mixed sequence — keeps prose & file ops, 
     assistantText("inspector says it's fine"),
   ];
   const out = filterParentContext(msgs);
-  // Expected: user, assistant(read+preface), toolResult(read), assistant("exports..."),
-  //           user("now spawn..."), assistant("spawning inspector" prose only),
-  //           assistant("inspector says...")
-  assert.equal(out.length, 7);
+  // Under (a') v0.8.1: the "spawning inspector" assistant turn is dropped
+  // whole (prose + toolCall + matching toolResult + completion card).
+  // Surviving: user, assistant(read+preface), toolResult(read),
+  //            assistant("exports..."), user("now spawn..."),
+  //            assistant("inspector says...").
+  assert.equal(out.length, 6);
   assert.equal(out[0].role, "user");
   assert.equal(out[1].role, "assistant");
   assert.ok(((out[1] as any).content as any[]).some((b) => b.type === "toolCall" && b.name === "read"));
@@ -313,11 +315,14 @@ test("filterParentContext: realistic mixed sequence — keeps prose & file ops, 
   assert.deepEqual((out[3] as any).content, [{ type: "text", text: "foo.txt exports a constant x" }]);
   assert.equal(out[4].role, "user");
   assert.equal(out[5].role, "assistant");
-  // The 'spawning inspector' assistant message should retain prose, drop the toolCall.
-  const blocks5 = (out[5] as any).content as any[];
-  assert.ok(blocks5.every((b) => b.type !== "toolCall"));
-  assert.ok(blocks5.some((b) => b.type === "text" && b.text === "spawning inspector"));
-  assert.equal(out[6].role, "assistant");
+  // No surviving assistant message contains the dropped "spawning inspector" prose.
+  for (const m of out) {
+    if ((m as any).role !== "assistant") continue;
+    const blocks = (m as any).content as any[];
+    for (const b of blocks) {
+      if (b?.type === "text") assert.doesNotMatch(b.text, /spawning inspector/i);
+    }
+  }
 });
 
 test("filterParentContext: custom excludeToolPrefixes overrides defaults", () => {
@@ -402,4 +407,114 @@ test("filterParentContext: subagent-* CustomMessages are dropped (pi-essentials/
 test("filterParentContext: unrelated CustomMessage types still pass through", () => {
   const msgs = [customMsg("sub-task-progress", "50%"), customMsg("auto-work-logger", "x")];
   assert.deepEqual(filterParentContext(msgs), msgs);
+});
+
+// ── v0.8.1 Item 1: (a') structural drop — assistant turns whose content
+//    array contains any excluded toolCall are dropped whole (prose included).
+//    See docs/v0.8.1-item1-design.md §3 + §6.1 A.
+
+test("filterParentContext: (a') drops whole assistant message when prose co-occurs with excluded toolCall (regression: 2026-05-15 dogfood)", () => {
+  // Witnessed bug: parent narrated "Spawning critic-X..." in the same
+  // assistant turn as the ensemble_spawn toolCall; the rewrite path kept
+  // the prose, the spawned critic read it as part of its brief and
+  // meta-commented instead of executing.
+  // Fix: any assistant message whose content contained an excluded toolCall
+  // is dropped whole — prose and all.
+  const msgs = [
+    user("Please review the diff."),
+    assistantToolCall(
+      "ensemble_spawn",
+      "tc1",
+      "Spawning critic-X to gate the diff. 3/4 slots in use, holding the turn.",
+    ),
+    toolResult("tc1", "ensemble_spawn", "agent_id=critic-X"),
+    customMsg(
+      "ensemble-notification",
+      "<sub-agent-completed>critic-X done</sub-agent-completed>",
+    ),
+    user("ok thanks, here is the actual brief: ..."),
+  ];
+  const out = filterParentContext(msgs);
+  // Expected: original user, then user follow-up. Assistant orchestration
+  // turn is dropped whole; toolResult dropped (excluded id); customMsg
+  // dropped (ensemble-notification).
+  assert.equal(out.length, 2);
+  assert.equal(out[0].role, "user");
+  assert.equal(out[1].role, "user");
+  // Belt-and-suspenders: no surviving assistant message anywhere mentions
+  // the persona id by name.
+  for (const m of out) {
+    if ((m as any).role !== "assistant") continue;
+    const blocks = (m as any).content;
+    if (!Array.isArray(blocks)) continue;
+    for (const b of blocks) {
+      if (b?.type === "text") assert.doesNotMatch(b.text, /critic-X/i);
+    }
+  }
+});
+
+test("filterParentContext: (a') drops thinking + prose + excluded toolCall whole", () => {
+  const msg: AgentMessage = {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "I should spawn an oracle now" },
+      { type: "text", text: "Spawning oracle to gate." },
+      { type: "toolCall", id: "tc1", name: "ensemble_spawn", arguments: {} },
+    ] as any,
+    api: "anthropic-messages" as any,
+    provider: "anthropic" as any,
+    model: "claude-sonnet-4-5",
+    usage: {
+      input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "toolUse",
+    timestamp: 0,
+  } as AgentMessage;
+  assert.deepEqual(filterParentContext([msg]), []);
+});
+
+test("filterParentContext: (a') drops mixed excluded + non-excluded toolCall + prose whole", () => {
+  // Decision: any excluded toolCall in the same message ⇒ orchestration turn ⇒ drop.
+  // See design §3.4 — preserving the non-excluded toolCall would create a dangling
+  // toolResult orphan; simpler invariant is to scrub the entire turn.
+  const msg: AgentMessage = {
+    role: "assistant",
+    content: [
+      { type: "text", text: "Spawning inspector and reading foo.txt." },
+      { type: "toolCall", id: "tc1", name: "read", arguments: {} },
+      { type: "toolCall", id: "tc2", name: "ensemble_spawn", arguments: {} },
+    ] as any,
+    api: "anthropic-messages" as any,
+    provider: "anthropic" as any,
+    model: "claude-sonnet-4-5",
+    usage: {
+      input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "toolUse",
+    timestamp: 0,
+  } as AgentMessage;
+  assert.deepEqual(filterParentContext([msg]), []);
+});
+
+test("filterParentContext: (a') does not drop assistant messages with non-excluded toolCalls (read+prose preserved)", () => {
+  // Sanity: read toolCall + prose should still survive — (a') only fires
+  // when an excluded toolCall is in the content array.
+  const msgs = [assistantToolCall("read", "tc1", "let me look at foo.txt")];
+  const out = filterParentContext(msgs);
+  assert.equal(out.length, 1);
+  const blocks = (out[0] as any).content as any[];
+  assert.ok(blocks.some((b) => b.type === "text"));
+  assert.ok(blocks.some((b) => b.type === "toolCall" && b.name === "read"));
+});
+
+test("filterParentContext: (a') applies symmetrically to subagent prefix (not just ensemble_*)", () => {
+  // Same drop semantics for the legacy `subagent` extension's tool calls —
+  // the trigger dispatches on the configured excludeToolPrefixes set, no
+  // hard-coded ensemble_* special case.
+  const msgs = [
+    assistantToolCall("subagent", "tc1", "Backgrounding subagent X."),
+  ];
+  assert.deepEqual(filterParentContext(msgs), []);
 });

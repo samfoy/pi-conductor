@@ -4,10 +4,10 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseFrontmatter, resolvePersonas } from "../src/personas.ts";
+import { builtinPersonasDir, parseFrontmatter, resolvePersonas } from "../src/personas.ts";
 
 test("parseFrontmatter: empty body without frontmatter", () => {
   const r = parseFrontmatter("hello world");
@@ -207,5 +207,58 @@ prompt`,
   } finally {
     if (realHome !== undefined) process.env.HOME = realHome;
     else delete process.env.HOME;
+  }
+});
+
+// ── v0.8.1 Item 1 — PRD Open Q #16 inherit_context audit ──
+//
+// Pins the per-persona table from docs/v0.8.1-item1-design.md §5. Future
+// drift on any of the 16 shipped personas fails this test loudly. Frontmatter-
+// only assertion (no body checks) — the audit is about routing decisions, not
+// behavior.
+
+test("personas: v0.8.1 inherit_context audit (PRD Open Q #16 fold-in)", () => {
+  const expected: Record<string, "none" | "filtered" | "full"> = {
+    // 7 read-only specialists / gates flipped to none in v0.8.1.
+    oracle: "none",
+    redteam: "none",
+    inspector: "none",
+    analyst: "none",
+    profiler: "none",
+    scribe: "none",
+    verifier: "none",
+    // 9 personas keep filtered (trajectory-needers, gates with parent context
+    // value, and write-capable producers).
+    investigator: "filtered",
+    clarifier: "filtered",
+    cartographer: "filtered",
+    critic: "filtered",
+    finalizer: "filtered",
+    designer: "filtered",
+    planner: "filtered",
+    simplifier: "filtered",
+    builder: "filtered",
+  };
+
+  const dir = builtinPersonasDir();
+  const files = readdirSync(dir).filter((f) => f.endsWith(".md"));
+  // Sanity: 16 shipped personas. If this fails, either a persona was added
+  // or removed without updating the audit — update the table above first.
+  assert.equal(files.length, 16, `expected 16 personas, found ${files.length}`);
+
+  for (const file of files) {
+    const text = readFileSync(join(dir, file), "utf8");
+    const { frontmatter } = parseFrontmatter(text);
+    const name = String(frontmatter.name);
+    const expectedInherit = expected[name];
+    assert.ok(
+      expectedInherit !== undefined,
+      `persona '${name}' (${file}) is not in the v0.8.1 audit table; update docs/v0.8.1-item1-design.md §5 and this test`,
+    );
+    assert.equal(
+      frontmatter.inherit_context,
+      expectedInherit,
+      `persona '${name}' inherit_context drifted from v0.8.1 audit (expected '${expectedInherit}', got '${frontmatter.inherit_context}')`,
+    );
   }
 });

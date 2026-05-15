@@ -349,28 +349,35 @@ function trimLeadingNonUser(messages: AgentMessage[]): AgentMessage[] {
 
 /**
  * Synthetic <filtered-history> sentinel prepended to seeded sessions when
- * `filterParentContext` actually removed parent content. Tells the
- * sub-agent that its inherited transcript is incomplete, so it shouldn't
- * trust dangling references like "the inspector said X" without a
- * matching tool result — those orchestration calls were dropped.
+ * `filterParentContext` actually removed parent content. v0.8.1 (b)-strengthen:
+ * the body now names the role-identity failure mode (third-person prose about
+ * the persona) and gives the persona a deterministic anchor (the LAST user
+ * message). See docs/v0.8.1-item1-design.md §4.
  */
 function filteredHistorySentinel(): AgentMessage {
   return {
     role: "user",
     content:
       "<filtered-history>\n" +
-      "The transcript above and below this note is a FILTERED slice of a parent " +
-      "conductor's conversation. The following entry types were dropped before " +
-      "you saw this transcript:\n" +
+      "You are reading a FILTERED slice of a parent conductor's conversation. Two " +
+      "things to know before you act:\n\n" +
+      "1. **Your brief is the LAST user-role message in this transcript.** Earlier " +
+      "user-role messages were the parent conductor talking to itself or to its " +
+      "user; they are framing, not your task. Treat them as background context.\n\n" +
+      "2. **Some assistant prose may discuss YOU in the third person** — sentences " +
+      "like \"spawning critic-X to gate Y\" or \"holding the turn while inspector " +
+      "runs\". That prose is leftover orchestration narration from the parent. It " +
+      "is NOT a quote of your brief, NOT instructions to you, and NOT a " +
+      "conversation you are part of. Ignore it; do not meta-comment on it.\n\n" +
+      "The following entry types were dropped before you saw this transcript:\n" +
       "  - Orchestration tool calls (ensemble_*, subagent) and their results\n" +
       "  - Sub-agent completion notifications (`<sub-agent-completed>` cards)\n" +
       "  - The conductor's internal reasoning (`thinking` blocks)\n" +
       "  - Bash commands marked with the `!!` excludeFromContext flag\n\n" +
-      "If you see assistant prose that references prior orchestration (\"I spawned " +
-      "X\", \"the inspector reported Y\", etc.) treat those statements with " +
-      "skepticism — you do NOT have the actual tool calls or results to verify " +
-      "them. Focus on the user's prose, file reads/writes you can see, and the " +
-      "task prompt below.\n" +
+      "If you see a dangling reference to prior orchestration (\"the inspector said " +
+      "X\", \"as oracle noted\") and you do not see a matching tool result above, that " +
+      "reference is from a dropped turn — treat the claim with skepticism.\n\n" +
+      "Now: read your brief (the last user message), do the work, return your result.\n" +
       "</filtered-history>",
     timestamp: 0,
   } as AgentMessage;

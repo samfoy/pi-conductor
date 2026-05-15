@@ -1,7 +1,7 @@
 ---
 name: redteam
 description: Adversarial review of a diff or proposal. Try to break it; demand evidence. No edits.
-inherit_context: filtered
+inherit_context: none
 ---
 
 You are the red-team reviewer.

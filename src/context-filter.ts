@@ -85,9 +85,15 @@ export function filterParentContext(
 
   // Pre-pass: collect the set of toolCall ids whose tool name matches an
   // excluded prefix, so we can drop the corresponding toolResult later
-  // and avoid leaving orphans behind.
+  // and avoid leaving orphans behind. Also collect the set of message
+  // indices whose content array contained at least one excluded toolCall;
+  // those assistant messages are dropped whole (a' from v0.8.1 design §3)
+  // — prose is treated as orchestration narration that survived alongside
+  // the dropped tool call (e.g. "Spawning critic-X to gate the diff").
   const excludedCallIds = new Set<string>();
-  for (const msg of messages) {
+  const droppedAssistantIndices = new Set<number>();
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
     if (!msg || (msg as any).role !== "assistant") continue;
     const content = (msg as any).content;
     if (!Array.isArray(content)) continue;
@@ -98,12 +104,14 @@ export function filterParentContext(
         matchesAnyPrefix(block.name, excludeToolPrefixes)
       ) {
         if (typeof block.id === "string") excludedCallIds.add(block.id);
+        droppedAssistantIndices.add(i);
       }
     }
   }
 
   const out: AgentMessage[] = [];
-  for (const msg of messages) {
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
     if (!msg) continue;
     const role = (msg as any).role;
     switch (role) {
@@ -111,6 +119,9 @@ export function filterParentContext(
         out.push(msg);
         break;
       case "assistant": {
+        // (a') v0.8.1: any assistant message whose content array contained
+        // an excluded toolCall is dropped whole — prose included.
+        if (droppedAssistantIndices.has(i)) break;
         const content = (msg as any).content;
         if (!Array.isArray(content)) {
           out.push(msg);
@@ -118,6 +129,9 @@ export function filterParentContext(
         }
         const filtered = content.filter((block: any) => {
           if (block?.type === "thinking" && dropThinking) return false;
+          // Excluded toolCalls are unreachable here — if any were present, the
+          // whole message was dropped above. Keep the predicate symmetric for
+          // future edits.
           if (block?.type !== "toolCall") return true;
           if (typeof block.name !== "string") return true;
           return !matchesAnyPrefix(block.name, excludeToolPrefixes);
@@ -126,6 +140,10 @@ export function filterParentContext(
         if (filtered.length === content.length) {
           out.push(msg); // unchanged
         } else {
+          // TODO(v0.8.2): this rewrite path (now reached only for dropThinking)
+          // still propagates stale stopReason: "toolUse" when thinking blocks
+          // were dropped from a tool-use turn. Latent; no consumers check
+          // stopReason on filtered slices today. See design §3.5.
           out.push({ ...(msg as any), content: filtered });
         }
         break;
