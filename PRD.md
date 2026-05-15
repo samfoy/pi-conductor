@@ -1,11 +1,11 @@
 # pi-conductor — PRD
 
-**Status:** v0.7 shipped (drafted v0.2)
+**Status:** v0.7 shipped (drafted v0.2). v0.8 in progress.
 **Owner:** samfp
 **Created:** 2026-05-14
 **Last updated:** 2026-05-15
 
-## Locked decisions (v0.7)
+## Locked decisions (v0.7–0.8)
 
 | Decision | Choice | Rationale |
 |---|---|---|
@@ -21,7 +21,7 @@
 | Persona discovery paths | **`~/.pi` subtree only (and project `.pi/`).** | User personas at `~/.pi/agent/conductor/personas/`; project at `<project>/.pi/conductor/personas/`. No XDG, no autoloop-style scattered locations. |
 | Foreground cancel UX | **Esc detaches; Ctrl+C kills.** | Implemented via per-spawn `ctx.ui.onTerminalInput` listener (intercepts bare Esc before pi's reserved `app.interrupt` action fires). `awaitOrDetach` race converts a foreground spawn into a background run; Ctrl+C SIGTERMs via the existing `signal.aborted` path. |
 | Default model per persona | **Inherit-only.** | Every persona inherits the parent's model and thinking unless explicitly overridden in the persona's frontmatter or in `personaOverrides`. No phase-aware defaults baked in. Install never references a model the user hasn't configured. |
-| Conductor mode at extension load | **ON by default.** | Anyone who installs pi-conductor wants the system-prompt addendum injecting at every turn. `PI_CONDUCTOR_MODE=0` / `off` is preserved as an explicit per-session opt-out; `/conductor on \| off` is the per-session toggle. |
+| Conductor mode at extension load | **OFF by default (v0.8).** Was ON in v0.7. | The strict-overseer §1 addendum is intentionally prescriptive ("you are not the implementer"); injecting it without an explicit signal would surprise every loaded session. Conductor mode is now opt-in via `defaultMode: "on"` in config (`~/.pi/agent/extensions/conductor/config.json`), `PI_CONDUCTOR_MODE=1` in env, or `/conductor on` per-session. Precedence: project config > user config > env var > built-in default `off`. |
 | Foreground stream width | **Live terminal columns**, clamped to [40, 240], default 100. | Width is captured once at spawn start and frozen for the duration of the spawn (no SIGWINCH-induced flicker). The focused-stream overlay (Ctrl+G) is the source of truth for full live-resizable viewing. |
 
 ## TL;DR
@@ -399,8 +399,11 @@ All overridable via the standard pi keybindings file.
 
 ```jsonc
 {
-  "defaultModel": "anthropic/claude-sonnet-4",
-  "defaultThinking": "medium",
+  // defaultModel / defaultThinking are reserved for a future milestone.
+  // The shipped default is to inherit from the parent session.
+  "defaultMode": "off",                  // v0.8: "on" | "off". Pinned
+                                         // conductor mode at extension load.
+                                         // Beats PI_CONDUCTOR_MODE env var.
   "defaultTimeoutMinutes": 30,
   "maxConcurrent": 4,
   "queueOnConcurrencyCap": true,         // false = reject instead
@@ -492,8 +495,16 @@ When `inherit_context: filtered`, before launching the sub-agent we serialize a 
 ### v0.7 — Cancel UX + history + on-by-default — _shipped_
 - Esc detaches a foreground spawn into the background (PRD-locked Foreground cancel UX). Implemented via per-spawn `ctx.ui.onTerminalInput` listener; pi's reserved `app.interrupt` keybinding cannot be overridden.
 - `/conductor history [N]` browses past runs from `~/.pi/agent/conductor/runs/`.
-- Conductor mode ON by default at extension load (`PI_CONDUCTOR_MODE=0` is the new opt-out).
+- Conductor mode ON by default at extension load (`PI_CONDUCTOR_MODE=0` is the new opt-out). _Reversed in v0.8._
 - Conductor system prompt addendum gains §10 — proactive delegation triggers.
+
+### v0.8 — Strict-overseer mode + default off — _in progress_
+- **Conductor mode OFF by default** at extension load (overrides v0.7's ON-by-default).
+- New config field `defaultMode: "on" | "off"` (default `"off"`) in `~/.pi/agent/extensions/conductor/config.json` and project `.pi/conductor.json`.
+- Precedence: project config > user config > `PI_CONDUCTOR_MODE` env var > built-in default `off`.
+- System-prompt addendum §1 rewritten as **strict-overseer** mode: explicit "you are not the implementer", banned tools list (no `edit`/`write`/non-orientation `bash`), narrow exceptions enumerated, slip-detection check.
+- §10 reframed as "delegation playbook" — pattern→persona mapping, fan-out vs chain guidance, slip antipattern callout.
+- Slash commands `/conductor on|off`, env var `PI_CONDUCTOR_MODE=1|0`, persona resolution, queue, panel, tools — all unchanged.
 
 ### v0.8+ — v2 ideas — _planned_
 - Run-record GC (open question #12).
@@ -563,3 +574,4 @@ All release-blocking questions through v0.7 are resolved. Remaining items are v1
 - 2026-05-15 — **Conductor mode ON by default at extension load.** Anyone who installs pi-conductor wants the system-prompt addendum. `PI_CONDUCTOR_MODE=0` / `off` is preserved as an explicit per-session opt-out; `/conductor on \| off` unchanged.
 - 2026-05-15 — **§10 — proactive delegation triggers** added to the conductor system-prompt addendum. §1 ("don't delegate work you can handle") was producing too-conservative behavior; §10 lists seven concrete triggers that should make the LLM reach for personas (parallel review, pre-mortem, about-to-commit, fresh mental model, multi-phase work, heavy parent context, verb-to-persona mapping) and a counter-balancing "don't delegate when" list.
 - 2026-05-15 — **Upstream namespace migration:** `@mariozechner/pi-*` → `@earendil-works/pi-*` (v0.70.2 → v0.74.0). API surfaces unchanged. Mechanical rename across all imports + `package.json` swap; auditable via `tools/rename-pi-namespace.mjs`.
+- 2026-05-15 — **v0.8 reverses v0.7's ON-by-default to OFF-by-default.** v0.7 made conductor mode ON by default reasoning "anyone who installs pi-conductor wants the addendum." In dogfood the parent agent still slipped into doing implementation work itself (reading library typedefs to plan a fix instead of spawning a `builder`). The user's directive: "we start with conductor mode off but if its on you become an overseer/delegation coordinator. the manager." v0.8 flips the default to OFF and rewrites §1 of the addendum to be prescriptive ("you are not the implementer") with a banned-tools list (no `edit`/`write`/non-orientation `bash`) and a narrow allowed list (meta-docs, orientation bash, ≤3 source-file reads per turn). New config field `defaultMode` lets users pin "always on" without an env var. Slash-command and env-var override paths unchanged. Single-commit revertable.
