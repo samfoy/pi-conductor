@@ -109,3 +109,88 @@ function truncate(s: string, max: number): string {
 function collapseWhitespace(s: string): string {
   return s.replace(/\s+/g, " ").trim();
 }
+
+// ── Update throttle ───────────────────────────────────────────────────
+
+export interface UpdateThrottleOpts {
+  /** Minimum ms between deliveries to the underlying callback. */
+  intervalMs: number;
+}
+
+export interface UpdateThrottle<T> {
+  /** Push the latest payload. May fire immediately or be coalesced. */
+  push(payload: T): void;
+  /** Force any pending payload through right now. Idempotent. */
+  flush(): void;
+  /** Cancel any pending fire and reject further pushes. Idempotent. */
+  dispose(): void;
+}
+
+/**
+ * Leading-edge + trailing-edge debouncer. The first push in an idle window
+ * fires synchronously; subsequent pushes within `intervalMs` are coalesced
+ * into a single trailing fire carrying the latest payload.
+ *
+ * Used by the foreground spawn to bound the parent tool-call card
+ * re-render rate. Terminal updates should call flush() to guarantee the
+ * final transcript is visible before the card collapses.
+ */
+export function createUpdateThrottle<T>(
+  fire: (payload: T) => void,
+  opts: UpdateThrottleOpts,
+): UpdateThrottle<T> {
+  const interval = Math.max(0, opts.intervalMs);
+  let lastFireAt = -Infinity;
+  let pending: { payload: T } | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let disposed = false;
+
+  const fireNow = (payload: T) => {
+    lastFireAt = Date.now();
+    pending = null;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    fire(payload);
+  };
+
+  const scheduleTrailing = () => {
+    if (timer) return;
+    const wait = Math.max(0, interval - (Date.now() - lastFireAt));
+    timer = setTimeout(() => {
+      timer = null;
+      if (disposed) return;
+      const p = pending;
+      pending = null;
+      if (p) fireNow(p.payload);
+    }, wait);
+  };
+
+  return {
+    push(payload: T) {
+      if (disposed) return;
+      const now = Date.now();
+      if (now - lastFireAt >= interval) {
+        fireNow(payload);
+        return;
+      }
+      pending = { payload };
+      scheduleTrailing();
+    },
+    flush() {
+      if (disposed) return;
+      if (!pending) return;
+      const p = pending;
+      fireNow(p.payload);
+    },
+    dispose() {
+      disposed = true;
+      pending = null;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    },
+  };
+}
