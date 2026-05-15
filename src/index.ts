@@ -45,6 +45,11 @@ export default function (pi: ExtensionAPI): void {
   // Track whether an overlay is already open so multiple opens don't stack.
   let overlayOpen = false;
 
+  // Active foreground-detach handler (set by tools.ts via
+  // registerForegroundDetach when a foreground spawn starts; cleared in
+  // its finally). Esc keybinding fires this when no overlay is open.
+  let activeForegroundDetach: (() => void) | null = null;
+
   function openFocusedOverlay(agentId?: string): void {
     if (!ctxRef) return;
     if (overlayOpen) {
@@ -184,6 +189,28 @@ export default function (pi: ExtensionAPI): void {
     setConductorMode: (on: boolean) => {
       conductorModeOn = on;
     },
+    /**
+     * One-shot detach slot for the active foreground spawn. Pi tool calls
+     * run sequentially within an assistant turn, so at most one foreground
+     * spawn can be in flight — a single slot is enough. Esc fires the
+     * registered handler (resolving the detach signal); the tool then
+     * returns its detached-as-background result.
+     */
+    registerForegroundDetach: () => {
+      let resolveDetach: () => void = () => {};
+      const detachSignal = new Promise<void>((res) => {
+        resolveDetach = res;
+      });
+      const handler = () => resolveDetach();
+      activeForegroundDetach = handler;
+      const unregister = () => {
+        if (activeForegroundDetach === handler) activeForegroundDetach = null;
+        // Resolve the signal too so any awaiters unblock cleanly when the
+        // tool path finishes via the completed branch and unregisters.
+        resolveDetach();
+      };
+      return { detachSignal, unregister };
+    },
     pushCompletionNotification: (run: Run) => {
       const text = formatCompletionNotification(run);
       pi.sendMessage(
@@ -264,6 +291,19 @@ export default function (pi: ExtensionAPI): void {
     description: "pi-conductor: open focused-stream overlay",
     handler: () => {
       openFocusedOverlay();
+    },
+  });
+
+  // Bind Esc to detach the active foreground sub-agent (continues in
+  // background). Guarded on overlayOpen so the focused-stream overlay's
+  // internal Esc-to-close behavior still works. PRD-locked Foreground
+  // cancel UX: Esc detaches; Ctrl+C kills (the latter is wired through
+  // the tool's signal.aborted path, which already SIGTERMs the run).
+  pi.registerShortcut(Key.escape, {
+    description: "pi-conductor: detach foreground sub-agent (continues in background)",
+    handler: () => {
+      if (overlayOpen) return;
+      activeForegroundDetach?.();
     },
   });
 }

@@ -66,6 +66,10 @@ function setup() {
     openFocusedOverlay: (id?: string) => {
       opens.push(id);
     },
+    registerForegroundDetach: () => ({
+      detachSignal: new Promise<void>(() => {}),
+      unregister: () => {},
+    }),
     pushCompletionNotification: () => {},
   });
 

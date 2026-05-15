@@ -59,6 +59,10 @@ function setup(extraRuns: Run[] = []) {
       getModel: () => model,
       getParentMessages: () => [],
       openFocusedOverlay: () => {},
+      registerForegroundDetach: () => ({
+        detachSignal: new Promise<void>(() => {}),
+        unregister: () => {},
+      }),
       pushCompletionNotification: () => {},
     },
   );

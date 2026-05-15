@@ -15,7 +15,9 @@ import { loadConfig } from "./config.ts";
 import { elapsedStr, formatUsage, getFinalText, pauseRun, resolveTimeoutMs, resumeRun, sendToRun, type RunRegistry } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
 import {
+  awaitOrDetach,
   createUpdateThrottle,
+  renderForegroundDetachedResult,
   renderForegroundStream,
   renderForegroundSummary,
 } from "./foreground-stream.ts";
@@ -53,6 +55,22 @@ interface RegisterToolsOpts {
    * UI context (e.g. headless tests).
    */
   openFocusedOverlay: (id?: string) => void;
+  /**
+   * Register a one-shot detach handler for the currently-active foreground
+   * spawn. The handler is called when the user requests detach (Esc).
+   * Returns an unregister function the tool calls in finally to release
+   * the slot. When no UI is available (headless tests), this can be a
+   * no-op that returns a Promise that never resolves.
+   *
+   * The tool race-awaits the spawn's `done` against this signal: if detach
+   * fires first, the foreground tool returns a "detached-as-background"
+   * result and the sub-agent keeps running; a registry listener pushes
+   * the standard <sub-agent-completed> notification on terminal status.
+   */
+  registerForegroundDetach: () => {
+    detachSignal: Promise<void>;
+    unregister: () => void;
+  };
 }
 
 export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
@@ -304,13 +322,31 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         });
 
         try {
-          const finished = await result.done;
-          // The registry's terminal notify already pushed the final state
-          // into the throttle (either fired or pending). Force any pending
-          // payload through so the last visible streamed frame matches
-          // reality before the tool-call card collapses to the summary.
-          throttle.flush();
-          return foregroundFinalResult(finished);
+          const detach = opts.registerForegroundDetach();
+          try {
+            const outcome = await awaitOrDetach(result.done, detach.detachSignal);
+            if (outcome.kind === "detached") {
+              // The sub-agent is still running. Install a one-shot listener
+              // so the eventual terminal status pushes a notification card,
+              // matching the queued-as-background path.
+              const unsubDetached = registry.onChange((r) => {
+                if (r.id === result.run.id && isTerminalStatus(r.status)) {
+                  unsubDetached();
+                  opts.pushCompletionNotification(r);
+                }
+              });
+              return renderForegroundDetachedResult(result.run);
+            }
+            // outcome.kind === "completed"
+            // The registry's terminal notify already pushed the final state
+            // into the throttle (either fired or pending). Force any pending
+            // payload through so the last visible streamed frame matches
+            // reality before the tool-call card collapses to the summary.
+            throttle.flush();
+            return foregroundFinalResult(outcome.value);
+          } finally {
+            detach.unregister();
+          }
         } finally {
           throttle.dispose();
           unsub();
@@ -439,11 +475,25 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         });
 
         try {
-          const finished = await result.done;
-          // Force any pending payload so the last visible streamed frame
-          // matches reality before the tool-call card collapses.
-          throttle.flush();
-          return foregroundFinalResult(finished);
+          const detach = opts.registerForegroundDetach();
+          try {
+            const outcome = await awaitOrDetach(result.done, detach.detachSignal);
+            if (outcome.kind === "detached") {
+              const unsubDetached = registry.onChange((r) => {
+                if (r.id === result.run.id && isTerminalStatus(r.status)) {
+                  unsubDetached();
+                  opts.pushCompletionNotification(r);
+                }
+              });
+              return renderForegroundDetachedResult(result.run);
+            }
+            // Force any pending payload so the last visible streamed frame
+            // matches reality before the tool-call card collapses.
+            throttle.flush();
+            return foregroundFinalResult(outcome.value);
+          } finally {
+            detach.unregister();
+          }
         } finally {
           throttle.dispose();
           unsub();

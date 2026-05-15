@@ -117,6 +117,50 @@ function collapseWhitespace(s: string): string {
   return s.replace(/\s+/g, " ").trim();
 }
 
+// ── Detach helpers (Esc-to-detach UX) ───────────────────────────────────
+
+export type DetachOutcome<T> =
+  | { kind: "completed"; value: T }
+  | { kind: "detached" };
+
+/**
+ * Race a "done" promise against a detach signal. Returns whichever
+ * settles first as a tagged outcome. The detach promise resolves with
+ * void; the done promise's value is surfaced verbatim on "completed".
+ */
+export async function awaitOrDetach<T>(
+  done: Promise<T>,
+  detach: Promise<void>,
+): Promise<DetachOutcome<T>> {
+  return Promise.race([
+    done.then((value): DetachOutcome<T> => ({ kind: "completed", value })),
+    detach.then((): DetachOutcome<T> => ({ kind: "detached" })),
+  ]);
+}
+
+/**
+ * Format the tool result returned to the LLM when the user detaches a
+ * foreground spawn. Mirrors the shape of the queued-as-background path:
+ * the sub-agent is still running, and completion will arrive as a
+ * <sub-agent-completed> notification card.
+ */
+export function renderForegroundDetachedResult(run: Run) {
+  const text =
+    `detached-as-background: ${run.id}\n` +
+    `persona=${run.persona} mode=background (was foreground)\n\n` +
+    `Foreground stream detached on user request. The sub-agent continues running in the background; ` +
+    `completion will arrive as a <sub-agent-completed> notification. Do NOT re-spawn.`;
+  return {
+    content: [{ type: "text" as const, text }],
+    details: {
+      status: "detached-as-background",
+      agent_id: run.id,
+      persona: run.persona,
+      mode: "background" as const,
+    },
+  };
+}
+
 // ── Update throttle ───────────────────────────────────────────────────
 
 export interface UpdateThrottleOpts {
