@@ -140,11 +140,21 @@ export function filterParentContext(
         if (filtered.length === content.length) {
           out.push(msg); // unchanged
         } else {
-          // TODO(v0.8.2): this rewrite path (now reached only for dropThinking)
-          // still propagates stale stopReason: "toolUse" when thinking blocks
-          // were dropped from a tool-use turn. Latent; no consumers check
-          // stopReason on filtered slices today. See design §3.5.
-          out.push({ ...(msg as any), content: filtered });
+          // dropThinking-only rewrite path: when thinking blocks are stripped
+          // from a turn whose original stopReason was "toolUse" but no
+          // toolCall remains in the filtered content, the stale stopReason
+          // no longer matches the message shape. Recompute conservatively
+          // (only mutate "toolUse" → no toolCall remaining); other stop
+          // reasons pass through unchanged. See design §3.5; closes the
+          // v0.8.2 follow-up TODO that landed with v0.8.1 Item 1.
+          const rewritten: any = { ...(msg as any), content: filtered };
+          if (
+            (msg as any).stopReason === "toolUse" &&
+            !filtered.some((b: any) => b?.type === "toolCall")
+          ) {
+            rewritten.stopReason = "stop";
+          }
+          out.push(rewritten);
         }
         break;
       }

@@ -476,8 +476,15 @@ test("filterParentContext: (a') drops thinking + prose + excluded toolCall whole
 
 test("filterParentContext: (a') drops mixed excluded + non-excluded toolCall + prose whole", () => {
   // Decision: any excluded toolCall in the same message ⇒ orchestration turn ⇒ drop.
-  // See design §3.4 — preserving the non-excluded toolCall would create a dangling
-  // toolResult orphan; simpler invariant is to scrub the entire turn.
+  // See design §3.4. Both choices (preserve non-excluded toolCall vs. drop
+  // whole turn) leave a dangling toolResult later in the slice — the
+  // excluded call's result is dropped by the toolResult-of-excluded-call
+  // branch in either case, and dropping the whole turn additionally orphans
+  // the SURVIVING (non-excluded) call's result. We accept that orphan and
+  // pick whole-turn drop because it keeps orchestration prose out of the
+  // slice (the load-bearing requirement per design §3.1) and keeps the
+  // rewrite path simple. Orphan toolResults are tolerated by the harness.
+
   const msg: AgentMessage = {
     role: "assistant",
     content: [
@@ -517,4 +524,76 @@ test("filterParentContext: (a') applies symmetrically to subagent prefix (not ju
     assistantToolCall("subagent", "tc1", "Backgrounding subagent X."),
   ];
   assert.deepEqual(filterParentContext(msgs), []);
+});
+
+// ── v0.8.1 follow-up (design §3.5): when the dropThinking-only rewrite
+//    path strips a thinking block from a turn whose original stopReason
+//    was "toolUse" but whose filtered content no longer contains a
+//    toolCall, the message ships with a stale stopReason that doesn't
+//    match its shape. Recompute conservatively: only mutate when
+//    "toolUse" → no toolCall remains.
+
+test("filterParentContext: dropThinking [thinking,text] with stopReason='toolUse' clears stale stopReason (design §3.5)", () => {
+  // Latent shape-correctness bug: original [thinking, text] tagged
+  // stopReason: "toolUse" gets dropThinking → [text] but the spread-copy
+  // rewrite preserved "toolUse" even though no toolCall remains. After
+  // the fix, stopReason is recomputed to a non-toolUse value ("stop").
+  const msg: AgentMessage = {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "weighing tool options" },
+      { type: "text", text: "Decided not to call a tool after all." },
+    ] as any,
+    api: "anthropic-messages" as any,
+    provider: "anthropic" as any,
+    model: "claude-sonnet-4-5",
+    usage: {
+      input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "toolUse",
+    timestamp: 0,
+  } as AgentMessage;
+  const out = filterParentContext([msg]);
+  assert.equal(out.length, 1);
+  const survivor = out[0] as any;
+  // Pin the specific neutral value so future edits can't regress to
+  // "toolUse" or to undefined (StopReason is a required field upstream).
+  assert.equal(survivor.stopReason, "stop",
+    "stale stopReason='toolUse' must be recomputed to 'stop' when no toolCall remains");
+  // Sanity: the text block did survive.
+  const blocks = survivor.content as any[];
+  assert.ok(blocks.some((b) => b.type === "text" && b.text === "Decided not to call a tool after all."));
+  assert.ok(blocks.every((b) => b.type !== "thinking"), "thinking must be filtered out");
+});
+
+test("filterParentContext: dropThinking [thinking,toolCall] with stopReason='toolUse' preserves justified stopReason", () => {
+  // Counterpart pin: when the surviving content STILL contains a toolCall,
+  // "toolUse" is justified and must NOT be over-corrected. Prevents the
+  // §3.5 fix from regressing into shape (B) ("always recompute") which
+  // would erase legitimate stopReason signal on the common case.
+  const msg: AgentMessage = {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "I'll read foo.txt" },
+      { type: "toolCall", id: "tc1", name: "read", arguments: {} },
+    ] as any,
+    api: "anthropic-messages" as any,
+    provider: "anthropic" as any,
+    model: "claude-sonnet-4-5",
+    usage: {
+      input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "toolUse",
+    timestamp: 0,
+  } as AgentMessage;
+  const out = filterParentContext([msg]);
+  assert.equal(out.length, 1);
+  const survivor = out[0] as any;
+  assert.equal(survivor.stopReason, "toolUse",
+    "stopReason='toolUse' must be preserved when a toolCall survives in the rewritten content");
+  const blocks = survivor.content as any[];
+  assert.ok(blocks.some((b) => b.type === "toolCall" && b.name === "read"));
+  assert.ok(blocks.every((b) => b.type !== "thinking"));
 });
