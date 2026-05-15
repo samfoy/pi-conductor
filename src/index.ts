@@ -7,8 +7,8 @@
  *   - slash commands: /conductor list | show | doctor | on | off | status |
  *                     stop | pause | resume | queue
  *   - ensemble panel (always visible when ≥1 sub-agent active or recently done)
- *   - conductor system prompt addendum, gated on PI_CONDUCTOR_MODE=1
- *     (env var) or `/conductor on` (toggled per session)
+ *   - conductor system prompt addendum, on by default; PI_CONDUCTOR_MODE=0
+ *     / off disables it, /conductor on|off toggles per-session
  *   - <sub-agent-completed> notification cards posted inline on completion
  *
  * v0.3 will add the focused stream overlay (Ctrl+G).
@@ -31,6 +31,7 @@ import { FocusedStreamModel } from "./focused-stream-model.ts";
 import { FocusedStreamOverlay } from "./focused-stream-overlay.ts";
 import { forceTerminate, resolveTimeoutMs, sendToRun, validateSendable } from "./runs.ts";
 import type { Run } from "./types.ts";
+import { resolveInitialConductorMode } from "./conductor-mode.ts";
 
 export default function (pi: ExtensionAPI): void {
   // ── Mutable session-scoped state ─────────────────────────────────────
@@ -153,9 +154,7 @@ export default function (pi: ExtensionAPI): void {
     }
   }
 
-  let conductorModeOn =
-    process.env.PI_CONDUCTOR_MODE === "1" ||
-    process.env.PI_CONDUCTOR_MODE?.toLowerCase() === "true";
+  let conductorModeOn = resolveInitialConductorMode(process.env);
 
   const opts = {
     getCwd: () => cwd,
