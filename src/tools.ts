@@ -14,9 +14,23 @@ import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
 import { elapsedStr, formatUsage, getFinalText, pauseRun, resolveTimeoutMs, resumeRun, sendToRun, type RunRegistry } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
-import { formatCompletionNotification } from "./notifications.ts";
+import {
+  createUpdateThrottle,
+  renderForegroundStream,
+  renderForegroundSummary,
+} from "./foreground-stream.ts";
 import type { FocusedStreamModel } from "./focused-stream-model.ts";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
+
+/** Width used for inline-streamed foreground transcripts. We don't have
+ * a TUI handle inside execute(), so we pick a sensible fixed width. The
+ * focused-stream overlay (Ctrl+G) is the source of truth for full-width
+ * viewing; this is the at-a-glance card-level preview. */
+const FOREGROUND_STREAM_WIDTH = 100;
+
+/** Min ms between onUpdate deliveries while a foreground sub-agent
+ * streams. Bounds pi's tool-card re-render rate. */
+const FOREGROUND_STREAM_INTERVAL_MS = 50;
 
 interface RegisterToolsOpts {
   getCwd: () => string;
@@ -252,20 +266,32 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 
       // result.kind === "spawned"
       if (foreground) {
-        // Stream tool-call hints via onUpdate while we wait for completion.
+        // Stream the sub-agent's transcript inline in the parent's
+        // tool-call card. Throttled so a fast event stream doesn't flood
+        // pi with re-renders. Terminal status flushes unconditionally
+        // before the summary is returned.
+        const throttle = createUpdateThrottle<Run>((r: Run) => {
+          if (!onUpdate) return;
+          onUpdate({
+            content: [
+              {
+                type: "text" as const,
+                text: renderForegroundStream(r, FOREGROUND_STREAM_WIDTH),
+              },
+            ],
+            details: {
+              agent_id: r.id,
+              status: r.status,
+              lastToolCall: r.lastToolCall,
+            },
+          });
+        }, { intervalMs: FOREGROUND_STREAM_INTERVAL_MS });
+        // Initial render so the card isn't blank before the first
+        // registry change fires.
+        throttle.push(result.run);
         const unsub = registry.onChange((r) => {
           if (r.id !== result.run.id) return;
-          if (onUpdate) {
-            onUpdate({
-              content: [
-                {
-                  type: "text" as const,
-                  text: formatStreamingPreview(r),
-                },
-              ],
-              details: { agent_id: r.id, status: r.status, lastToolCall: r.lastToolCall },
-            });
-          }
+          throttle.push(r);
         });
 
         // Honor abort.
@@ -279,8 +305,14 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 
         try {
           const finished = await result.done;
+          // Push the terminal state and force-flush so the last visible
+          // streamed frame matches reality (status, usage, final text)
+          // before the tool-call card collapses to the summary.
+          throttle.push(finished);
+          throttle.flush();
           return foregroundFinalResult(finished);
         } finally {
+          throttle.dispose();
           unsub();
         }
       }
@@ -372,20 +404,29 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       }
 
       if (foreground) {
-        // Stream tool-call hints while we wait for completion.
+        // Stream the sub-agent's transcript inline in the parent's
+        // tool-call card while the resumed session runs. Same throttle
+        // shape as the spawn path.
+        const throttle = createUpdateThrottle<Run>((r: Run) => {
+          if (!onUpdate) return;
+          onUpdate({
+            content: [
+              {
+                type: "text" as const,
+                text: renderForegroundStream(r, FOREGROUND_STREAM_WIDTH),
+              },
+            ],
+            details: {
+              agent_id: r.id,
+              status: r.status,
+              lastToolCall: r.lastToolCall,
+            },
+          });
+        }, { intervalMs: FOREGROUND_STREAM_INTERVAL_MS });
+        throttle.push(result.run);
         const unsub = registry.onChange((r) => {
           if (r.id !== result.run.id) return;
-          if (onUpdate) {
-            onUpdate({
-              content: [
-                {
-                  type: "text" as const,
-                  text: formatStreamingPreview(r),
-                },
-              ],
-              details: { agent_id: r.id, status: r.status, lastToolCall: r.lastToolCall },
-            });
-          }
+          throttle.push(r);
         });
 
         // Honor abort.
@@ -399,8 +440,11 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 
         try {
           const finished = await result.done;
+          throttle.push(finished);
+          throttle.flush();
           return foregroundFinalResult(finished);
         } finally {
+          throttle.dispose();
           unsub();
         }
       }
@@ -701,26 +745,11 @@ function formatStatusForLLM(g: StatusGroups, queueSize: number): string {
   return lines.join("\n");
 }
 
-function formatStreamingPreview(r: Run): string {
-  const u = formatUsage(r.usage);
-  const usagePart = u ? ` [${u}]` : "";
-  const hint = r.lastToolCall ? ` → ${r.lastToolCall}` : " starting…";
-  return `${r.persona}:${r.id} ${r.status} ${elapsedStr(r.startTime)}${usagePart}${hint}`;
-}
-
 function foregroundFinalResult(r: Run) {
-  const elapsed = elapsedStr(r.startTime, r.finishedAt);
+  const summary = renderForegroundSummary(r);
   if (r.status !== "completed") {
     return {
-      content: [
-        {
-          type: "text" as const,
-          text:
-            `## ✗ \`${r.persona}\` ${r.status} (${elapsed})\n\n` +
-            (r.errorMessage ?? "(no error message)") +
-            `\n\nTranscript: ${r.transcriptPath}`,
-        },
-      ],
+      content: [{ type: "text" as const, text: summary }],
       details: {
         status: r.status,
         agent_id: r.id,
@@ -732,12 +761,7 @@ function foregroundFinalResult(r: Run) {
   }
   const finalText = getFinalText(r.messages) || "(no output)";
   return {
-    content: [
-      {
-        type: "text" as const,
-        text: formatCompletionNotification(r),
-      },
-    ],
+    content: [{ type: "text" as const, text: summary }],
     details: {
       status: "completed",
       agent_id: r.id,
