@@ -2,7 +2,9 @@
 
 A pi extension that turns the parent pi session into an **orchestrator** driving a roster of **persona-based sub-agents** with first-class TUI visibility.
 
-> **v0.6 — filtered context inheritance.** Sub-agents can now inherit a filtered slice of the conductor's conversation via `inherit_context: filtered`. Drops orchestration noise (`ensemble_*`, `subagent` tool calls, `<sub-agent-completed>` cards) while preserving user/assistant prose, file ops, branch + compaction summaries.
+> **v0.4 — inline-streamed foreground transcript.** Foreground spawns now stream the sub-agent's transcript inline in the parent's tool-call card (re-rendered via throttled `onUpdate`, reusing `renderTranscript`). On completion the card collapses to a compact 1–3 line summary (status glyph, persona:id, elapsed, usage, optional final-text excerpt, transcript path).
+>
+> **v0.6 — filtered context inheritance.** Sub-agents can inherit a filtered slice of the conductor's conversation via `inherit_context: filtered`. Drops orchestration noise (`ensemble_*`, `subagent` tool calls, `<sub-agent-completed>` cards) while preserving user/assistant prose, file ops, branch + compaction summaries.
 
 See [`PRD.md`](./PRD.md) for the full design and decision log.
 
@@ -60,7 +62,7 @@ pi-conductor closes that gap. The parent pi session is the conductor, sub-agents
 
 Per the [PRD](./PRD.md):
 
-- **v0.4** — inline-streamed foreground transcript (foreground currently returns the result card; the live stream is via the panel + Ctrl+G overlay).
+- **v0.4 — _shipped_** — inline-streamed foreground transcript. Foreground spawns now re-render the parent's tool-call card on every registry change with the sub-agent's transcript (throttled to 50ms), and collapse to a compact summary on completion. Live progress remains visible in the panel widget + Ctrl+G overlay too.
 - **v0.7+** — history browser, run-record GC, worktree per persona.
 
 ## Install
@@ -154,7 +156,7 @@ pi-conductor does **not** replace `pi-essentials/subagent`. Different tools (`en
 - [x] v0.3 — Focused stream overlay (Ctrl+G)
 - [x] v0.5 — `ensemble_send` + `ensemble_pause` / `ensemble_resume` + overlay `s` keybinding
 - [x] v0.6 — Filtered context inheritance (`inherit_context: filtered` / `full`)
-- [ ] v0.4 — Inline-streamed foreground transcript (foreground currently returns the result card; the live stream is via the panel + Ctrl+G overlay)
+- [x] v0.4 — Inline-streamed foreground transcript (sub-agent transcript renders live in the parent tool-call card; collapses to a compact summary on completion)
 - [ ] v0.7 — History browser, run-record GC, worktree per persona
 
 ## License
