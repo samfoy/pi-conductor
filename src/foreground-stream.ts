@@ -36,12 +36,14 @@ const STATUS_GLYPH: Record<Run["status"], string> = {
 const SUMMARY_EXCERPT_MAX = 120;
 
 /**
- * Maximum bytes in the streamed transcript output. pi's tool-call cards
- * re-render the entire text on every onUpdate; sending a 200KB transcript
- * 10x/sec would melt the TUI. We truncate to the tail when the run
- * outgrows this limit.
+ * Maximum characters in the streamed transcript output. pi's tool-call
+ * cards re-render the entire text on every onUpdate; sending a 200KB
+ * transcript many times per second would melt the TUI. We tail-truncate
+ * when the run outgrows this limit. Note: "chars" here is JS
+ * String.length (UTF-16 code units), not bytes — ASCII transcripts cap
+ * at ~32KB, denser scripts can be wider.
  */
-const STREAM_MAX_BYTES = 32 * 1024;
+const STREAM_MAX_CHARS = 32 * 1024;
 
 /**
  * Render the inline-streamed transcript shown in the parent's tool-call
@@ -57,10 +59,15 @@ export function renderForegroundStream(run: Run, width: number): string {
   });
   const lines = bodyLines.length === 0 ? headerLines : [...headerLines, ...bodyLines];
   const out = lines.join("\n");
-  if (out.length <= STREAM_MAX_BYTES) return out;
-  // Tail-truncate so the most recent activity stays visible.
-  const tail = out.slice(out.length - STREAM_MAX_BYTES);
-  return `… (transcript truncated to last ${STREAM_MAX_BYTES} bytes) …\n${tail}`;
+  if (out.length <= STREAM_MAX_CHARS) return out;
+  // Tail-truncate so the most recent activity stays visible. Slice on a
+  // newline boundary when possible to avoid splitting a mid-line surrogate
+  // pair or a partial ANSI sequence.
+  let cut = out.length - STREAM_MAX_CHARS;
+  const nextNewline = out.indexOf("\n", cut);
+  if (nextNewline !== -1 && nextNewline - cut < 1024) cut = nextNewline + 1;
+  const tail = out.slice(cut);
+  return `… (transcript truncated to last ~${STREAM_MAX_CHARS} chars) …\n${tail}`;
 }
 
 /**

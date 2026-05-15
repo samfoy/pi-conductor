@@ -305,10 +305,10 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 
         try {
           const finished = await result.done;
-          // Push the terminal state and force-flush so the last visible
-          // streamed frame matches reality (status, usage, final text)
-          // before the tool-call card collapses to the summary.
-          throttle.push(finished);
+          // The registry's terminal notify already pushed the final state
+          // into the throttle (either fired or pending). Force any pending
+          // payload through so the last visible streamed frame matches
+          // reality before the tool-call card collapses to the summary.
           throttle.flush();
           return foregroundFinalResult(finished);
         } finally {
@@ -440,7 +440,8 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 
         try {
           const finished = await result.done;
-          throttle.push(finished);
+          // Force any pending payload so the last visible streamed frame
+          // matches reality before the tool-call card collapses.
           throttle.flush();
           return foregroundFinalResult(finished);
         } finally {

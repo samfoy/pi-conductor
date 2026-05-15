@@ -134,6 +134,27 @@ test("renderForegroundStream: thinking blocks are hidden", () => {
   assert.match(out, /visible reply/);
 });
 
+test("renderForegroundStream: tail-truncates when output exceeds 32KB", () => {
+  // Build a run with one giant assistant text part. renderTranscript
+  // wraps it to width=200 lines; total output should easily exceed 32KB.
+  const huge = "abcdefghij ".repeat(20_000); // ~220KB raw
+  const run = makeRun({
+    messages: [
+      {
+        role: "assistant",
+        content: [{ type: "text", text: huge }],
+      } as any,
+    ],
+  });
+  const out = renderForegroundStream(run, 200);
+  // Cap is ~32K chars plus the truncation marker line; assert reasonably bounded.
+  assert.ok(
+    out.length < 64 * 1024,
+    `output should be tail-truncated near 32K chars, got ${out.length}`,
+  );
+  assert.match(out, /transcript truncated/);
+});
+
 // ── renderForegroundSummary ───────────────────────────────────────────
 
 test("renderForegroundSummary: success with final text shows ✓ + quote + transcript", () => {

@@ -64,6 +64,10 @@ test("throttle: flush() forces immediate delivery of pending payload", () => {
     assert.deepEqual(calls, ["a"]);
     t.flush();
     assert.deepEqual(calls, ["a", "c"]);
+    // The trailing timer was scheduled at push("b"); flush() must
+    // cancel it so the deadline doesn't double-fire.
+    mock.timers.tick(500);
+    assert.deepEqual(calls, ["a", "c"], "flush() must cancel the pending trailing timer");
     t.dispose();
   } finally {
     mock.timers.reset();

@@ -410,8 +410,9 @@ test(
       let finished: Run;
       try {
         finished = await result.done;
-        // Terminal flush — guarantees the last visible frame matches reality.
-        throttle.push(finished);
+        // Mirror tools.ts wiring: the registry's terminal notify already
+        // pushed the final state into the throttle. flush() forces any
+        // pending payload through so the last frame matches reality.
         throttle.flush();
       } finally {
         throttle.dispose();
