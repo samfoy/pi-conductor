@@ -100,3 +100,24 @@ test("renderForegroundDetachedResult: details payload matches background-spawn s
   assert.equal(d.persona, run.persona);
   assert.equal(d.mode, "background");
 });
+
+// ── Detach race semantics ────────────────────────────────────
+
+test("awaitOrDetach: deterministic when both promises settle synchronously — caller is responsible for race-guard", async () => {
+  // When detach and done are both already resolved, the order in which
+  // their .then() handlers were enqueued in the microtask queue
+  // determines the winner. Promise.race is deterministic in V8: the
+  // first promise passed wins ties, but callers should not rely on this.
+  // The contract: at most one outcome resolves, so the caller's
+  // post-detach race-guard (re-checking terminal status synchronously
+  // after registering a listener) is a soundness requirement, not an
+  // optimization.
+  const done = Promise.resolve({ status: "completed" });
+  const detach = Promise.resolve();
+  const out = await awaitOrDetach(done, detach);
+  // We only assert that ONE outcome wins — either is acceptable.
+  assert.ok(
+    out.kind === "completed" || out.kind === "detached",
+    `expected exactly one of completed|detached, got ${JSON.stringify(out)}`,
+  );
+});

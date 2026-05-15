@@ -331,6 +331,15 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
                   opts.pushCompletionNotification(r);
                 }
               });
+              // Race guard: if the run reached terminal in the microtask
+              // window between detach winning and the listener installing,
+              // notify() already fired with no listener attached. Catch it
+              // by firing the notification synchronously when the current
+              // status is already terminal.
+              if (isTerminalStatus(result.run.status)) {
+                unsubDetached();
+                opts.pushCompletionNotification(result.run);
+              }
               return renderForegroundDetachedResult(result.run);
             }
             // outcome.kind === "completed"
@@ -482,6 +491,13 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
                   opts.pushCompletionNotification(r);
                 }
               });
+              // Race guard: if the run reached terminal between detach
+              // winning and the listener installing, fire the notification
+              // synchronously now (notify() already fired with no listener).
+              if (isTerminalStatus(result.run.status)) {
+                unsubDetached();
+                opts.pushCompletionNotification(result.run);
+              }
               return renderForegroundDetachedResult(result.run);
             }
             // Force any pending payload so the last visible streamed frame
