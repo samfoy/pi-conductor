@@ -915,11 +915,26 @@ export function forceTerminate(
   }
 }
 
-export function pauseRun(run: Run, registry: RunRegistry): boolean {
+/**
+ * Send a Unix signal to a pid. Defaults to `process.kill` but accepts an
+ * injectable mock so pauseRun / resumeRun / forceTerminate happy-path
+ * tests don't have to fork real processes.
+ */
+export type Signaler = (pid: number, signal: NodeJS.Signals | number) => void;
+
+const defaultSignaler: Signaler = (pid, signal) => {
+  process.kill(pid, signal);
+};
+
+export function pauseRun(
+  run: Run,
+  registry: RunRegistry,
+  signaler: Signaler = defaultSignaler,
+): boolean {
   if (run.status !== "running") return false;
   if (!run.proc?.pid) return false;
   try {
-    process.kill(run.proc.pid, "SIGSTOP");
+    signaler(run.proc.pid, "SIGSTOP");
   } catch {
     return false;
   }
@@ -930,11 +945,15 @@ export function pauseRun(run: Run, registry: RunRegistry): boolean {
   return true;
 }
 
-export function resumeRun(run: Run, registry: RunRegistry): boolean {
+export function resumeRun(
+  run: Run,
+  registry: RunRegistry,
+  signaler: Signaler = defaultSignaler,
+): boolean {
   if (run.status !== "paused") return false;
   if (!run.proc?.pid) return false;
   try {
-    process.kill(run.proc.pid, "SIGCONT");
+    signaler(run.proc.pid, "SIGCONT");
   } catch {
     return false;
   }

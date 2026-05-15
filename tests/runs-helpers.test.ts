@@ -459,6 +459,76 @@ test("resumeRun: returns false when run has no proc handle", () => {
   assert.equal(run.status, "paused");
 });
 
+test("pauseRun: happy path — SIGSTOPs the proc, flips status to paused, sets pausedAt, notifies", () => {
+  const reg = new RunRegistry();
+  const run = makeRun({ status: "running" });
+  // Fake child-process handle so pauseRun's pid check passes.
+  run.proc = { pid: 12345 } as any;
+  reg.register(run);
+  const calls: { pid: number; signal: NodeJS.Signals | number }[] = [];
+  const signaler = (pid: number, signal: NodeJS.Signals | number) => {
+    calls.push({ pid, signal });
+  };
+  let notifyCount = 0;
+  reg.onChange(() => {
+    notifyCount++;
+  });
+  const before = Date.now();
+  assert.equal(pauseRun(run, reg, signaler), true);
+  assert.deepEqual(calls, [{ pid: 12345, signal: "SIGSTOP" }]);
+  assert.equal(run.status, "paused");
+  assert.ok(run.pausedAt && run.pausedAt >= before, "pausedAt should be set to ~now");
+  assert.equal(notifyCount, 1, "registry.notify should fire exactly once");
+});
+
+test("pauseRun: signaler throws — returns false, run state unchanged", () => {
+  const reg = new RunRegistry();
+  const run = makeRun({ status: "running" });
+  run.proc = { pid: 99 } as any;
+  reg.register(run);
+  const throwingSignaler = () => {
+    throw new Error("ESRCH");
+  };
+  assert.equal(pauseRun(run, reg, throwingSignaler), false);
+  assert.equal(run.status, "running", "status must not flip on signaler failure");
+  assert.equal(run.pausedAt, undefined, "pausedAt must not be written on failure");
+});
+
+test("resumeRun: happy path — SIGCONTs the proc, flips status to running, clears pausedAt, notifies", () => {
+  const reg = new RunRegistry();
+  const run = makeRun({ status: "paused" });
+  run.proc = { pid: 6789 } as any;
+  run.pausedAt = 1_700_000_000_000;
+  reg.register(run);
+  const calls: { pid: number; signal: NodeJS.Signals | number }[] = [];
+  const signaler = (pid: number, signal: NodeJS.Signals | number) => {
+    calls.push({ pid, signal });
+  };
+  let notifyCount = 0;
+  reg.onChange(() => {
+    notifyCount++;
+  });
+  assert.equal(resumeRun(run, reg, signaler), true);
+  assert.deepEqual(calls, [{ pid: 6789, signal: "SIGCONT" }]);
+  assert.equal(run.status, "running");
+  assert.equal(run.pausedAt, undefined, "pausedAt should be cleared on resume");
+  assert.equal(notifyCount, 1, "registry.notify should fire exactly once");
+});
+
+test("resumeRun: signaler throws — returns false, run state unchanged", () => {
+  const reg = new RunRegistry();
+  const run = makeRun({ status: "paused" });
+  run.proc = { pid: 99 } as any;
+  run.pausedAt = 42;
+  reg.register(run);
+  const throwingSignaler = () => {
+    throw new Error("ESRCH");
+  };
+  assert.equal(resumeRun(run, reg, throwingSignaler), false);
+  assert.equal(run.status, "paused", "status must not flip on signaler failure");
+  assert.equal(run.pausedAt, 42, "pausedAt must not be cleared on failure");
+});
+
 test("forceTerminate: no-op when run is already in a terminal state", () => {
   const paths = tmpRunPaths();
   try {
