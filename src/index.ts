@@ -1,17 +1,19 @@
 /**
  * pi-conductor — Extension entry point.
  *
- * v0.2 (foreground spawn, background spawn, queue, panel, conductor mode):
- *   - persona discovery + resolution (builtin / user / project layering)
- *   - tools: ensemble_list, ensemble_status, ensemble_spawn
- *   - slash commands: /conductor list | show | doctor | on | off | status |
- *                     stop | pause | resume | queue
- *   - ensemble panel (always visible when ≥1 sub-agent active or recently done)
- *   - conductor system prompt addendum, on by default; PI_CONDUCTOR_MODE=0
- *     / off disables it, /conductor on|off toggles per-session
- *   - <sub-agent-completed> notification cards posted inline on completion
- *
- * v0.3 will add the focused stream overlay (Ctrl+G).
+ * Wires up the conductor runtime: persona discovery+resolution
+ * (builtin / user / project layers), the ensemble tools
+ * (`ensemble_list` / `_status` / `_spawn` / `_send` / `_pause` /
+ * `_resume` / `_focus`), the `/conductor …` slash commands, the
+ * always-visible ensemble panel, the conductor system-prompt
+ * addendum (on by default; `PI_CONDUCTOR_MODE=0|off` opts out;
+ * `/conductor on|off` toggles per-session), `<sub-agent-completed>`
+ * notification cards posted inline on terminal transitions, the
+ * focused-stream overlay (Ctrl+G — routed via
+ * `installFocusedOverlayShortcut`), Esc-to-detach for foreground
+ * spawns (via `registerForegroundDetach`), foreground-spawn streaming
+ * with throttle + post-detach completion listener, and the spawn
+ * queue with foreground auto-downgrade at the concurrency cap.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
