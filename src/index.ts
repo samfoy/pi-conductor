@@ -35,6 +35,7 @@ import { installFocusedOverlayShortcut } from "./focused-overlay-shortcut.ts";
 import { forceTerminate, resolveTimeoutMs, sendToRun, validateSendable } from "./runs.ts";
 import type { Run } from "./types.ts";
 import { resolveInitialConductorMode } from "./conductor-mode.ts";
+import { installSanitizerHook } from "./sanitizer-hook.ts";
 
 export default function (pi: ExtensionAPI): void {
   // ── Mutable session-scoped state ─────────────────────────────────────
@@ -50,6 +51,14 @@ export default function (pi: ExtensionAPI): void {
   let overlayOpen = false;
   // Session-scoped unsub for the Ctrl+G focused-overlay shortcut.
   let unsubFocusedShortcut: (() => void) | null = null;
+
+  // v0.8.2 (B-4) — toolUse.name sanitizer hook. Owns its own
+  // session-scoped warned-set; we hold the handle to call reset() in
+  // session_shutdown so a fresh session re-warns about pre-existing
+  // wedges on its first turn. See src/sanitizer-hook.ts.
+  const sanitizerHook = installSanitizerHook(pi, {
+    getCtx: () => ctxRef,
+  });
 
   // Note: we used to bind Key.escape and Key.ctrl("g") via
   // pi.registerShortcut, but pi reserves both (`app.interrupt` for Esc,
@@ -282,6 +291,10 @@ export default function (pi: ExtensionAPI): void {
         }
       }
     }
+    // v0.8.2 (B-4) — reset the sanitizer warning dedup set so a fresh
+    // session starts with a clean slate (a wedge that was warned about
+    // in the previous session should warn again on resume).
+    sanitizerHook.reset();
     ctxRef = null;
   });
 
@@ -315,6 +328,11 @@ export default function (pi: ExtensionAPI): void {
       return undefined;
     }
   });
+
+  // v0.8.2 (B-4) sanitizer hook is installed above (search for
+  // installSanitizerHook). Wiring is intentionally co-located with the
+  // session-scoped state declaration so its `reset()` handle is captured
+  // before any of pi's lifecycle events can fire.
 
   registerTools(pi, opts);
   registerCommands(pi, opts);
