@@ -7,7 +7,7 @@
  *   - ensemble_spawn  (foreground default, with auto-downgrade-on-queue)
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import type { Persona, PersonaOverride, Run, RunStatus, ThinkingLevel } from "./types.ts";
 import { resolvePersonas } from "./personas.ts";
@@ -24,7 +24,7 @@ import {
   resolveStreamWidth,
 } from "./foreground-stream.ts";
 import type { FocusedStreamModel } from "./focused-stream-model.ts";
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 /** Min ms between onUpdate deliveries while a foreground sub-agent
  * streams. Bounds pi's tool-card re-render rate. */

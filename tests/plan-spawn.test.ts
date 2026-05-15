@@ -14,7 +14,7 @@ import { test } from "node:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 import { planSpawnPiArgs } from "../src/runs.ts";
 import type { ContextInheritance, Persona } from "../src/types.ts";

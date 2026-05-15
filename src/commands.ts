@@ -15,7 +15,7 @@
  *   /conductor history [N]           — list past sub-agent runs (default 20)
  */
 
-import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { PersonaResolution, Run, RunRecord } from "./types.ts";

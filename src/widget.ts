@@ -7,8 +7,8 @@
  * so the user can see "✓ <persona> done" before the row disappears.
  */
 
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { elapsedStr, formatUsage, type RunRegistry } from "./runs.ts";
 import type { Run, RunStatus } from "./types.ts";
 

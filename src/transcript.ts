@@ -7,7 +7,7 @@
  * styling and rendering this output.
  */
 
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Run } from "./types.ts";
 import { elapsedStr, formatUsage } from "./runs.ts";
 

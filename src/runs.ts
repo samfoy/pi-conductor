@@ -22,7 +22,7 @@ import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { mkdir, writeFile, appendFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { applyEvent } from "./event-handler.ts";
 import { filterParentContext } from "./context-filter.ts";
 import { seedSessionFile } from "./session-seed.ts";

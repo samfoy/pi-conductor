@@ -6,7 +6,7 @@
  * actual rendering and state live in their respective pure modules.
  */
 
-import type { Component } from "@mariozechner/pi-tui";
+import type { Component } from "@earendil-works/pi-tui";
 import type { FocusedStreamModel } from "./focused-stream-model.ts";
 import { renderHeader, renderFooter, renderTranscript } from "./transcript.ts";
 

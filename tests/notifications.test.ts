@@ -15,7 +15,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { formatCompletionNotification } from "../src/notifications.ts";
 import { emptyUsage, type Run, type RunStatus } from "../src/types.ts";
 

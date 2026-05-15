@@ -13,7 +13,7 @@
 
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 import { filterParentContext } from "../src/context-filter.ts";
 

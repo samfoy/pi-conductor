@@ -10,7 +10,7 @@
  * unit-testable because it has no environmental dependencies.
  */
 
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Run } from "./types.ts";
 
 export type EventEffect =
