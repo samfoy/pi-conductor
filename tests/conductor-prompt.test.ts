@@ -286,3 +286,141 @@ test("buildConductorSystemPrompt: §9 — lists inspector as the fact-finding ch
   const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
   assert.match(out, /Fact-finding[\s\S]{0,80}inspector/i);
 });
+
+// ── §11: canonical workflows (v0.8 Slice 2) ───────────────────────
+
+test("buildConductorSystemPrompt: §11 — heading 'Default workflows' is present", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  assert.match(out, /Default workflows/i);
+});
+
+test("buildConductorSystemPrompt: §11 — loop semantics names ensemble_send as the iteration tool", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  // ensemble_send already appears in §3 — pin its presence in the loop
+  // semantics paragraph specifically (anywhere after the §11 heading).
+  const idx11 = out.indexOf("## 11.");
+  assert.ok(idx11 >= 0, "§11 heading should exist");
+  assert.match(out.slice(idx11), /ensemble_send/);
+});
+
+test("buildConductorSystemPrompt: §11 — loop bound (≤3 iterations) is published", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  assert.match(out, /loop ≤3|max 3 iterations|cap.*3 iterations|3 iterations/i);
+});
+
+test("buildConductorSystemPrompt: §11 — finalizer appears in the canonical chain shapes", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  // 'finalizer' was added to §10 in Slice 1 (closer trigger row). §11
+  // adds it to the chain blocks. Scope the assertion to §11 so it
+  // gates the new content, not Slice 1's row.
+  const idx11 = out.indexOf("## 11.");
+  assert.ok(idx11 >= 0, "§11 heading should exist");
+  assert.match(out.slice(idx11), /finalizer/);
+});
+
+test("buildConductorSystemPrompt: §11 — plan-loop pairs planner with oracle/critic", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  const idx11 = out.indexOf("## 11.");
+  assert.ok(idx11 >= 0, "§11 heading should exist");
+  assert.match(
+    out.slice(idx11),
+    /oracle.*planner|planner.*oracle|planner ⇄ oracle|planner ⇄ critic_or_oracle/i,
+  );
+});
+
+test("buildConductorSystemPrompt: §11 — build-loop pairs builder with critic", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  const idx11 = out.indexOf("## 11.");
+  assert.ok(idx11 >= 0, "§11 heading should exist");
+  assert.match(out.slice(idx11), /builder.*critic|critic.*builder|builder ⇄ critic/i);
+});
+
+test("buildConductorSystemPrompt: §11 — reviewer-veto rule is published", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  assert.match(out, /Reviewer veto|reviewer.*veto|reviewer.*trumps/i);
+});
+
+test("buildConductorSystemPrompt: §11 — the overseer-doesn't-review rule is published", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  assert.match(
+    out,
+    /You do not review|overseer (does not|doesn't) review|does not review/i,
+  );
+});
+
+test("buildConductorSystemPrompt: §11 — 'Breaking the chain' exceptions block exists", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  assert.match(out, /Breaking the chain|break the chain/i);
+});
+
+test("buildConductorSystemPrompt: §11 — 'No parallel write-capable spawns' rule is present", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  // NEW-1 from design §7.5.4: parallel write-capable builders share git
+  // history and tree state, so the conductor must not parallelize them.
+  assert.match(out, /No parallel write-capable spawns/i);
+});
+
+// ── §9 cross-reference to §11 (v0.8 Slice 2) ──────────────────────
+
+test("buildConductorSystemPrompt: §9 — cross-reference to §11 lands at the end of the section", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  // Slice 1 already added "see §11" to §10's closer-trigger rows. The
+  // §9 cross-ref must land in §9 specifically — scope between the §9
+  // heading and the §10 heading so we gate the new content, not Slice 1.
+  const idx9 = out.indexOf("## 9.");
+  const idx10 = out.indexOf("## 10.");
+  assert.ok(idx9 >= 0 && idx10 > idx9, "§9 and §10 should both exist in order");
+  assert.match(out.slice(idx9, idx10), /see §11/i);
+});
+
+// ── §6 disambiguation: new spawns vs loop revisions (v0.8 Slice 2) ─
+
+test("buildConductorSystemPrompt: §6 — disambiguation sentence distinguishes new spawns from loop revisions", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  // F5 disambiguation: §6's "synthesize their findings yourself" is for
+  // *new* persona spawns; §11's loop semantics use ensemble_send for
+  // revisions to the *same* producer. The disambiguation sentence in §6
+  // names both halves so the apparent contradiction is explicitly
+  // resolved. Pin both halves' substrings near each other inside §6.
+  const idx6 = out.indexOf("## 6.");
+  const idx7 = out.indexOf("## 7.");
+  assert.ok(idx6 >= 0 && idx7 > idx6, "§6 and §7 should both exist in order");
+  const section6 = out.slice(idx6, idx7);
+  assert.match(section6, /spawning a new persona/i);
+  assert.match(section6, /ensemble_send/);
+  assert.match(section6, /see §11/i);
+});
+
+// ── §11 — load-bearing prose pins (Slice 2 critic revise) ─────────
+
+test("buildConductorSystemPrompt: §11 — top-of-section cross-references the §1.5 principle by name", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  const idx11 = out.indexOf("## 11.");
+  const idx12 = out.length; // §11 is last section
+  // NEW-2: §11 must explicitly reference §1.5 so the cross-ref binding
+  // doesn't silently disappear in a future "tighten the prose" rewrite.
+  assert.match(out.slice(idx11, idx12), /§1\.5/);
+});
+
+test("buildConductorSystemPrompt: §11 — publishes 'oracle is the opener' and 'finalizer is the closer'", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  const idx11 = out.indexOf("## 11.");
+  // These two structural sentences are load-bearing — they make
+  // oracle's primacy and finalizer's terminality prescriptive, not
+  // optional. Pin both so a future rewrite that collapses §11 to
+  // chain-shape-only is caught.
+  assert.match(out.slice(idx11), /Oracle is the opener|oracle.*opener/i);
+  assert.match(out.slice(idx11), /finalizer.*closer|closer.*finalizer/i);
+});
+
+test("buildConductorSystemPrompt: §11 — 'Breaking the chain' covers F6's skill-driven and user-fan-out exceptions", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  const idx11 = out.indexOf("## 11.");
+  // F6 from the oracle-revision round added these two exceptions.
+  // They are distinctive content and should be regression-protected
+  // so a future "trim the list" rewrite doesn't silently drop them.
+  assert.match(out.slice(idx11), /[Ss]kill-driven workflow/);
+  assert.match(out.slice(idx11), /User explicitly directs|user-directed.*fan-?out|parallel fan-?out/i);
+  // Closure prose is load-bearing per design §7.5.3 — pin it too.
+  assert.match(out.slice(idx11), /not a valid reason/i);
+});
