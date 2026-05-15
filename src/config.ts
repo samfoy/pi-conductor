@@ -76,6 +76,9 @@ function mergeConfig(base: ConductorConfig, raw: unknown): ConductorConfig {
   if (r.defaultSpawnMode === "foreground" || r.defaultSpawnMode === "background") {
     out.defaultSpawnMode = r.defaultSpawnMode;
   }
+  if (r.defaultMode === "on" || r.defaultMode === "off") {
+    out.defaultMode = r.defaultMode;
+  }
   if (r.personaOverrides && typeof r.personaOverrides === "object") {
     // Field-level merge per persona name. A project entry that touches
     // `thinking` does not blow away a user entry's `model`.

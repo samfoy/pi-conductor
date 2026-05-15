@@ -265,3 +265,91 @@ test("loadConfig: accepts conductorPromptPath string override", () => {
     teardown(fx);
   }
 });
+
+// ── defaultMode (v0.8) ────────────────────────────────────────────
+
+test("loadConfig: DEFAULT_CONFIG includes defaultMode 'off'", () => {
+  // The new field has a deterministic default (OFF) so consumers can rely
+  // on it without optional-chaining the resolved config.
+  assert.equal(DEFAULT_CONFIG.defaultMode, "off");
+});
+
+test("loadConfig: defaults include defaultMode 'off' when no config files exist", () => {
+  const fx = setup();
+  try {
+    const cfg = loadConfig(fx.projectDir);
+    assert.equal(cfg.defaultMode, "off");
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: user config defaultMode 'on' is preserved", () => {
+  const fx = setup();
+  try {
+    writeUserConfig(fx, JSON.stringify({ defaultMode: "on" }));
+    const cfg = loadConfig(fx.projectDir);
+    assert.equal(cfg.defaultMode, "on");
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: user config defaultMode 'off' is preserved", () => {
+  const fx = setup();
+  try {
+    writeUserConfig(fx, JSON.stringify({ defaultMode: "off" }));
+    const cfg = loadConfig(fx.projectDir);
+    assert.equal(cfg.defaultMode, "off");
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: project config defaultMode beats user config defaultMode", () => {
+  const fx = setup();
+  try {
+    writeUserConfig(fx, JSON.stringify({ defaultMode: "on" }));
+    writeProjectConfig(fx, JSON.stringify({ defaultMode: "off" }));
+    const cfg = loadConfig(fx.projectDir);
+    assert.equal(cfg.defaultMode, "off");
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: malformed defaultMode (unknown string) silently falls back to default", () => {
+  const fx = setup();
+  try {
+    writeUserConfig(fx, JSON.stringify({ defaultMode: "maybe" }));
+    const cfg = loadConfig(fx.projectDir);
+    assert.equal(cfg.defaultMode, "off");
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: malformed defaultMode (wrong type) silently falls back to default", () => {
+  const fx = setup();
+  try {
+    writeUserConfig(
+      fx,
+      JSON.stringify({ defaultMode: 1, otherTouched: 2 }), // number, not string
+    );
+    const cfg = loadConfig(fx.projectDir);
+    assert.equal(cfg.defaultMode, "off");
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: malformed defaultMode (array) silently falls back to default", () => {
+  const fx = setup();
+  try {
+    writeUserConfig(fx, JSON.stringify({ defaultMode: ["on"] }));
+    const cfg = loadConfig(fx.projectDir);
+    assert.equal(cfg.defaultMode, "off");
+  } finally {
+    teardown(fx);
+  }
+});

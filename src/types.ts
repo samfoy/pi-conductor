@@ -78,6 +78,12 @@ export interface ConductorConfig {
   queueOnConcurrencyCap: boolean;
   autoOpenFocusOnSpawn: boolean;
   defaultSpawnMode: "foreground" | "background";
+  /**
+   * v0.8: pinned conductor-mode default at extension load. Beats the
+   * `PI_CONDUCTOR_MODE` env var so users can set "always on" once and
+   * forget. Built-in default is `"off"`.
+   */
+  defaultMode: "on" | "off";
   personaOverrides: Record<string, PersonaOverride>;
   conductorPromptPath: string | null;
 }
@@ -97,6 +103,7 @@ export const DEFAULT_CONFIG: ConductorConfig = {
   queueOnConcurrencyCap: true,
   autoOpenFocusOnSpawn: false,
   defaultSpawnMode: "foreground",
+  defaultMode: "off",
   personaOverrides: {},
   conductorPromptPath: null,
 };

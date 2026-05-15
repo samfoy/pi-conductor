@@ -148,7 +148,15 @@ export default function (pi: ExtensionAPI): void {
     }
   }
 
-  let conductorModeOn = resolveInitialConductorMode(process.env);
+  // v0.8: conductor mode defaults to OFF; users opt in via
+  // `defaultMode: "on"` in config, `PI_CONDUCTOR_MODE=1` in env, or
+  // `/conductor on` per-session. Reading config at extension load
+  // (rather than session_start) is fine for the initial value — the
+  // user's pinned default doesn't change between session_starts.
+  const initialCfg = loadConfig(cwd);
+  let conductorModeOn = resolveInitialConductorMode(process.env, {
+    defaultMode: initialCfg.defaultMode,
+  });
 
   const opts = {
     getCwd: () => cwd,
