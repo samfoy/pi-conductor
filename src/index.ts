@@ -28,7 +28,7 @@ import { buildConductorSystemPrompt } from "./conductor-prompt.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
 import { FocusedStreamModel } from "./focused-stream-model.ts";
-import { FocusedStreamOverlay } from "./focused-stream-overlay.ts";
+import { createFocusedOverlayComponent } from "./focused-overlay-factory.ts";
 import { installFocusedOverlayShortcut } from "./focused-overlay-shortcut.ts";
 import { forceTerminate, resolveTimeoutMs, sendToRun, validateSendable } from "./runs.ts";
 import type { Run } from "./types.ts";
@@ -71,31 +71,16 @@ export default function (pi: ExtensionAPI): void {
     overlayOpen = true;
     void ctxRef.ui
       .custom(
-        (_tui, _theme, _kb, done) => {
-          const overlay = new FocusedStreamOverlay({
+        (_tui, _theme, _kb, done) =>
+          createFocusedOverlayComponent({
             model: focusModel,
-            onClose: () => done(undefined),
-            onKill: (id: string) => {
-              const run = registry.get(id);
-              if (run) forceTerminate(run, "killed", registry);
-              // Refresh the model so the next render reflects the kill.
-              focusModel.refresh();
-            },
-            onSend: (id: string) => {
+            registry,
+            forceTerminate,
+            promptAndSendToRun: (id: string) => {
               void promptAndSendToRun(id);
             },
-          });
-          // Re-render whenever a registered run changes state so the live
-          // transcript stays current.
-          const unsub = registry.onChange(() => {
-            // The custom() factory exposes its TUI handle implicitly; the
-            // overlay's own invalidate hooks plus the request-render plumbing
-            // wired into Component is sufficient here. We keep the listener
-            // registered for the lifetime of the overlay and dispose on close.
-            void unsub;
-          });
-          return overlay;
-        },
+            done,
+          }),
         { overlay: true },
       )
       .finally(() => {
