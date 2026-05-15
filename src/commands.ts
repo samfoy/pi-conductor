@@ -11,11 +11,14 @@
  *   /conductor pause <agent-id|all>  — SIGSTOP
  *   /conductor resume <agent-id|all> — SIGCONT
  *   /conductor queue                 — show the spawn queue
+ *   /conductor focus [agent-id]      — open the focused-stream overlay
+ *   /conductor history [N]           — list past sub-agent runs (default 20)
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import { existsSync } from "node:fs";
-import type { PersonaResolution, Run } from "./types.ts";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import type { PersonaResolution, Run, RunRecord } from "./types.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig, projectConfigPath, userConfigPath } from "./config.ts";
 import {
@@ -24,10 +27,13 @@ import {
   formatUsage,
   pauseRun,
   resumeRun,
+  runDir,
+  runsRoot,
   type RunRegistry,
 } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
 import { buildDoctorReport } from "./doctor.ts";
+import { buildHistoryReport } from "./history.ts";
 
 interface RegisterCommandsOpts {
   getCwd: () => string;
@@ -52,6 +58,7 @@ const SUBCOMMANDS = [
   "resume",
   "queue",
   "focus",
+  "history",
 ];
 
 export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): void {
@@ -107,6 +114,9 @@ export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): 
           return;
         case "focus":
           runFocus(opts, ctx, subRest);
+          return;
+        case "history":
+          runHistory(opts, ctx, subRest);
           return;
         default:
           ctx.ui.notify(
@@ -355,4 +365,64 @@ function statusGlyph(s: string): string {
     default:
       return "·";
   }
+}
+
+function runHistory(
+  _opts: RegisterCommandsOpts,
+  ctx: ExtensionCommandContext,
+  arg: string,
+): void {
+  const root = runsRoot();
+  if (!existsSync(root)) {
+    ctx.ui.notify(
+      "no run history yet. Spawn a sub-agent and it'll show up here.",
+      "info",
+    );
+    return;
+  }
+
+  const parsed = parseInt(arg, 10);
+  const limit = Number.isFinite(parsed) && parsed > 0 ? parsed : 20;
+
+  const report = buildHistoryReport(
+    {
+      listRunIds: () => {
+        try {
+          return readdirSync(root, { withFileTypes: true })
+            .filter((d) => d.isDirectory())
+            .map((d) => d.name);
+        } catch {
+          return [];
+        }
+      },
+      readRecord: (id: string): RunRecord | undefined => {
+        const p = join(runDir(id), "record.json");
+        try {
+          return JSON.parse(readFileSync(p, "utf8")) as RunRecord;
+        } catch {
+          return undefined;
+        }
+      },
+      readFinalText: (id: string): string | undefined => {
+        const p = join(runDir(id), "final.md");
+        try {
+          return readFileSync(p, "utf8");
+        } catch {
+          return undefined;
+        }
+      },
+      statMtime: (id: string): number => {
+        // Use the run dir's mtime; record.json is rewritten on every
+        // status change, so the dir mtime tracks last activity.
+        try {
+          return statSync(runDir(id)).mtimeMs;
+        } catch {
+          return 0;
+        }
+      },
+    },
+    { limit },
+  );
+
+  ctx.ui.notify(report, "info");
 }
