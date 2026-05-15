@@ -117,6 +117,30 @@ function collapseWhitespace(s: string): string {
   return s.replace(/\s+/g, " ").trim();
 }
 
+// ── Stream width resolution ──────────────────────────────────────
+
+/** Default width for headless contexts (RPC, CI, missing TTY). */
+export const STREAM_DEFAULT_WIDTH = 100;
+/** Below this, the streamed transcript becomes unreadable. */
+export const STREAM_MIN_WIDTH = 40;
+/** Above this, extra columns waste pi's tool-card render budget. */
+export const STREAM_MAX_WIDTH = 240;
+
+/**
+ * Pick the rendering width for renderForegroundStream. Prefers the live
+ * terminal columns (typically `process.stdout.columns`) clamped to
+ * [STREAM_MIN_WIDTH, STREAM_MAX_WIDTH]. Falls back to STREAM_DEFAULT_WIDTH
+ * for headless / unknown contexts.
+ */
+export function resolveStreamWidth(cols: number | undefined | null): number {
+  if (typeof cols !== "number" || !Number.isFinite(cols) || cols <= 0) {
+    return STREAM_DEFAULT_WIDTH;
+  }
+  if (cols < STREAM_MIN_WIDTH) return STREAM_MIN_WIDTH;
+  if (cols > STREAM_MAX_WIDTH) return STREAM_MAX_WIDTH;
+  return Math.floor(cols);
+}
+
 // ── Detach helpers (Esc-to-detach UX) ───────────────────────────────────
 
 export type DetachOutcome<T> =

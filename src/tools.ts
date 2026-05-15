@@ -20,15 +20,10 @@ import {
   renderForegroundDetachedResult,
   renderForegroundStream,
   renderForegroundSummary,
+  resolveStreamWidth,
 } from "./foreground-stream.ts";
 import type { FocusedStreamModel } from "./focused-stream-model.ts";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
-
-/** Width used for inline-streamed foreground transcripts. We don't have
- * a TUI handle inside execute(), so we pick a sensible fixed width. The
- * focused-stream overlay (Ctrl+G) is the source of truth for full-width
- * viewing; this is the at-a-glance card-level preview. */
-const FOREGROUND_STREAM_WIDTH = 100;
 
 /** Min ms between onUpdate deliveries while a foreground sub-agent
  * streams. Bounds pi's tool-card re-render rate. */
@@ -288,13 +283,14 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         // tool-call card. Throttled so a fast event stream doesn't flood
         // pi with re-renders. Terminal status flushes unconditionally
         // before the summary is returned.
+        const streamWidth = resolveStreamWidth(process.stdout?.columns);
         const throttle = createUpdateThrottle<Run>((r: Run) => {
           if (!onUpdate) return;
           onUpdate({
             content: [
               {
                 type: "text" as const,
-                text: renderForegroundStream(r, FOREGROUND_STREAM_WIDTH),
+                text: renderForegroundStream(r, streamWidth),
               },
             ],
             details: {
@@ -443,13 +439,14 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         // Stream the sub-agent's transcript inline in the parent's
         // tool-call card while the resumed session runs. Same throttle
         // shape as the spawn path.
+        const streamWidth = resolveStreamWidth(process.stdout?.columns);
         const throttle = createUpdateThrottle<Run>((r: Run) => {
           if (!onUpdate) return;
           onUpdate({
             content: [
               {
                 type: "text" as const,
-                text: renderForegroundStream(r, FOREGROUND_STREAM_WIDTH),
+                text: renderForegroundStream(r, streamWidth),
               },
             ],
             details: {
