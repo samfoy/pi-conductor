@@ -36,8 +36,10 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
   RunRegistry,
   allocateRunId,
+  applyCloseHandlerTerminal,
   buildPiArgs,
   buildSubAgentPrompt,
+  discoverSessionPathIfMissing,
   elapsedStr,
   findSessionFile,
   forceTerminate,
@@ -602,6 +604,207 @@ test("forceTerminate: clears any pending timeoutTimer", () => {
     reg.register(run);
     forceTerminate(run, "killed", reg);
     assert.equal(run.timeoutTimer, undefined);
+  } finally {
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
+// ── applyCloseHandlerTerminal (proc.on("close") race-fix) ─────────────
+//
+// `runPiSubprocess` finalizes a run through two paths:
+//   1. The subprocess's natural exit (proc.on("close")) routes through
+//      the closure-local `finalize`.
+//   2. An external `forceTerminate` (called by runStop, the timeout
+//      timer, or session_shutdown) settles the run synchronously.
+//
+// If (2) ran first, SIGTERM/SIGKILL eventually causes (1) with a
+// non-zero exit code. The legacy `finalize` only checked its own
+// `finalized` flag — not `run.status` — so the close handler would
+// silently regress "killed" → "failed" and double-fire onComplete.
+//
+// `applyCloseHandlerTerminal` is the testable seam that owns the
+// guard + the run-state mutation. The closure uses its return value
+// to gate the rest of finalize's body (errorMessage fallback,
+// session-file discovery, persistence writes, onComplete).
+
+test("applyCloseHandlerTerminal: applies status/exitCode/finishedAt on the happy path", () => {
+  const paths = tmpRunPaths();
+  try {
+    const run = makeRun({ status: "running", ...paths });
+    const t0 = Date.now();
+    const mutated = applyCloseHandlerTerminal(run, "completed", 0);
+    assert.equal(mutated, true);
+    assert.equal(run.status, "completed");
+    assert.equal(run.exitCode, 0);
+    assert.ok(typeof run.finishedAt === "number" && run.finishedAt >= t0);
+  } finally {
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
+test("applyCloseHandlerTerminal: bails when run is already terminal — status must NOT regress", () => {
+  // Race-fix invariant: a late close handler must not flip an
+  // already-killed run back to "failed" with the SIGTERM exit code.
+  const paths = tmpRunPaths();
+  try {
+    const run = makeRun({
+      status: "killed",
+      finishedAt: 99,
+      exitCode: undefined,
+      ...paths,
+    });
+    const mutated = applyCloseHandlerTerminal(run, "failed", 143);
+    assert.equal(mutated, false, "must bail when run is already terminal");
+    assert.equal(run.status, "killed", "status must NOT regress to failed");
+    assert.equal(run.finishedAt, 99, "finishedAt must not be overwritten");
+    assert.equal(run.exitCode, undefined, "exitCode must not be set on bail");
+  } finally {
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
+test("applyCloseHandlerTerminal: bails for every terminal status (killed / timeout / completed / failed)", () => {
+  const paths = tmpRunPaths();
+  try {
+    for (const prior of ["killed", "timeout", "completed", "failed"] as const) {
+      const run = makeRun({ status: prior, finishedAt: 1, ...paths });
+      const mutated = applyCloseHandlerTerminal(run, "failed", 1);
+      assert.equal(mutated, false, `must bail when status=${prior}`);
+      assert.equal(run.status, prior, `status must remain ${prior}`);
+      assert.equal(run.finishedAt, 1, "finishedAt must not be overwritten");
+    }
+  } finally {
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
+test("applyCloseHandlerTerminal: after forceTerminate, the close handler bails", () => {
+  // Reproduces the exact race the bug report described:
+  //   forceTerminate sets status=killed and fires onComplete.
+  //   The subprocess then exits (SIGTERM → exit code 143).
+  //   proc.on("close") routes through finalize → applyCloseHandlerTerminal.
+  //   The helper must bail; no status regress, no second onComplete via
+  //   this path.
+  const paths = tmpRunPaths();
+  try {
+    const reg = new RunRegistry();
+    const run = makeRun({ status: "running", ...paths });
+    reg.register(run);
+    let onCompleteCalls = 0;
+
+    forceTerminate(run, "killed", reg, () => onCompleteCalls++);
+    assert.equal(run.status, "killed");
+    assert.equal(onCompleteCalls, 1, "forceTerminate fires onComplete once");
+
+    // Subprocess exits afterwards with SIGTERM:
+    const mutated = applyCloseHandlerTerminal(run, "failed", 143);
+    assert.equal(mutated, false, "helper must bail — forceTerminate already settled");
+    assert.equal(run.status, "killed", "status must NOT regress to failed");
+    // The closure caller, on receiving false, skips its onComplete branch
+    // and only resolves `done`. The full closure-level guarantee is
+    // exercised by the live spawn integration test; here we pin the
+    // helper-level invariant the closure depends on.
+  } finally {
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
+// ── discoverSessionPathIfMissing (bail-path session discovery) ─────────
+//
+// `findSessionFile` is owned by the close-handler `finalize` path,
+// not by `forceTerminate`. The bail branch must still discover the
+// pi session file so a force-killed/timed-out sub-agent remains
+// resumable via `ensemble_send` (otherwise `validateSendable` rejects
+// it with "sessionPath unset").
+//
+// `discoverSessionPathIfMissing` is the shared seam used by both the
+// happy path and the bail path inside `finalize`. Tests pin its
+// guard semantics; a composition test below pins the bail-path
+// regression specifically.
+
+test("discoverSessionPathIfMissing: sets sessionPath when sessionDir holds a .jsonl and sessionPath is unset", () => {
+  const paths = tmpRunPaths();
+  try {
+    const sd = join(paths.dir, "session");
+    mkdirSync(sd, { recursive: true });
+    const f = join(sd, "2026-05-15T00-00-00-000Z_abc.jsonl");
+    writeFileSync(f, "{}\n");
+    const run = makeRun({ sessionPath: undefined, ...paths });
+    discoverSessionPathIfMissing(run, sd);
+    assert.equal(run.sessionPath, f);
+  } finally {
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
+test("discoverSessionPathIfMissing: no-op when sessionDir is undefined", () => {
+  const run = makeRun({ sessionPath: undefined });
+  discoverSessionPathIfMissing(run, undefined);
+  assert.equal(run.sessionPath, undefined);
+});
+
+test("discoverSessionPathIfMissing: no-op when sessionPath is already set (never overwrite)", () => {
+  const paths = tmpRunPaths();
+  try {
+    const sd = join(paths.dir, "session");
+    mkdirSync(sd, { recursive: true });
+    const decoy = join(sd, "decoy.jsonl");
+    writeFileSync(decoy, "{}\n");
+    const run = makeRun({ sessionPath: "/already/set.jsonl", ...paths });
+    discoverSessionPathIfMissing(run, sd);
+    assert.equal(
+      run.sessionPath,
+      "/already/set.jsonl",
+      "must NOT overwrite an existing sessionPath",
+    );
+  } finally {
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
+test("discoverSessionPathIfMissing: no-op when sessionDir contains no .jsonl", () => {
+  const paths = tmpRunPaths();
+  try {
+    const sd = join(paths.dir, "session");
+    mkdirSync(sd, { recursive: true });
+    const run = makeRun({ sessionPath: undefined, ...paths });
+    discoverSessionPathIfMissing(run, sd);
+    assert.equal(run.sessionPath, undefined);
+  } finally {
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
+});
+
+test("bail path composition: after forceTerminate, discoverSessionPathIfMissing must still populate sessionPath", () => {
+  // Pins the critic's regression report: pre-fix, the bail branch
+  // returned before findSessionFile, leaving sessionPath undefined.
+  // Without this the run is unresumable via ensemble_send (rejected
+  // by validateSendable as 'sessionPath unset').
+  const paths = tmpRunPaths();
+  try {
+    const reg = new RunRegistry();
+    const sd = join(paths.dir, "session");
+    mkdirSync(sd, { recursive: true });
+    const sessionFile = join(sd, "2026-05-15T00-00-00-000Z_xyz.jsonl");
+    writeFileSync(sessionFile, "{}\n");
+
+    const run = makeRun({ status: "running", sessionPath: undefined, ...paths });
+    reg.register(run);
+    forceTerminate(run, "killed", reg);
+    assert.equal(run.status, "killed");
+    assert.equal(run.sessionPath, undefined, "forceTerminate does not discover sessionPath");
+
+    // Subprocess exits afterwards; close handler enters the bail branch.
+    const mutated = applyCloseHandlerTerminal(run, "failed", 143);
+    assert.equal(mutated, false, "helper bails because forceTerminate already settled");
+    discoverSessionPathIfMissing(run, sd);
+
+    assert.equal(
+      run.sessionPath,
+      sessionFile,
+      "bail branch must still discover sessionPath so ensemble_send can resume",
+    );
+    assert.equal(run.status, "killed", "status remains killed");
   } finally {
     rmSync(paths.dir, { recursive: true, force: true });
   }

@@ -103,6 +103,30 @@ export function findSessionFile(sessionDir: string): string | undefined {
   return bestPath;
 }
 
+/**
+ * Populate `run.sessionPath` from `sessionDir` if and only if it is
+ * not already set. Shared by the close-handler `finalize` closure on
+ * both branches — happy path and the post-`forceTerminate` bail path —
+ * so a force-killed/timed-out sub-agent stays resumable via
+ * `ensemble_send` (otherwise `validateSendable` rejects it with
+ * "sessionPath unset"). `forceTerminate` itself does NOT call this
+ * because it is synchronous and runs before pi has had a chance to
+ * write the .jsonl file; discovery happens once the close handler
+ * fires.
+ *
+ * No-op when `sessionDir` is undefined, when `run.sessionPath` is
+ * already set (never overwrite), or when no `.jsonl` is found.
+ */
+export function discoverSessionPathIfMissing(
+  run: Run,
+  sessionDir: string | undefined,
+): void {
+  if (!sessionDir) return;
+  if (run.sessionPath) return;
+  const found = findSessionFile(sessionDir);
+  if (found) run.sessionPath = found;
+}
+
 // ── Id allocation ────────────────────────────────────────────────────
 
 const PRONOUNCEABLE_CHARS = "abcdefghijklmnpqrstuvwxyz0123456789"; // no o, easy to read
@@ -663,18 +687,34 @@ function runPiSubprocess(
       run.timeoutTimer = undefined;
     }
     if (buffer.trim()) processLine(buffer);
-    run.status = terminal;
-    run.exitCode = exitCode;
-    run.finishedAt = Date.now();
+    // Race-fix: if `forceTerminate` already settled the run (e.g. the
+    // user pressed Ctrl+C, the timeout timer fired, or session_shutdown
+    // ran), `applyCloseHandlerTerminal` returns false. The errorMessage
+    // fallback, registry.notify, persistence writes, and onComplete all
+    // already executed on the forceTerminate path — we skip them.
+    //
+    // BUT: pi's session-file discovery is owned by the close-handler
+    // path, not forceTerminate (sync forceTerminate runs before pi
+    // writes the .jsonl). We must still call discoverSessionPathIfMissing
+    // here so the force-killed sub-agent stays resumable via
+    // ensemble_send. We also clear run.proc and kill() the handle
+    // (idempotent; SIGTERM may have been sent already), then resolve
+    // `done` with the correct (forceTerminate-set) state.
+    if (!applyCloseHandlerTerminal(run, terminal, exitCode)) {
+      discoverSessionPathIfMissing(run, opts.sessionDir);
+      run.proc = undefined;
+      try {
+        proc.kill();
+      } catch {
+        // already dead
+      }
+      donePromiseResolve(run);
+      return;
+    }
     if (terminal === "failed" && !run.errorMessage) {
       run.errorMessage = stderr.trim() || `pi subprocess exited with code ${exitCode}`;
     }
-    // Discover the pi session file pi created in <runDir>/session/. Used by
-    // ensemble_send to resume this sub-agent later via `pi --session <path>`.
-    if (opts.sessionDir && !run.sessionPath) {
-      const found = findSessionFile(opts.sessionDir);
-      if (found) run.sessionPath = found;
-    }
+    discoverSessionPathIfMissing(run, opts.sessionDir);
     run.proc = undefined;
     opts.registry.notify(run);
     try {
@@ -874,6 +914,44 @@ export function sendToRun(
 }
 
 // ── Termination helpers ──────────────────────────────────────────────
+
+/**
+ * Race-fix helper used by the closure-local `finalize` inside
+ * `runPiSubprocess` (the `proc.on("close")` path).
+ *
+ * The conductor has two paths that can settle a Run to a terminal
+ * state:
+ *
+ *   1. The subprocess's natural exit, observed by `proc.on("close")`,
+ *      which routes through the `finalize` closure.
+ *   2. An external `forceTerminate(run, "killed"|"timeout", …)` called
+ *      from `runStop`, the timeout timer, or `session_shutdown`.
+ *
+ * If (2) ran first, the SIGTERM (and the SIGKILL fallback) issued by
+ * forceTerminate eventually causes (1) to fire with a non-zero exit
+ * code (typically 143 for SIGTERM, 137 for SIGKILL). Without a guard,
+ * the close handler would call `finalize("failed", 143)` and silently
+ * regress `run.status` from "killed" back to "failed", while
+ * double-firing the registry listeners and the `<sub-agent-completed>`
+ * notification.
+ *
+ * This helper applies the terminal transition only when the run is
+ * not already terminal. Returns true if it mutated state, false if it
+ * bailed because the run was already settled. The closure body uses
+ * the return value to gate the rest of finalize's work (errorMessage
+ * fallback, session-file discovery, persistence writes, onComplete).
+ */
+export function applyCloseHandlerTerminal(
+  run: Run,
+  terminal: RunStatus,
+  exitCode: number | undefined,
+): boolean {
+  if (isTerminal(run.status)) return false;
+  run.status = terminal;
+  run.exitCode = exitCode;
+  run.finishedAt = Date.now();
+  return true;
+}
 
 export function forceTerminate(
   run: Run,
