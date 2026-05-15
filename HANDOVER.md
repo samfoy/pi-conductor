@@ -142,20 +142,22 @@ CONTRIBUTING.md           — TDD rules, conventions.
 
 ---
 
-## 5. What works today (v0.4 + v0.6 shipped)
+## 5. What works today (v0.7 shipped)
 
 - **Persona discovery + resolution** with builtin/user/project layering
 - **16 starter personas** covering full SDLC (see decision-log table)
 - **Tools**: `ensemble_list`, `ensemble_status`, `ensemble_spawn`, `ensemble_send`, `ensemble_pause`, `ensemble_resume`, `ensemble_focus`
-- **Slash commands**: `/conductor list | show | doctor | on | off | status | stop | pause | resume | queue | focus`
+- **Slash commands**: `/conductor list | show | doctor | on | off | status | stop | pause | resume | queue | focus | history`
 - **Spawn**: foreground (default, blocks AND streams the sub-agent's transcript inline in the parent's tool-call card; collapses to a 1–3 line summary on completion) or background (returns immediately, completion arrives via `<sub-agent-completed>` notification message)
-- **Inline-streamed foreground transcript (v0.4)** — `ensemble_spawn(foreground=true)` and `ensemble_send(foreground=true)` push the sub-agent's transcript through `onUpdate` on every registry change. The text is composed by `renderForegroundStream` (header + collapsed-tool-calls transcript, reuses `renderHeader` + `renderTranscript` from `transcript.ts`). Updates are coalesced via `createUpdateThrottle` at 50ms granularity; terminal state is force-flushed before the tool result is returned. The result card collapses to `renderForegroundSummary` — status glyph, persona:id, elapsed, usage, optional final-text excerpt, transcript path. The streamed view is tail-truncated at 32KB to keep pi's tool-card re-render cheap on long runs.
+- **Inline-streamed foreground transcript (v0.4)** — `ensemble_spawn(foreground=true)` and `ensemble_send(foreground=true)` push the sub-agent's transcript through `onUpdate` on every registry change. The text is composed by `renderForegroundStream` (header + collapsed-tool-calls transcript, reuses `renderHeader` + `renderTranscript` from `transcript.ts`). Updates are coalesced via `createUpdateThrottle` at 50ms granularity; terminal state is force-flushed before the tool result is returned. The result card collapses to `renderForegroundSummary` — status glyph, persona:id, elapsed, usage, optional final-text excerpt, transcript path. The streamed view is tail-truncated at 32K chars to keep pi's tool-card re-render cheap on long runs. **Width tracks the live terminal** (`process.stdout.columns`, clamped to [40, 240]; falls back to 100 in headless contexts).
+- **Esc-to-detach (v0.7)** — PRD-locked Foreground cancel UX. Pressing Esc while a foreground sub-agent streams converts the spawn into a background run; the tool returns a `detached-as-background` result so the LLM doesn't re-spawn, and a registry listener pushes the standard `<sub-agent-completed>` notification on terminal status. Implemented via `awaitOrDetach` race + `pi.registerShortcut(Key.escape, ...)` in `index.ts` (guarded on `overlayOpen` so the focused-stream overlay's internal Esc-to-close still works). Ctrl+C continues to kill via the existing `signal?.addEventListener("abort", ...)` path.
+- **`/conductor history [N]` (v0.7)** — lists past sub-agent runs from `~/.pi/agent/conductor/runs/`, sorted by run-dir mtime DESC, default limit 20. Surfaces persona, run id, status glyph, elapsed, usage, and final-text excerpt (or error message for failures). Pure renderer in `src/history.ts` with injected I/O so it's fully unit-tested.
 - **Resumable sessions on disk** — every sub-agent writes to `<runDir>/session/`. `Run.sessionPath` is populated up-front when seeded (v0.6) or on finalize (v0.5). Future `ensemble_send` calls resume via `pi --session <path>`.
 - **`ensemble_send`** — continues a finished sub-agent's session with a new user message. Reuses the same `applyEvent` plumbing so the run's messages, usage, and lastToolCall accumulate across the original spawn AND any subsequent sends.
 - **`inherit_context: filtered` / `full` (v0.6)** — personas with these settings boot the sub-agent on a seeded JSONL session containing the conductor's transcript. `filtered` drops orchestration noise (`ensemble_*`, `subagent` tool calls + results, `<sub-agent-completed>` cards, `!!`-prefix bash); `full` passes everything verbatim. `none` (default) keeps the existing fresh-spawn behavior. Pure planner `planSpawnPiArgs` decides per-spawn; `filterParentContext` is the pure filter; `seedSessionFile` writes the JSONL.
 - **Overlay `s` keybinding** — prompts for a follow-up message and dispatches via `sendToRun`. Footer shows `s send`.
 - **Concurrency cap + FIFO queue** with foreground→background auto-downgrade when full. `parentMessages` snapshots flow through `PendingSpawn` so a queued sub-agent inherits the conductor's intent at enqueue time, not at drain time.
-- **Pause/resume/stop** via SIGSTOP/SIGCONT/SIGTERM; `stop` works on running OR queued sub-agents; pause/resume also exposed as LLM-callable tools
+- **Pause/resume/stop** via SIGSTOP/SIGCONT/SIGTERM; `stop` works on running OR queued sub-agents; pause/resume also exposed as LLM-callable tools. Happy-path now unit-tested via an injectable `Signaler`.
 - **Ensemble panel** (always-visible `belowEditor` widget when ≥1 sub-agent active or recently-finished within 8s)
 - **Conductor mode system prompt** injected via `before_agent_start` when `PI_CONDUCTOR_MODE=1` env or `/conductor on`. Documents `ensemble_send` / `ensemble_pause` / `ensemble_resume` for the LLM.
 - **Focused stream overlay** (Ctrl+G) — full-screen drilldown of one sub-agent's live transcript with per-agent scroll, global fold flags, kill-from-overlay, send-from-overlay
@@ -164,10 +166,8 @@ CONTRIBUTING.md           — TDD rules, conventions.
 - **Pre-commit hook** gates every commit on the test suite
 
 What does NOT work yet:
-- **`/conductor history`** — listed in PRD slash commands but not implemented. Sessions accumulate under `~/.pi/agent/conductor/runs/`; a browser would surface them.
 - **Run-record GC** — still no policy; sessions live forever.
 - **`inherit_skills: true`** — PRD lists this as a v1 frontmatter field; currently parsed but unused. Would need to port the parent's skill catalog to the child's prompt.
-- **Esc-to-detach for foreground spawns** — PRD-locked UX (Esc detaches→background, Ctrl+C kills). Ctrl+C SIGTERM is already wired through the existing `signal?.addEventListener("abort", ...)` path; Esc-to-detach would need to register a temporary `pi.registerShortcut(Key.escape, ...)` while a foreground spawn is in flight and resolve the `done` promise with a "detached\u2192background" signal. Deferred to v0.7.
 
 ---
 
@@ -246,14 +246,12 @@ The agent will inject its final report when done. Switch to its tmux window to m
 
 ## 9. What to do next (priority order)
 
-1. **Hand-test v0.4 end-to-end.** Load the extension (`pi -e ~/scratch/pi-conductor/src/index.ts`), turn conductor mode on, foreground-spawn a persona on a multi-step task (e.g. inspector: "run `echo X` then describe what you saw"). Confirm the parent's tool-call card re-renders with the sub-agent transcript while it streams, and collapses to the compact summary on completion. Verify width=100 looks right at typical terminal sizes.
-2. **Esc-to-detach for foreground spawns.** PRD-locked UX (Esc detaches→background, Ctrl+C kills). Ctrl+C is already wired via the existing abort signal path; Esc would need to register a temporary `pi.registerShortcut(Key.escape, ...)` while a foreground spawn is in flight, resolve `result.done` (or wrap it) with a "detached" signal, install a completion listener that pushes the standard `<sub-agent-completed>` card, and return immediately from `execute()` with a queued-style result.
-3. **`/conductor history`** — listed in PRD slash commands but not implemented. Browse past runs from `~/.pi/agent/conductor/runs/`. Useful now that v0.4 + v0.5 + v0.6 leave more session files on disk.
-4. **Run-record GC** — open question #12 in the PRD. Sessions accumulate under `~/.pi/agent/conductor/runs/` and never get cleaned up. Decide a policy.
-5. **`inherit_skills: true`** — PRD lists this as a v1 frontmatter field; currently parsed but unused. Port the parent's skill catalog to the child's prompt at spawn time.
-6. **Audit which shipped personas should default to `inherit_context: filtered`.** Currently most personas set `filtered` in frontmatter but every spawn was effectively `none` until v0.6. Now that filtering really runs, walk each persona and confirm whether its `filtered` setting is right (or if it should be `none` for read-only specialists where extra context is just noise).
-7. **Optional cleanup:** `pauseRun` / `resumeRun` happy paths still aren't unit-tested (they call `process.kill` directly). A `signaler` injection point would unlock them.
-8. **Plumb a real width into `renderForegroundStream`.** Currently hardcoded to 100 columns because `execute()` doesn't have a TUI handle. Could expose a getter from `index.ts` that reads the live terminal width when a session is attached. Not blocking — the focused-stream overlay is the source of truth for full-width viewing.
+1. **Hand-test v0.7 end-to-end.** Load the extension, foreground-spawn a long-running task, press Esc, watch the spawn convert to background and the `<sub-agent-completed>` card arrive. Try `/conductor history` and `/conductor history 5` to see the recent-runs browser. Verify Ctrl+C still kills (not detaches).
+2. **Run-record GC** — open question #12 in the PRD. Sessions accumulate under `~/.pi/agent/conductor/runs/` and never get cleaned up. Decide a policy (e.g. keep last N, or older-than-D days). Implement as a `/conductor gc` slash command + an opt-in startup hook.
+3. **`inherit_skills: true`** — PRD lists this as a v1 frontmatter field; currently parsed but unused. Port the parent's skill catalog to the child's prompt at spawn time.
+4. **Audit which shipped personas should default to `inherit_context: filtered`.** Currently most personas set `filtered` in frontmatter but every spawn was effectively `none` until v0.6. Now that filtering really runs, walk each persona and confirm whether its `filtered` setting is right (or if it should be `none` for read-only specialists where extra context is just noise).
+5. **Worktree per persona** (PRD v2 deferred).
+6. **PRD `Implementation phases` cleanup.** Now that v0.4 + v0.5 + v0.6 + v0.7 are all shipped, the section should reflect actual state.
 
 ---
 

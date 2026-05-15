@@ -16,6 +16,7 @@ import { resolvePersonas } from "../src/personas.ts";
 import { RunRegistry, runDir, sendToRun } from "../src/runs.ts";
 import { SpawnQueue } from "../src/queue.ts";
 import {
+  awaitOrDetach,
   createUpdateThrottle,
   renderForegroundStream,
   renderForegroundSummary,
@@ -461,6 +462,76 @@ test(
         `summary should be compact (<2KB), got ${summary.length} bytes`,
       );
       assert.doesNotMatch(summary, /<sub-agent-completed>/);
+    } finally {
+      try {
+        rmSync(tmpCwd, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+    }
+  },
+);
+
+test(
+  "spawn integration: Esc-to-detach converts a foreground spawn to background",
+  { skip: !RUN_LIVE ? "set CONDUCTOR_LIVE_TESTS=1 to enable (uses real pi subprocess + AWS creds)" : false, timeout: 180_000 },
+  async () => {
+    const tmpCwd = mkdtempSync(join(tmpdir(), "conductor-live-cwd-"));
+    try {
+      const resolved = await resolvePersonas({ cwd: tmpCwd });
+      const inspector = resolved.personas.get("inspector");
+      assert.ok(inspector, "inspector persona must be resolvable");
+
+      const registry = new RunRegistry();
+      const queue = new SpawnQueue(registry, 4);
+
+      // Spawn a foreground run that takes long enough to detach mid-stream.
+      const result = queue.enqueueOrSpawn({
+        persona: inspector,
+        task:
+          "Use bash to run `sleep 3 && echo HELLO_FROM_DETACHED` and then summarize what happened in one sentence.",
+        mode: "foreground",
+        cwd: tmpCwd,
+        timeoutMs: 150_000,
+      });
+      assert.equal(result.kind, "spawned");
+      if (result.kind !== "spawned") return;
+
+      // Trigger detach after a short delay so the run has time to start
+      // emitting events but cannot have completed yet.
+      let resolveDetach: () => void = () => {};
+      const detachSignal = new Promise<void>((res) => {
+        resolveDetach = res;
+      });
+      setTimeout(() => resolveDetach(), 800);
+
+      const outcome = await awaitOrDetach(result.done, detachSignal);
+
+      // Must come back as detached — the run hasn't completed in <1s.
+      assert.equal(
+        outcome.kind,
+        "detached",
+        `expected detach to win the race, got ${outcome.kind}`,
+      );
+
+      // The run should still be alive after detach.
+      const liveRun = registry.get(result.run.id);
+      assert.ok(liveRun, "run must remain in registry after detach");
+      assert.ok(
+        liveRun!.status === "running" ||
+          liveRun!.status === "paused" ||
+          liveRun!.status === "completed",
+        `unexpected post-detach status: ${liveRun!.status}`,
+      );
+
+      // Wait for the run to actually complete in the background and
+      // verify the registry state ends up terminal.
+      const finished = await result.done;
+      assert.ok(
+        finished.status === "completed" || finished.status === "failed",
+        `unexpected eventual status: ${finished.status}`,
+      );
+      assert.equal(finished.id, result.run.id);
     } finally {
       try {
         rmSync(tmpCwd, { recursive: true, force: true });
