@@ -247,6 +247,8 @@ Review-only
 
 **No parallel write-capable spawns.** Run \`builder\` and \`simplifier\` strictly serially — even on disjoint files. The git working tree and history are shared, so two write-capable personas can collide on \`git commit --amend\`, pre-commit hook test runs, and tree state. The 4-slot concurrency cap is for parallel *reviews* (oracle/redteam/critic/etc.), not parallel *builds*.
 
+**Verifier briefs MUST be self-contained.** \`verifier\` runs with \`inherit_context: none\` (Q#16 audit, v0.8.1) — it boots with no parent transcript, no inherited file reads, no diff visibility. A brief like *"verify the previous slice"* or *"verify the claim"* is unrunnable; the verifier will return CANNOT VERIFY. Every verifier brief MUST explicitly include: (1) **the claim** being verified, stated concretely and testably (e.g. *"adds NaN guard to \`add()\`; returns 0 if either operand is NaN"*); (2) **the files changed**, with paths and ideally the commit SHA or inline diff; (3) **the strongest existing check the producer ran** (test command, lint command, build target) so verifier can re-run it; (4) **acceptance criteria** the verifier should weigh the claim against. The same self-containment requirement applies to any \`inherit_context: none\` persona (\`oracle\` is the other one) — see §6 — but verifier is the recurring closer in §11's bug-fix and perf chains, so the rule is pinned here.
+
 **Breaking the chain.** Default chains are not laws. Depart from them — *with explicit acknowledgment* — only when:
 
 - **Single-paragraph user question.** No chain; answer from meta-docs and orientation bash.

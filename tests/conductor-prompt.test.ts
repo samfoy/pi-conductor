@@ -424,3 +424,38 @@ test("buildConductorSystemPrompt: §11 — 'Breaking the chain' covers F6's skil
   // Closure prose is load-bearing per design §7.5.3 — pin it too.
   assert.match(out.slice(idx11), /not a valid reason/i);
 });
+
+test("buildConductorSystemPrompt: §11 — verifier briefs must be self-contained (Q#16 inherit_context: none follow-up)", () => {
+  // v0.8.1 Q#16 audit flipped `verifier` from inherit_context: filtered to
+  // inherit_context: none. Post-flip, a verifier brief like "verify the
+  // previous slice" is unrunnable — verifier boots with no parent
+  // transcript, so the conductor must spell out the claim, the files
+  // changed, the existing check, and acceptance criteria explicitly.
+  // §11 is where verifier shows up in the canonical chains, so the rule
+  // lives there. See docs/v0.8.2-backlog.md "§11 verifier-brief sub-rule".
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  const idx11 = out.indexOf("## 11.");
+  assert.ok(idx11 >= 0, "§11 heading must exist");
+  const section = out.slice(idx11);
+
+  // Anchor: the rule must mention verifier and inherit_context together.
+  assert.match(section, /verifier/i);
+  assert.match(section, /inherit_context/);
+
+  // Anchor: the rule must use "self-contained" or "claim" (or both)
+  // — these are the load-bearing concepts. Leave editorial wording free.
+  assert.match(section, /self-contained|claim/i);
+
+  // Locality: the verifier-brief rule should be co-located with
+  // inherit_context — i.e. they should appear within the same paragraph-ish
+  // window, not separated by hundreds of lines. 600 chars is generous
+  // (a paragraph or two) and rules out accidental matches across sections.
+  const verifierIdx = section.search(/verifier briefs?/i);
+  const inheritIdx = section.indexOf("inherit_context");
+  assert.ok(verifierIdx >= 0, "§11 must reference 'verifier brief(s)' explicitly");
+  assert.ok(inheritIdx >= 0, "§11 must reference inherit_context");
+  assert.ok(
+    Math.abs(verifierIdx - inheritIdx) < 600,
+    `verifier-brief rule must be co-located with inherit_context (got ${Math.abs(verifierIdx - inheritIdx)} chars apart)`,
+  );
+});
