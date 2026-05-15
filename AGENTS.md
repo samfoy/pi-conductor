@@ -31,7 +31,7 @@ If you can't figure out how to test something cleanly, the code probably needs r
 
 A pi extension that turns the parent pi session into an orchestrator driving persona-based sub-agents with first-class TUI visibility. See `README.md` for the user-facing summary.
 
-Versioning lives in the PRD's "Implementation phases" section. Current state is v0.2 (background + foreground spawn, queue, panel, conductor mode). v0.3 is the focused stream overlay.
+Versioning lives in the PRD's "Implementation phases" section. **Current state: v0.7 shipped** — all milestones v0.1–v0.7 are live (read-only scaffold, background + foreground spawn with inline-streamed transcript, queue, ensemble panel, conductor mode prompt, focused-stream overlay, ensemble_send / pause / resume, filtered context inheritance, Esc-to-detach, /conductor history, conductor mode ON by default). Next up: run-record GC, persona inherit_context audit, worktree-per-persona (v0.8+).
 
 ## Project conventions
 
@@ -40,6 +40,11 @@ Versioning lives in the PRD's "Implementation phases" section. Current state is 
 - `personas/` — markdown files with YAML-ish frontmatter, one per shipped persona.
 - `~/.pi/agent/conductor/personas/` — user-level overrides at runtime (NOT in this repo).
 - `<project>/.pi/conductor/personas/` — project-level overrides at runtime (NOT in this repo).
+- `tools/` — maintenance scripts (e.g. `rename-pi-namespace.mjs`); not part of the runtime.
+
+## Upstream package namespace
+
+pi-coding-agent and its companions live under `@earendil-works/`, not `@mariozechner/`. The migration happened in commit `5594e5d`; if you see `@mariozechner/pi-*` imports they are stale and need to be rewritten. The namespace packages are not on the workplace npm proxy — install with `--registry https://registry.npmjs.org`.
 
 ## What NOT to do
 

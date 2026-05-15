@@ -1,11 +1,11 @@
 # pi-conductor — PRD
 
-**Status:** Draft v0.2
+**Status:** v0.7 shipped (drafted v0.2)
 **Owner:** samfp
 **Created:** 2026-05-14
-**Last updated:** 2026-05-14
+**Last updated:** 2026-05-15
 
-## Locked decisions (v0.4)
+## Locked decisions (v0.7)
 
 | Decision | Choice | Rationale |
 |---|---|---|
@@ -19,8 +19,10 @@
 | Foreground-spawn-while-queued | **Auto-downgrade to background.** | When `maxConcurrent` is hit, foreground spawns return `{ status: "queued-as-background", agent_id }` and complete via the standard `<sub-agent-completed>` notification card. The conductor system prompt notes this can happen. |
 | Filtered context inheritance | **Reimplement.** | Don't depend on pi-subagents' `shared/fork-context.ts`. Filtering rules are short and stable; owning the implementation is worth the cost. |
 | Persona discovery paths | **`~/.pi` subtree only (and project `.pi/`).** | User personas at `~/.pi/agent/conductor/personas/`; project at `<project>/.pi/conductor/personas/`. No XDG, no autoloop-style scattered locations. |
-| Foreground cancel UX | **Esc detaches; Ctrl+C kills.** | Esc converts a foreground stream into a background sub-agent (transparent transition; ensemble panel takes over visibility). Ctrl+C SIGTERMs the sub-agent and ends the parent's foreground turn with a `killed` notification. |
+| Foreground cancel UX | **Esc detaches; Ctrl+C kills.** | Implemented via per-spawn `ctx.ui.onTerminalInput` listener (intercepts bare Esc before pi's reserved `app.interrupt` action fires). `awaitOrDetach` race converts a foreground spawn into a background run; Ctrl+C SIGTERMs via the existing `signal.aborted` path. |
 | Default model per persona | **Inherit-only.** | Every persona inherits the parent's model and thinking unless explicitly overridden in the persona's frontmatter or in `personaOverrides`. No phase-aware defaults baked in. Install never references a model the user hasn't configured. |
+| Conductor mode at extension load | **ON by default.** | Anyone who installs pi-conductor wants the system-prompt addendum injecting at every turn. `PI_CONDUCTOR_MODE=0` / `off` is preserved as an explicit per-session opt-out; `/conductor on \| off` is the per-session toggle. |
+| Foreground stream width | **Live terminal columns**, clamped to [40, 240], default 100. | Width is captured once at spawn start and frozen for the duration of the spawn (no SIGWINCH-induced flicker). The focused-stream overlay (Ctrl+G) is the source of truth for full live-resizable viewing. |
 
 ## TL;DR
 
@@ -453,39 +455,50 @@ When `inherit_context: filtered`, before launching the sub-agent we serialize a 
 
 ## Implementation phases
 
-### v0.1 — Skeleton (this PRD + extension scaffold)
+### v0.1 — Skeleton (this PRD + extension scaffold) — _shipped_
 - Extension scaffold (TypeScript, single file or small module set).
 - Persona file loader (frontmatter + body parser).
 - `ensemble_list`, `ensemble_status` tools.
 - Ensemble panel (read-only, no spawn yet).
 
-### v0.2 — Background spawning
+### v0.2 — Background spawning — _shipped_
 - `ensemble_spawn(foreground=false)` only.
 - Live ensemble panel updates from JSON stream.
 - `<sub-agent-completed>` notifications.
 - `/conductor list`, `/conductor status`, `/conductor doctor`.
-- Five built-in personas as markdown files.
+- 16 built-in personas as markdown files.
 
-### v0.3 — TUI focused view
+### v0.3 — TUI focused view — _shipped_
 - Focused stream overlay (Ctrl+G).
 - Transcript rendering (assistant text, tool calls collapsed, thinking toggleable).
-- Ensemble overlay (Ctrl+E) with row selection.
+- `ensemble_focus`, `/conductor focus`.
 
-### v0.4 — Foreground spawning
-- `ensemble_spawn(foreground=true)` streams inline in parent conversation.
-- Auto-collapse on completion to a folded summary block.
+### v0.4 — Foreground spawning — _shipped_
+- `ensemble_spawn(foreground=true)` streams inline in parent conversation via throttled `onUpdate`.
+- Auto-collapse on completion to a compact 1–3 line summary block.
+- Live terminal width (`process.stdout.columns`, clamped to [40, 240]).
 
-### v0.5 — Send / continue / kill
-- `ensemble_send` (continue a background sub-agent's session).
+### v0.5 — Send / continue / kill — _shipped_
+- `ensemble_send` (continue any sub-agent's session, including finished ones via `pi --session`).
 - `s` keybinding inside focused view to send.
-- `ensemble_stop` and `k` keybinding.
+- `ensemble_pause` / `ensemble_resume` (SIGSTOP / SIGCONT) as LLM-callable tools.
+- Resumable sessions on disk.
 
-### v0.6 — Context inheritance & history
-- `inherit_context: filtered` (port pi-subagents' fork-context filter or reimplement).
-- `/conductor history` — browse past runs from `runs/`.
+### v0.6 — Context inheritance — _shipped_
+- `inherit_context: filtered` (reimplemented in-tree, not ported from pi-subagents).
+- `inherit_context: full` for whole-transcript handoff.
+- `<filtered-history>` sentinel when the seeded transcript is filtered.
 
-### v0.7+ — v2 ideas
-- Worktree per persona.
+### v0.7 — Cancel UX + history + on-by-default — _shipped_
+- Esc detaches a foreground spawn into the background (PRD-locked Foreground cancel UX). Implemented via per-spawn `ctx.ui.onTerminalInput` listener; pi's reserved `app.interrupt` keybinding cannot be overridden.
+- `/conductor history [N]` browses past runs from `~/.pi/agent/conductor/runs/`.
+- Conductor mode ON by default at extension load (`PI_CONDUCTOR_MODE=0` is the new opt-out).
+- Conductor system prompt addendum gains §10 — proactive delegation triggers.
+
+### v0.8+ — v2 ideas — _planned_
+- Run-record GC (open question #12).
+- `inherit_skills: true` (port parent skill catalog into child prompt).
+- Worktree per persona (`worktree: true` in frontmatter).
 - Quality gates (`on_complete_hook` per persona).
 - Transient (in-process) runtime for read-only personas.
 - Project-shareable persona library (a "marketplace" of `.md` files).
@@ -493,22 +506,25 @@ When `inherit_context: filtered`, before launching the sub-agent we serialize a 
 
 ## Open questions
 
-All v0.3 release-blocking questions resolved. Remaining items are v1.x decisions that don't gate v0.1 scaffolding:
+All release-blocking questions through v0.7 are resolved. Remaining items are v1.x decisions that don't gate any current milestone.
 
 1. ~~Naming.~~ **Resolved:** `pi-conductor`.
 2. ~~Tool restriction enforcement.~~ **Resolved:** dropped; pi has no clean mechanism, and we don't fake it.
 3. ~~Foreground vs background default.~~ **Resolved:** foreground default.
 4. ~~Notification rendering.~~ **Resolved:** inline visible folded card.
 5. ~~Persona tool inheritance.~~ **Resolved (moot):** no tool restrictions.
-6. ~~Pause / resume.~~ **Resolved:** supported in v1 via SIGSTOP/SIGCONT.
+6. ~~Pause / resume.~~ **Resolved:** shipped in v0.5 via SIGSTOP/SIGCONT, exposed as `ensemble_pause` / `ensemble_resume` tools and `/conductor pause` / `resume` slash commands.
 7. ~~Foreground spawn that gets queued.~~ **Resolved:** auto-downgrade to background.
-8. ~~Filtered context inheritance — port or reimplement?~~ **Resolved:** reimplement.
+8. ~~Filtered context inheritance — port or reimplement?~~ **Resolved:** reimplement; shipped in v0.6.
 9. ~~Persona discovery paths.~~ **Resolved:** `~/.pi/agent/conductor/personas/` and project `.pi/conductor/personas/` only.
-10. ~~Foreground cancellation UX.~~ **Resolved:** Esc detaches; Ctrl+C kills.
+10. ~~Foreground cancellation UX.~~ **Resolved + shipped (v0.7):** Esc detaches via per-spawn `onTerminalInput`; Ctrl+C kills via `signal.aborted`.
 11. ~~Default model per persona phase — phase-aware or inherit?~~ **Resolved:** inherit-only. Shipped persona files never set `model` or `thinking`; users override per-persona in `personaOverrides`. No phase-aware defaults baked into the package.
-12. **Resumable sessions for finished sub-agents.** `ensemble_send` to a *finished* sub-agent currently implies resuming via `pi --session`. Should we keep finished sub-agents' sessions alive forever (disk grows) or GC after N days? *Open.*
+12. **Resumable sessions for finished sub-agents.** `ensemble_send` to a *finished* sub-agent resumes via `pi --session`. Should we keep finished sub-agents' sessions alive forever (disk grows) or GC after N days? *Open — next-up for v0.8.*
 13. **Worktree isolation per persona** (deferred to v2). When implemented: which personas default `worktree: true`? `builder` and `simplifier` are the obvious ones (write-capable, can run in parallel). Read-only personas should always be `false`.
 14. **Project-shareable persona library.** A vault-style "marketplace" of `.md` persona files — install via `/conductor install <url>`? *v2.*
+15. **`inherit_skills: true`.** Currently parsed from frontmatter but unused. Implementation would port the parent's skill catalog into the child's prompt at spawn time. *Open — v0.8+.*
+16. **Persona `inherit_context` audit.** Most shipped personas declare `inherit_context: filtered` in frontmatter, but no spawn actually filtered until v0.6. Now that filtering really runs, walk each persona and confirm whether `filtered` is right (or if read-only specialists should be `none` for less noise). *Open — v0.8.*
+17. **Conductor `model` / `thinking_level` not preserved into seeded sessions.** Acceptable today (most personas inherit anyway). Worth documenting in the persona reference.
 
 ## Validation plan
 
@@ -541,3 +557,9 @@ All v0.3 release-blocking questions resolved. Remaining items are v1.x decisions
 - 2026-05-14 — **Persona discovery limited to `~/.pi` subtree** (user) and project `.pi/conductor/personas/`. No XDG / no scattered locations.
 - 2026-05-14 — **Foreground cancel UX:** Esc → detach to background; Ctrl+C → kill.
 - 2026-05-14 — **Default model per persona = inherit-only.** Shipped persona files never set `model` or `thinking`; phase-aware defaults rejected to keep installs portable across provider configs. Users override per-persona in `personaOverrides`.
+- 2026-05-15 — **v0.4 + v0.5 + v0.6 shipped.** Inline-streamed foreground transcript (throttled `onUpdate`), `ensemble_send` / `pause` / `resume`, filtered context inheritance.
+- 2026-05-15 — **v0.7 cancel UX implemented via `ctx.ui.onTerminalInput`**, not `pi.registerShortcut(Key.escape, ...)`. Pi's runner reserves `app.interrupt` (default: escape, ctrl+c) and silently drops conflicting extension shortcuts at load. The onTerminalInput route runs ahead of the keybinding layer in pi-tui's `TUI.handleInput`, so Esc is intercepted and consumed before pi's interrupt action sees it.
+- 2026-05-15 — **`/conductor history`** shipped as a pure renderer + injected I/O (`src/history.ts`); ordering by `record.json` mtime, not directory mtime, so ext4 dir-mtime semantics don't reorder by creation time.
+- 2026-05-15 — **Conductor mode ON by default at extension load.** Anyone who installs pi-conductor wants the system-prompt addendum. `PI_CONDUCTOR_MODE=0` / `off` is preserved as an explicit per-session opt-out; `/conductor on \| off` unchanged.
+- 2026-05-15 — **§10 — proactive delegation triggers** added to the conductor system-prompt addendum. §1 ("don't delegate work you can handle") was producing too-conservative behavior; §10 lists seven concrete triggers that should make the LLM reach for personas (parallel review, pre-mortem, about-to-commit, fresh mental model, multi-phase work, heavy parent context, verb-to-persona mapping) and a counter-balancing "don't delegate when" list.
+- 2026-05-15 — **Upstream namespace migration:** `@mariozechner/pi-*` → `@earendil-works/pi-*` (v0.70.2 → v0.74.0). API surfaces unchanged. Mechanical rename across all imports + `package.json` swap; auditable via `tools/rename-pi-namespace.mjs`.

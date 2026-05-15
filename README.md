@@ -2,11 +2,7 @@
 
 A pi extension that turns the parent pi session into an **orchestrator** driving a roster of **persona-based sub-agents** with first-class TUI visibility.
 
-> **v0.7 — Esc-to-detach + run history.** Pressing Esc while a foreground sub-agent streams converts the spawn into a background run; completion arrives as a `<sub-agent-completed>` notification just like a regular background spawn. New `/conductor history` command browses past runs from `~/.pi/agent/conductor/runs/`.
->
-> **v0.4 — inline-streamed foreground transcript.** Foreground spawns now stream the sub-agent's transcript inline in the parent's tool-call card (re-rendered via throttled `onUpdate`, reusing `renderTranscript`, width follows the live terminal). On completion the card collapses to a compact 1–3 line summary (status glyph, persona:id, elapsed, usage, optional final-text excerpt, transcript path).
->
-> **v0.6 — filtered context inheritance.** Sub-agents can inherit a filtered slice of the conductor's conversation via `inherit_context: filtered`. Drops orchestration noise (`ensemble_*`, `subagent` tool calls, `<sub-agent-completed>` cards) while preserving user/assistant prose, file ops, branch + compaction summaries.
+> **Current state: v0.7 shipped.** Conductor mode is on by default; foreground sub-agents stream their transcript inline in the parent's tool-call card; Esc detaches a foreground spawn into the background; `/conductor history` browses past runs; sub-agents can inherit a filtered slice of the conductor's conversation; the focused-stream overlay (Ctrl+G) drills into any sub-agent's live transcript.
 
 See [`PRD.md`](./PRD.md) for the full design and decision log.
 
@@ -16,57 +12,46 @@ Pi already has good options for sub-agents (`pi-essentials/subagent`, `pi-mono/t
 
 pi-conductor closes that gap. The parent pi session is the conductor, sub-agents are subprocesses, and the user can drop into any sub-agent's live transcript view at will — without leaving pi.
 
-## v0.6 — what works today
+## What works today
 
-- Everything from v0.1–v0.5 (persona discovery + roster, all tools, queue, panel, conductor mode prompt, focused-stream overlay, send/resume, pause/resume).
-- **`inherit_context: filtered`** — personas with this setting now boot their sub-agent with a seeded session containing the conductor's filtered conversation. The filter (`filterParentContext`) keeps user prose, assistant prose, `read`/`write`/`bash` tool calls + results, and branch/compaction summaries; it drops `ensemble_*` and `subagent` orchestration calls, `<sub-agent-completed>` notification cards, and any `!!`-prefix bash entries (`excludeFromContext`).
-- **`inherit_context: full`** — same plumbing but with no filter; the sub-agent inherits the conductor's transcript verbatim. Useful for handoff personas where every detail matters.
-- **Reimplemented in-tree** per locked PRD decision — we do NOT depend on `pi-subagents/shared/fork-context.ts`. Filter rules are short, pure, and unit-tested.
-- **Pure planner** — `planSpawnPiArgs` decides between fresh spawn (`pi --session-dir`) and seeded resume (`pi --session <seeded.jsonl>`) based on `inherit_context` + parent message snapshot. Falls back to fresh when nothing survives the filter.
+### Personas + tools
 
-## v0.5 — what works today
-
-- Everything from v0.1–v0.4 (persona discovery + roster, all tools listed below, queue with auto-downgrade, ensemble panel, conductor mode prompt, focused-stream overlay).
-- **`ensemble_send(agent_id, message, foreground?)`** — continue an existing sub-agent's session with a new user-role message. Works on finished sub-agents too — resumes via `pi --session <path>`. Foreground default streams tool-call hints inline; background notifies via the standard `<sub-agent-completed>` card.
-- **`ensemble_pause(agent_id)`** / **`ensemble_resume(agent_id)`** — LLM-callable wrappers around SIGSTOP / SIGCONT. The corresponding slash commands (`/conductor pause` / `/conductor resume`) are unchanged.
-- **Resumable sessions on disk** — every spawn now writes its session JSONL into `<runDir>/session/`; `Run.sessionPath` is populated on finalize so `ensemble_send` can resume the sub-agent at any later point.
-- **Focused-stream `s` keybinding** — prompts the user for a follow-up message and dispatches it through `sendToRun` for the focused sub-agent. Footer now shows `s send`.
-- **`getPiInvocation` fix** — honors a `PI_BIN` env override and only re-uses `process.argv[1]` when it actually looks like pi's CLI. Live integration tests can now exercise spawn + send end-to-end via `CONDUCTOR_LIVE_TESTS=1`.
-
-## v0.3 — what works today
-
-- Everything from v0.1 + v0.2 (persona discovery + roster, `ensemble_list`, `ensemble_status`, `ensemble_spawn` foreground/background, queue with auto-downgrade, ensemble panel, conductor mode prompt, pause/resume/stop, `/conductor` slash commands, doctor with config error surfacing, applyEvent extracted for testability).
-- **`ensemble_focus(agent_id?)`** — LLM-callable tool that opens the focused-stream overlay on a sub-agent. Omit `agent_id` to open on the most recently active sub-agent.
-- **`/conductor focus <agent-id>`** — user-facing slash command equivalent.
-- **`Ctrl+G`** — keybinding that opens the overlay on the most recently active sub-agent.
-- **Focused stream overlay** — full-screen drilldown that renders one sub-agent's live transcript: header (persona, id, status, elapsed, usage), turn-separated assistant messages with collapsible tool calls and toggleable thinking blocks, footer with keybinding hints.
-  - `Esc` close, `Tab`/`Shift+Tab` cycle, `↑/↓` scroll, `PgUp/PgDn` page scroll, `c` toggle tool-call collapse, `t` toggle thinking visibility, `k` kill the focused sub-agent.
-  - Scroll position is per-agent; fold flags are global.
-  - Live updates: the overlay re-renders as the sub-agent emits events.
-
-- **Persona discovery + resolution** — markdown files with frontmatter; layered builtin → user → project precedence.
-- **16 starter personas** covering the full SDLC, adapted from external role definitions:
+- **16 starter personas** covering the full SDLC, layered builtin → user → project precedence:
   - **Discovery:** `inspector`, `analyst`, `cartographer`
   - **Spec / design:** `clarifier`, `designer`, `oracle`
   - **Implementation:** `planner`, `builder`, `simplifier`
   - **Review / verification:** `critic`, `redteam`, `finalizer`, `verifier`
   - **Debugging:** `investigator`
   - **Other:** `profiler`, `scribe`
-- **Tools:**
-  - `ensemble_list` — list available personas with descriptions, model/thinking config, and source.
-  - `ensemble_status` — stub returning empty until v0.2 ships spawning.
-- **Slash commands:**
-  - `/conductor list` — list personas with their resolved configuration.
-  - `/conductor show <name>` — display a persona's full file (system prompt + frontmatter).
-  - `/conductor doctor` — health check: persona counts by source, shadowed entries, parse errors, unknown overrides, config file resolution.
+- **LLM tools:** `ensemble_list`, `ensemble_status`, `ensemble_spawn`, `ensemble_send`, `ensemble_pause`, `ensemble_resume`, `ensemble_focus`.
+- **Slash commands:** `/conductor list | show | doctor | on | off | status | stop | pause | resume | queue | focus | history`.
 
-## Coming next
+### Spawning + lifecycle
 
-Per the [PRD](./PRD.md):
+- **Foreground spawns** (default) block AND stream the sub-agent's transcript inline in the parent's tool-call card. Updates are throttled at 50ms; the card collapses to a compact 1–3 line summary on completion. Width tracks the live terminal (`process.stdout.columns`, clamped to [40, 240]).
+- **Background spawns** return immediately; completion arrives as a `<sub-agent-completed>` notification card.
+- **Esc detaches** a foreground spawn into a background run; the conductor gets a `detached-as-background` result so it doesn't re-spawn, and the eventual completion still arrives as a notification card. **Ctrl+C kills.**
+- **Concurrency cap + FIFO queue**; foreground-while-full auto-downgrades to background.
+- **Pause / resume** via SIGSTOP / SIGCONT; **stop** via SIGTERM. Works on running OR queued sub-agents.
 
-- **v0.7 — _shipped_** — Esc-to-detach (foreground → background mid-stream, completion arrives as a notification); `/conductor history [N]` browses past runs from `~/.pi/agent/conductor/runs/`. Foreground stream now uses live terminal width.
-- **v0.4 — _shipped_** — inline-streamed foreground transcript. Foreground spawns now re-render the parent's tool-call card on every registry change with the sub-agent's transcript (throttled to 50ms), and collapse to a compact summary on completion. Live progress remains visible in the panel widget + Ctrl+G overlay too.
-- **v0.8+** — run-record GC, worktree per persona.
+### Context inheritance
+
+- **`inherit_context: filtered`** — sub-agent boots with a seeded session of the conductor's filtered transcript: keeps user/assistant prose + read/write/bash tool calls + branch / compaction summaries; drops `ensemble_*` and `subagent` orchestration noise, `<sub-agent-completed>` cards, and `!!`-prefix bash entries.
+- **`inherit_context: full`** passes the whole transcript verbatim.
+- **`inherit_context: none`** boots fresh.
+- The persona file's frontmatter decides; the conductor doesn't.
+
+### TUI surface
+
+- **Ensemble panel** — always-visible widget below the editor when ≥1 sub-agent is active or recently finished.
+- **Focused stream overlay (Ctrl+G)** — full-screen drilldown of one sub-agent's live transcript. Tab/Sh-Tab cycle, ↑↓ scroll, `c` collapse tool calls, `t` show thinking, `s` send a follow-up, `k` kill, Esc close.
+- **Conductor system prompt addendum** — auto-injected at every turn when conductor mode is on (default). Documents the persona roster, the `ensemble_*` tools, parallelism rules, the queue auto-downgrade contract, parent-snapshot semantics, and **§10 — heuristic delegation triggers** so the LLM proactively reaches for personas when appropriate.
+- **`/conductor history [N]`** — browses past runs from `~/.pi/agent/conductor/runs/`, sorted by mtime DESC, default 20.
+
+### Persistence
+
+- Every spawn writes its session JSONL into `<runDir>/session/`; `Run.sessionPath` is populated up-front when seeded or on finalize for fresh spawns.
+- `ensemble_send` resumes any finished sub-agent's session via `pi --session <path>`. Reuse a sub-agent's loaded context instead of re-spawning when you want a follow-up.
 
 ## Install
 
@@ -74,12 +59,18 @@ Per the [PRD](./PRD.md):
 # Clone for development
 git clone https://github.com/samfoy/pi-conductor.git
 cd pi-conductor
-npm install
+npm install --registry https://registry.npmjs.org    # @earendil-works packages
 npm test
 
-# Load locally with pi
+# Load locally with pi (per session)
 pi -e /path/to/pi-conductor/src/index.ts
+
+# Or auto-load every session
+mkdir -p ~/.pi/agent/extensions/conductor
+ln -s /path/to/pi-conductor/src/index.ts ~/.pi/agent/extensions/conductor/index.ts
 ```
+
+> Conductor mode is **on by default** when the extension loads. Disable per session with `PI_CONDUCTOR_MODE=0` or `/conductor off`. The tools and slash commands stay registered either way; only the system-prompt addendum is gated.
 
 Once published:
 
@@ -154,14 +145,14 @@ pi-conductor does **not** replace `pi-essentials/subagent`. Different tools (`en
 
 ## Status
 
-- [x] v0.1 — Read-only scaffold
+- [x] v0.1 — Read-only scaffold (persona discovery, list/show/doctor)
 - [x] v0.2 — Background spawning + ensemble panel + queue + conductor mode
 - [x] v0.3 — Focused stream overlay (Ctrl+G)
+- [x] v0.4 — Inline-streamed foreground transcript (throttled tool-card re-render; compact summary on completion)
 - [x] v0.5 — `ensemble_send` + `ensemble_pause` / `ensemble_resume` + overlay `s` keybinding
 - [x] v0.6 — Filtered context inheritance (`inherit_context: filtered` / `full`)
-- [x] v0.4 — Inline-streamed foreground transcript (sub-agent transcript renders live in the parent tool-call card; collapses to a compact summary on completion)
-- [x] v0.7 — Esc-to-detach for foreground sub-agent spawns + `/conductor history` + live terminal width for foreground stream
-- [ ] v0.8 — Run-record GC, worktree per persona
+- [x] v0.7 — Esc-to-detach + `/conductor history` + live terminal width + conductor mode on by default + §10 delegation triggers
+- [ ] v0.8 — Run-record GC, worktree per persona, `inherit_skills: true`
 
 ## License
 

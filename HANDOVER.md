@@ -1,10 +1,10 @@
 # pi-conductor — Handover
 
-**Date:** 2026-05-14
+**Date:** 2026-05-15
 **Repo:** `~/scratch/pi-conductor/`  (git-init'd, master branch only, never pushed)
 **Author:** Sam Painter (samfp@)
-**Last commit:** post-review hardening done; v0.5 ensemble_send persona-prompt drop fixed; <filtered-history> sentinel landed; inherit_context=full live test added; conductor prompt now documents the snapshot semantics.
-**Test state:** 296 unit + 4 live-gated, unit suite ~3s; live integration suite passes (~80s) covering spawn, ensemble_send resume, inherit_context=filtered, inherit_context=full.
+**Last commit:** v0.7 — conductor mode ON by default, §10 proactive delegation triggers in the conductor system prompt, namespace migrated to `@earendil-works/pi-*`. README/PRD/AGENTS docs refreshed in the same wave.
+**Test state:** 357 unit + 6 live-gated; unit suite ~4.4s; live integration suite passes (~120s) covering spawn, ensemble_send resume, inherit_context=filtered/full, foreground stream onUpdate flow, and Esc-detach via awaitOrDetach.
 
 This document is a self-contained briefing so a fresh pi session (or a new agent) can pick up the project without losing context. Read this end-to-end before doing any work.
 
@@ -73,16 +73,18 @@ The user explicitly asked for TDD as the project standard. The pre-commit hook e
 
 ---
 
-## 4. Architecture (current state, v0.6)
+## 4. Architecture (current state, v0.7)
 
 ```
 src/
 ├── index.ts               — Extension entry. Wires lifecycle, registry,
 │                            queue, focus model, ensemble panel widget,
 │                            conductor system prompt, Ctrl+G keybinding,
-│                            getParentMessages snapshot for inherit_context.
+│                            getParentMessages snapshot for inherit_context,
+│                            registerForegroundDetach plumbing (per-spawn
+│                            ctx.ui.onTerminalInput Esc interception).
 ├── types.ts               — Persona, Run, RunStatus, Usage, ConductorConfig,
-│                            PersonaOverride, EventEffect.
+│                            PersonaOverride, EventEffect, isTerminal.
 ├── personas.ts            — Frontmatter parser + layered loader
 │                            (builtin / user / project precedence).
 ├── config.ts              — loadConfig + loadConfigWithErrors (errors-aware).
@@ -90,10 +92,10 @@ src/
 ├── runs.ts                — RunRegistry, spawnRun (subprocess + JSON parser),
 │                            planSpawnPiArgs (decides fresh vs seeded
 │                            resume per inherit_context), forceTerminate,
-│                            pauseRun, resumeRun, formatters
-│                            (formatTokens, formatUsage, elapsedStr,
-│                            getFinalText, allocateRunId, buildSubAgentPrompt,
-│                            buildPiArgs).
+│                            pauseRun, resumeRun (Signaler-injectable),
+│                            sendToRun, formatters (formatTokens,
+│                            formatUsage, elapsedStr, getFinalText,
+│                            allocateRunId, buildSubAgentPrompt, buildPiArgs).
 ├── context-filter.ts      — Pure filterParentContext(messages, opts).
 │                            Drops ensemble_*/subagent tool calls + results,
 │                            ensemble-notification CustomMessages, !!-prefix
@@ -111,27 +113,46 @@ src/
 │                            enqueue time (v0.6).
 ├── notifications.ts       — formatCompletionNotification(run): string.
 ├── conductor-prompt.ts    — buildConductorSystemPrompt({ personas,
-│                            maxConcurrent }).
+│                            maxConcurrent }). Includes §10 — proactive
+│                            delegation triggers (v0.7).
+├── conductor-mode.ts      — Pure resolveInitialConductorMode(env): boolean.
+│                            Default: ON. PI_CONDUCTOR_MODE=0/off opts out.
+├── history.ts             — Pure buildHistoryReport(deps, opts): string for
+│                            /conductor history. I/O is injected.
 ├── widget.ts              — Ensemble panel (belowEditor; reactive to
 │                            registry changes; 8s linger on finished runs).
 ├── transcript.ts          — Pure renderer for the focused-stream overlay.
 │                            renderTranscript / renderHeader / renderFooter.
+├── foreground-stream.ts   — Pure helpers for the v0.4 inline-streamed
+│                            foreground spawn: renderForegroundStream
+│                            (header + collapsed-tool-call body),
+│                            renderForegroundSummary (compact 1-3 line
+│                            post-completion block), renderForegroundDetachedResult
+│                            (for Esc-detach), createUpdateThrottle
+│                            (leading + trailing debouncer), awaitOrDetach
+│                            (race helper), installPostDetachCompletionListener
+│                            (terminal-flip listener with race-guard),
+│                            resolveStreamWidth (clamped terminal cols).
 ├── focused-stream-model.ts — Pure navigation/fold/scroll state for the
 │                             focused-stream overlay.
 ├── focused-stream-overlay.ts — Thin Component layer that consumes the
 │                               model + renderer.
 ├── tools.ts               — ensemble_list, ensemble_status, ensemble_spawn,
 │                            ensemble_send, ensemble_pause, ensemble_resume,
-│                            ensemble_focus.
+│                            ensemble_focus. Foreground branches use
+│                            createUpdateThrottle + awaitOrDetach +
+│                            installPostDetachCompletionListener.
 └── commands.ts            — /conductor list | show | doctor | on | off |
-                             status | stop | pause | resume | queue | focus.
+                             status | stop | pause | resume | queue | focus |
+                             history.
 
 personas/  — 16 markdown files, one per starter persona. Each has YAML-ish
              frontmatter + system-prompt body + ## Source footer documenting
              lineage from autoloop.
 
-tests/     — 18 test files, 282 tests total (3 live-gated). See §6.
+tests/     — 25 test files, 357 unit tests + 6 live-gated. See §6.
 
+tools/                    — maintenance scripts (e.g. rename-pi-namespace.mjs).
 hooks/pre-commit          — runs npm test, rejects on red.
 scripts/install-hooks.sh  — one-time setup: git config core.hooksPath hooks.
 PRD.md                    — Full design doc, decision log, implementation phases.
@@ -171,7 +192,7 @@ What does NOT work yet:
 
 ---
 
-## 6. Test layout (~282 tests, 18 files, ~3s)
+## 6. Test layout (357 unit + 6 live-gated, 25 files, ~4.4s)
 
 ```
 tests/
@@ -180,23 +201,39 @@ tests/
 ├── queue.test.ts                     — RunRegistry + SpawnQueue mechanics
 ├── queue-extra.test.ts               — Queue edge cases + parentMessages snapshot
 ├── spawn.integration.test.ts         — GATED live tests (CONDUCTOR_LIVE_TESTS=1):
-│                                       spawn, ensemble_send, inherit_context=filtered
+│                                       spawn, ensemble_send, inherit_context=filtered/full,
+│                                       foreground stream onUpdate sequence,
+│                                       awaitOrDetach against a live spawn (Esc-detach
+│                                       race; the keybinding path itself requires hand-test)
 ├── notifications.test.ts             — formatCompletionNotification
-├── conductor-prompt.test.ts          — buildConductorSystemPrompt
+├── conductor-prompt.test.ts          — buildConductorSystemPrompt incl. §10 triggers
+├── conductor-mode-default.test.ts    — resolveInitialConductorMode (default ON,
+│                                       PI_CONDUCTOR_MODE opt-out tokens)
 ├── config.test.ts                    — loadConfig defaults + merge
 ├── config-errors.test.ts             — loadConfigWithErrors error reporting
-├── context-filter.test.ts            — filterParentContext: every include /
-│                                       exclude rule (v0.6)
+├── context-filter.test.ts            — filterParentContext: every include/exclude rule
 ├── doctor.test.ts                    — buildDoctorReport
 ├── plan-spawn.test.ts                — planSpawnPiArgs: inherit_context matrix
-│                                       (none / filtered / full) (v0.6)
 ├── runs-helpers.test.ts              — formatTokens, formatUsage, elapsedStr,
-│                                       getFinalText, etc.
+│                                       getFinalText, pauseRun/resumeRun (with
+│                                       injectable Signaler), forceTerminate
 ├── event-handler.test.ts             — applyEvent (every event variant)
 ├── session-seed.test.ts              — seedSessionFile: header shape, parentId
-│                                       chain, JSON round-trip (v0.6)
-├── transcript.test.ts                — renderTranscript / renderHeader /
-│                                       renderFooter
+│                                       chain, JSON round-trip
+├── transcript.test.ts                — renderTranscript / renderHeader / renderFooter
+├── foreground-stream.test.ts         — renderForegroundStream + renderForegroundSummary
+│                                       + STREAM_MAX_CHARS truncation
+├── foreground-throttle.test.ts       — createUpdateThrottle: leading + trailing,
+│                                       flush(), dispose(), cancel pending fire
+├── foreground-detach.test.ts         — awaitOrDetach race semantics +
+│                                       renderForegroundDetachedResult shape
+├── post-detach-listener.test.ts      — installPostDetachCompletionListener:
+│                                       4 scenarios (active, terminal-flip-later,
+│                                       race-guard already-terminal, manual unsub)
+├── resolve-stream-width.test.ts      — resolveStreamWidth: defaults, clamps,
+│                                       NaN/negative
+├── history.test.ts                   — buildHistoryReport: empty, ordering, limit,
+│                                       per-status rendering, truncation
 ├── focused-stream-model.test.ts      — FocusedStreamModel state machine
 ├── focused-stream-overlay.test.ts    — FocusedStreamOverlay Component dispatch
 ├── ensemble-focus.test.ts            — ensemble_focus tool model effect
@@ -216,11 +253,30 @@ Run all: `npm test`. Run live: `CONDUCTOR_LIVE_TESTS=1 npm test` (needs AWS cred
 ## 7. Git history (this branch)
 
 ```
+217fb37 feat(prompt): §10 — proactive delegation triggers
+816dfb8 feat(v0.7): conductor mode ON by default
+5594e5d chore(deps): migrate to @earendil-works/pi-*
+a2cb43c refactor(v0.7): extract installPostDetachCompletionListener helper
+422b5ff docs(handover): correct Esc-to-detach implementation note
+5ec7dcd fix(v0.7): Esc-to-detach via onTerminalInput, not registerShortcut
+968fe41 fix(v0.7): race-guard the post-detach completion-notification listener
+66bfa0f test(v0.7): live integration test for Esc-detach + README/HANDOVER updates
+4534e9c test(runs): cover pauseRun / resumeRun via injectable Signaler
+17aaf68 feat(v0.4): use live terminal width for inline foreground stream
+d8d1792 feat(commands): /conductor history lists past sub-agent runs
+2d7aea0 feat(v0.7): Esc-to-detach for foreground sub-agent spawns
+1c85a1f refactor(v0.4): tighten foreground stream throttle per self-review
+1701dd3 docs: mark v0.4 inline-streamed foreground transcript shipped
+fad88a4 test(v0.4): live integration test for foreground stream throttle + flush
+e451c91 feat(v0.4): stream foreground transcript inline in parent tool-call card
+6c259d6 feat(v0.4): add createUpdateThrottle for inline foreground stream
+4cf119a feat(v0.4): add renderForegroundStream + renderForegroundSummary helpers
+6101e2f docs(handover): mark post-review issues resolved
+88d868d feat(prompt+test): document inherit_context + stale snapshots
+96d1ccf feat(spawn): prepend <filtered-history> sentinel
+c5de692 fix(send): re-inject persona system prompt on ensemble_send resume
+... (older v0.5 / v0.6 commits) ...
 76357d2 feat(v0.3): focused stream overlay (Ctrl+G)
-ef5999a feat(commands): /conductor doctor surfaces malformed config files
-4c89d80 fix(config): merge personaOverrides field-level across user → project
-39c2014 refactor(runs): extract applyEvent for direct unit testing
-c72e178 chore: enforce TDD via CONTRIBUTING.md, AGENTS.md, and pre-commit hook
 688ff97 feat: pi-conductor v0.2 — spawn, queue, panel, conductor mode
 a1d711b feat: initial pi-conductor v0.1 scaffold
 ```
@@ -231,43 +287,46 @@ Never pushed. No remote configured.
 
 ## 8. In-flight work as of this handover
 
-**Interactive subagent `dedup-fix` running in tmux** (`tmux select-window -t Scratch:subagent-dedup-fix`).
+None. v0.4 → v0.7 are all on master, green local + live. No outstanding subagents, no pending refactors.
 
-**What it's doing:** Fixing `~/.pi/agent/extensions/tool-dedup.ts`, which is over-tuned. The bug: `edit` and `write` are not in `EXEMPT_TOOLS`, so legitimate sequential edits with similar `oldText` get blocked. The agent is:
-1. Adding `edit` and `write` to `EXEMPT_TOOLS`.
-2. Possibly exempting `read` too (or making it content-aware).
-3. Writing a test file (`tool-dedup.test.ts`) to lock in the behavior.
-
-**Symptom this affects:** during this session I (the parent agent) repeatedly hit "[tool-dedup] You already called `edit` with these exact arguments in turn N" false positives and had to fall back to `python3 << 'PYEOF'` heredocs as a workaround. That's bad and the user called it out. After the dedup fix lands, the workaround is no longer needed and I should never reach for python heredocs again.
-
-The agent will inject its final report when done. Switch to its tmux window to monitor.
+The one open caveat: the **Esc-detach keybinding path** (the `ctx.ui.onTerminalInput` interception) is NOT exercised by any automated test — the live integration test validates `awaitOrDetach` against a real spawn, but the keypress → listener → detach trigger chain requires a real terminal. Hand-test before declaring v0.7 truly done in production use.
 
 ---
 
 ## 9. What to do next (priority order)
 
-1. **Hand-test v0.7 end-to-end.** Load the extension, foreground-spawn a long-running task, press Esc, watch the spawn convert to background and the `<sub-agent-completed>` card arrive. Try `/conductor history` and `/conductor history 5` to see the recent-runs browser. Verify Ctrl+C still kills (not detaches).
+1. **Hand-test v0.7 end-to-end.** Load the extension, foreground-spawn a long-running task, press Esc, watch the spawn convert to background and the `<sub-agent-completed>` card arrive. Try `/conductor history` and `/conductor history 5` to see the recent-runs browser. Verify Ctrl+C still kills (not detaches). The keybinding path is the one piece of v0.7 that automated tests can't cover.
 2. **Run-record GC** — open question #12 in the PRD. Sessions accumulate under `~/.pi/agent/conductor/runs/` and never get cleaned up. Decide a policy (e.g. keep last N, or older-than-D days). Implement as a `/conductor gc` slash command + an opt-in startup hook.
 3. **`inherit_skills: true`** — PRD lists this as a v1 frontmatter field; currently parsed but unused. Port the parent's skill catalog to the child's prompt at spawn time.
-4. **Audit which shipped personas should default to `inherit_context: filtered`.** Currently most personas set `filtered` in frontmatter but every spawn was effectively `none` until v0.6. Now that filtering really runs, walk each persona and confirm whether its `filtered` setting is right (or if it should be `none` for read-only specialists where extra context is just noise).
+4. **Audit which shipped personas should default to `inherit_context: filtered`.** Currently most personas set `filtered` in frontmatter; now that filtering really runs, walk each persona and confirm whether `filtered` is right (or if read-only specialists should be `none` for less noise).
 5. **Worktree per persona** (PRD v2 deferred).
-6. **PRD `Implementation phases` cleanup.** Now that v0.4 + v0.5 + v0.6 + v0.7 are all shipped, the section should reflect actual state.
 
 ---
 
 ## 10. How to load the extension
 
-For development:
+For development (per session):
 ```bash
 pi -e ~/scratch/pi-conductor/src/index.ts
 ```
 
-To turn on conductor mode for a session (injects the system prompt):
+For auto-load every session:
 ```bash
-PI_CONDUCTOR_MODE=1 pi -e ~/scratch/pi-conductor/src/index.ts
+mkdir -p ~/.pi/agent/extensions/conductor
+ln -s ~/scratch/pi-conductor/src/index.ts ~/.pi/agent/extensions/conductor/index.ts
 ```
 
-Or `/conductor on` from inside an active session. Toggle off with `/conductor off`.
+Conductor mode is **on by default** at extension load (v0.7). To disable for one session:
+```bash
+PI_CONDUCTOR_MODE=0 pi -e ~/scratch/pi-conductor/src/index.ts
+```
+
+Or `/conductor off` from inside an active session. Toggle back on with `/conductor on`.
+
+Dependencies live under `@earendil-works/` (migrated from `@mariozechner/` in v0.7) and are not on the workplace npm proxy. Install with:
+```bash
+npm install --registry https://registry.npmjs.org
+```
 
 To run the test suite:
 ```bash
@@ -324,15 +383,15 @@ From PRD §"Open questions":
 13. **Worktree isolation per persona** (v2). When implemented: which personas default `worktree: true`? `builder` and `simplifier` are obvious; read-only personas should always be `false`.
 14. **Project-shareable persona library** (v2). A "marketplace" of `.md` persona files — install via `/conductor install <url>`?
 
-Plus issues surfaced by the test sweep that don't block v0.3 but are worth tracking:
-- `pauseRun` / `resumeRun` happy paths aren't unit-tested (they call `process.kill` directly). A `signaler` injection point would unlock them.
+Plus issues surfaced by the test sweep that don't block any milestone but are worth tracking:
+- ~~`pauseRun` / `resumeRun` happy paths aren't unit-tested.~~ **Fixed in v0.7** via injectable `Signaler` parameter.
 - `SpawnQueue.setMaxConcurrent` drain trigger is tested via stubbing `queue.drain` and counting calls — mild implementation-detail. Acceptable.
 - Persona override merge is now field-level across user → project. Inside a single layer, fields still don't merge (a single layer's `personaOverrides[oracle]` is one object — nothing to merge). This is fine.
-- `/dedup-stats` command in `tool-dedup.ts` should be preserved by the in-flight fix.
 - ~~v0.5 `ensemble_send` may also drop the persona system prompt on resume.~~ **Fixed in `c5de692`.** `Run.systemPrompt` is captured at spawn; `buildResumePiArgs` re-injects it via `--append-system-prompt`.
-- ~~Stale parentMessages snapshot for queued spawns.~~ **Now flagged to the LLM** in the conductor system prompt's new §8 ("Context inheritance").
-- ~~Filter false-negative for assistant prose that *quotes* a sub-agent's reply.~~ **Mitigated** via the `<filtered-history>` sentinel: the sub-agent is told its inherited transcript is filtered and to treat dangling orchestration references with skepticism.
-- **Conductor `model` / `thinking_level` not preserved into the seeded session.** Acceptable for v0.6 (most personas inherit anyway), worth documenting in the persona reference.
+- ~~Stale parentMessages snapshot for queued spawns.~~ **Flagged to the LLM** in the conductor system prompt's §8 ("Context inheritance").
+- ~~Filter false-negative for assistant prose that *quotes* a sub-agent's reply.~~ **Mitigated** via the `<filtered-history>` sentinel.
+- **Conductor `model` / `thinking_level` not preserved into the seeded session.** Acceptable today (most personas inherit anyway), worth documenting in the persona reference.
+- **Esc-detach keybinding path is not unit-tested.** The live integration test covers `awaitOrDetach` against a real spawn, but the keypress → `ctx.ui.onTerminalInput` listener → detach trigger chain requires a real terminal. Hand-test before declaring v0.7 truly done in production use.
 
 ---
 
@@ -341,11 +400,12 @@ Plus issues surfaced by the test sweep that don't block v0.3 but are worth track
 If you're a fresh agent reading this:
 1. The user (samfp) wanted **a parent orchestrator that drives focused sub-agents with full TUI visibility**, distinct from `pi-essentials/subagent` (too generic), team-mode (no live transcript visibility), and pi-subagents (background runs are widget-only).
 2. The user is committed to **TDD** for this project. Every change ships with a test. The pre-commit hook enforces.
-3. The user prefers **the `edit` tool over scripted edits**. Don't reach for python heredocs.
+3. The user prefers **the `edit` tool over scripted edits**. Don't reach for python heredocs or `sed -i`.
 4. **16 personas** are shipped; their lineage is autoloop; their adaptation rules are in PRD §"Adapting an external role definition to a conductor persona".
-5. **v0.5 just shipped** — `ensemble_send` resumes a finished sub-agent's session via `pi --session`; `ensemble_pause` / `ensemble_resume` are LLM-callable; overlay `s` key dispatches sends. **v0.4 (inline foreground stream) and v0.6 (filtered context inheritance) are the next two milestones.**
-6. **A subagent is fixing tool-dedup in tmux right now.** Wait for it to finish before doing more conductor work, since the dedup bug was friction during this session.
-7. **PRD.md is the source of truth.** Read it before proposing design changes.
+5. **v0.7 is live.** v0.1–v0.7 all shipped (read-only scaffold, background spawn, focused-stream overlay, inline-streamed foreground, ensemble_send / pause / resume, filtered context inheritance, Esc-detach + history + on-by-default + §10 delegation triggers). **Next-up: run-record GC, persona inherit_context audit, worktree-per-persona** (v0.8+).
+6. **No in-flight work.** master is clean; no subagents running.
+7. **PRD.md is the source of truth.** Read it before proposing design changes. The Locked decisions table (v0.7) and the Implementation phases section both reflect actual current state.
+8. **Upstream namespace.** All deps live under `@earendil-works/` (since v0.7). If you see `@mariozechner/pi-*` imports anywhere, they're stale — rewrite via `node tools/rename-pi-namespace.mjs`.
 
 ---
 
