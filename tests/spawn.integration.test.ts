@@ -15,6 +15,12 @@ import { execSync } from "node:child_process";
 import { resolvePersonas } from "../src/personas.ts";
 import { RunRegistry, runDir, sendToRun } from "../src/runs.ts";
 import { SpawnQueue } from "../src/queue.ts";
+import {
+  createUpdateThrottle,
+  renderForegroundStream,
+  renderForegroundSummary,
+} from "../src/foreground-stream.ts";
+import type { Run } from "../src/types.ts";
 
 const HAS_PI = (() => {
   try {
@@ -348,6 +354,112 @@ test(
         new RegExp(MARKER),
         `sub-agent must reproduce the parent's seeded marker in its reply (got: ${finalText.slice(0, 200)})`,
       );
+    } finally {
+      try {
+        rmSync(tmpCwd, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+    }
+  },
+);
+
+test(
+  "spawn integration: foreground stream onUpdate fires multiple times and last frame matches final state",
+  { skip: !RUN_LIVE ? "set CONDUCTOR_LIVE_TESTS=1 to enable (uses real pi subprocess + AWS creds)" : false, timeout: 180_000 },
+  async () => {
+    const tmpCwd = mkdtempSync(join(tmpdir(), "conductor-live-cwd-"));
+    try {
+      const resolved = await resolvePersonas({ cwd: tmpCwd });
+      const inspector = resolved.personas.get("inspector");
+      assert.ok(inspector, "inspector persona must be resolvable");
+
+      const registry = new RunRegistry();
+      const queue = new SpawnQueue(registry, 4);
+
+      // Capture sequence of rendered foreground-stream frames. Mirrors what
+      // ensemble_spawn (foreground) wires up: throttled onUpdate fed by
+      // registry.onChange, then a final flush before the summary.
+      const frames: { runId: string; status: Run["status"]; text: string }[] = [];
+      const throttle = createUpdateThrottle<Run>((r: Run) => {
+        frames.push({
+          runId: r.id,
+          status: r.status,
+          text: renderForegroundStream(r, 100),
+        });
+      }, { intervalMs: 50 });
+
+      const result = queue.enqueueOrSpawn({
+        persona: inspector,
+        task:
+          "Use bash to run `echo HELLO_FROM_INSPECTOR_FOREGROUND` then describe what you saw in one sentence.",
+        mode: "foreground",
+        cwd: tmpCwd,
+        timeoutMs: 150_000,
+      });
+      assert.equal(result.kind, "spawned");
+      if (result.kind !== "spawned") return;
+
+      // Initial render so the card isn't blank, mirroring tools.ts wiring.
+      throttle.push(result.run);
+      const unsub = registry.onChange((r) => {
+        if (r.id !== result.run.id) return;
+        throttle.push(r);
+      });
+
+      let finished: Run;
+      try {
+        finished = await result.done;
+        // Terminal flush — guarantees the last visible frame matches reality.
+        throttle.push(finished);
+        throttle.flush();
+      } finally {
+        throttle.dispose();
+        unsub();
+      }
+
+      assert.ok(
+        finished.status === "completed" || finished.status === "failed",
+        `unexpected terminal status: ${finished.status}`,
+      );
+
+      // 1. At least 2 frames fired (initial + at least one progress / terminal).
+      assert.ok(
+        frames.length >= 2,
+        `expected ≥2 streamed frames, got ${frames.length}`,
+      );
+
+      // 2. The LAST frame matches the run's terminal status.
+      const last = frames[frames.length - 1];
+      assert.equal(last.runId, finished.id);
+      assert.equal(
+        last.status,
+        finished.status,
+        `terminal flush should carry the final status; got ${last.status}, expected ${finished.status}`,
+      );
+
+      // 3. No frame fires after dispose. Snapshot count, give the loop
+      //    a tick, assert no growth.
+      const lenAtDispose = frames.length;
+      await new Promise((res) => setImmediate(res));
+      assert.equal(
+        frames.length,
+        lenAtDispose,
+        "no frames should fire after the throttle is disposed",
+      );
+
+      // 4. The terminal frame's rendered text reflects the final state.
+      assert.match(last.text, new RegExp(finished.id));
+      assert.match(last.text, new RegExp(finished.status));
+
+      // 5. The completion summary the tool returns should be compact and
+      //    distinct from the streamed transcript dump (no XML envelope).
+      const summary = renderForegroundSummary(finished);
+      assert.ok(
+        summary.length < 2_000,
+        `summary should be compact (<2KB), got ${summary.length} bytes`,
+      );
+      assert.doesNotMatch(summary, /<sub-agent-completed>/);
     } finally {
       try {
         rmSync(tmpCwd, { recursive: true, force: true });
