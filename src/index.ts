@@ -16,7 +16,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey } from "@earendil-works/pi-tui";
+import { matchesKey } from "@earendil-works/pi-tui";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { registerCommands } from "./commands.ts";
 import { registerTools } from "./tools.ts";
@@ -29,6 +29,7 @@ import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
 import { FocusedStreamModel } from "./focused-stream-model.ts";
 import { FocusedStreamOverlay } from "./focused-stream-overlay.ts";
+import { installFocusedOverlayShortcut } from "./focused-overlay-shortcut.ts";
 import { forceTerminate, resolveTimeoutMs, sendToRun, validateSendable } from "./runs.ts";
 import type { Run } from "./types.ts";
 import { resolveInitialConductorMode } from "./conductor-mode.ts";
@@ -45,13 +46,19 @@ export default function (pi: ExtensionAPI): void {
 
   // Track whether an overlay is already open so multiple opens don't stack.
   let overlayOpen = false;
+  // Session-scoped unsub for the Ctrl+G focused-overlay shortcut.
+  let unsubFocusedShortcut: (() => void) | null = null;
 
-  // Note: we used to register Key.escape via pi.registerShortcut, but pi
-  // reserves `app.interrupt` (default: escape, ctrl+c) and silently drops
-  // conflicting extension shortcuts at load. Instead, foreground-detach
-  // listens to raw terminal input (ctx.ui.onTerminalInput) for the
-  // duration of each foreground spawn, intercepts bare Esc, and consumes
-  // the keystroke so pi's interrupt action doesn't also fire.
+  // Note: we used to bind Key.escape and Key.ctrl("g") via
+  // pi.registerShortcut, but pi reserves both (`app.interrupt` for Esc,
+  // a built-in for Ctrl+G) and silently drops conflicting extension
+  // shortcuts at load. Instead, both are routed through raw terminal
+  // input via ctx.ui.onTerminalInput: foreground-detach intercepts Esc
+  // for the duration of each foreground spawn (see
+  // registerForegroundDetach below), and installFocusedOverlayShortcut
+  // intercepts Ctrl+G for the lifetime of the session (see
+  // session_start). Both consume the keystroke (`{ consume: true }`)
+  // so pi's reserved bindings don't also fire.
 
   function openFocusedOverlay(agentId?: string): void {
     if (!ctxRef) return;
@@ -254,9 +261,18 @@ export default function (pi: ExtensionAPI): void {
     ctxRef = ctx;
     if (widget) widget.dispose();
     widget = mountEnsembleWidget(registry, () => ctxRef);
+    if (unsubFocusedShortcut) unsubFocusedShortcut();
+    unsubFocusedShortcut = installFocusedOverlayShortcut(ctx, {
+      openFocusedOverlay: () => openFocusedOverlay(),
+      isOverlayOpen: () => overlayOpen,
+    });
   });
 
   pi.on("session_shutdown", async () => {
+    if (unsubFocusedShortcut) {
+      unsubFocusedShortcut();
+      unsubFocusedShortcut = null;
+    }
     if (widget) {
       widget.dispose();
       widget = null;
@@ -307,13 +323,4 @@ export default function (pi: ExtensionAPI): void {
 
   registerTools(pi, opts);
   registerCommands(pi, opts);
-
-  // Bind Ctrl+G to open the focused-stream overlay on the most recently
-  // active sub-agent (or no-op when no sub-agents exist).
-  pi.registerShortcut(Key.ctrl("g"), {
-    description: "pi-conductor: open focused-stream overlay",
-    handler: () => {
-      openFocusedOverlay();
-    },
-  });
 }
