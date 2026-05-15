@@ -12,7 +12,7 @@ import { Type } from "@sinclair/typebox";
 import type { Persona, PersonaOverride, Run, RunStatus, ThinkingLevel } from "./types.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
-import { elapsedStr, formatUsage, getFinalText, pauseRun, resolveTimeoutMs, resumeRun, sendToRun, type RunRegistry } from "./runs.ts";
+import { elapsedStr, forceTerminate, formatUsage, getFinalText, pauseRun, resolveTimeoutMs, resumeRun, sendToRun, type RunRegistry } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
 import {
   awaitOrDetach,
@@ -76,6 +76,7 @@ export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   registerSendTool(pi, opts);
   registerPauseTool(pi, opts);
   registerResumeTool(pi, opts);
+  registerKillTool(pi, opts);
   registerFocusTool(pi, opts);
 }
 
@@ -607,6 +608,70 @@ function registerResumeTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       return {
         content: [{ type: "text" as const, text: `resumed: ${run.id}` }],
         details: { status: "running", agent_id: run.id, persona: run.persona } as ResumeDetails,
+      };
+    },
+  });
+}
+
+// ── ensemble_kill ────────────────────────────────────────────────────
+
+function registerKillTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
+  pi.registerTool({
+    name: "ensemble_kill",
+    label: "Kill sub-agent",
+    description:
+      "Force-terminate a running, paused, or queued sub-agent by `agent_id`. " +
+      "SIGTERM-then-SIGKILL on processes; queued sub-agents are removed from the queue. " +
+      "Use to stop a sub-agent that has run too long, gone off-track, or that you want to " +
+      "abort before completion. The sub-agent's run record is preserved for inspection " +
+      "(transcript, final.md). Idempotent — calling on an already-terminated sub-agent is a " +
+      "no-op success. Killing via tool never triggers a follow-up turn (consistent with the " +
+      "existing pi convention that tool-initiated kills are silent).",
+    promptSnippet: "Force-terminate a sub-agent",
+    promptGuidelines: [
+      "Use ensemble_kill to abort a sub-agent that is misbehaving, off-track, or no longer needed.",
+      "Killable states: running, paused, queued. Already-terminal sub-agents are no-op success.",
+      "Run records (transcript, final.md) are preserved for post-mortem inspection.",
+    ],
+    parameters: Type.Object({
+      agent_id: Type.String({
+        description: "agent_id of the sub-agent to terminate.",
+      }),
+    }),
+    async execute(_id, params) {
+      const registry = opts.getRegistry();
+      const queue = opts.getQueue();
+      const run = registry.get(params.agent_id);
+      type KillDetails = { error?: string; status?: string; agent_id?: string; persona?: string };
+      if (!run) {
+        const r = errorResult(
+          `agent_id "${params.agent_id}" not found. Run ensemble_status to see active sub-agents.`,
+        );
+        return r as { content: typeof r.content; details: KillDetails };
+      }
+      // Idempotent: if already-terminal, return current status as success.
+      // Matches the brief's "calling on an already-terminated sub-agent is a no-op success".
+      if (run.status === "completed" || run.status === "failed" || run.status === "killed" || run.status === "timeout") {
+        return {
+          content: [{ type: "text" as const, text: `already ${run.status}: ${run.id} (no-op)` }],
+          details: { status: run.status, agent_id: run.id, persona: run.persona } as KillDetails,
+        };
+      }
+      // Queued runs need to be removed from the pending list AND have their
+      // placeholder Run flipped to terminal. SpawnQueue.removeQueued does both
+      // (it splices pending and calls forceTerminate on the placeholder).
+      if (run.status === "queued") {
+        queue.removeQueued(run.id);
+      } else {
+        // running / paused — forceTerminate handles SIGTERM/SIGKILL on the
+        // process handle (best-effort idempotent), flips status to "killed",
+        // and persists record + final. We deliberately do NOT pass an
+        // onComplete: tool-initiated kills are silent (no follow-up turn).
+        forceTerminate(run, "killed", registry);
+      }
+      return {
+        content: [{ type: "text" as const, text: `killed: ${run.id}` }],
+        details: { status: "killed", agent_id: run.id, persona: run.persona } as KillDetails,
       };
     },
   });
