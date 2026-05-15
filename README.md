@@ -2,7 +2,7 @@
 
 A pi extension that turns the parent pi session into an **orchestrator** driving a roster of **persona-based sub-agents** with first-class TUI visibility.
 
-> **Current state: v0.7 shipped.** Conductor mode is on by default; foreground sub-agents stream their transcript inline in the parent's tool-call card; Esc detaches a foreground spawn into the background; `/conductor history` browses past runs; sub-agents can inherit a filtered slice of the conductor's conversation; the focused-stream overlay (Ctrl+G) drills into any sub-agent's live transcript.
+> **Current state: v0.7 shipped; v0.8 in progress.** Conductor mode is OFF by default in v0.8 (was ON in v0.7); foreground sub-agents stream their transcript inline in the parent's tool-call card; Esc detaches a foreground spawn into the background; `/conductor history` browses past runs; sub-agents can inherit a filtered slice of the conductor's conversation; the focused-stream overlay (Ctrl+G) drills into any sub-agent's live transcript.
 
 See [`PRD.md`](./PRD.md) for the full design and decision log.
 
@@ -45,7 +45,7 @@ pi-conductor closes that gap. The parent pi session is the conductor, sub-agents
 
 - **Ensemble panel** — always-visible widget below the editor when ≥1 sub-agent is active or recently finished.
 - **Focused stream overlay (Ctrl+G)** — full-screen drilldown of one sub-agent's live transcript. Tab/Sh-Tab cycle, ↑↓ scroll, `c` collapse tool calls, `t` show thinking, `s` send a follow-up, `k` kill, Esc close.
-- **Conductor system prompt addendum** — auto-injected at every turn when conductor mode is on (default). Documents the persona roster, the `ensemble_*` tools, parallelism rules, the queue auto-downgrade contract, parent-snapshot semantics, and **§10 — heuristic delegation triggers** so the LLM proactively reaches for personas when appropriate.
+- **Conductor system prompt addendum** — auto-injected at every turn when conductor mode is ON. Documents the persona roster, the `ensemble_*` tools, parallelism rules, the queue auto-downgrade contract, parent-snapshot semantics, and **§10 — the delegation playbook** so the LLM acts as a strict overseer (v0.8: addendum §1 declares "you are not the implementer"; banned-tools list in §1.5).
 - **`/conductor history [N]`** — browses past runs from `~/.pi/agent/conductor/runs/`, sorted by mtime DESC, default 20.
 
 ### Persistence
@@ -70,7 +70,13 @@ mkdir -p ~/.pi/agent/extensions/conductor
 ln -s /path/to/pi-conductor/src/index.ts ~/.pi/agent/extensions/conductor/index.ts
 ```
 
-> Conductor mode is **on by default** when the extension loads. Disable per session with `PI_CONDUCTOR_MODE=0` or `/conductor off`. The tools and slash commands stay registered either way; only the system-prompt addendum is gated.
+> Conductor mode is **OFF by default** in v0.8 (was ON in v0.7). Three opt-in paths:
+>
+> - **Per session:** `/conductor on`.
+> - **Per shell:** `export PI_CONDUCTOR_MODE=1`.
+> - **Persistent:** add `{"defaultMode": "on"}` to `~/.pi/agent/extensions/conductor/config.json`.
+>
+> The tools and slash commands stay registered either way; only the system-prompt addendum is gated.
 
 Once published:
 
@@ -121,6 +127,9 @@ Adapted from … with the following changes …
 
 ```jsonc
 {
+  "defaultMode": "off",                  // v0.8: "on" | "off". Pinned
+                                         // conductor-mode default at
+                                         // extension load. Beats env var.
   "defaultTimeoutMinutes": 30,
   "maxConcurrent": 4,
   "queueOnConcurrencyCap": true,
