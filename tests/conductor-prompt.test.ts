@@ -137,3 +137,43 @@ test("buildConductorSystemPrompt: warns about stale parent snapshots in batched 
   // LLM doesn't expect later siblings to see earlier siblings' work.
   assert.match(out, /(snapshot|enqueue)/i);
 });
+
+// ── §10: delegation triggers ──────────────────────────────────────
+
+test("buildConductorSystemPrompt: §10 — includes a 'when to reach for conductor' triggers section", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  // Stable substring: the explicit §10 heading. Wording can evolve;
+  // the heading shouldn't.
+  assert.match(out, /When to reach for conductor/i);
+});
+
+test("buildConductorSystemPrompt: §10 — names the high-leverage delegation cases", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  // The triggers we want the LLM to actually internalize:
+  //   1. parallel review / multiple perspectives
+  //   2. user-asked-for review or pre-mortem
+  //   3. about-to-commit sanity check via oracle
+  //   4. fresh mental model from many files
+  //   5. multi-phase work (research → design → plan → build → verify)
+  //   6. parent context heavy / noisy turn
+  //   7. task-name-to-persona mapping
+  assert.match(out, /parallel|multiple (independent )?perspectives/i);
+  assert.match(out, /review|pre-mortem|second opinion|sanity check/i);
+  assert.match(out, /commit|sanity check.*oracle|oracle.*before/i);
+  assert.match(out, /fresh.*context|fresh.*mental model|specialist/i);
+  assert.match(out, /phase(s)?|chain/i);
+});
+
+test("buildConductorSystemPrompt: §10 — also names when NOT to delegate", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  // Don't-delegate triggers are equally important so the LLM doesn't
+  // spawn-spam every turn. Look for the inverse heading or guidance.
+  assert.match(out, /Don't delegate|do not delegate|skip delegation/i);
+});
+
+test("buildConductorSystemPrompt: §10 — includes the per-turn 'ask yourself' nudge", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  // The biggest behavior changer in practice: a per-turn-start prompt
+  // that forces the LLM to consider conductor before going solo.
+  assert.match(out, /(ask yourself|at (the )?start of (every|each) (non-trivial )?(user )?turn|before any non-trivial)/i);
+});

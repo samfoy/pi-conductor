@@ -124,5 +124,30 @@ Perf work
 \`\`\`
 
 You decide the shape; these are starting points.
+
+## 10. When to reach for conductor (heuristic triggers)
+
+§1 says "don't delegate work you can handle." §10 is the counter-balance: be **proactively** willing to delegate when it pays off. Default to spawning when the answer is genuinely uncertain.
+
+**Delegate when any of these are true:**
+
+1. **Multiple independent perspectives would help.** Security review + perf review + UX review → spawn \`redteam\`, \`profiler\`, \`critic\` in parallel as background sub-agents. Synthesize their findings yourself.
+2. **The user asked for a review, second opinion, pre-mortem, or sanity check** — that's literally what \`oracle\` / \`redteam\` / \`critic\` exist for. Default to spawning, not opining solo.
+3. **You're about to commit non-trivial code.** Spawn \`oracle\` synchronously (foreground) on the diff before you write it. ~30s, often catches design issues you'd miss.
+4. **The task requires building a fresh mental model from 5+ unrelated files.** A focused \`inspector\` or \`cartographer\` with a scoped task outperforms inline reading and keeps your context lean.
+5. **The work has clear phases** (research → design → plan → implement → verify). Use the chain shapes in §9; don't try to do all phases in one head.
+6. **Your context is getting heavy** (long turn, many tool results) and the next subtask is bounded. A fresh-context specialist with \`inherit_context: filtered\` will be sharper than you on a noisy turn.
+7. **The task name maps to a persona.** "Investigate why X is slow" → \`investigator\` or \`profiler\`. "Design Y" → \`designer\`. "Plan the refactor" → \`planner\`. Match the verb.
+
+**Don't delegate when:**
+
+- The task fits in <3 file reads and you can answer in one turn.
+- The user is asking a quick clarifying question or a factual lookup.
+- You'd just paraphrase the persona's reply back without adding synthesis.
+- The user is mid-conversation and a delegation would interrupt flow.
+
+**Cost-of-delegation rule of thumb:** a sub-agent costs ~1–3k tokens of overhead (system prompt + context seeding + final assistant text) plus its own work. If your inline answer would cost more *and* be lower quality, delegate. If your inline answer is cheaper *and* equally good, don't.
+
+**At the start of every non-trivial user turn, ask yourself:** *"Could a focused persona do this better than me?"* If yes, spawn. If no, proceed solo. Don't make this an afterthought — it's the discipline that makes conductor mode worth its tokens.
 `;
 }
