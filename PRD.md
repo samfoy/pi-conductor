@@ -1,6 +1,6 @@
 # pi-conductor — PRD
 
-**Status:** v0.7 shipped (drafted v0.2). v0.8 in progress.
+**Status:** v0.8 shipped (drafted v0.2).
 **Owner:** samfp
 **Created:** 2026-05-14
 **Last updated:** 2026-05-15
@@ -498,7 +498,7 @@ When `inherit_context: filtered`, before launching the sub-agent we serialize a 
 - Conductor mode ON by default at extension load (`PI_CONDUCTOR_MODE=0` is the new opt-out). _Reversed in v0.8._
 - Conductor system prompt addendum gains §10 — proactive delegation triggers.
 
-### v0.8 — Strict-overseer mode + default off — _in progress_
+### v0.8 — Strict-overseer mode + default off — _shipped_
 - **Conductor mode OFF by default** at extension load (overrides v0.7's ON-by-default).
 - New config field `defaultMode: "on" | "off"` (default `"off"`) in `~/.pi/agent/extensions/conductor/config.json` and project `.pi/conductor.json`.
 - Precedence: project config > user config > `PI_CONDUCTOR_MODE` env var > built-in default `off`.
