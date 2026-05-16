@@ -2024,6 +2024,7 @@ function registerTools(pi, opts) {
   registerSendTool(pi, opts);
   registerPauseTool(pi, opts);
   registerResumeTool(pi, opts);
+  registerKillTool(pi, opts);
   registerFocusTool(pi, opts);
 }
 function registerListTool(pi, opts) {
@@ -2461,6 +2462,50 @@ function registerResumeTool(pi, opts) {
       return {
         content: [{ type: "text", text: `resumed: ${run.id}` }],
         details: { status: "running", agent_id: run.id, persona: run.persona }
+      };
+    }
+  });
+}
+function registerKillTool(pi, opts) {
+  pi.registerTool({
+    name: "ensemble_kill",
+    label: "Kill sub-agent",
+    description: "Force-terminate a running, paused, or queued sub-agent by `agent_id`. SIGTERM-then-SIGKILL on processes; queued sub-agents are removed from the queue. Use to stop a sub-agent that has run too long, gone off-track, or that you want to abort before completion. The sub-agent's run record is preserved for inspection (transcript, final.md). Idempotent \u2014 calling on an already-terminated sub-agent is a no-op success. Killing via tool never triggers a follow-up turn (consistent with the existing pi convention that tool-initiated kills are silent).",
+    promptSnippet: "Force-terminate a sub-agent",
+    promptGuidelines: [
+      "Use ensemble_kill to abort a sub-agent that is misbehaving, off-track, or no longer needed.",
+      "Killable states: running, paused, queued. Already-terminal sub-agents are no-op success.",
+      "Run records (transcript, final.md) are preserved for post-mortem inspection."
+    ],
+    parameters: Type.Object({
+      agent_id: Type.String({
+        description: "agent_id of the sub-agent to terminate."
+      })
+    }),
+    async execute(_id, params) {
+      const registry = opts.getRegistry();
+      const queue = opts.getQueue();
+      const run = registry.get(params.agent_id);
+      if (!run) {
+        const r = errorResult(
+          `agent_id "${params.agent_id}" not found. Run ensemble_status to see active sub-agents.`
+        );
+        return r;
+      }
+      if (run.status === "completed" || run.status === "failed" || run.status === "killed" || run.status === "timeout") {
+        return {
+          content: [{ type: "text", text: `already ${run.status}: ${run.id} (no-op)` }],
+          details: { status: run.status, agent_id: run.id, persona: run.persona }
+        };
+      }
+      if (run.status === "queued") {
+        queue.removeQueued(run.id);
+      } else {
+        forceTerminate(run, "killed", registry);
+      }
+      return {
+        content: [{ type: "text", text: `killed: ${run.id}` }],
+        details: { status: "killed", agent_id: run.id, persona: run.persona }
       };
     }
   });
