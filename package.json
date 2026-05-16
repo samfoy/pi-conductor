@@ -15,21 +15,30 @@
   },
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/index.js"
     ]
   },
   "files": [
+    "dist",
     "src",
+    "README.md",
+    "LICENSE",
     "personas",
-    "PRD.md",
-    "README.md"
+    "hooks",
+    "scripts"
   ],
+  "type": "module",
   "scripts": {
     "test": "node --test --import tsx tests/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --sourcemap --packages=external --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-agent-core --external:@earendil-works/pi-tui --external:@sinclair/typebox",
+    "check": "tsc --noEmit",
+    "dev": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --sourcemap --watch --packages=external --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-agent-core --external:@earendil-works/pi-tui --external:@sinclair/typebox",
+    "prepare": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
+    "esbuild": "^0.27.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   },
