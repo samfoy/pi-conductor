@@ -55,8 +55,10 @@ test("renderForegroundStream: single assistant text turn renders header + that t
   const out = renderForegroundStream(run, 80);
   assert.match(out, /oracle-7f3a/);
   assert.match(out, /Looking at the auth flow now/);
-  // Turn separator should appear since renderTranscript adds one per turn.
-  assert.match(out, /turn 1/);
+  // Slice 4: single-turn transcripts emit no `· turn N` separator (separators
+  // appear only between consecutive assistant turns).
+  assert.doesNotMatch(out, /· turn /);
+  assert.doesNotMatch(out, /── turn /);
 });
 
 test("renderForegroundStream: tool call renders collapsed (single chevron line)", () => {

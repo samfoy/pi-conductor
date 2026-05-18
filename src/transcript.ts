@@ -95,7 +95,12 @@ export function renderTranscript(run: Run, opts: TranscriptOptions): string[] {
 
     if (role === "assistant") {
       assistantTurnIndex += 1;
-      out.push(turnSeparator(assistantTurnIndex, opts.width));
+      // Only emit a separator between consecutive assistant turns; the first
+      // turn flows directly under the header. Single-turn transcripts get no
+      // separator at all.
+      if (assistantTurnIndex >= 2) {
+        out.push(turnSeparator(assistantTurnIndex, opts.width));
+      }
 
       const content = (msg as any).content;
       if (!Array.isArray(content)) continue;
@@ -130,12 +135,10 @@ export function renderTranscript(run: Run, opts: TranscriptOptions): string[] {
 // ── Helpers ───────────────────────────────────────────────────────────
 
 function turnSeparator(turn: number, width: number): string {
-  const label = ` turn ${turn} `;
-  const filler = Math.max(0, width - label.length);
-  const left = "── ";
-  const right = "─".repeat(Math.max(0, filler - left.length));
-  const candidate = left + label.trim() + " " + right;
-  if (candidate.length > width) return candidate.slice(0, width);
+  // Slice 4: single-line dim-friendly marker, no flanking rules. Slice 7
+  // applies the dim color in the Component layer; this stays pure ASCII.
+  const candidate = `· turn ${turn}`;
+  if (visibleWidth(candidate) > width) return truncateToWidth(candidate, width, "…", false);
   return candidate;
 }
 

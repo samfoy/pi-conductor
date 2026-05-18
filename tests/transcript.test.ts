@@ -58,10 +58,14 @@ test("renderTranscript: a single assistant text message becomes its text lines",
     ],
   });
   const lines = renderTranscript(run, DEFAULT_OPTS);
-  // First line should be a turn header, then the text body.
-  assert.equal(lines.length >= 2, true, "should have at least a header + body");
+  // Slice 4: single-turn transcripts emit no separator. The text lines are
+  // the entire output.
   const joined = lines.join("\n");
   assert.match(joined, /Hello world/);
+  // No `· turn N` marker when there's only one assistant turn.
+  assert.doesNotMatch(joined, /· turn /);
+  // No legacy ruler-style separator either.
+  assert.doesNotMatch(joined, /── turn /);
 });
 
 test("renderTranscript: long assistant text wraps to width", () => {
@@ -457,17 +461,29 @@ test("renderTranscript: user-role messages do NOT render (parent's prompt is int
   assert.match(joined, /got it/);
 });
 
-test("renderTranscript: multiple assistant turns are separated by a turn header", () => {
+test("renderTranscript: multiple assistant turns are separated by a single-line `· turn N` marker", () => {
   const run = makeRun({
     messages: [
       { role: "assistant", content: [{ type: "text", text: "first" }] } as any,
       { role: "assistant", content: [{ type: "text", text: "second" }] } as any,
+      { role: "assistant", content: [{ type: "text", text: "third" }] } as any,
     ],
   });
   const lines = renderTranscript(run, DEFAULT_OPTS);
-  // Look for at least two turn separators (e.g. "── turn 1 ──", "── turn 2 ──")
-  const headerCount = lines.filter((l: string) => /turn\s+\d+/i.test(l)).length;
-  assert.equal(headerCount >= 2, true, "expected at least two turn headers");
+  // Slice 4: 3 assistant turns → 2 separators (between turns 1↔2 and 2↔3).
+  // Each separator is exactly one line, left-aligned `· turn N`, no flanking rules.
+  const sepLines = lines.filter((l: string) => /^· turn \d+$/.test(l));
+  assert.equal(sepLines.length, 2, "expected exactly 2 separators between 3 turns");
+  assert.equal(sepLines[0], "· turn 2");
+  assert.equal(sepLines[1], "· turn 3");
+  // Each separator line is ≤ the requested width.
+  for (const s of sepLines) {
+    assert.equal(s.length <= DEFAULT_OPTS.width, true, `separator '${s}' exceeds width`);
+  }
+  // No legacy ruler-style separator (`── turn N ──…`) anywhere in output.
+  for (const l of lines) {
+    assert.doesNotMatch(l, /── turn /);
+  }
 });
 
 // ── renderHeader ──────────────────────────────────────────────────────

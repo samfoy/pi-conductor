@@ -1725,7 +1725,9 @@ function renderTranscript(run, opts) {
     }
     if (role === "assistant") {
       assistantTurnIndex += 1;
-      out.push(turnSeparator(assistantTurnIndex, opts.width));
+      if (assistantTurnIndex >= 2) {
+        out.push(turnSeparator(assistantTurnIndex, opts.width));
+      }
       const content = msg.content;
       if (!Array.isArray(content)) continue;
       for (const part of content) {
@@ -1754,12 +1756,8 @@ function renderTranscript(run, opts) {
   return out;
 }
 function turnSeparator(turn, width) {
-  const label = ` turn ${turn} `;
-  const filler = Math.max(0, width - label.length);
-  const left = "\u2500\u2500 ";
-  const right = "\u2500".repeat(Math.max(0, filler - left.length));
-  const candidate = left + label.trim() + " " + right;
-  if (candidate.length > width) return candidate.slice(0, width);
+  const candidate = `\xB7 turn ${turn}`;
+  if (visibleWidth2(candidate) > width) return truncateToWidth(candidate, width, "\u2026", false);
   return candidate;
 }
 function renderThinking(text, width) {
