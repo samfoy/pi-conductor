@@ -36,6 +36,7 @@ import { forceTerminate, resolveTimeoutMs, sendToRun, validateSendable } from ".
 import type { Run } from "./types.ts";
 import { resolveInitialConductorMode } from "./conductor-mode.ts";
 import { installSanitizerHook } from "./sanitizer-hook.ts";
+import { handleSessionShutdown } from "./shutdown.ts";
 
 export default function (pi: ExtensionAPI): void {
   // ── Mutable session-scoped state ─────────────────────────────────────
@@ -272,7 +273,7 @@ export default function (pi: ExtensionAPI): void {
     });
   });
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (event) => {
     if (unsubFocusedShortcut) {
       unsubFocusedShortcut();
       unsubFocusedShortcut = null;
@@ -281,20 +282,18 @@ export default function (pi: ExtensionAPI): void {
       widget.dispose();
       widget = null;
     }
-    // Best-effort: terminate everything still alive.
-    for (const r of registry.list()) {
-      if (r.status === "running" || r.status === "paused") {
-        try {
-          r.proc?.kill("SIGTERM");
-        } catch {
-          // already dead
-        }
-      }
-    }
-    // v0.8.2 (B-4) — reset the sanitizer warning dedup set so a fresh
-    // session starts with a clean slate (a wedge that was warned about
-    // in the previous session should warn again on resume).
-    sanitizerHook.reset();
+    // Reason-aware tear-down. On `/reload` (reason === "reload") the
+    // host re-imports dist/index.js while preserving chat + scratchpad +
+    // brief; killing in-flight children would defeat the whole point of
+    // a developer hot-reload loop. On any other reason (quit, new,
+    // resume, fork) we SIGTERM running/paused sub-agents and reset the
+    // sanitizer warning dedup set so a fresh session re-warns about
+    // pre-existing wedges. See src/shutdown.ts for the rationale and
+    // the unit tests in tests/shutdown.test.ts for the invariants.
+    handleSessionShutdown(event, {
+      runs: registry.list(),
+      resetSanitizer: () => sanitizerHook.reset(),
+    });
     ctxRef = null;
   });
 
