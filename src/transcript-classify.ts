@@ -47,6 +47,8 @@ export type LineKind =
   | "outcome"
   /** Thinking block — either `· thinking (...)` summary or `  ┃ …` body. */
   | "thinking"
+  /** Overlay scroll-position hint: `↑ N hidden  ·  ↓ M hidden`. */
+  | "scrollHint"
   /** Fallback: wrapped assistant body, expanded JSON args, blanks, etc. */
   | "text";
 
@@ -117,6 +119,13 @@ export function classifyLine(line: string): ClassifiedLine {
   // line `  ┃ thinking` and continuation lines `  ┃ <text>` match.
   if (line.startsWith("  ┃")) {
     return { kind: "thinking", glyph: "┃" };
+  }
+
+  // Scroll hint: `↑ N hidden`, `↓ M hidden`, or the combined form
+  // `↑ N hidden  ·  ↓ M hidden`. Emitted by the overlay between the
+  // transcript body and footer; styling layer dims it.
+  if (/^[↑↓] \d+ hidden/.test(line)) {
+    return { kind: "scrollHint", glyph: line[0]! };
   }
 
   // Footer hint line. The first hint in `FOOTER_HINTS` is "Esc close"; if

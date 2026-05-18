@@ -1928,6 +1928,9 @@ function classifyLine(line) {
   if (line.startsWith("  \u2503")) {
     return { kind: "thinking", glyph: "\u2503" };
   }
+  if (/^[↑↓] \d+ hidden/.test(line)) {
+    return { kind: "scrollHint", glyph: line[0] };
+  }
   if (line.startsWith("Esc ")) {
     return { kind: "footer" };
   }
@@ -1971,6 +1974,8 @@ function applyTheme(line, classified, theme, opts = {}) {
       return theme.fg("dim", line);
     }
     case "thinking":
+      return theme.fg("dim", line);
+    case "scrollHint":
       return theme.fg("dim", line);
     case "turnSep":
       return theme.fg("dim", line);
@@ -3501,7 +3506,10 @@ var FocusedStreamOverlay = class {
       const footer = renderFooter(width);
       const offset = Math.min(model.scrollOffset(), Math.max(0, transcript.length - 1));
       const visibleTranscript = transcript.slice(offset);
-      lines = [...header, ...visibleTranscript, ...footer];
+      const viewportHeight = this.opts.getViewportHeight?.() ?? 0;
+      const hint = renderScrollHint(offset, transcript.length, viewportHeight);
+      const hintLines = hint === null ? [] : [hint];
+      lines = [...header, ...visibleTranscript, ...hintLines, ...footer];
       status = focused.status;
     }
     if (!theme) return lines;
@@ -3572,6 +3580,15 @@ var FocusedStreamOverlay = class {
 };
 function renderRulers(width, ch) {
   return [ch.repeat(Math.max(0, width))];
+}
+function renderScrollHint(scrollOffset, transcriptLineCount, viewportHeight) {
+  if (viewportHeight <= 0) return null;
+  const above = Math.max(0, Math.min(scrollOffset, transcriptLineCount));
+  const below = Math.max(0, transcriptLineCount - above - viewportHeight);
+  if (above === 0 && below === 0) return null;
+  if (above > 0 && below > 0) return `\u2191 ${above} hidden  \xB7  \u2193 ${below} hidden`;
+  if (above > 0) return `\u2191 ${above} hidden`;
+  return `\u2193 ${below} hidden`;
 }
 function clip(s, width) {
   if (s.length <= width) return s;

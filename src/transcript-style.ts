@@ -80,6 +80,7 @@ export interface ApplyThemeOpts {
  *   outcome  → ✓ → success, ✗ → error, default (… pending) → dim
  *   thinking → dim (the leading `· ` summary marker and `┃` body gutter
  *              both read as the same low-intensity colour)
+ *   scrollHint→ dim
  *   turnSep  → dim
  *   footer   → dim (Slice 9 will further split key vs label)
  *   text     → unchanged
@@ -118,6 +119,8 @@ export function applyTheme(
       return theme.fg("dim", line);
     }
     case "thinking":
+      return theme.fg("dim", line);
+    case "scrollHint":
       return theme.fg("dim", line);
     case "turnSep":
       return theme.fg("dim", line);

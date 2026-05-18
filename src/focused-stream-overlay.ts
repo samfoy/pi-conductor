@@ -32,6 +32,16 @@ export interface FocusedStreamOverlayOptions {
    * host's `Theme` instance via the focused-overlay-factory.
    */
   theme?: ThemeFg;
+  /**
+   * Slice 8: optional viewport-height source used to compute the
+   * scroll-position hint. Pi-tui's Component interface only passes
+   * `width` to render(), so the host doesn't tell us how many rows are
+   * visible — callers (the focused-overlay-factory in production,
+   * tests in unit suites) wire this to `process.stdout.rows` or a stub.
+   * When unset (or returning a non-positive number) the scroll hint is
+   * suppressed entirely — better silent than wrong.
+   */
+  getViewportHeight?: () => number;
 }
 
 /**
@@ -73,7 +83,14 @@ export class FocusedStreamOverlay implements Component {
       // Apply scroll offset to the transcript only — header and footer stay pinned.
       const offset = Math.min(model.scrollOffset(), Math.max(0, transcript.length - 1));
       const visibleTranscript = transcript.slice(offset);
-      lines = [...header, ...visibleTranscript, ...footer];
+
+      // Slice 8: optional scroll-position hint between body and footer.
+      // Suppressed when nothing is hidden either way.
+      const viewportHeight = this.opts.getViewportHeight?.() ?? 0;
+      const hint = renderScrollHint(offset, transcript.length, viewportHeight);
+      const hintLines = hint === null ? [] : [hint];
+
+      lines = [...header, ...visibleTranscript, ...hintLines, ...footer];
       status = focused.status;
     }
 
@@ -157,6 +174,35 @@ export class FocusedStreamOverlay implements Component {
 
 function renderRulers(width: number, ch: string): string[] {
   return [ch.repeat(Math.max(0, width))];
+}
+
+/**
+ * Pure helper: produce a one-line scroll-position hint, or `null` when
+ * suppressed. Slice 8 of v0.8.3 Item 3 — closes Ctrl+G overlay sub-issue
+ * O2 ("`model.scrollOffset()` slices silently…").
+ *
+ * Shapes:
+ *   `↑ N hidden  ·  ↓ M hidden`  (both top-clipped and bottom-clipped)
+ *   `↑ N hidden`                  (top-clipped only)
+ *   `↓ M hidden`                  (bottom-clipped only)
+ *   null                          (nothing scrolled and content fits)
+ *
+ * Suppression rule: if `viewportHeight <= 0`, suppress — we have no
+ * basis to compute what's hidden below. Otherwise, suppress when both
+ * `aboveCount` and `belowCount` clamp to zero.
+ */
+export function renderScrollHint(
+  scrollOffset: number,
+  transcriptLineCount: number,
+  viewportHeight: number,
+): string | null {
+  if (viewportHeight <= 0) return null;
+  const above = Math.max(0, Math.min(scrollOffset, transcriptLineCount));
+  const below = Math.max(0, transcriptLineCount - above - viewportHeight);
+  if (above === 0 && below === 0) return null;
+  if (above > 0 && below > 0) return `↑ ${above} hidden  ·  ↓ ${below} hidden`;
+  if (above > 0) return `↑ ${above} hidden`;
+  return `↓ ${below} hidden`;
 }
 
 function clip(s: string, width: number): string {
