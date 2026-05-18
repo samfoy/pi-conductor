@@ -109,6 +109,8 @@ export function renderTranscript(run: Run, opts: TranscriptOptions): string[] {
           case "thinking":
             if (opts.showThinking) {
               out.push(...renderThinking(String(part.thinking ?? ""), opts.width));
+            } else {
+              out.push(renderThinkingSummary(String(part.thinking ?? "")));
             }
             break;
           case "toolCall":
@@ -143,6 +145,21 @@ function renderThinking(text: string, width: number): string[] {
     out.push("  ┃ " + line);
   }
   return out;
+}
+
+/**
+ * Compact summary line emitted when `showThinking: false`. Lets the user see
+ * that thinking happened (and roughly how much) without taking the vertical
+ * cost of the body. Char count is the raw text length; line count is the
+ * number of newline-separated segments, with empty text reporting 0 lines.
+ *
+ * Slice 7 will color the leading `·` via the component-layer styling helper.
+ */
+function renderThinkingSummary(text: string): string {
+  const chars = text.length;
+  const lines = text === "" ? 0 : text.split("\n").length;
+  const lineWord = lines === 1 ? "line" : "lines";
+  return `· thinking (${chars} chars / ${lines} ${lineWord})`;
 }
 
 function renderToolCall(

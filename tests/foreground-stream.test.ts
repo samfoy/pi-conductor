@@ -117,20 +117,24 @@ test("renderForegroundStream: width respected — no line exceeds it", () => {
   }
 });
 
-test("renderForegroundStream: thinking blocks are hidden", () => {
+test("renderForegroundStream: hidden thinking emits summary line unconditionally", () => {
+  const text = "secret reasoning across\ntwo lines";
   const run = makeRun({
     messages: [
       {
         role: "assistant",
         content: [
-          { type: "thinking", thinking: "secret reasoning" },
+          { type: "thinking", thinking: text },
           { type: "text", text: "visible reply" },
         ],
       } as any,
     ],
   });
   const out = renderForegroundStream(run, 80);
+  // Body never rendered in foreground (no overlay model to consult)
   assert.doesNotMatch(out, /secret reasoning/);
+  // Summary line is always emitted
+  assert.match(out, new RegExp(`· thinking \\(${text.length} chars / 2 lines\\)`));
   assert.match(out, /visible reply/);
 });
 

@@ -1738,6 +1738,8 @@ function renderTranscript(run, opts) {
           case "thinking":
             if (opts.showThinking) {
               out.push(...renderThinking(String(part.thinking ?? ""), opts.width));
+            } else {
+              out.push(renderThinkingSummary(String(part.thinking ?? "")));
             }
             break;
           case "toolCall":
@@ -1766,6 +1768,12 @@ function renderThinking(text, width) {
     out.push("  \u2503 " + line);
   }
   return out;
+}
+function renderThinkingSummary(text) {
+  const chars = text.length;
+  const lines = text === "" ? 0 : text.split("\n").length;
+  const lineWord = lines === 1 ? "line" : "lines";
+  return `\xB7 thinking (${chars} chars / ${lines} ${lineWord})`;
 }
 function renderToolCall(part, resultsByCallId, opts) {
   const name = part.name ?? "tool";

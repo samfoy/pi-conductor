@@ -147,13 +147,14 @@ test("renderTranscript: expanded toolCall shows arguments", () => {
   assert.match(joined, /ls \/tmp/);
 });
 
-test("renderTranscript: thinking blocks are hidden by default", () => {
+test("renderTranscript: hidden thinking renders a one-line summary by default", () => {
+  const text = "I should check the auth flow first";
   const run = makeRun({
     messages: [
       {
         role: "assistant",
         content: [
-          { type: "thinking", thinking: "I should check the auth flow first" },
+          { type: "thinking", thinking: text },
           { type: "text", text: "Let me investigate." },
         ],
       } as any,
@@ -161,8 +162,43 @@ test("renderTranscript: thinking blocks are hidden by default", () => {
   });
   const lines = renderTranscript(run, { ...DEFAULT_OPTS, showThinking: false });
   const joined = lines.join("\n");
+  // Body is hidden
   assert.doesNotMatch(joined, /I should check the auth flow/);
+  // But a summary line is emitted instead, with exact char + line counts
+  assert.match(joined, new RegExp(`· thinking \\(${text.length} chars / 1 line\\)`));
   assert.match(joined, /Let me investigate/);
+});
+
+test("renderTranscript: hidden thinking summary uses 'lines' (plural) for multi-line text", () => {
+  const text = "line one\nline two\nline three";
+  const run = makeRun({
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: text },
+        ],
+      } as any,
+    ],
+  });
+  const lines = renderTranscript(run, { ...DEFAULT_OPTS, showThinking: false });
+  const joined = lines.join("\n");
+  assert.doesNotMatch(joined, /line one/);
+  assert.match(joined, new RegExp(`· thinking \\(${text.length} chars / 3 lines\\)`));
+});
+
+test("renderTranscript: hidden thinking with empty body still summarizes", () => {
+  const run = makeRun({
+    messages: [
+      {
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "" }],
+      } as any,
+    ],
+  });
+  const lines = renderTranscript(run, { ...DEFAULT_OPTS, showThinking: false });
+  const joined = lines.join("\n");
+  assert.match(joined, /· thinking \(0 chars \/ 0 lines\)/);
 });
 
 test("renderTranscript: thinking blocks visible when showThinking is true", () => {
