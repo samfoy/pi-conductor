@@ -84,6 +84,84 @@ test("FocusedStreamOverlay.render: empty registry shows a placeholder", () => {
   assert.match(joined, /no sub-agents/i);
 });
 
+// ── Slice 10: empty-state polish (O4) ───────────────────────────────────
+
+test("empty state: no flanking rulers in the body (only the footer ruler remains)", () => {
+  const reg = new RunRegistry();
+  const model = new FocusedStreamModel(reg);
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {},
+    onKill: () => {},
+  });
+  const lines = overlay.render(80);
+  // Footer is the last 2 lines: [ruler, hintLine]. Anything before that
+  // is the empty-state body — no ─-only lines should appear there.
+  assert.ok(lines.length >= 2, "expected at least footer");
+  const body = lines.slice(0, lines.length - 2);
+  for (const line of body) {
+    assert.equal(
+      /^─{3,}$/.test(line),
+      false,
+      `unexpected ruler in empty-state body: ${JSON.stringify(line)}`,
+    );
+  }
+  // Footer ruler still present at index length-2.
+  assert.match(lines[lines.length - 2]!, /^─+$/);
+});
+
+test("empty state: heading styled muted, prose styled dim when theme is set", () => {
+  const reg = new RunRegistry();
+  const model = new FocusedStreamModel(reg);
+  const stub: ThemeFg = {
+    fg: (slot, text) => `[${slot}]${text}[/]`,
+  };
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {},
+    onKill: () => {},
+    theme: stub,
+  });
+  const joined = overlay.render(80).join("\n");
+  // Heading routed through `muted`.
+  assert.match(joined, /\[muted\]\(no sub-agents running\)\[\/\]/);
+  // Prose routed through `dim`.
+  assert.match(joined, /\[dim\]Spawn one via ensemble_spawn[^[]*\[\/\]/);
+  // Heading and prose use distinct slots (sanity — no muted-then-dim or
+  // vice-versa overlap on the same content).
+  assert.equal(joined.includes("[muted]Spawn"), false);
+  assert.equal(joined.includes("[dim](no sub-agents"), false);
+});
+
+test("empty state: at viewport=20, heading lands ~mid (loose: index 5..12)", () => {
+  const reg = new RunRegistry();
+  const model = new FocusedStreamModel(reg);
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {},
+    onKill: () => {},
+    getViewportHeight: () => 20,
+  });
+  const lines = overlay.render(80);
+  const headingIdx = lines.findIndex((l) => l.includes("(no sub-agents running)"));
+  assert.ok(headingIdx >= 5 && headingIdx <= 12, `headingIdx=${headingIdx}`);
+});
+
+test("empty state: body line count reduced vs pre-slice (default viewport)", () => {
+  // Pre-slice: 1 leading ruler + 5 placeholder rows = 6 body lines.
+  // Post-slice (default viewport=0): 1 spacer + heading + spacer + prose = 4.
+  const reg = new RunRegistry();
+  const model = new FocusedStreamModel(reg);
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {},
+    onKill: () => {},
+  });
+  const lines = overlay.render(80);
+  const body = lines.slice(0, lines.length - 2);
+  assert.ok(body.length < 6, `expected body < 6, got ${body.length}`);
+});
+
 test("FocusedStreamOverlay.render: lines never exceed the requested width", () => {
   const { overlay } = setup();
   const lines = overlay.render(40);

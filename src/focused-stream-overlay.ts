@@ -44,16 +44,64 @@ export interface FocusedStreamOverlayOptions {
   getViewportHeight?: () => number;
 }
 
+// ── Slice 10: empty-state polish ─────────────────────────────────────
+//
+// O4 closer. Replaces the prior `EMPTY_PLACEHOLDER` + leading-ruler
+// pair (which read as a render bug) with a viewport-aware centred
+// message. Plan §A1 (oracle amendment 1) explicitly drops `Box` from
+// pi-tui — we keep the empty-state branch in plain string[] so the
+// overlay stays stub-compatible with sentinel themes in tests.
+//
+// Styling, when a theme is set, happens INLINE here rather than via
+// `applyThemeToLines` because empty-state chrome isn't a transcript
+// LineKind. The outputs of `renderEmpty` are therefore returned
+// directly as the body, bypassing the styler.
+
+const EMPTY_HEADING = "(no sub-agents running)";
+const EMPTY_PROSE = "Spawn one via ensemble_spawn or /conductor spawn.";
+
 /**
- * Lines of empty whitespace shown when there are no sub-agents to display.
+ * Render the empty-state body lines (no focused run). Drops the prior
+ * flanking rulers, emits a `muted`-slot heading and a `dim`-slot prose
+ * line, and pads the top with empty rows so the message lands roughly
+ * mid-viewport when `viewportHeight` is known.
+ *
+ * Layout (body lines only — footer is appended by the caller):
+ *
+ *   <topPad spacers>   ← Math.max(1, floor((viewport - 5) / 2))
+ *   <indent>(no sub-agents running)        ← muted when theme set
+ *   <blank>
+ *   <indent>Spawn one via ensemble_spawn ...← dim when theme set
+ *
+ * `viewportHeight <= 0` → fall back to a single leading spacer (the
+ * default-viewport case in unit tests, where the host hasn't wired
+ * `getViewportHeight`). The overall body count is then 4 lines, down
+ * from the pre-slice count of 6 (1 ruler + 5 placeholder rows).
  */
-const EMPTY_PLACEHOLDER = [
-  "",
-  "  no sub-agents to display.",
-  "",
-  "  Spawn one via ensemble_spawn or /conductor spawn.",
-  "",
-];
+export function renderEmpty(
+  width: number,
+  viewportHeight: number,
+  theme?: ThemeFg,
+): string[] {
+  // The body proper is 3 lines (heading + blank + prose). The footer
+  // appended by the caller is 2 lines. So the slack budget for top
+  // padding is `viewport - 3 - 2 = viewport - 5`. Halve it for
+  // centring; floor; clamp to ≥1 so something is always above the
+  // heading even on tiny / unknown viewports.
+  const slack = Math.max(0, viewportHeight - 5);
+  const topPad = Math.max(1, Math.floor(slack / 2));
+
+  const indent = "  ";
+  const headingLine = theme
+    ? indent + theme.fg("muted", EMPTY_HEADING)
+    : indent + EMPTY_HEADING;
+  const proseLine = theme
+    ? indent + theme.fg("dim", clip(EMPTY_PROSE, Math.max(0, width - indent.length)))
+    : indent + clip(EMPTY_PROSE, Math.max(0, width - indent.length));
+
+  const top = Array<string>(topPad).fill("");
+  return [...top, headingLine, "", proseLine];
+}
 
 // ── Slice 9: FOOTER_BINDINGS ──────────────────────────────────────────
 //
@@ -211,11 +259,12 @@ export class FocusedStreamOverlay implements Component {
     let bodyLines: string[];
     let status: RunStatus | undefined;
     if (!focused) {
-      bodyLines = [
-        ...renderRulers(width, "─"),
-        ...EMPTY_PLACEHOLDER.map((s) => clip(s, width)),
-      ];
-      status = undefined;
+      // Slice 10: empty-state body is rendered (and styled, if a theme
+      // is set) inline by `renderEmpty`. We bypass the styler entirely
+      // for this branch — no rulers in the body, no LineKind mapping.
+      const viewportHeight = this.opts.getViewportHeight?.() ?? 0;
+      const empty = renderEmpty(width, viewportHeight, theme);
+      return [...empty, ...footerLines];
     } else {
       const header = renderHeader(focused, width);
       const transcript = renderTranscript(focused, {
@@ -241,6 +290,7 @@ export class FocusedStreamOverlay implements Component {
     if (!theme) return [...bodyLines, ...footerLines];
     const themedBody = applyThemeToLines(bodyLines, classifyLine, theme, { status });
     return [...themedBody, ...footerLines];
+    // (Empty-state branch returned earlier — see Slice 10 comment above.)
   }
 
   invalidate(): void {
@@ -270,8 +320,9 @@ export class FocusedStreamOverlay implements Component {
   }
 }
 
-function renderRulers(width: number, ch: string): string[] {
-  return [ch.repeat(Math.max(0, width))];
+function clip(s: string, width: number): string {
+  if (s.length <= width) return s;
+  return s.slice(0, Math.max(0, width - 1)) + "…";
 }
 
 /**
@@ -301,9 +352,4 @@ export function renderScrollHint(
   if (above > 0 && below > 0) return `↑ ${above} hidden  ·  ↓ ${below} hidden`;
   if (above > 0) return `↑ ${above} hidden`;
   return `↓ ${below} hidden`;
-}
-
-function clip(s: string, width: number): string {
-  if (s.length <= width) return s;
-  return s.slice(0, Math.max(0, width - 1)) + "…";
 }

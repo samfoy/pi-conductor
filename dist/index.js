@@ -3451,13 +3451,17 @@ var FocusedStreamModel = class {
 
 // src/focused-stream-overlay.ts
 import { visibleWidth as visibleWidth3 } from "@earendil-works/pi-tui";
-var EMPTY_PLACEHOLDER = [
-  "",
-  "  no sub-agents to display.",
-  "",
-  "  Spawn one via ensemble_spawn or /conductor spawn.",
-  ""
-];
+var EMPTY_HEADING = "(no sub-agents running)";
+var EMPTY_PROSE = "Spawn one via ensemble_spawn or /conductor spawn.";
+function renderEmpty(width, viewportHeight, theme) {
+  const slack = Math.max(0, viewportHeight - 5);
+  const topPad = Math.max(1, Math.floor(slack / 2));
+  const indent = "  ";
+  const headingLine = theme ? indent + theme.fg("muted", EMPTY_HEADING) : indent + EMPTY_HEADING;
+  const proseLine = theme ? indent + theme.fg("dim", clip(EMPTY_PROSE, Math.max(0, width - indent.length))) : indent + clip(EMPTY_PROSE, Math.max(0, width - indent.length));
+  const top = Array(topPad).fill("");
+  return [...top, headingLine, "", proseLine];
+}
 var FOOTER_BINDINGS = [
   {
     keyDisplay: "Esc",
@@ -3560,11 +3564,9 @@ var FocusedStreamOverlay = class {
     let bodyLines;
     let status;
     if (!focused) {
-      bodyLines = [
-        ...renderRulers(width, "\u2500"),
-        ...EMPTY_PLACEHOLDER.map((s) => clip(s, width))
-      ];
-      status = void 0;
+      const viewportHeight = this.opts.getViewportHeight?.() ?? 0;
+      const empty = renderEmpty(width, viewportHeight, theme);
+      return [...empty, ...footerLines];
     } else {
       const header = renderHeader(focused, width);
       const transcript = renderTranscript(focused, {
@@ -3603,8 +3605,9 @@ var FocusedStreamOverlay = class {
     }
   }
 };
-function renderRulers(width, ch) {
-  return [ch.repeat(Math.max(0, width))];
+function clip(s, width) {
+  if (s.length <= width) return s;
+  return s.slice(0, Math.max(0, width - 1)) + "\u2026";
 }
 function renderScrollHint(scrollOffset, transcriptLineCount, viewportHeight) {
   if (viewportHeight <= 0) return null;
@@ -3614,10 +3617,6 @@ function renderScrollHint(scrollOffset, transcriptLineCount, viewportHeight) {
   if (above > 0 && below > 0) return `\u2191 ${above} hidden  \xB7  \u2193 ${below} hidden`;
   if (above > 0) return `\u2191 ${above} hidden`;
   return `\u2193 ${below} hidden`;
-}
-function clip(s, width) {
-  if (s.length <= width) return s;
-  return s.slice(0, Math.max(0, width - 1)) + "\u2026";
 }
 
 // src/focused-overlay-factory.ts
