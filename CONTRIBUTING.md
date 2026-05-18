@@ -33,7 +33,7 @@ If a bug ships, the regression test for it is part of the fix. The PR descriptio
 
 ## Pre-commit hook
 
-The repo ships a pre-commit hook at `hooks/pre-commit` that runs `npm test` and rejects the commit if any test fails. Activate it once per clone:
+The repo ships a pre-commit hook at `hooks/pre-commit` that runs `npm test` and rejects the commit if any test fails. When the staged change touches `src/`, the hook also runs `npm run build` and auto-stages `dist/index.js` + `dist/index.js.map` — `dist/` is a tracked artifact whose only legitimate state is "matches src/", so the rebuild is automatic and contributors don't need to remember it. Activate the hook once per clone:
 
 ```bash
 git config core.hooksPath hooks
@@ -46,6 +46,28 @@ Or run the bundled installer:
 ```
 
 To skip the hook for a true emergency (almost never appropriate), pass `--no-verify` to `git commit`. Don't make a habit of it.
+
+## Iteration workflow
+
+`pi.extensions` loads the bundled `dist/index.js`, not `src/`, so any `src/` change must be rebuilt before the parent pi session can see it. Two ways to keep the bundle current during development:
+
+- **`npm run dev`** — esbuild in watch mode. Run it as a background process; every save in `src/` regenerates `dist/index.js` in ~30ms. Pair with the host's `/reload` slash command in the parent pi session and changes pick up without a full pi restart.
+- **The pre-commit hook is the safety net.** If `npm run dev` wasn't running (or crashed), the hook rebuilds + auto-stages `dist/` whenever staged files include `src/`. You don't need to remember `npm run build` before commit.
+
+### What `/reload` preserves
+
+As of `1c72856` (`fix(lifecycle): preserve runs on /reload`), the conductor's `session_shutdown` handler is reload-aware:
+
+- **Preserved across `/reload`:** chat history, conductor brief, scratchpad notes (`note set`/`note get`), the `pi.on("context", …)` sanitizer hook (re-registers cleanly on the new runtime).
+- **Not preserved:** in-flight sub-agent registry entries. Surviving sub-agents keep running as separate processes and write their `final.md` / `record.json` to disk, but the new runtime won't fire `<sub-agent-completed>` notifications for runs that started under the old one. Wait for them to finish naturally and read the on-disk record, or check `~/.pi/agent/conductor/runs/<persona>-<id>/`.
+
+### Recommended loop
+
+1. Start `npm run dev` in a background process (e.g. via the `pi-processes` extension or a tmux pane).
+2. Edit `src/`. Watch rebuilds `dist/index.js`.
+3. `/reload` in the parent pi session to pick up the new bundle.
+4. Test interactively or via `npm test`.
+5. Commit. The pre-commit hook re-runs the build as a safety net even if `dev` was off, plus the test suite.
 
 ## Running the test suite
 

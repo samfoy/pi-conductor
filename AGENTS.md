@@ -27,6 +27,8 @@ If you can't figure out how to test something cleanly, the code probably needs r
 3. Conventional Commits message.
 4. Don't bundle unrelated changes into one commit.
 
+(The pre-commit hook auto-rebuilds `dist/` when `src/` is staged, so you don't need a separate `npm run build` step — but `npm run dev` running in the background is the recommended iteration loop. See `CONTRIBUTING.md`.)
+
 ## What this repo is
 
 A pi extension that turns the parent pi session into an orchestrator driving persona-based sub-agents with first-class TUI visibility. See `README.md` for the user-facing summary.

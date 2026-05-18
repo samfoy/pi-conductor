@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # pi-conductor pre-commit hook.
 #
-# Runs the unit test suite. Rejects the commit on any red test.
+# When `src/` files are staged, rebuilds `dist/index.js` and auto-stages
+# the result — `dist/` is a tracked artifact whose only legitimate state
+# is "matches src/". Then runs the unit test suite. Rejects the commit on
+# any red test or build failure.
 #
 # To activate this hook in your clone, run:
 #   git config core.hooksPath hooks
@@ -24,6 +27,22 @@ fi
 if [[ ! -d node_modules ]]; then
   echo "pre-commit: node_modules missing — run 'npm install' first" >&2
   exit 1
+fi
+
+# Rebuild dist/ when src/ is touched. dist/index.js is a tracked artifact
+# whose only legitimate state is "matches src/" — staleness has bitten three
+# slices in a row (ff9a40e, cfeffb5, 1c72856), so we automate the rebuild and
+# auto-stage the result. Build cost is ~30ms wall (esbuild) when fired;
+# guarded so doc-/persona-/test-only commits pay nothing.
+if git diff --cached --name-only | grep -q '^src/'; then
+  echo "pre-commit: rebuilding dist/ (src/ changes detected)…"
+  if ! npm run build --silent; then
+    echo
+    echo "pre-commit: build FAILED. Commit rejected." >&2
+    echo "pre-commit: fix the build, then commit again." >&2
+    exit 1
+  fi
+  git add dist/index.js dist/index.js.map
 fi
 
 echo "pre-commit: running npm test (unit suite)…"
