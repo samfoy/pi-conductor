@@ -23,6 +23,22 @@ import { renderHeader, renderTranscript } from "./transcript.ts";
 import { isTerminal, type Run } from "./types.ts";
 import { STATUS_GLYPH } from "./status-glyph.ts";
 
+/**
+ * Count toolResult messages in a Run. Used by the foreground throttle
+ * call-sites to decide whether to bypass the debounce window: when this
+ * number grows between registry updates a new tool result has landed, and
+ * we want the ↳ ✓/✗ outcome glyph visible immediately rather than
+ * waiting up to FOREGROUND_STREAM_INTERVAL_MS for the trailing edge
+ * (oracle §7 throttle interaction).
+ */
+export function countToolResultMessages(run: Run): number {
+  let n = 0;
+  for (const m of run.messages) {
+    if ((m as any).role === "toolResult") n += 1;
+  }
+  return n;
+}
+
 /** Maximum characters in the final-text excerpt of the summary. */
 const SUMMARY_EXCERPT_MAX = 120;
 
@@ -186,6 +202,14 @@ export interface UpdateThrottleOpts {
 export interface UpdateThrottle<T> {
   /** Push the latest payload. May fire immediately or be coalesced. */
   push(payload: T): void;
+  /**
+   * Fire `payload` synchronously regardless of leading-edge state. Cancels
+   * any pending trailing fire so the throttle window restarts cleanly. Used
+   * by callers that detected a high-priority event (e.g. a tool result) and
+   * want it visible without waiting out the debounce window. Idempotent vs
+   * dispose.
+   */
+  pushImmediate(payload: T): void;
   /** Force any pending payload through right now. Idempotent. */
   flush(): void;
   /** Cancel any pending fire and reject further pushes. Idempotent. */
@@ -243,6 +267,11 @@ export function createUpdateThrottle<T>(
       }
       pending = { payload };
       scheduleTrailing();
+    },
+    pushImmediate(payload: T) {
+      if (disposed) return;
+      // fireNow clears pending + cancels any scheduled trailing timer.
+      fireNow(payload);
     },
     flush() {
       if (disposed) return;

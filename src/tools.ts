@@ -16,6 +16,7 @@ import { elapsedStr, forceTerminate, formatUsage, getFinalText, pauseRun, resolv
 import { SpawnQueue } from "./queue.ts";
 import {
   awaitOrDetach,
+  countToolResultMessages,
   createUpdateThrottle,
   installPostDetachCompletionListener,
   renderForegroundDetachedResult,
@@ -324,9 +325,19 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         // Initial render so the card isn't blank before the first
         // registry change fires.
         throttle.push(result.run);
+        let lastToolResultCount = countToolResultMessages(result.run);
         const unsub = registry.onChange((r) => {
           if (r.id !== result.run.id) return;
-          throttle.push(r);
+          // Bypass the throttle when a new toolResult lands so the user
+          // sees the ↳ ✓/✗ outcome glyph without waiting out the trailing
+          // edge (would otherwise show ↳ … for up to FOREGROUND_STREAM_INTERVAL_MS).
+          const c = countToolResultMessages(r);
+          if (c > lastToolResultCount) {
+            lastToolResultCount = c;
+            throttle.pushImmediate(r);
+          } else {
+            throttle.push(r);
+          }
         });
 
         // Honor abort.
@@ -494,9 +505,16 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           });
         }, { intervalMs: FOREGROUND_STREAM_INTERVAL_MS });
         throttle.push(result.run);
+        let lastToolResultCount2 = countToolResultMessages(result.run);
         const unsub = registry.onChange((r) => {
           if (r.id !== result.run.id) return;
-          throttle.push(r);
+          const c = countToolResultMessages(r);
+          if (c > lastToolResultCount2) {
+            lastToolResultCount2 = c;
+            throttle.pushImmediate(r);
+          } else {
+            throttle.push(r);
+          }
         });
 
         // Honor abort.

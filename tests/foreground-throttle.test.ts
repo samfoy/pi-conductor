@@ -121,3 +121,39 @@ test("throttle: identical consecutive payloads still emit (caller controls dedup
     mock.timers.reset();
   }
 });
+
+// ── Slice 2: pushImmediate bypass for tool-result events ─────────────
+//
+// When a tool result lands within the throttle's debounce window, callers
+// want the new state visible immediately rather than waiting for the
+// trailing edge — otherwise the user sees a half-second flash of the call
+// without its outcome glyph. pushImmediate fires synchronously regardless
+// of leading-edge state and cancels any pending trailing fire.
+
+test("throttle: pushImmediate fires synchronously even mid-window", () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  try {
+    const calls: string[] = [];
+    const t = createUpdateThrottle((s: string) => calls.push(s), { intervalMs: 50 });
+    t.push("a"); // leading edge → fires immediately
+    t.push("b"); // coalesced into a pending trailing fire
+    assert.deepEqual(calls, ["a"]);
+    t.pushImmediate("c"); // bypass: fires now
+    assert.deepEqual(calls, ["a", "c"]);
+    // The trailing timer scheduled by push("b") must have been cancelled
+    // so it doesn't double-fire after we already delivered "c".
+    mock.timers.tick(500);
+    assert.deepEqual(calls, ["a", "c"], "pushImmediate must cancel the pending trailing timer");
+    t.dispose();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("throttle: pushImmediate is a no-op after dispose", () => {
+  const calls: string[] = [];
+  const t = createUpdateThrottle((s: string) => calls.push(s), { intervalMs: 50 });
+  t.dispose();
+  t.pushImmediate("x");
+  assert.deepEqual(calls, []);
+});

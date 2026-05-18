@@ -183,6 +183,203 @@ test("renderTranscript: thinking blocks visible when showThinking is true", () =
   assert.match(joined, /decision: X/);
 });
 
+// ── Slice 2: tool-call outcome line `↳ ✓/✗/…` in collapsed mode ─────
+
+test("renderTranscript: collapsed toolCall + success result emits a ↳ ✓ outcome line", () => {
+  const run = makeRun({
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call-1",
+            name: "bash",
+            arguments: { command: "echo hi" },
+          },
+        ],
+      } as any,
+      {
+        role: "toolResult",
+        isError: false,
+        content: [
+          { type: "toolResult", toolUseId: "call-1", text: "hello world" },
+        ],
+      } as any,
+    ],
+  });
+  const lines = renderTranscript(run, { ...DEFAULT_OPTS, collapseToolCalls: true });
+  const joined = lines.join("\n");
+  assert.match(joined, /▸ bash/);
+  // Outcome line follows: ↳ ✓ <preview>
+  assert.match(joined, /↳ ✓ hello world/);
+  // Must NOT show ✗ for a success.
+  assert.doesNotMatch(joined, /↳ ✗/);
+});
+
+test("renderTranscript: collapsed toolCall + isError result emits ↳ ✗", () => {
+  const run = makeRun({
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call-2",
+            name: "bash",
+            arguments: { command: "false" },
+          },
+        ],
+      } as any,
+      {
+        role: "toolResult",
+        isError: true,
+        content: [
+          { type: "toolResult", toolUseId: "call-2", text: "exit 1" },
+        ],
+      } as any,
+    ],
+  });
+  const lines = renderTranscript(run, { ...DEFAULT_OPTS, collapseToolCalls: true });
+  const joined = lines.join("\n");
+  assert.match(joined, /▸ bash/);
+  assert.match(joined, /↳ ✗ exit 1/);
+  assert.doesNotMatch(joined, /↳ ✓/);
+});
+
+test("renderTranscript: collapsed toolCall with id but no result emits pending ↳ …", () => {
+  // Pending state — call landed but result hasn't yet. Render `↳ …` so the
+  // user has a stable visual cue the tool is mid-flight (prevents the
+  // half-second flash described in plan §7 throttle interaction).
+  const run = makeRun({
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call-pending",
+            name: "bash",
+            arguments: { command: "sleep 5" },
+          },
+        ],
+      } as any,
+    ],
+  });
+  const lines = renderTranscript(run, { ...DEFAULT_OPTS, collapseToolCalls: true });
+  const joined = lines.join("\n");
+  assert.match(joined, /▸ bash/);
+  assert.match(joined, /↳ …/);
+  assert.doesNotMatch(joined, /↳ ✓/);
+  assert.doesNotMatch(joined, /↳ ✗/);
+});
+
+test("renderTranscript: non-collapsed mode does NOT add a ↳ ✓/✗ outcome line", () => {
+  // collapseToolCalls=false renders the full body (existing behavior); the
+  // ↳ ✓/✗ glyph layer is collapsed-mode-only because the body itself shows
+  // the outcome.
+  const run = makeRun({
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call-3",
+            name: "bash",
+            arguments: { command: "echo hi" },
+          },
+        ],
+      } as any,
+      {
+        role: "toolResult",
+        isError: false,
+        content: [
+          { type: "toolResult", toolUseId: "call-3", text: "hi" },
+        ],
+      } as any,
+    ],
+  });
+  const lines = renderTranscript(run, { ...DEFAULT_OPTS, collapseToolCalls: false });
+  const joined = lines.join("\n");
+  assert.match(joined, /▾ bash/);
+  // Body still renders the result text (existing behavior).
+  assert.match(joined, /hi/);
+  // No ✓/✗ outcome glyph in expanded mode.
+  assert.doesNotMatch(joined, /↳ ✓/);
+  assert.doesNotMatch(joined, /↳ ✗/);
+});
+
+test("renderTranscript: outcome preview takes only the first line of the result", () => {
+  const run = makeRun({
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call-multiline",
+            name: "bash",
+            arguments: { command: "ls" },
+          },
+        ],
+      } as any,
+      {
+        role: "toolResult",
+        isError: false,
+        content: [
+          { type: "toolResult", toolUseId: "call-multiline", text: "line one\nline two\nline three" },
+        ],
+      } as any,
+    ],
+  });
+  const lines = renderTranscript(run, { ...DEFAULT_OPTS, collapseToolCalls: true });
+  const joined = lines.join("\n");
+  assert.match(joined, /↳ ✓ line one/);
+  // Only the first line of the result appears in the outcome preview;
+  // subsequent lines are not surfaced (use Ctrl+G + expand for full body).
+  assert.doesNotMatch(joined, /line two/);
+});
+
+test("renderTranscript: outcome line respects the width budget", () => {
+  const run = makeRun({
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call-wide",
+            name: "bash",
+            arguments: { command: "cat huge.log" },
+          },
+        ],
+      } as any,
+      {
+        role: "toolResult",
+        isError: false,
+        content: [
+          {
+            type: "toolResult",
+            toolUseId: "call-wide",
+            text: "x".repeat(500),
+          },
+        ],
+      } as any,
+    ],
+  });
+  for (const w of [20, 40, 80]) {
+    const lines = renderTranscript(run, { ...DEFAULT_OPTS, collapseToolCalls: true, width: w });
+    for (const line of lines) {
+      assert.equal(
+        visibleWidth(line) <= w,
+        true,
+        `outcome line exceeded width=${w}: visibleWidth=${visibleWidth(line)} line=${JSON.stringify(line)}`,
+      );
+    }
+  }
+});
+
 test("renderTranscript: toolResult message renders indented under the call", () => {
   const run = makeRun({
     messages: [

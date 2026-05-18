@@ -1772,7 +1772,20 @@ function renderToolCall(part, resultsByCallId, opts) {
   if (opts.collapseToolCalls) {
     const summary = summarizeToolArgs(name, part.arguments ?? {});
     const line = `\u25B8 ${name}${summary ? " " + summary : ""}`;
-    return [truncateOrPad(line, opts.width)];
+    const out2 = [truncateOrPad(line, opts.width)];
+    if (part.id) {
+      const result = resultsByCallId.get(part.id);
+      if (result) {
+        const isError = result.isError === true;
+        const glyph = isError ? "\u2717" : "\u2713";
+        const preview = firstLine(extractFirstResultText(result));
+        const outcome = preview ? ` \u21B3 ${glyph} ${preview}` : ` \u21B3 ${glyph}`;
+        out2.push(truncateOrPad(outcome, opts.width));
+      } else {
+        out2.push(truncateOrPad(" \u21B3 \u2026", opts.width));
+      }
+    }
+    return out2;
   }
   const out = [`\u25BE ${name}`];
   if (part.arguments) {
@@ -1796,6 +1809,15 @@ function renderToolCall(part, resultsByCallId, opts) {
     }
   }
   return out;
+}
+function extractFirstResultText(result) {
+  const content = result.content;
+  if (!Array.isArray(content)) return "";
+  for (const r of content) {
+    const text = r?.text ?? r?.output ?? "";
+    if (typeof text === "string" && text) return text;
+  }
+  return "";
 }
 function firstLine(s) {
   const idx = s.indexOf("\n");
@@ -1828,6 +1850,13 @@ function padOrTruncate(left, right, width) {
 }
 
 // src/foreground-stream.ts
+function countToolResultMessages(run) {
+  let n = 0;
+  for (const m of run.messages) {
+    if (m.role === "toolResult") n += 1;
+  }
+  return n;
+}
 var SUMMARY_EXCERPT_MAX = 120;
 var STREAM_MAX_CHARS = 32 * 1024;
 function renderForegroundStream(run, width) {
@@ -1943,6 +1972,10 @@ function createUpdateThrottle(fire, opts) {
       }
       pending = { payload };
       scheduleTrailing();
+    },
+    pushImmediate(payload) {
+      if (disposed) return;
+      fireNow(payload);
     },
     flush() {
       if (disposed) return;
@@ -2190,9 +2223,16 @@ persona=${p.persona} queue_position=${result.queuePosition}
           });
         }, { intervalMs: FOREGROUND_STREAM_INTERVAL_MS });
         throttle.push(result.run);
+        let lastToolResultCount = countToolResultMessages(result.run);
         const unsub = registry.onChange((r) => {
           if (r.id !== result.run.id) return;
-          throttle.push(r);
+          const c = countToolResultMessages(r);
+          if (c > lastToolResultCount) {
+            lastToolResultCount = c;
+            throttle.pushImmediate(r);
+          } else {
+            throttle.push(r);
+          }
         });
         signal?.addEventListener("abort", () => {
           try {
@@ -2318,9 +2358,16 @@ function registerSendTool(pi, opts) {
           });
         }, { intervalMs: FOREGROUND_STREAM_INTERVAL_MS });
         throttle.push(result.run);
+        let lastToolResultCount2 = countToolResultMessages(result.run);
         const unsub = registry.onChange((r) => {
           if (r.id !== result.run.id) return;
-          throttle.push(r);
+          const c = countToolResultMessages(r);
+          if (c > lastToolResultCount2) {
+            lastToolResultCount2 = c;
+            throttle.pushImmediate(r);
+          } else {
+            throttle.push(r);
+          }
         });
         signal?.addEventListener("abort", () => {
           try {

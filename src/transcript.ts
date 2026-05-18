@@ -154,7 +154,25 @@ function renderToolCall(
   if (opts.collapseToolCalls) {
     const summary = summarizeToolArgs(name, part.arguments ?? {});
     const line = `▸ ${name}${summary ? " " + summary : ""}`;
-    return [truncateOrPad(line, opts.width)];
+    const out: string[] = [truncateOrPad(line, opts.width)];
+    // Outcome line: ↳ ✓/✗/… + first-line preview. Only emitted when the
+    // call carries an id we can correlate against; tests/fixtures that omit
+    // id keep their pre-Slice-2 single-chevron shape.
+    if (part.id) {
+      const result = resultsByCallId.get(part.id);
+      if (result) {
+        const isError = (result as any).isError === true;
+        const glyph = isError ? "✗" : "✓";
+        const preview = firstLine(extractFirstResultText(result));
+        const outcome = preview ? ` ↳ ${glyph} ${preview}` : ` ↳ ${glyph}`;
+        out.push(truncateOrPad(outcome, opts.width));
+      } else {
+        // Pending: call landed but no result yet. Stable cue prevents the
+        // ≤500ms flash described in plan §7 throttle interaction.
+        out.push(truncateOrPad(" ↳ …", opts.width));
+      }
+    }
+    return out;
   }
 
   const out: string[] = [`▾ ${name}`];
@@ -181,6 +199,16 @@ function renderToolCall(
     }
   }
   return out;
+}
+
+function extractFirstResultText(result: AgentMessage): string {
+  const content = (result as any).content;
+  if (!Array.isArray(content)) return "";
+  for (const r of content) {
+    const text = r?.text ?? r?.output ?? "";
+    if (typeof text === "string" && text) return text;
+  }
+  return "";
 }
 
 function firstLine(s: string): string {
