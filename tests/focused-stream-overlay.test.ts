@@ -121,8 +121,11 @@ test("FocusedStreamOverlay.render: applies theme via classify+applyTheme when pr
   assert.match(joined, /\[accent\][^[]*a-1[^[]*\[\/\]/);
   // The header's top ruler is borderMuted.
   assert.match(joined, /\[borderMuted\]─+\[\/\]/);
-  // Footer hint line (starts with "Esc ") is dim.
-  assert.match(joined, /\[dim\]Esc /);
+  // Footer hint line: Slice 9 styles each binding's key glyph with the
+  // accent slot (label is plain). Earlier slices had the whole footer
+  // dimmed via classifyLine; that's gone — the overlay now owns its
+  // footer entirely and styles it itself.
+  assert.match(joined, /\[accent\]Esc\[\/\] close/);
 });
 
 test("FocusedStreamOverlay.render: omitting theme returns plain (ANSI-free) lines", () => {

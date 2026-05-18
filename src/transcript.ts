@@ -117,30 +117,13 @@ export function deriveActivity(run: Run, nowMs: number): string | undefined {
 }
 
 // ── Footer ────────────────────────────────────────────────────────────
-
-const FOOTER_HINTS = [
-  "Esc close",
-  "Tab/Sh-Tab cycle",
-  "↑↓ scroll",
-  "s send",
-  "c collapse",
-  "t thinking",
-  "k kill",
-];
-
-export function renderFooter(width: number): string[] {
-  // Greedy pack: include as many hints as fit, separated by " · ".
-  const sep = " · ";
-  let line = "";
-  for (const hint of FOOTER_HINTS) {
-    const next = line ? line + sep + hint : hint;
-    if (next.length > width) break;
-    line = next;
-  }
-  if (line.length > width) line = line.slice(0, width);
-  const ruler = "─".repeat(Math.max(0, width));
-  return [ruler, line];
-}
+//
+// v0.8.3 Item 3 — Slice 9: footer rendering moved to
+// `focused-stream-overlay.ts` (the only consumer of an interactive
+// footer). The pure renderer no longer owns the hint list. The
+// classifier (`transcript-classify.ts`) still recognises footer-shaped
+// lines for legacy callers / fixtures, but no helper here produces
+// them.
 
 // ── Transcript body ───────────────────────────────────────────────────
 

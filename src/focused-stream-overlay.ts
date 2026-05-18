@@ -6,9 +6,9 @@
  * actual rendering and state live in their respective pure modules.
  */
 
-import type { Component } from "@earendil-works/pi-tui";
+import { visibleWidth, type Component } from "@earendil-works/pi-tui";
 import type { FocusedStreamModel } from "./focused-stream-model.ts";
-import { renderHeader, renderFooter, renderTranscript } from "./transcript.ts";
+import { renderHeader, renderTranscript } from "./transcript.ts";
 import { classifyLine } from "./transcript-classify.ts";
 import { applyThemeToLines, type ThemeFg } from "./transcript-style.ts";
 import type { RunStatus } from "./types.ts";
@@ -55,20 +55,165 @@ const EMPTY_PLACEHOLDER = [
   "",
 ];
 
+// ── Slice 9: FOOTER_BINDINGS ──────────────────────────────────────────
+//
+// Single source of truth for both the rendered hint list AND the
+// keystroke dispatch table. Adding a binding requires one edit; the
+// pure-renderer `transcript.ts:renderFooter` (and its `FOOTER_HINTS`
+// const) is gone — the overlay owns its footer entirely.
+//
+// The action callback receives the overlay instance and the raw input
+// `data` so it can distinguish between bindings that share a hint slot
+// but dispatch differently (Tab vs Shift-Tab; ↑ vs ↓; PgUp vs PgDn).
+
+/**
+ * One footer hint paired with its dispatch action. The same array drives
+ * `renderFooterLine` and `handleInput` so they cannot drift.
+ */
+export interface FooterBinding {
+  /** Visible key glyph in the hint (e.g. "Esc", "Tab/Sh-Tab", "↑↓", "c"). */
+  keyDisplay: string;
+  /** Plain-text label shown after the key glyph (e.g. "close", "cycle"). */
+  label: string;
+  /**
+   * Raw input strings that fire this binding. The first entry is the
+   * "primary" match used by tests; additional entries handle aliases
+   * (e.g. Esc has both `\x1b` and `\u001b`).
+   */
+  matches: string[];
+  /** Dispatch handler. Receives the overlay (for opts access) and the raw input. */
+  action: (overlay: FocusedStreamOverlay, data: string) => void;
+}
+
+export const FOOTER_BINDINGS: FooterBinding[] = [
+  {
+    keyDisplay: "Esc",
+    label: "close",
+    matches: ["\x1b", "\u001b"],
+    action: (o) => o.opts.onClose(),
+  },
+  {
+    keyDisplay: "Tab/Sh-Tab",
+    label: "cycle",
+    matches: ["\t", "\x1b[Z"],
+    action: (o, data) => {
+      if (data === "\x1b[Z") o.opts.model.cyclePrev();
+      else o.opts.model.cycleNext();
+      o.opts.onChange?.();
+    },
+  },
+  {
+    keyDisplay: "↑↓",
+    label: "scroll",
+    // Order matters for tests that dispatch the *first* match — down
+    // arrow is observable from a fresh (offset=0) model, where up
+    // would clamp to a no-op.
+    matches: ["\x1b[B", "\x1b[A", "\x1b[6~", "\x1b[5~"],
+    action: (o, data) => {
+      if (data === "\x1b[A") o.opts.model.scrollUp(1);
+      else if (data === "\x1b[B") o.opts.model.scrollDown(1);
+      else if (data === "\x1b[5~") o.opts.model.scrollUp(10);
+      else if (data === "\x1b[6~") o.opts.model.scrollDown(10);
+      o.opts.onChange?.();
+    },
+  },
+  {
+    keyDisplay: "s",
+    label: "send",
+    matches: ["s"],
+    action: (o) => {
+      const onSend = o.opts.onSend;
+      if (!onSend) return;
+      const focused = o.opts.model.focused();
+      if (focused) onSend(focused.id);
+    },
+  },
+  {
+    keyDisplay: "c",
+    label: "collapse",
+    matches: ["c"],
+    action: (o) => {
+      o.opts.model.toggleCollapseToolCalls();
+      o.opts.onChange?.();
+    },
+  },
+  {
+    keyDisplay: "t",
+    label: "thinking",
+    matches: ["t"],
+    action: (o) => {
+      o.opts.model.toggleShowThinking();
+      o.opts.onChange?.();
+    },
+  },
+  {
+    keyDisplay: "k",
+    label: "kill",
+    matches: ["k"],
+    action: (o) => {
+      const focused = o.opts.model.focused();
+      if (focused) o.opts.onKill(focused.id);
+    },
+  },
+];
+
+/**
+ * Render the overlay footer (top ruler + hint line). Pure helper —
+ * `theme` is optional; when omitted, returns plain (ANSI-free) output
+ * matching the previous `transcript.ts:renderFooter` shape so unit
+ * tests can assert structure without ANSI.
+ *
+ * Style choice (Slice 9 / O3): each hint renders as `[accent]<key>[/] <label>`.
+ * The host's `keyHint` / `keyText` helpers live under
+ * `dist/modes/interactive/components/keybinding-hints.js` — internal
+ * to pi-coding-agent, not on its public surface — so we mirror their
+ * shape with our existing `ThemeFg` interface. The accent slot picks
+ * up the theme's brand colour without coupling to host internals.
+ */
+export function renderFooterLine(
+  bindings: FooterBinding[],
+  width: number,
+  theme?: ThemeFg,
+): string[] {
+  const ruler = "─".repeat(Math.max(0, width));
+  const sep = "  "; // two-space separator (per design O3, replaces " · ")
+  let plain = ""; // accumulator for visible-width budgeting
+  let styled = ""; // accumulator with ANSI applied (when theme set)
+  for (const b of bindings) {
+    const piece = `${b.keyDisplay} ${b.label}`;
+    const next = plain ? plain + sep + piece : piece;
+    if (visibleWidth(next) > width) break;
+    plain = next;
+    if (theme) {
+      const stylePiece = `${theme.fg("accent", b.keyDisplay)} ${b.label}`;
+      styled = styled ? styled + sep + stylePiece : stylePiece;
+    }
+  }
+  const hintLine = theme ? styled : plain;
+  return [ruler, hintLine];
+}
+
 export class FocusedStreamOverlay implements Component {
-  constructor(private opts: FocusedStreamOverlayOptions) {}
+  constructor(private readonly _opts: FocusedStreamOverlayOptions) {}
 
   render(width: number): string[] {
     const { model, theme } = this.opts;
     model.refresh();
     const focused = model.focused();
-    let lines: string[];
+    // Slice 9: footer is built (and styled) here, separately from the
+    // body. We thread it through `applyThemeToLines` only when no theme
+    // is set — when a theme IS set, `renderFooterLine` already styles
+    // the hint line, and re-running it through the classifier would
+    // either double-style or fall through as `text` (since the line now
+    // starts with ANSI bytes, not "Esc "). Concatenating after avoids
+    // both pitfalls.
+    const footerLines = renderFooterLine(FOOTER_BINDINGS, width, theme);
+    let bodyLines: string[];
     let status: RunStatus | undefined;
     if (!focused) {
-      lines = [
+      bodyLines = [
         ...renderRulers(width, "─"),
         ...EMPTY_PLACEHOLDER.map((s) => clip(s, width)),
-        ...renderFooter(width),
       ];
       status = undefined;
     } else {
@@ -78,7 +223,6 @@ export class FocusedStreamOverlay implements Component {
         collapseToolCalls: model.collapseToolCalls(),
         showThinking: model.showThinking(),
       });
-      const footer = renderFooter(width);
 
       // Apply scroll offset to the transcript only — header and footer stay pinned.
       const offset = Math.min(model.scrollOffset(), Math.max(0, transcript.length - 1));
@@ -90,84 +234,38 @@ export class FocusedStreamOverlay implements Component {
       const hint = renderScrollHint(offset, transcript.length, viewportHeight);
       const hintLines = hint === null ? [] : [hint];
 
-      lines = [...header, ...visibleTranscript, ...hintLines, ...footer];
+      bodyLines = [...header, ...visibleTranscript, ...hintLines];
       status = focused.status;
     }
 
-    if (!theme) return lines;
-    return applyThemeToLines(lines, classifyLine, theme, { status });
+    if (!theme) return [...bodyLines, ...footerLines];
+    const themedBody = applyThemeToLines(bodyLines, classifyLine, theme, { status });
+    return [...themedBody, ...footerLines];
   }
 
   invalidate(): void {
     // Stateless beyond what the model holds. Nothing to clear.
   }
 
+  /**
+   * Public access to the construction options. Used by `FOOTER_BINDINGS`
+   * action callbacks so they can dispatch through the same opts the
+   * Component was wired with.
+   */
+  get opts(): FocusedStreamOverlayOptions {
+    return this._opts;
+  }
+
   handleInput(data: string): void {
-    const { model, onClose, onKill, onSend, onChange } = this.opts;
-
-    // Esc — close.
-    if (data === "\x1b" || data === "\u001b") {
-      onClose();
-      return;
-    }
-
-    // Arrow keys.
-    if (data === "\x1b[A") {
-      model.scrollUp(1);
-      onChange?.();
-      return;
-    }
-    if (data === "\x1b[B") {
-      model.scrollDown(1);
-      onChange?.();
-      return;
-    }
-    if (data === "\x1b[5~") {
-      model.scrollUp(10);
-      onChange?.();
-      return;
-    }
-    if (data === "\x1b[6~") {
-      model.scrollDown(10);
-      onChange?.();
-      return;
-    }
-
-    // Tab / Shift+Tab.
-    if (data === "\t") {
-      model.cycleNext();
-      onChange?.();
-      return;
-    }
-    if (data === "\x1b[Z") {
-      model.cyclePrev();
-      onChange?.();
-      return;
-    }
-
-    // Single-letter keys.
-    switch (data) {
-      case "c":
-        model.toggleCollapseToolCalls();
-        onChange?.();
-        return;
-      case "t":
-        model.toggleShowThinking();
-        onChange?.();
-        return;
-      case "k": {
-        const focused = model.focused();
-        if (focused) onKill(focused.id);
+    // Slice 9: dispatch via FOOTER_BINDINGS — single source of truth.
+    // The bindings cover Esc, Tab/Sh-Tab, arrow keys, c, t, s, k. Any
+    // input not matched by a binding is a no-op (preserves the prior
+    // "unknown keys are no-ops" contract).
+    for (const binding of FOOTER_BINDINGS) {
+      if (binding.matches.includes(data)) {
+        binding.action(this, data);
         return;
       }
-      case "s": {
-        if (!onSend) return;
-        const focused = model.focused();
-        if (focused) onSend(focused.id);
-        return;
-      }
-      default:
-        return;
     }
   }
 }

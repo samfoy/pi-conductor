@@ -1729,27 +1729,6 @@ function deriveActivity(run, nowMs) {
   }
   return void 0;
 }
-var FOOTER_HINTS = [
-  "Esc close",
-  "Tab/Sh-Tab cycle",
-  "\u2191\u2193 scroll",
-  "s send",
-  "c collapse",
-  "t thinking",
-  "k kill"
-];
-function renderFooter(width) {
-  const sep = " \xB7 ";
-  let line = "";
-  for (const hint of FOOTER_HINTS) {
-    const next = line ? line + sep + hint : hint;
-    if (next.length > width) break;
-    line = next;
-  }
-  if (line.length > width) line = line.slice(0, width);
-  const ruler = "\u2500".repeat(Math.max(0, width));
-  return [ruler, line];
-}
 function renderTranscript(run, opts) {
   const out = [];
   let assistantTurnIndex = 0;
@@ -3471,6 +3450,7 @@ var FocusedStreamModel = class {
 };
 
 // src/focused-stream-overlay.ts
+import { visibleWidth as visibleWidth3 } from "@earendil-works/pi-tui";
 var EMPTY_PLACEHOLDER = [
   "",
   "  no sub-agents to display.",
@@ -3478,22 +3458,111 @@ var EMPTY_PLACEHOLDER = [
   "  Spawn one via ensemble_spawn or /conductor spawn.",
   ""
 ];
-var FocusedStreamOverlay = class {
-  constructor(opts) {
-    this.opts = opts;
+var FOOTER_BINDINGS = [
+  {
+    keyDisplay: "Esc",
+    label: "close",
+    matches: ["\x1B", "\x1B"],
+    action: (o) => o.opts.onClose()
+  },
+  {
+    keyDisplay: "Tab/Sh-Tab",
+    label: "cycle",
+    matches: ["	", "\x1B[Z"],
+    action: (o, data) => {
+      if (data === "\x1B[Z") o.opts.model.cyclePrev();
+      else o.opts.model.cycleNext();
+      o.opts.onChange?.();
+    }
+  },
+  {
+    keyDisplay: "\u2191\u2193",
+    label: "scroll",
+    // Order matters for tests that dispatch the *first* match — down
+    // arrow is observable from a fresh (offset=0) model, where up
+    // would clamp to a no-op.
+    matches: ["\x1B[B", "\x1B[A", "\x1B[6~", "\x1B[5~"],
+    action: (o, data) => {
+      if (data === "\x1B[A") o.opts.model.scrollUp(1);
+      else if (data === "\x1B[B") o.opts.model.scrollDown(1);
+      else if (data === "\x1B[5~") o.opts.model.scrollUp(10);
+      else if (data === "\x1B[6~") o.opts.model.scrollDown(10);
+      o.opts.onChange?.();
+    }
+  },
+  {
+    keyDisplay: "s",
+    label: "send",
+    matches: ["s"],
+    action: (o) => {
+      const onSend = o.opts.onSend;
+      if (!onSend) return;
+      const focused = o.opts.model.focused();
+      if (focused) onSend(focused.id);
+    }
+  },
+  {
+    keyDisplay: "c",
+    label: "collapse",
+    matches: ["c"],
+    action: (o) => {
+      o.opts.model.toggleCollapseToolCalls();
+      o.opts.onChange?.();
+    }
+  },
+  {
+    keyDisplay: "t",
+    label: "thinking",
+    matches: ["t"],
+    action: (o) => {
+      o.opts.model.toggleShowThinking();
+      o.opts.onChange?.();
+    }
+  },
+  {
+    keyDisplay: "k",
+    label: "kill",
+    matches: ["k"],
+    action: (o) => {
+      const focused = o.opts.model.focused();
+      if (focused) o.opts.onKill(focused.id);
+    }
   }
-  opts;
+];
+function renderFooterLine(bindings, width, theme) {
+  const ruler = "\u2500".repeat(Math.max(0, width));
+  const sep = "  ";
+  let plain = "";
+  let styled = "";
+  for (const b of bindings) {
+    const piece = `${b.keyDisplay} ${b.label}`;
+    const next = plain ? plain + sep + piece : piece;
+    if (visibleWidth3(next) > width) break;
+    plain = next;
+    if (theme) {
+      const stylePiece = `${theme.fg("accent", b.keyDisplay)} ${b.label}`;
+      styled = styled ? styled + sep + stylePiece : stylePiece;
+    }
+  }
+  const hintLine = theme ? styled : plain;
+  return [ruler, hintLine];
+}
+var FocusedStreamOverlay = class {
+  constructor(_opts) {
+    this._opts = _opts;
+  }
+  _opts;
   render(width) {
     const { model, theme } = this.opts;
     model.refresh();
     const focused = model.focused();
-    let lines;
+    const footerLines = renderFooterLine(FOOTER_BINDINGS, width, theme);
+    let bodyLines;
     let status;
     if (!focused) {
-      lines = [
+      bodyLines = [
         ...renderRulers(width, "\u2500"),
-        ...EMPTY_PLACEHOLDER.map((s) => clip(s, width)),
-        ...renderFooter(width)
+        ...EMPTY_PLACEHOLDER.map((s) => clip(s, width))
       ];
       status = void 0;
     } else {
@@ -3503,78 +3572,34 @@ var FocusedStreamOverlay = class {
         collapseToolCalls: model.collapseToolCalls(),
         showThinking: model.showThinking()
       });
-      const footer = renderFooter(width);
       const offset = Math.min(model.scrollOffset(), Math.max(0, transcript.length - 1));
       const visibleTranscript = transcript.slice(offset);
       const viewportHeight = this.opts.getViewportHeight?.() ?? 0;
       const hint = renderScrollHint(offset, transcript.length, viewportHeight);
       const hintLines = hint === null ? [] : [hint];
-      lines = [...header, ...visibleTranscript, ...hintLines, ...footer];
+      bodyLines = [...header, ...visibleTranscript, ...hintLines];
       status = focused.status;
     }
-    if (!theme) return lines;
-    return applyThemeToLines(lines, classifyLine, theme, { status });
+    if (!theme) return [...bodyLines, ...footerLines];
+    const themedBody = applyThemeToLines(bodyLines, classifyLine, theme, { status });
+    return [...themedBody, ...footerLines];
   }
   invalidate() {
   }
+  /**
+   * Public access to the construction options. Used by `FOOTER_BINDINGS`
+   * action callbacks so they can dispatch through the same opts the
+   * Component was wired with.
+   */
+  get opts() {
+    return this._opts;
+  }
   handleInput(data) {
-    const { model, onClose, onKill, onSend, onChange } = this.opts;
-    if (data === "\x1B" || data === "\x1B") {
-      onClose();
-      return;
-    }
-    if (data === "\x1B[A") {
-      model.scrollUp(1);
-      onChange?.();
-      return;
-    }
-    if (data === "\x1B[B") {
-      model.scrollDown(1);
-      onChange?.();
-      return;
-    }
-    if (data === "\x1B[5~") {
-      model.scrollUp(10);
-      onChange?.();
-      return;
-    }
-    if (data === "\x1B[6~") {
-      model.scrollDown(10);
-      onChange?.();
-      return;
-    }
-    if (data === "	") {
-      model.cycleNext();
-      onChange?.();
-      return;
-    }
-    if (data === "\x1B[Z") {
-      model.cyclePrev();
-      onChange?.();
-      return;
-    }
-    switch (data) {
-      case "c":
-        model.toggleCollapseToolCalls();
-        onChange?.();
-        return;
-      case "t":
-        model.toggleShowThinking();
-        onChange?.();
-        return;
-      case "k": {
-        const focused = model.focused();
-        if (focused) onKill(focused.id);
+    for (const binding of FOOTER_BINDINGS) {
+      if (binding.matches.includes(data)) {
+        binding.action(this, data);
         return;
       }
-      case "s": {
-        if (!onSend) return;
-        const focused = model.focused();
-        if (focused) onSend(focused.id);
-        return;
-      }
-      default:
-        return;
     }
   }
 };

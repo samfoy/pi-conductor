@@ -12,7 +12,6 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import {
   renderTranscript,
   renderHeader,
-  renderFooter,
   type TranscriptOptions,
 } from "../src/transcript.ts";
 import { emptyUsage, type Run } from "../src/types.ts";
@@ -698,37 +697,11 @@ test("renderHeader: activity respects width at width=50/80/120/213", () => {
 });
 
 // ── renderFooter ──────────────────────────────────────────────────────
-
-test("renderFooter: includes the Esc-to-close hint", () => {
-  const lines = renderFooter(80);
-  const joined = lines.join("\n");
-  assert.match(joined, /Esc/);
-  assert.match(joined, /close|return|back/i);
-});
-
-test("renderFooter: includes Tab-to-cycle hint", () => {
-  const joined = renderFooter(80).join("\n");
-  assert.match(joined, /Tab/);
-});
-
-test("renderFooter: includes c (collapse) and t (thinking) hints", () => {
-  const joined = renderFooter(80).join("\n");
-  assert.match(joined, /\bc\b/);
-  assert.match(joined, /\bt\b/);
-});
-
-test("renderFooter: includes 's' send hint", () => {
-  const joined = renderFooter(80).join("\n");
-  assert.match(joined, /\bs\b/);
-  assert.match(joined, /send/i);
-});
-
-test("renderFooter: never exceeds the requested width", () => {
-  const lines = renderFooter(30);
-  for (const line of lines) {
-    assert.equal(visibleWidth(line) <= 30, true, `footer line too long: "${line}"`);
-  }
-});
+//
+// v0.8.3 Item 3 — Slice 9: footer rendering moved to the overlay.
+// The hint-list / dispatch tests (Esc/Tab/c/t/s/width) now live in
+// tests/footer-bindings.test.ts (relocated, not rewritten). The pure
+// renderer no longer exports a renderFooter helper.
 
 // ── Slice 7 invariant: pure renderers stay monochrome ─────────────────
 //
@@ -742,12 +715,6 @@ test("renderHeader emits no ANSI escape sequences", () => {
   const run = makeRun({ status: "running", lastEventAt: Date.now() });
   for (const line of renderHeader(run, 80)) {
     assert.equal(line.includes("\x1b["), false, `unexpected ANSI in header: ${line}`);
-  }
-});
-
-test("renderFooter emits no ANSI escape sequences", () => {
-  for (const line of renderFooter(80)) {
-    assert.equal(line.includes("\x1b["), false, `unexpected ANSI in footer: ${line}`);
   }
 });
 
