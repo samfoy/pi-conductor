@@ -1697,7 +1697,7 @@ function renderHeader(run, width) {
     }
   }
   const headerLine2 = padOrTruncate(left, right, width);
-  return [sep, headerLine2, sep];
+  return [sep, headerLine2];
 }
 var IDLE_THRESHOLD_MS = 5e3;
 function deriveActivity(run, nowMs) {
@@ -1901,6 +1901,89 @@ function padOrTruncate(left, right, width) {
   return left + " ".repeat(pad) + right;
 }
 
+// src/transcript-classify.ts
+var HEADER_GLYPHS = /* @__PURE__ */ new Set(["\u25CC", "\u25CF", "\u23F8", "\u2713", "\u2717", "\u25A0", "\u23F1"]);
+function classifyLine(line) {
+  if (line.length > 0 && /^─+$/.test(line)) {
+    return { kind: "ruler" };
+  }
+  if (line.length >= 2) {
+    const first = line[0];
+    if (HEADER_GLYPHS.has(first) && line[1] === " ") {
+      return { kind: "header", glyph: first };
+    }
+  }
+  if (line.startsWith("\u25B8 ") || line.startsWith("\u25BE ")) {
+    return { kind: "tool", glyph: line[0] };
+  }
+  if (/^\s+↳ /.test(line) || line.startsWith(" \u21B3 ") || line.startsWith("  \u21B3 ")) {
+    return { kind: "outcome", glyph: "\u21B3" };
+  }
+  if (/^· turn \d/.test(line)) {
+    return { kind: "turnSep", glyph: "\xB7" };
+  }
+  if (line.startsWith("\xB7 thinking ") || line === "\xB7 thinking") {
+    return { kind: "thinking", glyph: "\xB7" };
+  }
+  if (line.startsWith("  \u2503")) {
+    return { kind: "thinking", glyph: "\u2503" };
+  }
+  if (line.startsWith("Esc ")) {
+    return { kind: "footer" };
+  }
+  return { kind: "text" };
+}
+
+// src/transcript-style.ts
+function statusColorSlot(status) {
+  switch (status) {
+    case "running":
+      return "accent";
+    case "completed":
+      return "success";
+    case "failed":
+    case "killed":
+    case "timeout":
+      return "error";
+    case "paused":
+      return "warning";
+    case "queued":
+      return "muted";
+  }
+}
+function applyTheme(line, classified, theme, opts = {}) {
+  switch (classified.kind) {
+    case "header": {
+      const slot = opts.status ? statusColorSlot(opts.status) : "accent";
+      return theme.fg(slot, line);
+    }
+    case "ruler":
+      return theme.fg("borderMuted", line);
+    case "tool": {
+      if (line.length < 2) return theme.fg("accent", line);
+      const head = line.slice(0, 2);
+      const tail = line.slice(2);
+      return theme.fg("accent", head) + tail;
+    }
+    case "outcome": {
+      if (line.includes("\u21B3 \u2713")) return theme.fg("success", line);
+      if (line.includes("\u21B3 \u2717")) return theme.fg("error", line);
+      return theme.fg("dim", line);
+    }
+    case "thinking":
+      return theme.fg("dim", line);
+    case "turnSep":
+      return theme.fg("dim", line);
+    case "footer":
+      return theme.fg("dim", line);
+    case "text":
+      return line;
+  }
+}
+function applyThemeToLines(lines, classify, theme, opts = {}) {
+  return lines.map((line) => applyTheme(line, classify(line), theme, opts));
+}
+
 // src/foreground-stream.ts
 function countToolResultMessages(run) {
   let n = 0;
@@ -1911,14 +1994,15 @@ function countToolResultMessages(run) {
 }
 var SUMMARY_EXCERPT_MAX = 120;
 var STREAM_MAX_CHARS = 32 * 1024;
-function renderForegroundStream(run, width) {
+function renderForegroundStream(run, width, theme) {
   const headerLines = renderHeader(run, width);
   const bodyLines = renderTranscript(run, {
     width,
     collapseToolCalls: true,
     showThinking: false
   });
-  const lines = bodyLines.length === 0 ? headerLines : [...headerLines, ...bodyLines];
+  const merged = bodyLines.length === 0 ? headerLines : [...headerLines, ...bodyLines];
+  const lines = theme ? applyThemeToLines(merged, classifyLine, theme, { status: run.status }) : merged;
   const out = lines.join("\n");
   if (out.length <= STREAM_MAX_CHARS) return out;
   let cut = out.length - STREAM_MAX_CHARS;
@@ -2258,13 +2342,14 @@ persona=${p.persona} queue_position=${result.queuePosition}
       }
       if (foreground) {
         const streamWidth = resolveStreamWidth(process.stdout?.columns);
+        const streamTheme = opts.getTheme?.();
         const throttle = createUpdateThrottle((r) => {
           if (!onUpdate) return;
           onUpdate({
             content: [
               {
                 type: "text",
-                text: renderForegroundStream(r, streamWidth)
+                text: renderForegroundStream(r, streamWidth, streamTheme)
               }
             ],
             details: {
@@ -2393,13 +2478,14 @@ function registerSendTool(pi, opts) {
       }
       if (foreground) {
         const streamWidth = resolveStreamWidth(process.stdout?.columns);
+        const streamTheme = opts.getTheme?.();
         const throttle = createUpdateThrottle((r) => {
           if (!onUpdate) return;
           onUpdate({
             content: [
               {
                 type: "text",
-                text: renderForegroundStream(r, streamWidth)
+                text: renderForegroundStream(r, streamWidth, streamTheme)
               }
             ],
             details: {
@@ -2981,10 +3067,10 @@ function formatRow(r, theme) {
   return `${glyph} ${name} ${elapsed}${activity}${usage}`;
 }
 function statusGlyph(s, theme) {
-  const slot = statusColorSlot(s);
+  const slot = statusColorSlot2(s);
   return theme.fg(slot, STATUS_GLYPH[s]);
 }
-function statusColorSlot(s) {
+function statusColorSlot2(s) {
   switch (s) {
     case "queued":
       return "dim";
@@ -3393,26 +3479,33 @@ var FocusedStreamOverlay = class {
   }
   opts;
   render(width) {
-    const { model } = this.opts;
+    const { model, theme } = this.opts;
     model.refresh();
     const focused = model.focused();
+    let lines;
+    let status;
     if (!focused) {
-      return [
+      lines = [
         ...renderRulers(width, "\u2500"),
         ...EMPTY_PLACEHOLDER.map((s) => clip(s, width)),
         ...renderFooter(width)
       ];
+      status = void 0;
+    } else {
+      const header = renderHeader(focused, width);
+      const transcript = renderTranscript(focused, {
+        width,
+        collapseToolCalls: model.collapseToolCalls(),
+        showThinking: model.showThinking()
+      });
+      const footer = renderFooter(width);
+      const offset = Math.min(model.scrollOffset(), Math.max(0, transcript.length - 1));
+      const visibleTranscript = transcript.slice(offset);
+      lines = [...header, ...visibleTranscript, ...footer];
+      status = focused.status;
     }
-    const header = renderHeader(focused, width);
-    const transcript = renderTranscript(focused, {
-      width,
-      collapseToolCalls: model.collapseToolCalls(),
-      showThinking: model.showThinking()
-    });
-    const footer = renderFooter(width);
-    const offset = Math.min(model.scrollOffset(), Math.max(0, transcript.length - 1));
-    const visibleTranscript = transcript.slice(offset);
-    return [...header, ...visibleTranscript, ...footer];
+    if (!theme) return lines;
+    return applyThemeToLines(lines, classifyLine, theme, { status });
   }
   invalidate() {
   }
@@ -3497,7 +3590,8 @@ function createFocusedOverlayComponent(deps) {
     },
     onSend: (id) => {
       deps.promptAndSendToRun(id);
-    }
+    },
+    theme: deps.theme
   });
 }
 
@@ -3714,14 +3808,15 @@ function index_default(pi) {
     if (agentId) focusModel.focus(agentId);
     overlayOpen = true;
     void ctxRef.ui.custom(
-      (_tui, _theme, _kb, done) => createFocusedOverlayComponent({
+      (_tui, theme, _kb, done) => createFocusedOverlayComponent({
         model: focusModel,
         registry,
         forceTerminate,
         promptAndSendToRun: (id) => {
           void promptAndSendToRun(id);
         },
-        done
+        done,
+        theme
       }),
       { overlay: true }
     ).finally(() => {
@@ -3809,6 +3904,13 @@ function index_default(pi) {
     setConductorMode: (on) => {
       conductorModeOn = on;
     },
+    /**
+     * Slice 7: read the host's current Theme so the foreground stream
+     * can colour its rendered transcript. Returns undefined in headless
+     * contexts and between session_start cycles — the renderer falls
+     * back to plain output in that case.
+     */
+    getTheme: () => ctxRef?.ui.theme,
     /**
      * One-shot detach slot for the active foreground spawn. Listens to
      * raw terminal input via ctx.ui.onTerminalInput (interactive mode

@@ -9,10 +9,12 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { FocusedStreamOverlay } from "../src/focused-stream-overlay.ts";
 import { FocusedStreamModel } from "../src/focused-stream-model.ts";
 import { RunRegistry } from "../src/runs.ts";
 import { emptyUsage, type Run } from "../src/types.ts";
+import type { ThemeFg } from "../src/transcript-style.ts";
 
 function makeRun(id: string): Run {
   return {
@@ -86,8 +88,78 @@ test("FocusedStreamOverlay.render: lines never exceed the requested width", () =
   const { overlay } = setup();
   const lines = overlay.render(40);
   for (const line of lines) {
-    assert.ok(line.length <= 40, `line too long (${line.length}): "${line}"`);
+    // Use visibleWidth (matches pi-tui's renderer) so this test stays
+    // robust to any future ANSI styling — plain `.length` would count
+    // ANSI escape bytes against the budget incorrectly.
+    assert.ok(
+      visibleWidth(line) <= 40,
+      `line too long (${visibleWidth(line)}): "${line}"`,
+    );
   }
+});
+
+// ── Slice 7: theme integration ────────────────────────────────────────
+
+test("FocusedStreamOverlay.render: applies theme via classify+applyTheme when provided", () => {
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  const model = new FocusedStreamModel(reg);
+  // Sentinel-stub theme — wraps text in `[<slot>]…[/]` so we can assert
+  // which slot the overlay routed each line through.
+  const stub: ThemeFg = {
+    fg: (slot, text) => `[${slot}]${text}[/]`,
+  };
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {},
+    onKill: () => {},
+    theme: stub,
+  });
+  const lines = overlay.render(80);
+  const joined = lines.join("\n");
+  // Header line carries the running-status accent slot.
+  assert.match(joined, /\[accent\][^[]*a-1[^[]*\[\/\]/);
+  // The header's top ruler is borderMuted.
+  assert.match(joined, /\[borderMuted\]─+\[\/\]/);
+  // Footer hint line (starts with "Esc ") is dim.
+  assert.match(joined, /\[dim\]Esc /);
+});
+
+test("FocusedStreamOverlay.render: omitting theme returns plain (ANSI-free) lines", () => {
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  const model = new FocusedStreamModel(reg);
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {},
+    onKill: () => {},
+    // theme intentionally omitted
+  });
+  const lines = overlay.render(80);
+  for (const line of lines) {
+    assert.equal(line.includes("\x1b["), false, `unexpected ANSI in: ${line}`);
+  }
+});
+
+test("FocusedStreamOverlay.render: completed run colours header via success slot", () => {
+  const reg = new RunRegistry();
+  const completed = makeRun("a-1");
+  completed.status = "completed";
+  completed.finishedAt = Date.now();
+  reg.register(completed);
+  const model = new FocusedStreamModel(reg);
+  const stub: ThemeFg = {
+    fg: (slot, text) => `[${slot}]${text}[/]`,
+  };
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {},
+    onKill: () => {},
+    theme: stub,
+  });
+  const joined = overlay.render(80).join("\n");
+  // Header for a completed run uses the success slot.
+  assert.match(joined, /\[success\][^[]*completed[^[]*\[\/\]/);
 });
 
 // ── handleInput → model dispatch ──────────────────────────────────────

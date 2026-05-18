@@ -60,7 +60,11 @@ export function renderHeader(run: Run, width: number): string[] {
 
   // Truncate to width if needed.
   const headerLine = padOrTruncate(left, right, width);
-  return [sep, headerLine, sep];
+  // Slice 7 (D3): drop the trailing ruler so the header is two lines
+  // (top ruler + status line) instead of three. The first turn body or
+  // separator now flows directly under the status line, removing one
+  // line of vertical chrome per render.
+  return [sep, headerLine];
 }
 
 // ── Activity derivation (Slice 5b) ──────────────────────────────────

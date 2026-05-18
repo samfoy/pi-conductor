@@ -26,6 +26,7 @@ import {
 } from "./foreground-stream.ts";
 import type { FocusedStreamModel } from "./focused-stream-model.ts";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { ThemeFg } from "./transcript-style.ts";
 
 /** Min ms between onUpdate deliveries while a foreground sub-agent
  * streams. Bounds pi's tool-card re-render rate. */
@@ -68,6 +69,14 @@ interface RegisterToolsOpts {
     detachSignal: Promise<void>;
     unregister: () => void;
   };
+  /**
+   * Slice 7: theme used to colour the inline-streamed foreground
+   * transcript surfaced via the parent's tool-call card. Returns the
+   * host's `Theme` instance (re-read on every spawn so theme switches
+   * mid-session take effect on the next stream). Returns `undefined`
+   * in headless tests, in which case the stream renders plain.
+   */
+  getTheme?: () => ThemeFg | undefined;
 }
 
 export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
@@ -306,13 +315,14 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         // pi with re-renders. Terminal status flushes unconditionally
         // before the summary is returned.
         const streamWidth = resolveStreamWidth(process.stdout?.columns);
+        const streamTheme = opts.getTheme?.();
         const throttle = createUpdateThrottle<Run>((r: Run) => {
           if (!onUpdate) return;
           onUpdate({
             content: [
               {
                 type: "text" as const,
-                text: renderForegroundStream(r, streamWidth),
+                text: renderForegroundStream(r, streamWidth, streamTheme),
               },
             ],
             details: {
@@ -488,13 +498,14 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         // tool-call card while the resumed session runs. Same throttle
         // shape as the spawn path.
         const streamWidth = resolveStreamWidth(process.stdout?.columns);
+        const streamTheme = opts.getTheme?.();
         const throttle = createUpdateThrottle<Run>((r: Run) => {
           if (!onUpdate) return;
           onUpdate({
             content: [
               {
                 type: "text" as const,
-                text: renderForegroundStream(r, streamWidth),
+                text: renderForegroundStream(r, streamWidth, streamTheme),
               },
             ],
             details: {

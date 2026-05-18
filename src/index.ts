@@ -83,7 +83,7 @@ export default function (pi: ExtensionAPI): void {
     overlayOpen = true;
     void ctxRef.ui
       .custom(
-        (_tui, _theme, _kb, done) =>
+        (_tui, theme, _kb, done) =>
           createFocusedOverlayComponent({
             model: focusModel,
             registry,
@@ -92,6 +92,7 @@ export default function (pi: ExtensionAPI): void {
               void promptAndSendToRun(id);
             },
             done,
+            theme,
           }),
         { overlay: true },
       )
@@ -202,6 +203,13 @@ export default function (pi: ExtensionAPI): void {
     setConductorMode: (on: boolean) => {
       conductorModeOn = on;
     },
+    /**
+     * Slice 7: read the host's current Theme so the foreground stream
+     * can colour its rendered transcript. Returns undefined in headless
+     * contexts and between session_start cycles — the renderer falls
+     * back to plain output in that case.
+     */
+    getTheme: () => ctxRef?.ui.theme,
     /**
      * One-shot detach slot for the active foreground spawn. Listens to
      * raw terminal input via ctx.ui.onTerminalInput (interactive mode

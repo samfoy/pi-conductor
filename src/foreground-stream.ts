@@ -22,6 +22,8 @@ import { elapsedStr, formatUsage, getFinalText, type RunRegistry } from "./runs.
 import { renderHeader, renderTranscript } from "./transcript.ts";
 import { isTerminal, type Run } from "./types.ts";
 import { STATUS_GLYPH } from "./status-glyph.ts";
+import { classifyLine } from "./transcript-classify.ts";
+import { applyThemeToLines, type ThemeFg } from "./transcript-style.ts";
 
 /**
  * Count toolResult messages in a Run. Used by the foreground throttle
@@ -56,15 +58,27 @@ const STREAM_MAX_CHARS = 32 * 1024;
  * Render the inline-streamed transcript shown in the parent's tool-call
  * card while a foreground sub-agent is running. Always shows the header;
  * the transcript body is appended only when there are messages to render.
+ *
+ * Slice 7: when `theme` is provided, the rendered lines are post-processed
+ * via `applyThemeToLines` before joining — the parent's tool-card slot
+ * surfaces ANSI fine. When omitted (headless tests, snapshot fixtures),
+ * plain output is returned so existing assertions stay readable.
  */
-export function renderForegroundStream(run: Run, width: number): string {
+export function renderForegroundStream(
+  run: Run,
+  width: number,
+  theme?: ThemeFg,
+): string {
   const headerLines = renderHeader(run, width);
   const bodyLines = renderTranscript(run, {
     width,
     collapseToolCalls: true,
     showThinking: false,
   });
-  const lines = bodyLines.length === 0 ? headerLines : [...headerLines, ...bodyLines];
+  const merged = bodyLines.length === 0 ? headerLines : [...headerLines, ...bodyLines];
+  const lines = theme
+    ? applyThemeToLines(merged, classifyLine, theme, { status: run.status })
+    : merged;
   const out = lines.join("\n");
   if (out.length <= STREAM_MAX_CHARS) return out;
   // Tail-truncate so the most recent activity stays visible. Slice on a

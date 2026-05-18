@@ -36,7 +36,8 @@ function makeRun(overrides: Partial<Run> = {}): Run {
 
 test("renderForegroundStream: empty messages renders just the header", () => {
   const out = renderForegroundStream(makeRun(), 80);
-  // Header is always present (3 lines: top rule, header line, bottom rule).
+  // Slice 7: header is 2 lines (top ruler + status line). The bottom
+  // ruler was dropped per design D3.
   assert.match(out, /oracle/);
   assert.match(out, /oracle-7f3a/);
   assert.match(out, /running/);

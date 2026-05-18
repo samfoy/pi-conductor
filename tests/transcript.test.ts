@@ -729,3 +729,59 @@ test("renderFooter: never exceeds the requested width", () => {
     assert.equal(visibleWidth(line) <= 30, true, `footer line too long: "${line}"`);
   }
 });
+
+// ── Slice 7 invariant: pure renderers stay monochrome ─────────────────
+//
+// The Component layer is the only place ANSI is introduced (see
+// src/transcript-style.ts + tests/transcript-style.test.ts). The pure
+// renderers below MUST emit no ANSI escape bytes — if they do, the
+// snapshot baselines below silently rot and the wrap/truncate helpers
+// will mis-measure widths (they expect plain input from the renderer).
+
+test("renderHeader emits no ANSI escape sequences", () => {
+  const run = makeRun({ status: "running", lastEventAt: Date.now() });
+  for (const line of renderHeader(run, 80)) {
+    assert.equal(line.includes("\x1b["), false, `unexpected ANSI in header: ${line}`);
+  }
+});
+
+test("renderFooter emits no ANSI escape sequences", () => {
+  for (const line of renderFooter(80)) {
+    assert.equal(line.includes("\x1b["), false, `unexpected ANSI in footer: ${line}`);
+  }
+});
+
+test("renderTranscript emits no ANSI escape sequences", () => {
+  const run = makeRun({
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "hello" },
+          { type: "thinking", thinking: "weighing options" },
+          { type: "toolCall", id: "c-1", name: "bash", arguments: { command: "ls" } },
+        ],
+      } as any,
+      {
+        role: "toolResult",
+        isError: false,
+        content: [{ type: "toolResult", toolUseId: "c-1", text: "ok" }],
+      } as any,
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "done" }],
+      } as any,
+    ],
+  });
+  for (const line of renderTranscript(run, DEFAULT_OPTS)) {
+    assert.equal(line.includes("\x1b["), false, `unexpected ANSI in transcript: ${line}`);
+  }
+});
+
+test("renderHeader emits exactly 2 lines (top ruler + status), no trailing ruler", () => {
+  const run = makeRun({ status: "running", lastEventAt: Date.now() });
+  const lines = renderHeader(run, 80);
+  assert.equal(lines.length, 2, "D3: bottom-header ruler dropped in Slice 7");
+  assert.match(lines[0]!, /^─+$/, "first line is the top ruler");
+  assert.doesNotMatch(lines[1]!, /^─+$/, "second line is NOT a ruler");
+});

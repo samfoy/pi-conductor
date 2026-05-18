@@ -18,6 +18,7 @@ import { FocusedStreamOverlay } from "./focused-stream-overlay.ts";
 import type { FocusedStreamModel } from "./focused-stream-model.ts";
 import type { RunRegistry, TerminationReason } from "./runs.ts";
 import type { Run } from "./types.ts";
+import type { ThemeFg } from "./transcript-style.ts";
 
 export interface FocusedOverlayFactoryDeps {
   /** The focus model the overlay reads from. */
@@ -45,6 +46,13 @@ export interface FocusedOverlayFactoryDeps {
    * resolves with `value`.
    */
   readonly done: (value: undefined) => void;
+  /**
+   * Slice 7: theme used by the overlay to colour rendered output. The
+   * factory forwards this verbatim to the overlay's options. When omitted
+   * (e.g. headless tests of the factory), the overlay returns plain
+   * lines.
+   */
+  readonly theme?: ThemeFg;
 }
 
 export function createFocusedOverlayComponent(
@@ -62,5 +70,6 @@ export function createFocusedOverlayComponent(
     onSend: (id: string) => {
       deps.promptAndSendToRun(id);
     },
+    theme: deps.theme,
   });
 }

@@ -9,6 +9,9 @@
 import type { Component } from "@earendil-works/pi-tui";
 import type { FocusedStreamModel } from "./focused-stream-model.ts";
 import { renderHeader, renderFooter, renderTranscript } from "./transcript.ts";
+import { classifyLine } from "./transcript-classify.ts";
+import { applyThemeToLines, type ThemeFg } from "./transcript-style.ts";
+import type { RunStatus } from "./types.ts";
 
 export interface FocusedStreamOverlayOptions {
   model: FocusedStreamModel;
@@ -22,6 +25,13 @@ export interface FocusedStreamOverlayOptions {
   onSend?: (agentId: string) => void;
   /** Optional: triggered after every dispatched key so the TUI re-renders. */
   onChange?: () => void;
+  /**
+   * Slice 7: optional theme used to style the rendered output.
+   * When omitted, render() returns plain (unstyled) lines — used by
+   * unit tests that assert shape without ANSI. Production passes the
+   * host's `Theme` instance via the focused-overlay-factory.
+   */
+  theme?: ThemeFg;
 }
 
 /**
@@ -39,29 +49,36 @@ export class FocusedStreamOverlay implements Component {
   constructor(private opts: FocusedStreamOverlayOptions) {}
 
   render(width: number): string[] {
-    const { model } = this.opts;
+    const { model, theme } = this.opts;
     model.refresh();
     const focused = model.focused();
+    let lines: string[];
+    let status: RunStatus | undefined;
     if (!focused) {
-      return [
+      lines = [
         ...renderRulers(width, "─"),
         ...EMPTY_PLACEHOLDER.map((s) => clip(s, width)),
         ...renderFooter(width),
       ];
+      status = undefined;
+    } else {
+      const header = renderHeader(focused, width);
+      const transcript = renderTranscript(focused, {
+        width,
+        collapseToolCalls: model.collapseToolCalls(),
+        showThinking: model.showThinking(),
+      });
+      const footer = renderFooter(width);
+
+      // Apply scroll offset to the transcript only — header and footer stay pinned.
+      const offset = Math.min(model.scrollOffset(), Math.max(0, transcript.length - 1));
+      const visibleTranscript = transcript.slice(offset);
+      lines = [...header, ...visibleTranscript, ...footer];
+      status = focused.status;
     }
 
-    const header = renderHeader(focused, width);
-    const transcript = renderTranscript(focused, {
-      width,
-      collapseToolCalls: model.collapseToolCalls(),
-      showThinking: model.showThinking(),
-    });
-    const footer = renderFooter(width);
-
-    // Apply scroll offset to the transcript only — header and footer stay pinned.
-    const offset = Math.min(model.scrollOffset(), Math.max(0, transcript.length - 1));
-    const visibleTranscript = transcript.slice(offset);
-    return [...header, ...visibleTranscript, ...footer];
+    if (!theme) return lines;
+    return applyThemeToLines(lines, classifyLine, theme, { status });
   }
 
   invalidate(): void {
