@@ -3581,6 +3581,20 @@ function installSanitizerHook(pi, opts) {
   };
 }
 
+// src/shutdown.ts
+function handleSessionShutdown(event, deps) {
+  if (event.reason === "reload") return;
+  for (const r of deps.runs) {
+    if (r.status === "running" || r.status === "paused") {
+      try {
+        r.proc?.kill("SIGTERM");
+      } catch {
+      }
+    }
+  }
+  deps.resetSanitizer();
+}
+
 // src/index.ts
 function index_default(pi) {
   let cwd = process.cwd();
@@ -3757,7 +3771,7 @@ function index_default(pi) {
       isOverlayOpen: () => overlayOpen
     });
   });
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (event) => {
     if (unsubFocusedShortcut) {
       unsubFocusedShortcut();
       unsubFocusedShortcut = null;
@@ -3766,15 +3780,10 @@ function index_default(pi) {
       widget.dispose();
       widget = null;
     }
-    for (const r of registry.list()) {
-      if (r.status === "running" || r.status === "paused") {
-        try {
-          r.proc?.kill("SIGTERM");
-        } catch {
-        }
-      }
-    }
-    sanitizerHook.reset();
+    handleSessionShutdown(event, {
+      runs: registry.list(),
+      resetSanitizer: () => sanitizerHook.reset()
+    });
     ctxRef = null;
   });
   pi.on("turn_start", async (_event, ctx) => {
