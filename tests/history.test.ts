@@ -188,3 +188,31 @@ test("buildHistoryReport: omits final-text excerpt for non-completed status", ()
   const out = buildHistoryReport(deps, { limit: 20 });
   assert.doesNotMatch(out, /should not be rendered/);
 });
+
+test("buildHistoryReport: each RunStatus surfaces the shared STATUS_GLYPH char", async () => {
+  const { STATUS_GLYPH } = await import("../src/status-glyph.ts");
+  const statuses = [
+    "queued",
+    "running",
+    "paused",
+    "completed",
+    "failed",
+    "killed",
+    "timeout",
+  ] as const;
+  for (const status of statuses) {
+    const id = `probe-${status}`;
+    const deps = makeDeps([
+      {
+        id,
+        record: rec({ id, persona: "probe", status, finishedAt: 1_700_000_001_000 }),
+      },
+    ]);
+    const out = buildHistoryReport(deps, { limit: 5 });
+    const glyph = STATUS_GLYPH[status];
+    assert.ok(
+      out.includes(glyph),
+      `expected glyph ${glyph} for status ${status} in:\n${out}`,
+    );
+  }
+});

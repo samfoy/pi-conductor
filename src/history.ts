@@ -11,7 +11,8 @@
  */
 
 import { elapsedStr, formatUsage } from "./runs.ts";
-import type { RunRecord, RunStatus } from "./types.ts";
+import { STATUS_GLYPH } from "./status-glyph.ts";
+import type { RunRecord } from "./types.ts";
 
 export interface HistoryDeps {
   /** List the run-id directory names under runsRoot(). */
@@ -32,16 +33,6 @@ export interface HistoryOpts {
   /** Maximum number of entries to render. */
   limit: number;
 }
-
-const STATUS_GLYPH: Record<RunStatus, string> = {
-  queued: "◌",
-  running: "●",
-  paused: "⏸",
-  completed: "✓",
-  failed: "✗",
-  killed: "■",
-  timeout: "⏱",
-};
 
 const EXCERPT_MAX_CHARS = 120;
 

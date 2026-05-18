@@ -6,6 +6,17 @@ import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
 import { existsSync as existsSync5, readdirSync as readdirSync2, readFileSync as readFileSync2, statSync as statSync2 } from "node:fs";
 import { join as join4 } from "node:path";
 
+// src/status-glyph.ts
+var STATUS_GLYPH = {
+  queued: "\u25CC",
+  running: "\u25CF",
+  paused: "\u23F8",
+  completed: "\u2713",
+  failed: "\u2717",
+  killed: "\u25A0",
+  timeout: "\u23F1"
+};
+
 // src/personas.ts
 import { readdir, readFile, stat } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -1257,15 +1268,6 @@ function countBySource(resolved) {
 }
 
 // src/history.ts
-var STATUS_GLYPH = {
-  queued: "\u25CC",
-  running: "\u25CF",
-  paused: "\u23F8",
-  completed: "\u2713",
-  failed: "\u2717",
-  killed: "\u25A0",
-  timeout: "\u23F1"
-};
 var EXCERPT_MAX_CHARS = 120;
 function buildHistoryReport(deps, opts) {
   const ids = deps.listRunIds();
@@ -1568,27 +1570,7 @@ function formatRunRow(r) {
   const u = formatUsage(r.usage);
   const usagePart = u ? `[${u}]` : "";
   const hint = r.lastToolCall ? ` \u2192 ${r.lastToolCall}` : "";
-  return `  ${statusGlyph(r.status)} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint}`;
-}
-function statusGlyph(s) {
-  switch (s) {
-    case "queued":
-      return "\u25CC";
-    case "running":
-      return "\u25CF";
-    case "paused":
-      return "\u23F8";
-    case "completed":
-      return "\u2713";
-    case "failed":
-      return "\u2717";
-    case "killed":
-      return "\u25A0";
-    case "timeout":
-      return "\u23F1";
-    default:
-      return "\xB7";
-  }
+  return `  ${STATUS_GLYPH[r.status] ?? "\xB7"} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint}`;
 }
 function runHistory(_opts, ctx, arg) {
   const root = runsRoot();
@@ -1649,17 +1631,6 @@ import { Type } from "@sinclair/typebox";
 // src/transcript.ts
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
-// src/status-glyph.ts
-var STATUS_GLYPH2 = {
-  queued: "\u25CC",
-  running: "\u25CF",
-  paused: "\u23F8",
-  completed: "\u2713",
-  failed: "\u2717",
-  killed: "\u25A0",
-  timeout: "\u23F1"
-};
-
 // src/tool-summary.ts
 var MAX_SUMMARY_LEN = 50;
 var MAX_KV_VALUE_LEN = 30;
@@ -1692,7 +1663,7 @@ function shorten(s, max) {
 function renderHeader(run, width) {
   const elapsed = elapsedStr(run.startTime, run.finishedAt);
   const usage = formatUsage(run.usage);
-  const glyph = STATUS_GLYPH2[run.status] ?? "\xB7";
+  const glyph = STATUS_GLYPH[run.status] ?? "\xB7";
   const left = `${glyph} ${run.persona} (${run.id}) \u2014 ${run.status} ${elapsed}`;
   const right = usage ? `[${usage}]` : "";
   const sep = "\u2500".repeat(Math.max(0, width));
@@ -1864,7 +1835,7 @@ function renderForegroundStream(run, width) {
 ${tail}`;
 }
 function renderForegroundSummary(run) {
-  const glyph = STATUS_GLYPH2[run.status] ?? "\xB7";
+  const glyph = STATUS_GLYPH[run.status] ?? "\xB7";
   const verb = run.status === "completed" ? "completed" : run.status === "killed" ? "killed" : run.status === "timeout" ? "timed out" : run.status;
   const elapsed = elapsedStr(run.startTime, run.finishedAt);
   const usage = formatUsage(run.usage);
@@ -2889,16 +2860,16 @@ function mountEnsembleWidget(registry, getCtx) {
   };
 }
 function formatRow(r, theme) {
-  const glyph = statusGlyph2(r.status, theme);
+  const glyph = statusGlyph(r.status, theme);
   const name = theme.fg("accent", r.persona) + theme.fg("dim", `:${r.id.split("-").pop() ?? r.id}`);
   const elapsed = theme.fg("dim", elapsedStr(r.startTime, r.finishedAt));
   const activity = r.status === "queued" ? theme.fg("dim", " (queued)") : r.status === "paused" ? theme.fg("warning", " (paused)") : r.lastToolCall ? theme.fg("dim", ` \u2192 ${r.lastToolCall}`) : r.status === "running" ? theme.fg("dim", " starting\u2026") : "";
   const usage = r.usage.turns > 0 ? theme.fg("muted", ` [${formatUsage(r.usage)}]`) : "";
   return `${glyph} ${name} ${elapsed}${activity}${usage}`;
 }
-function statusGlyph2(s, theme) {
+function statusGlyph(s, theme) {
   const slot = statusColorSlot(s);
-  return theme.fg(slot, STATUS_GLYPH2[s]);
+  return theme.fg(slot, STATUS_GLYPH[s]);
 }
 function statusColorSlot(s) {
   switch (s) {

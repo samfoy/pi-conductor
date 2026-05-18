@@ -18,7 +18,8 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { PersonaResolution, Run, RunRecord } from "./types.ts";
+import type { PersonaResolution, Run, RunRecord, RunStatus } from "./types.ts";
+import { STATUS_GLYPH } from "./status-glyph.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig, projectConfigPath, userConfigPath } from "./config.ts";
 import {
@@ -343,28 +344,11 @@ function formatRunRow(r: Run): string {
   const u = formatUsage(r.usage);
   const usagePart = u ? `[${u}]` : "";
   const hint = r.lastToolCall ? ` → ${r.lastToolCall}` : "";
-  return `  ${statusGlyph(r.status)} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint}`;
+  return `  ${STATUS_GLYPH[r.status] ?? "·"} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint}`;
 }
 
-function statusGlyph(s: string): string {
-  switch (s) {
-    case "queued":
-      return "◌";
-    case "running":
-      return "●";
-    case "paused":
-      return "⏸";
-    case "completed":
-      return "✓";
-    case "failed":
-      return "✗";
-    case "killed":
-      return "■";
-    case "timeout":
-      return "⏱";
-    default:
-      return "·";
-  }
+export function statusGlyph(s: string): string {
+  return STATUS_GLYPH[s as RunStatus] ?? "·";
 }
 
 function runHistory(
