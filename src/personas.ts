@@ -161,7 +161,7 @@ function validateAndBuild(
   const inheritSkills = optionalBoolean(frontmatter, "inherit_skills") ?? false;
   const defaultReads = optionalStringList(frontmatter, "default_reads") ?? [];
   const worktree = optionalBoolean(frontmatter, "worktree") ?? false;
-  const timeoutMinutes = optionalNumber(frontmatter, "timeout_minutes") ?? 30;
+  const timeoutMinutes = optionalNumber(frontmatter, "timeout_minutes") ?? 60;
 
   if (timeoutMinutes <= 0 || timeoutMinutes > 24 * 60) {
     throw new Error(`timeout_minutes must be in (0, 1440]; got ${timeoutMinutes}`);

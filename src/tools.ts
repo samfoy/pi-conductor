@@ -189,6 +189,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       "For read-only personas (oracle, redteam, inspector, analyst, profiler, investigator), prefer parallel background spawns.",
       "For write-capable personas (builder, simplifier), run one at a time per set of files.",
       "Foreground spawns may auto-downgrade to background under load — handle the queued-as-background return cleanly without re-spawning.",
+      "Pass timeout_minutes to override the per-persona / global default for a single risky run; default applies if omitted.",
     ],
     parameters: Type.Object({
       persona: Type.String({
@@ -204,8 +205,19 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
             "true (default) blocks until done and streams the sub-agent into the ensemble panel; false runs in background and notifies on completion.",
         }),
       ),
+      timeout_minutes: Type.Optional(
+        Type.Integer({
+          minimum: 1,
+          maximum: 1440,
+          description:
+            "Wall-clock timeout for this sub-agent in minutes (1–1440). Overrides the per-persona override and the global default. Omit to use the cascade.",
+        }),
+      ),
     }),
     async execute(_id, params, signal, onUpdate) {
+      const tmRange = validateTimeoutMinutes(params.timeout_minutes);
+      if (tmRange) return errorResult(tmRange);
+
       const cwd = opts.getCwd();
       const cfg = loadConfig(cwd);
       const resolved = await resolvePersonas({ cwd, personaOverrides: cfg.personaOverrides });
@@ -221,7 +233,14 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       const queue = opts.getQueue();
       const registry = opts.getRegistry();
 
-      const ov = cfg.personaOverrides[persona.name] ?? {};
+      // Per-call `timeout_minutes` arg wins over persona override, which wins
+      // over global default. We synthesize a fresh override that layers the
+      // tool arg on top of any config-defined persona override.
+      const baseOv = cfg.personaOverrides[persona.name] ?? {};
+      const ov: PersonaOverride =
+        params.timeout_minutes !== undefined
+          ? { ...baseOv, timeoutMinutes: params.timeout_minutes }
+          : baseOv;
       const model = resolveModel(persona, ov);
       const thinking = resolveThinking(persona, ov);
       const timeoutMs = resolveTimeoutMs(persona, ov, cfg);
@@ -403,8 +422,19 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
             "true (default) blocks until the sub-agent finishes its reply; false runs in background and notifies on completion.",
         }),
       ),
+      timeout_minutes: Type.Optional(
+        Type.Integer({
+          minimum: 1,
+          maximum: 1440,
+          description:
+            "Wall-clock timeout for this resumed turn in minutes (1–1440). Overrides per-persona and global defaults. Send arms a fresh budget per call.",
+        }),
+      ),
     }),
     async execute(_id, params, signal, onUpdate) {
+      const tmRange = validateTimeoutMinutes(params.timeout_minutes);
+      if (tmRange) return errorResult(tmRange);
+
       const cwd = opts.getCwd();
       const cfg = loadConfig(cwd);
       const registry = opts.getRegistry();
@@ -419,10 +449,15 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       // Per-persona timeout takes precedence over the global default.
       // Re-resolve the persona registry so a user-configured
       // `timeout_minutes` on the persona is honored for sends, not just
-      // for the initial spawn.
+      // for the initial spawn. A per-call `timeout_minutes` arg layers on
+      // top of that — same precedence chain as ensemble_spawn.
       const resolved = await resolvePersonas({ cwd, personaOverrides: cfg.personaOverrides });
       const persona = resolved.personas.get(run.persona);
-      const ov = cfg.personaOverrides[run.persona] ?? {};
+      const baseOv = cfg.personaOverrides[run.persona] ?? {};
+      const ov: PersonaOverride =
+        params.timeout_minutes !== undefined
+          ? { ...baseOv, timeoutMinutes: params.timeout_minutes }
+          : baseOv;
       const timeoutMs = resolveTimeoutMs(persona, ov, cfg);
 
       const result = sendToRun(run, params.message, {
@@ -891,6 +926,20 @@ function errorResult(text: string) {
     content: [{ type: "text" as const, text }],
     details: { error: text },
   };
+}
+
+/**
+ * Validate a per-call `timeout_minutes` tool argument. Returns an error
+ * message string when out of range, undefined when valid (or absent).
+ * The schema declares Type.Integer({minimum:1, maximum:1440}); this is the
+ * defensive runtime check for hosts that don't enforce the schema.
+ */
+function validateTimeoutMinutes(tm: number | undefined): string | undefined {
+  if (tm === undefined) return undefined;
+  if (!Number.isFinite(tm) || !Number.isInteger(tm) || tm < 1 || tm > 1440) {
+    return `timeout_minutes must be an integer in [1, 1440]; got ${tm}`;
+  }
+  return undefined;
 }
 
 function isTerminalStatus(s: RunStatus): boolean {

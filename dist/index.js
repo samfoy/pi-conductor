@@ -24,7 +24,7 @@ var THINKING_LEVELS = [
 ];
 var CONTEXT_INHERITANCE = ["none", "filtered", "full"];
 var DEFAULT_CONFIG = {
-  defaultTimeoutMinutes: 30,
+  defaultTimeoutMinutes: 60,
   maxConcurrent: 4,
   queueOnConcurrencyCap: true,
   autoOpenFocusOnSpawn: false,
@@ -152,7 +152,7 @@ function validateAndBuild(raw, source, sourcePath) {
   const inheritSkills = optionalBoolean(frontmatter, "inherit_skills") ?? false;
   const defaultReads = optionalStringList(frontmatter, "default_reads") ?? [];
   const worktree = optionalBoolean(frontmatter, "worktree") ?? false;
-  const timeoutMinutes = optionalNumber(frontmatter, "timeout_minutes") ?? 30;
+  const timeoutMinutes = optionalNumber(frontmatter, "timeout_minutes") ?? 60;
   if (timeoutMinutes <= 0 || timeoutMinutes > 24 * 60) {
     throw new Error(`timeout_minutes must be in (0, 1440]; got ${timeoutMinutes}`);
   }
@@ -2117,7 +2117,8 @@ function registerSpawnTool(pi, opts) {
       "Write fully self-contained task prompts \u2014 the sub-agent doesn't see your conversation.",
       "For read-only personas (oracle, redteam, inspector, analyst, profiler, investigator), prefer parallel background spawns.",
       "For write-capable personas (builder, simplifier), run one at a time per set of files.",
-      "Foreground spawns may auto-downgrade to background under load \u2014 handle the queued-as-background return cleanly without re-spawning."
+      "Foreground spawns may auto-downgrade to background under load \u2014 handle the queued-as-background return cleanly without re-spawning.",
+      "Pass timeout_minutes to override the per-persona / global default for a single risky run; default applies if omitted."
     ],
     parameters: Type.Object({
       persona: Type.String({
@@ -2130,9 +2131,18 @@ function registerSpawnTool(pi, opts) {
         Type.Boolean({
           description: "true (default) blocks until done and streams the sub-agent into the ensemble panel; false runs in background and notifies on completion."
         })
+      ),
+      timeout_minutes: Type.Optional(
+        Type.Integer({
+          minimum: 1,
+          maximum: 1440,
+          description: "Wall-clock timeout for this sub-agent in minutes (1\u20131440). Overrides the per-persona override and the global default. Omit to use the cascade."
+        })
       )
     }),
     async execute(_id, params, signal, onUpdate) {
+      const tmRange = validateTimeoutMinutes(params.timeout_minutes);
+      if (tmRange) return errorResult(tmRange);
       const cwd = opts.getCwd();
       const cfg = loadConfig(cwd);
       const resolved = await resolvePersonas({ cwd, personaOverrides: cfg.personaOverrides });
@@ -2146,7 +2156,8 @@ function registerSpawnTool(pi, opts) {
       const mode = foreground ? "foreground" : "background";
       const queue = opts.getQueue();
       const registry = opts.getRegistry();
-      const ov = cfg.personaOverrides[persona.name] ?? {};
+      const baseOv = cfg.personaOverrides[persona.name] ?? {};
+      const ov = params.timeout_minutes !== void 0 ? { ...baseOv, timeoutMinutes: params.timeout_minutes } : baseOv;
       const model = resolveModel(persona, ov);
       const thinking = resolveThinking(persona, ov);
       const timeoutMs = resolveTimeoutMs(persona, ov, cfg);
@@ -2286,9 +2297,18 @@ function registerSendTool(pi, opts) {
         Type.Boolean({
           description: "true (default) blocks until the sub-agent finishes its reply; false runs in background and notifies on completion."
         })
+      ),
+      timeout_minutes: Type.Optional(
+        Type.Integer({
+          minimum: 1,
+          maximum: 1440,
+          description: "Wall-clock timeout for this resumed turn in minutes (1\u20131440). Overrides per-persona and global defaults. Send arms a fresh budget per call."
+        })
       )
     }),
     async execute(_id, params, signal, onUpdate) {
+      const tmRange = validateTimeoutMinutes(params.timeout_minutes);
+      if (tmRange) return errorResult(tmRange);
       const cwd = opts.getCwd();
       const cfg = loadConfig(cwd);
       const registry = opts.getRegistry();
@@ -2301,7 +2321,8 @@ function registerSendTool(pi, opts) {
       const foreground = params.foreground !== false;
       const resolved = await resolvePersonas({ cwd, personaOverrides: cfg.personaOverrides });
       const persona = resolved.personas.get(run.persona);
-      const ov = cfg.personaOverrides[run.persona] ?? {};
+      const baseOv = cfg.personaOverrides[run.persona] ?? {};
+      const ov = params.timeout_minutes !== void 0 ? { ...baseOv, timeoutMinutes: params.timeout_minutes } : baseOv;
       const timeoutMs = resolveTimeoutMs(persona, ov, cfg);
       const result = sendToRun(run, params.message, {
         registry,
@@ -2689,6 +2710,13 @@ function errorResult(text) {
     content: [{ type: "text", text }],
     details: { error: text }
   };
+}
+function validateTimeoutMinutes(tm) {
+  if (tm === void 0) return void 0;
+  if (!Number.isFinite(tm) || !Number.isInteger(tm) || tm < 1 || tm > 1440) {
+    return `timeout_minutes must be an integer in [1, 1440]; got ${tm}`;
+  }
+  return void 0;
 }
 function isTerminalStatus(s) {
   return s === "completed" || s === "failed" || s === "killed" || s === "timeout";

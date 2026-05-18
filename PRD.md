@@ -82,7 +82,7 @@ default_reads:                             # files auto-read on launch (relative
   - plan.md
   - progress.md
 worktree: false
-timeout_minutes: 30
+timeout_minutes: 60
 ---
 
 You are the oracle: a high-context decision-consistency subagent.
@@ -102,7 +102,7 @@ Frontmatter fields (v1):
 | `inherit_skills` | bool | `false` | Pass parent's skill catalog to child |
 | `default_reads` | list | `[]` | Files auto-prefixed to the launch prompt as context |
 | `worktree` | bool | `false` | v2 |
-| `timeout_minutes` | number | 30 | Hard kill |
+| `timeout_minutes` | number | 60 | Hard kill |
 
 ### Built-in starter personas (shipped with the extension)
 
@@ -404,7 +404,7 @@ All overridable via the standard pi keybindings file.
   "defaultMode": "off",                  // v0.8: "on" | "off". Pinned
                                          // conductor mode at extension load.
                                          // Beats PI_CONDUCTOR_MODE env var.
-  "defaultTimeoutMinutes": 30,
+  "defaultTimeoutMinutes": 60,
   "maxConcurrent": 4,
   "queueOnConcurrencyCap": true,         // false = reject instead
   "autoOpenFocusOnSpawn": false,

@@ -98,7 +98,7 @@ export interface PersonaOverride {
 }
 
 export const DEFAULT_CONFIG: ConductorConfig = {
-  defaultTimeoutMinutes: 30,
+  defaultTimeoutMinutes: 60,
   maxConcurrent: 4,
   queueOnConcurrencyCap: true,
   autoOpenFocusOnSpawn: false,

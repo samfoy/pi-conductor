@@ -108,7 +108,7 @@ default_reads:
   - design.md
   - plan.md
 worktree: false
-timeout_minutes: 30
+timeout_minutes: 60
 ---
 
 You are the oracle: …
@@ -130,7 +130,7 @@ Adapted from … with the following changes …
   "defaultMode": "off",                  // v0.8: "on" | "off". Pinned
                                          // conductor-mode default at
                                          // extension load. Beats env var.
-  "defaultTimeoutMinutes": 30,
+  "defaultTimeoutMinutes": 60,
   "maxConcurrent": 4,
   "queueOnConcurrencyCap": true,
   "autoOpenFocusOnSpawn": false,
