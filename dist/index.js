@@ -1680,11 +1680,54 @@ function renderHeader(run, width) {
   const elapsed = elapsedStr(run.startTime, run.finishedAt);
   const usage = formatUsage(run.usage);
   const glyph = STATUS_GLYPH[run.status] ?? "\xB7";
-  const left = `${glyph} ${run.persona} (${run.id}) \u2014 ${run.status} ${elapsed}`;
+  const baseLeft = `${glyph} ${run.persona} (${run.id}) \u2014 ${run.status} ${elapsed}`;
   const right = usage ? `[${usage}]` : "";
   const sep = "\u2500".repeat(Math.max(0, width));
+  const activity = deriveActivity(run, Date.now());
+  let left = baseLeft;
+  if (activity !== void 0) {
+    const sepText = " \xB7 ";
+    const rightW = visibleWidth2(right);
+    const baseW = visibleWidth2(baseLeft);
+    const minSpace = right ? 1 : 0;
+    const budget = width - baseW - rightW - minSpace - visibleWidth2(sepText);
+    if (budget >= 2) {
+      const fitted = visibleWidth2(activity) <= budget ? activity : truncateToWidth(activity, budget, "\u2026", false);
+      left = baseLeft + sepText + fitted;
+    }
+  }
   const headerLine2 = padOrTruncate(left, right, width);
   return [sep, headerLine2, sep];
+}
+var IDLE_THRESHOLD_MS = 5e3;
+function deriveActivity(run, nowMs) {
+  if (run.status !== "running") return void 0;
+  const lastEvent = run.lastEventAt ?? run.startTime;
+  const idleMs = nowMs - lastEvent;
+  if (idleMs >= IDLE_THRESHOLD_MS) {
+    const totalSecs = Math.floor(idleMs / 1e3);
+    if (totalSecs >= 60) {
+      const mins = Math.floor(totalSecs / 60);
+      return `idle ${mins}m`;
+    }
+    return `idle ${totalSecs}s`;
+  }
+  const last = run.messages.at(-1);
+  if (!last) return void 0;
+  const role = last.role;
+  if (role !== "assistant") return void 0;
+  const content = last.content;
+  if (!Array.isArray(content)) return void 0;
+  for (let i = content.length - 1; i >= 0; i--) {
+    const part = content[i];
+    const t = part?.type;
+    if (t === "toolCall") {
+      return formatToolCallShort(String(part.name ?? "tool"), part.arguments);
+    }
+    if (t === "thinking") return "thinking";
+    if (t === "text") return "responding";
+  }
+  return void 0;
 }
 var FOOTER_HINTS = [
   "Esc close",

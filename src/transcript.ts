@@ -13,6 +13,7 @@ import type { Run } from "./types.ts";
 import { elapsedStr, formatUsage } from "./runs.ts";
 import { STATUS_GLYPH } from "./status-glyph.ts";
 import { summarizeToolArgs } from "./tool-summary.ts";
+import { formatToolCallShort } from "./event-handler.ts";
 
 export interface TranscriptOptions {
   /** Hard wrap width; lines that exceed it are wrapped or truncated. */
@@ -30,13 +31,85 @@ export function renderHeader(run: Run, width: number): string[] {
   const usage = formatUsage(run.usage);
   const glyph = STATUS_GLYPH[run.status] ?? "·";
 
-  const left = `${glyph} ${run.persona} (${run.id}) — ${run.status} ${elapsed}`;
+  const baseLeft = `${glyph} ${run.persona} (${run.id}) — ${run.status} ${elapsed}`;
   const right = usage ? `[${usage}]` : "";
   const sep = "─".repeat(Math.max(0, width));
+
+  // Slice 5b: optionally append a derived activity field. Width discipline is
+  // load-bearing — if appending the activity (with separator) would push the
+  // header past the requested width, we shrink the activity (or drop it
+  // entirely), never the persona/id/status/elapsed prefix.
+  const activity = deriveActivity(run, Date.now());
+  let left = baseLeft;
+  if (activity !== undefined) {
+    const sepText = " · ";
+    const rightW = visibleWidth(right);
+    const baseW = visibleWidth(baseLeft);
+    const minSpace = right ? 1 : 0;
+    const budget =
+      width - baseW - rightW - minSpace - visibleWidth(sepText);
+    // Only append if there's room for at least "· " + 2 chars of activity.
+    if (budget >= 2) {
+      const fitted =
+        visibleWidth(activity) <= budget
+          ? activity
+          : truncateToWidth(activity, budget, "…", false);
+      left = baseLeft + sepText + fitted;
+    }
+  }
 
   // Truncate to width if needed.
   const headerLine = padOrTruncate(left, right, width);
   return [sep, headerLine, sep];
+}
+
+// ── Activity derivation (Slice 5b) ──────────────────────────────────
+
+const IDLE_THRESHOLD_MS = 5000;
+
+/**
+ * Derive a one-segment activity descriptor for the live run. Returns
+ * `undefined` when no activity should be shown (terminal/queued/paused
+ * statuses, or no last message yet).
+ *
+ * Order of precedence:
+ * 1. If status is not `running`, no activity.
+ * 2. If `nowMs - lastEventAt >= IDLE_THRESHOLD_MS`, return `idle Ns` /
+ *    `idle Nm`.
+ * 3. Otherwise, scan the last assistant message's content from end to
+ *    start; the first toolCall, thinking, or text part wins.
+ */
+export function deriveActivity(run: Run, nowMs: number): string | undefined {
+  if (run.status !== "running") return undefined;
+
+  const lastEvent = run.lastEventAt ?? run.startTime;
+  const idleMs = nowMs - lastEvent;
+  if (idleMs >= IDLE_THRESHOLD_MS) {
+    const totalSecs = Math.floor(idleMs / 1000);
+    if (totalSecs >= 60) {
+      const mins = Math.floor(totalSecs / 60);
+      return `idle ${mins}m`;
+    }
+    return `idle ${totalSecs}s`;
+  }
+
+  const last = run.messages.at(-1);
+  if (!last) return undefined;
+  const role = (last as any).role;
+  if (role !== "assistant") return undefined;
+  const content = (last as any).content;
+  if (!Array.isArray(content)) return undefined;
+
+  for (let i = content.length - 1; i >= 0; i--) {
+    const part = content[i];
+    const t = part?.type;
+    if (t === "toolCall") {
+      return formatToolCallShort(String(part.name ?? "tool"), part.arguments);
+    }
+    if (t === "thinking") return "thinking";
+    if (t === "text") return "responding";
+  }
+  return undefined;
 }
 
 // ── Footer ────────────────────────────────────────────────────────────

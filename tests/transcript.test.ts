@@ -525,6 +525,178 @@ test("renderHeader: never exceeds the requested width", () => {
   }
 });
 
+// ── renderHeader: derived activity field (Slice 5b) ───────────────────
+
+test("renderHeader: running run with last message thinking shows '· thinking'", () => {
+  const run = makeRun({
+    status: "running",
+    lastEventAt: Date.now() - 100,
+    messages: [
+      { role: "assistant", content: [{ type: "thinking", thinking: "hmm" }] } as any,
+    ],
+  });
+  const joined = renderHeader(run, 120).join("\n");
+  assert.match(joined, /· thinking/);
+});
+
+test("renderHeader: running run with last toolCall shows '· $ <cmd>' for bash", () => {
+  const run = makeRun({
+    status: "running",
+    lastEventAt: Date.now() - 100,
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          { type: "toolCall", name: "bash", arguments: { command: "echo hi" } },
+        ],
+      } as any,
+    ],
+  });
+  const joined = renderHeader(run, 120).join("\n");
+  assert.match(joined, /· \$ echo hi/);
+});
+
+test("renderHeader: running run with last toolCall for read shows '· read <path>'", () => {
+  const run = makeRun({
+    status: "running",
+    lastEventAt: Date.now() - 100,
+    messages: [
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", name: "read", arguments: { file_path: "x.ts" } }],
+      } as any,
+    ],
+  });
+  const joined = renderHeader(run, 120).join("\n");
+  assert.match(joined, /· read x\.ts/);
+});
+
+test("renderHeader: running run with last text message shows '· responding'", () => {
+  const run = makeRun({
+    status: "running",
+    lastEventAt: Date.now() - 100,
+    messages: [
+      { role: "assistant", content: [{ type: "text", text: "hello" }] } as any,
+    ],
+  });
+  const joined = renderHeader(run, 120).join("\n");
+  assert.match(joined, /· responding/);
+});
+
+test("renderHeader: running run idle ≥5s shows '· idle Ns' in seconds", () => {
+  const run = makeRun({
+    status: "running",
+    lastEventAt: Date.now() - 6000,
+    messages: [
+      { role: "assistant", content: [{ type: "text", text: "hi" }] } as any,
+    ],
+  });
+  const joined = renderHeader(run, 120).join("\n");
+  assert.match(joined, /· idle 6s/);
+});
+
+test("renderHeader: running run idle ≥60s shows '· idle Nm' in minutes", () => {
+  const run = makeRun({
+    status: "running",
+    lastEventAt: Date.now() - 65_000,
+    messages: [
+      { role: "assistant", content: [{ type: "text", text: "hi" }] } as any,
+    ],
+  });
+  const joined = renderHeader(run, 120).join("\n");
+  assert.match(joined, /· idle 1m/);
+});
+
+test("renderHeader: idle threshold — 4999ms ago shows activity, 5001ms ago shows idle", () => {
+  const justBeforeThreshold = makeRun({
+    status: "running",
+    lastEventAt: Date.now() - 4999,
+    messages: [
+      { role: "assistant", content: [{ type: "text", text: "hi" }] } as any,
+    ],
+  });
+  const justAfterThreshold = makeRun({
+    status: "running",
+    lastEventAt: Date.now() - 5001,
+    messages: [
+      { role: "assistant", content: [{ type: "text", text: "hi" }] } as any,
+    ],
+  });
+  const beforeJoined = renderHeader(justBeforeThreshold, 120).join("\n");
+  const afterJoined = renderHeader(justAfterThreshold, 120).join("\n");
+  assert.match(beforeJoined, /· responding/);
+  assert.doesNotMatch(beforeJoined, /· idle/);
+  assert.match(afterJoined, /· idle 5s/);
+  assert.doesNotMatch(afterJoined, /· responding/);
+});
+
+test("renderHeader: completed/failed/killed/timeout/queued/paused show NO activity field", () => {
+  const lastEvent = Date.now() - 100_000; // would-be 'idle 1m' if running
+  const last = [{ role: "assistant", content: [{ type: "text", text: "hi" }] } as any];
+  for (const status of ["completed", "failed", "killed", "timeout", "queued", "paused"] as const) {
+    const run = makeRun({ status, lastEventAt: lastEvent, messages: last });
+    const joined = renderHeader(run, 120).join("\n");
+    assert.doesNotMatch(
+      joined,
+      /· (idle|thinking|responding|\$ |read |write |edit |grep )/,
+      `non-running status "${status}" leaked an activity segment: ${joined}`,
+    );
+  }
+});
+
+test("renderHeader: width discipline — activity is truncated/dropped, persona stays", () => {
+  const run = makeRun({
+    persona: "an-extremely-long-persona-name-that-will-overflow",
+    id: "oracle-7f3a",
+    status: "running",
+    lastEventAt: Date.now() - 100,
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            name: "bash",
+            arguments: { command: "a-very-long-command-tail-that-would-not-fit-anywhere" },
+          },
+        ],
+      } as any,
+    ],
+  });
+  const lines = renderHeader(run, 50);
+  for (const line of lines) {
+    assert.equal(visibleWidth(line) <= 50, true, `header line exceeded width: "${line}"`);
+  }
+  const joined = lines.join("\n");
+  // Persona name fully present (or at minimum its head is preserved).
+  assert.match(joined, /an-extremely-long-persona-name/);
+});
+
+test("renderHeader: activity respects width at width=50/80/120/213", () => {
+  const run = makeRun({
+    status: "running",
+    lastEventAt: Date.now() - 100,
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          { type: "toolCall", name: "bash", arguments: { command: "echo hello" } },
+        ],
+      } as any,
+    ],
+  });
+  for (const width of [50, 80, 120, 213]) {
+    const lines = renderHeader(run, width);
+    for (const line of lines) {
+      assert.equal(
+        visibleWidth(line) <= width,
+        true,
+        `width=${width}: header line exceeded width: "${line}"`,
+      );
+    }
+  }
+});
+
 // ── renderFooter ──────────────────────────────────────────────────────
 
 test("renderFooter: includes the Esc-to-close hint", () => {
