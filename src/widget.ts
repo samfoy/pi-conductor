@@ -10,6 +10,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { elapsedStr, formatUsage, type RunRegistry } from "./runs.ts";
+import { STATUS_GLYPH } from "./status-glyph.ts";
 import type { Run, RunStatus } from "./types.ts";
 
 const WIDGET_KEY = "conductor-ensemble";
@@ -129,20 +130,25 @@ function formatRow(r: Run, theme: any): string {
 }
 
 function statusGlyph(s: RunStatus, theme: any): string {
+  // Color slot per status; glyph chars are shared via STATUS_GLYPH so the
+  // widget, transcript, and foreground-stream renderers stay in lockstep.
+  const slot = statusColorSlot(s);
+  return theme.fg(slot, STATUS_GLYPH[s]);
+}
+
+function statusColorSlot(s: RunStatus): string {
   switch (s) {
     case "queued":
-      return theme.fg("dim", "◌");
+      return "dim";
     case "running":
-      return theme.fg("accent", "●");
+      return "accent";
     case "paused":
-      return theme.fg("warning", "⏸");
+      return "warning";
     case "completed":
-      return theme.fg("success", "✓");
+      return "success";
     case "failed":
-      return theme.fg("error", "✗");
     case "killed":
-      return theme.fg("error", "■");
     case "timeout":
-      return theme.fg("error", "⏱");
+      return "error";
   }
 }

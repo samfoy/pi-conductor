@@ -21,16 +21,7 @@
 import { elapsedStr, formatUsage, getFinalText, type RunRegistry } from "./runs.ts";
 import { renderHeader, renderTranscript } from "./transcript.ts";
 import { isTerminal, type Run } from "./types.ts";
-
-const STATUS_GLYPH: Record<Run["status"], string> = {
-  queued: "◌",
-  running: "●",
-  paused: "⏸",
-  completed: "✓",
-  failed: "✗",
-  killed: "■",
-  timeout: "⏱",
-};
+import { STATUS_GLYPH } from "./status-glyph.ts";
 
 /** Maximum characters in the final-text excerpt of the summary. */
 const SUMMARY_EXCERPT_MAX = 120;

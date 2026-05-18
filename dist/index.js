@@ -1648,6 +1648,8 @@ import { Type } from "@sinclair/typebox";
 
 // src/transcript.ts
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+
+// src/status-glyph.ts
 var STATUS_GLYPH2 = {
   queued: "\u25CC",
   running: "\u25CF",
@@ -1657,6 +1659,36 @@ var STATUS_GLYPH2 = {
   killed: "\u25A0",
   timeout: "\u23F1"
 };
+
+// src/tool-summary.ts
+var MAX_SUMMARY_LEN = 50;
+var MAX_KV_VALUE_LEN = 30;
+function summarizeToolArgs(name, args) {
+  switch (name) {
+    case "bash":
+      return shorten(String(args.command ?? ""), MAX_SUMMARY_LEN);
+    case "read":
+    case "write":
+    case "edit":
+      return shorten(String(args.file_path ?? args.path ?? ""), MAX_SUMMARY_LEN);
+    case "grep":
+      return shorten(String(args.pattern ?? ""), MAX_SUMMARY_LEN);
+    default: {
+      const pairs = [];
+      for (const [k, v] of Object.entries(args)) {
+        const repr = typeof v === "string" ? v : JSON.stringify(v);
+        pairs.push(`${k}=${shorten(repr, MAX_KV_VALUE_LEN)}`);
+      }
+      return shorten(pairs.join(" "), MAX_SUMMARY_LEN);
+    }
+  }
+}
+function shorten(s, max) {
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1) + "\u2026";
+}
+
+// src/transcript.ts
 function renderHeader(run, width) {
   const elapsed = elapsedStr(run.startTime, run.finishedAt);
   const usage = formatUsage(run.usage);
@@ -1754,7 +1786,7 @@ function renderThinking(text, width) {
 function renderToolCall(part, resultsByCallId, opts) {
   const name = part.name ?? "tool";
   if (opts.collapseToolCalls) {
-    const summary = summarizeArgs(name, part.arguments ?? {});
+    const summary = summarizeToolArgs(name, part.arguments ?? {});
     const line = `\u25B8 ${name}${summary ? " " + summary : ""}`;
     return [truncateOrPad(line, opts.width)];
   }
@@ -1780,30 +1812,6 @@ function renderToolCall(part, resultsByCallId, opts) {
     }
   }
   return out;
-}
-function summarizeArgs(name, args) {
-  switch (name) {
-    case "bash":
-      return shorten(String(args.command ?? ""), 50);
-    case "read":
-    case "write":
-    case "edit":
-      return shorten(String(args.file_path ?? args.path ?? ""), 50);
-    case "grep":
-      return shorten(String(args.pattern ?? ""), 50);
-    default: {
-      const pairs = [];
-      for (const [k, v] of Object.entries(args)) {
-        const repr = typeof v === "string" ? v : JSON.stringify(v);
-        pairs.push(`${k}=${shorten(repr, 30)}`);
-      }
-      return shorten(pairs.join(" "), 50);
-    }
-  }
-}
-function shorten(s, max) {
-  if (s.length <= max) return s;
-  return s.slice(0, max - 1) + "\u2026";
 }
 function firstLine(s) {
   const idx = s.indexOf("\n");
@@ -1836,15 +1844,6 @@ function padOrTruncate(left, right, width) {
 }
 
 // src/foreground-stream.ts
-var STATUS_GLYPH3 = {
-  queued: "\u25CC",
-  running: "\u25CF",
-  paused: "\u23F8",
-  completed: "\u2713",
-  failed: "\u2717",
-  killed: "\u25A0",
-  timeout: "\u23F1"
-};
 var SUMMARY_EXCERPT_MAX = 120;
 var STREAM_MAX_CHARS = 32 * 1024;
 function renderForegroundStream(run, width) {
@@ -1865,7 +1864,7 @@ function renderForegroundStream(run, width) {
 ${tail}`;
 }
 function renderForegroundSummary(run) {
-  const glyph = STATUS_GLYPH3[run.status] ?? "\xB7";
+  const glyph = STATUS_GLYPH2[run.status] ?? "\xB7";
   const verb = run.status === "completed" ? "completed" : run.status === "killed" ? "killed" : run.status === "timeout" ? "timed out" : run.status;
   const elapsed = elapsedStr(run.startTime, run.finishedAt);
   const usage = formatUsage(run.usage);
@@ -2898,21 +2897,23 @@ function formatRow(r, theme) {
   return `${glyph} ${name} ${elapsed}${activity}${usage}`;
 }
 function statusGlyph2(s, theme) {
+  const slot = statusColorSlot(s);
+  return theme.fg(slot, STATUS_GLYPH2[s]);
+}
+function statusColorSlot(s) {
   switch (s) {
     case "queued":
-      return theme.fg("dim", "\u25CC");
+      return "dim";
     case "running":
-      return theme.fg("accent", "\u25CF");
+      return "accent";
     case "paused":
-      return theme.fg("warning", "\u23F8");
+      return "warning";
     case "completed":
-      return theme.fg("success", "\u2713");
+      return "success";
     case "failed":
-      return theme.fg("error", "\u2717");
     case "killed":
-      return theme.fg("error", "\u25A0");
     case "timeout":
-      return theme.fg("error", "\u23F1");
+      return "error";
   }
 }
 

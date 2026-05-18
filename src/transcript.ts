@@ -11,6 +11,8 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { Run } from "./types.ts";
 import { elapsedStr, formatUsage } from "./runs.ts";
+import { STATUS_GLYPH } from "./status-glyph.ts";
+import { summarizeToolArgs } from "./tool-summary.ts";
 
 export interface TranscriptOptions {
   /** Hard wrap width; lines that exceed it are wrapped or truncated. */
@@ -20,16 +22,6 @@ export interface TranscriptOptions {
   /** When true, thinking parts are shown; otherwise hidden. */
   showThinking: boolean;
 }
-
-const STATUS_GLYPH: Record<Run["status"], string> = {
-  queued: "◌",
-  running: "●",
-  paused: "⏸",
-  completed: "✓",
-  failed: "✗",
-  killed: "■",
-  timeout: "⏱",
-};
 
 // ── Header ────────────────────────────────────────────────────────────
 
@@ -160,7 +152,7 @@ function renderToolCall(
 ): string[] {
   const name = part.name ?? "tool";
   if (opts.collapseToolCalls) {
-    const summary = summarizeArgs(name, part.arguments ?? {});
+    const summary = summarizeToolArgs(name, part.arguments ?? {});
     const line = `▸ ${name}${summary ? " " + summary : ""}`;
     return [truncateOrPad(line, opts.width)];
   }
@@ -189,33 +181,6 @@ function renderToolCall(
     }
   }
   return out;
-}
-
-function summarizeArgs(name: string, args: Record<string, any>): string {
-  switch (name) {
-    case "bash":
-      return shorten(String(args.command ?? ""), 50);
-    case "read":
-    case "write":
-    case "edit":
-      return shorten(String(args.file_path ?? args.path ?? ""), 50);
-    case "grep":
-      return shorten(String(args.pattern ?? ""), 50);
-    default: {
-      // Compact key=value list.
-      const pairs: string[] = [];
-      for (const [k, v] of Object.entries(args)) {
-        const repr = typeof v === "string" ? v : JSON.stringify(v);
-        pairs.push(`${k}=${shorten(repr, 30)}`);
-      }
-      return shorten(pairs.join(" "), 50);
-    }
-  }
-}
-
-function shorten(s: string, max: number): string {
-  if (s.length <= max) return s;
-  return s.slice(0, max - 1) + "…";
 }
 
 function firstLine(s: string): string {

@@ -14,7 +14,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyEvent, type EventEffect } from "../src/event-handler.ts";
+import { applyEvent, type EventEffect, formatToolCallShort } from "../src/event-handler.ts";
 import { emptyUsage, type Run } from "../src/types.ts";
 
 function makeRun(): Run {
@@ -318,4 +318,64 @@ test("applyEvent: messages array is mutated in place (caller sees updates withou
   });
   assert.equal(messagesRef, run.messages, "messages array identity preserved");
   assert.equal(messagesRef.length, 1);
+});
+
+// ── lastToolCall byte-exact regression (Slice 0 dedup) ────────────────
+//
+// `run.lastToolCall` text is read by the ensemble panel widget. The Slice 0
+// dedup (shared STATUS_GLYPH + shared summarizeToolArgs) deliberately keeps
+// `formatToolCallShort` independent because its truncation / shortenPath /
+// fallback semantics diverge from the transcript renderer's core helper.
+// Pin the byte-exact output for the common tools so future dedup attempts
+// don't silently regress the widget.
+
+test("formatToolCallShort: bash short command keeps `$ ` prefix and command literal", () => {
+  assert.equal(formatToolCallShort("bash", { command: "echo hi" }), "$ echo hi");
+});
+
+test("formatToolCallShort: bash long command keeps 50 chars before ellipsis", () => {
+  // Distinct from transcript.ts' summarizeToolArgs which trims to 49 + ….
+  // The widget's `lastToolCall` line specifically keeps a 50-char head.
+  const cmd = "a".repeat(80);
+  const out = formatToolCallShort("bash", { command: cmd });
+  assert.equal(out, "$ " + "a".repeat(50) + "…");
+});
+
+test("formatToolCallShort: bash with missing command falls back to `$ ...`", () => {
+  assert.equal(formatToolCallShort("bash", {}), "$ ...");
+});
+
+test("formatToolCallShort: read uses `read ` prefix and shortenPath", () => {
+  // shortenPath collapses $HOME prefix to `~`; outside-home paths pass through.
+  assert.equal(formatToolCallShort("read", { file_path: "/tmp/x.md" }), "read /tmp/x.md");
+});
+
+test("formatToolCallShort: read falls back to args.path then to `...`", () => {
+  assert.equal(formatToolCallShort("read", { path: "/p" }), "read /p");
+  assert.equal(formatToolCallShort("read", {}), "read ...");
+});
+
+test("formatToolCallShort: write uses `write ` prefix", () => {
+  assert.equal(formatToolCallShort("write", { file_path: "out.txt" }), "write out.txt");
+});
+
+test("formatToolCallShort: edit uses `edit ` prefix", () => {
+  assert.equal(formatToolCallShort("edit", { file_path: "src/foo.ts" }), "edit src/foo.ts");
+});
+
+test("formatToolCallShort: grep uses `grep ` prefix and the pattern verbatim (no truncation)", () => {
+  // Note: event-handler.ts intentionally does NOT truncate grep patterns;
+  // transcript.ts does truncate at 50. Different consumers, different shape.
+  const longPattern = "x".repeat(80);
+  assert.equal(formatToolCallShort("grep", { pattern: longPattern }), `grep ${longPattern}`);
+});
+
+test("formatToolCallShort: unknown tool falls through to the bare tool name", () => {
+  assert.equal(formatToolCallShort("custom_tool", { foo: "bar" }), "custom_tool");
+});
+
+test("formatToolCallShort: undefined args reduce to fallbacks", () => {
+  assert.equal(formatToolCallShort("bash", undefined), "$ ...");
+  assert.equal(formatToolCallShort("read", undefined), "read ...");
+  assert.equal(formatToolCallShort("grep", undefined), "grep ...");
 });
