@@ -373,6 +373,49 @@ import { mkdir, writeFile, appendFile } from "node:fs/promises";
 import { homedir as homedir3 } from "node:os";
 import { dirname as dirname3, join as join3 } from "node:path";
 
+// src/tool-summary.ts
+import { visibleWidth } from "@earendil-works/pi-tui";
+var MAX_SUMMARY_LEN = 50;
+var MAX_KV_VALUE_LEN = 30;
+var ELLIPSIS = "\u2026";
+var ELLIPSIS_W = 1;
+function shortenMiddle(text, max) {
+  if (max <= 0) return "";
+  if (visibleWidth(text) <= max) return text;
+  if (max === ELLIPSIS_W) return ELLIPSIS;
+  if (max < 3) return text.slice(0, max);
+  const budget = max - ELLIPSIS_W;
+  const headLen = Math.ceil(budget * 0.6);
+  const tailLen = budget - headLen;
+  const head = text.slice(0, headLen);
+  const tail = tailLen > 0 ? text.slice(text.length - tailLen) : "";
+  return head + ELLIPSIS + tail;
+}
+function summarizeToolArgs(name, args) {
+  switch (name) {
+    case "bash":
+      return shortenMiddle(String(args.command ?? ""), MAX_SUMMARY_LEN);
+    case "read":
+    case "write":
+    case "edit":
+      return shorten(String(args.file_path ?? args.path ?? ""), MAX_SUMMARY_LEN);
+    case "grep":
+      return shorten(String(args.pattern ?? ""), MAX_SUMMARY_LEN);
+    default: {
+      const pairs = [];
+      for (const [k, v] of Object.entries(args)) {
+        const repr = typeof v === "string" ? v : JSON.stringify(v);
+        pairs.push(`${k}=${shorten(repr, MAX_KV_VALUE_LEN)}`);
+      }
+      return shorten(pairs.join(" "), MAX_SUMMARY_LEN);
+    }
+  }
+}
+function shorten(s, max) {
+  if (s.length <= max) return s;
+  return s.slice(0, max - 1) + "\u2026";
+}
+
 // src/event-handler.ts
 var NONE = { kind: "none" };
 var UPDATED = { kind: "updated" };
@@ -442,7 +485,7 @@ function formatToolCallShort(name, args) {
   switch (name) {
     case "bash": {
       const cmd = a.command ?? "...";
-      return `$ ${cmd.length > 50 ? cmd.slice(0, 50) + "\u2026" : cmd}`;
+      return `$ ${shortenMiddle(cmd, 51)}`;
     }
     case "read":
       return `read ${shortenPath(a.file_path || a.path || "...")}`;
@@ -1629,37 +1672,7 @@ function runHistory(_opts, ctx, arg) {
 import { Type } from "@sinclair/typebox";
 
 // src/transcript.ts
-import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-
-// src/tool-summary.ts
-var MAX_SUMMARY_LEN = 50;
-var MAX_KV_VALUE_LEN = 30;
-function summarizeToolArgs(name, args) {
-  switch (name) {
-    case "bash":
-      return shorten(String(args.command ?? ""), MAX_SUMMARY_LEN);
-    case "read":
-    case "write":
-    case "edit":
-      return shorten(String(args.file_path ?? args.path ?? ""), MAX_SUMMARY_LEN);
-    case "grep":
-      return shorten(String(args.pattern ?? ""), MAX_SUMMARY_LEN);
-    default: {
-      const pairs = [];
-      for (const [k, v] of Object.entries(args)) {
-        const repr = typeof v === "string" ? v : JSON.stringify(v);
-        pairs.push(`${k}=${shorten(repr, MAX_KV_VALUE_LEN)}`);
-      }
-      return shorten(pairs.join(" "), MAX_SUMMARY_LEN);
-    }
-  }
-}
-function shorten(s, max) {
-  if (s.length <= max) return s;
-  return s.slice(0, max - 1) + "\u2026";
-}
-
-// src/transcript.ts
+import { truncateToWidth, visibleWidth as visibleWidth2, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 function renderHeader(run, width) {
   const elapsed = elapsedStr(run.startTime, run.finishedAt);
   const usage = formatUsage(run.usage);
@@ -1793,20 +1806,20 @@ function wrap(text, width) {
   return wrapTextWithAnsi(text, width);
 }
 function truncateOrPad(line, width) {
-  if (visibleWidth(line) <= width) return line;
+  if (visibleWidth2(line) <= width) return line;
   return truncateToWidth(line, width, "\u2026", false);
 }
 function padOrTruncate(left, right, width) {
   if (!right) {
-    return visibleWidth(left) <= width ? left : truncateToWidth(left, width, "\u2026", false);
+    return visibleWidth2(left) <= width ? left : truncateToWidth(left, width, "\u2026", false);
   }
   const minSpace = 1;
-  const leftW = visibleWidth(left);
-  const rightW = visibleWidth(right);
+  const leftW = visibleWidth2(left);
+  const rightW = visibleWidth2(right);
   if (leftW + minSpace + rightW > width) {
     const leftBudget = Math.max(0, width - rightW - minSpace);
     const leftCut = leftW > leftBudget ? truncateToWidth(left, leftBudget, "\u2026", false) : left;
-    const leftCutW = visibleWidth(leftCut);
+    const leftCutW = visibleWidth2(leftCut);
     const pad2 = Math.max(minSpace, width - leftCutW - rightW);
     return leftCut + " ".repeat(pad2) + right;
   }

@@ -11,6 +11,7 @@
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { shortenMiddle } from "./tool-summary.ts";
 import type { Run } from "./types.ts";
 
 export type EventEffect =
@@ -112,7 +113,9 @@ export function formatToolCallShort(name: string, args: Record<string, any> | un
   switch (name) {
     case "bash": {
       const cmd = (a.command as string) ?? "...";
-      return `$ ${cmd.length > 50 ? cmd.slice(0, 50) + "…" : cmd}`;
+      // Total visible width is preserved at 53 chars (`$ ` + 51-char body).
+      // shortenMiddle keeps both head and tail of the command visible.
+      return `$ ${shortenMiddle(cmd, 51)}`;
     }
     case "read":
       return `read ${shortenPath((a.file_path || a.path || "...") as string)}`;

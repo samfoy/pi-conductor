@@ -15,6 +15,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { applyEvent, type EventEffect, formatToolCallShort } from "../src/event-handler.ts";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { emptyUsage, type Run } from "../src/types.ts";
 
 function makeRun(): Run {
@@ -333,12 +334,26 @@ test("formatToolCallShort: bash short command keeps `$ ` prefix and command lite
   assert.equal(formatToolCallShort("bash", { command: "echo hi" }), "$ echo hi");
 });
 
-test("formatToolCallShort: bash long command keeps 50 chars before ellipsis", () => {
-  // Distinct from transcript.ts' summarizeToolArgs which trims to 49 + ….
-  // The widget's `lastToolCall` line specifically keeps a 50-char head.
+test("formatToolCallShort: bash long command middle-truncates with `$ ` prefix preserved", () => {
+  // v0.8.1 sub-issue #1 / Slice 1 (option (b) amendment): switched from
+  // head-truncate (`$ ${cmd[:50]}…`, total visible width 53) to
+  // shortenMiddle so the argument tail stays visible. Total visible width
+  // is preserved at 53 chars (`$ ` + 51-char shortened body).
   const cmd = "a".repeat(80);
   const out = formatToolCallShort("bash", { command: cmd });
-  assert.equal(out, "$ " + "a".repeat(50) + "…");
+  assert.ok(out.startsWith("$ "));
+  assert.equal(visibleWidth(out), 53);
+  assert.ok(out.includes("…"));
+});
+
+test("formatToolCallShort: bash long command surfaces both head and tail (sub-issue #1)", () => {
+  const cmd = "aws sts get-caller-identity --profile tickety 2>/dev/null";
+  const out = formatToolCallShort("bash", { command: cmd });
+  assert.ok(out.startsWith("$ aws sts "));
+  // The trailing redirect lands beyond the head budget; head-truncate loses it.
+  assert.ok(out.endsWith("/dev/null"), `expected tail '/dev/null' in ${JSON.stringify(out)}`);
+  assert.ok(out.includes("…"));
+  assert.equal(visibleWidth(out), 53);
 });
 
 test("formatToolCallShort: bash with missing command falls back to `$ ...`", () => {
