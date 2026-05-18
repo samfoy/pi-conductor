@@ -50,6 +50,7 @@ function makeRun(id: string, overrides: Partial<Run> = {}): Run {
     mode: "background",
     status: "completed",
     startTime: Date.now() - 10_000,
+    lastEventAt: Date.now() - 10_000,
     finishedAt: Date.now() - 1_000,
     messages: [],
     usage: emptyUsage(),

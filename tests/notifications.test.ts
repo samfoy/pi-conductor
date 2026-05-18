@@ -29,6 +29,7 @@ function makeRun(overrides: Partial<Run> = {}): Run {
     mode: "background",
     status: "completed",
     startTime: T0,
+    lastEventAt: T0,
     finishedAt: T0 + 12_000, // 12s elapsed
     messages: [],
     usage: emptyUsage(),

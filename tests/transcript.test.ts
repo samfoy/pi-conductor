@@ -25,6 +25,7 @@ function makeRun(overrides: Partial<Run> = {}): Run {
     mode: "background",
     status: "running",
     startTime: 1_700_000_000_000,
+    lastEventAt: 1_700_000_000_000,
     messages: [],
     usage: emptyUsage(),
     cwd: "/tmp",
@@ -494,6 +495,7 @@ test("renderHeader: shows persona, id, status, elapsed", () => {
     id: "oracle-7f3a",
     status: "running",
     startTime: Date.now() - 65_000,
+    lastEventAt: Date.now() - 65_000,
   });
   const lines = renderHeader(run, 80);
   const joined = lines.join("\n");

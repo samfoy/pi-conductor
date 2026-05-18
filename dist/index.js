@@ -442,6 +442,7 @@ function applyEvent(run, event) {
     if (!e.message) return NONE;
     const msg = e.message;
     run.messages.push(msg);
+    run.lastEventAt = Date.now();
     if (msg.role === "assistant") {
       run.usage.turns += 1;
       const u = msg.usage;
@@ -472,6 +473,7 @@ function applyEvent(run, event) {
   if (e.type === "tool_result_end") {
     if (!e.message) return NONE;
     run.messages.push(e.message);
+    run.lastEventAt = Date.now();
     return UPDATED;
   }
   return NONE;
@@ -885,6 +887,7 @@ function spawnRun(opts) {
     mode: opts.mode,
     status: "running",
     startTime: Date.now(),
+    lastEventAt: Date.now(),
     messages: [],
     usage: emptyUsage(),
     cwd: opts.cwd,
@@ -2791,6 +2794,7 @@ var SpawnQueue = class {
       // queued runs are always background once they start
       status: "queued",
       startTime: Date.now(),
+      lastEventAt: Date.now(),
       messages: [],
       usage: emptyUsage(),
       cwd: opts.cwd,

@@ -51,6 +51,7 @@ function makeRun(id: string, status: Run["status"] = "running"): Run {
     mode: "background",
     status,
     startTime: Date.now(),
+    lastEventAt: Date.now(),
     messages: [],
     usage: emptyUsage(),
     cwd: "/tmp",

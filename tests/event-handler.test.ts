@@ -26,6 +26,7 @@ function makeRun(): Run {
     mode: "background",
     status: "running",
     startTime: 1_700_000_000_000,
+    lastEventAt: 1_700_000_000_000,
     messages: [],
     usage: emptyUsage(),
     cwd: "/tmp",
@@ -393,4 +394,71 @@ test("formatToolCallShort: undefined args reduce to fallbacks", () => {
   assert.equal(formatToolCallShort("bash", undefined), "$ ...");
   assert.equal(formatToolCallShort("read", undefined), "read ...");
   assert.equal(formatToolCallShort("grep", undefined), "grep ...");
+});
+
+// ── Slice 5a — lastEventAt write behaviour ─────────────────────────
+
+test("applyEvent: message_end push updates run.lastEventAt to ~now", () => {
+  const run = makeRun();
+  run.lastEventAt = run.startTime; // simulate a run that hasn't seen events
+  const before = Date.now();
+  applyEvent(run, {
+    type: "message_end",
+    message: { role: "assistant", content: [{ type: "text", text: "hi" }] },
+  });
+  const after = Date.now();
+  assert.ok(
+    run.lastEventAt >= before && run.lastEventAt <= after,
+    `lastEventAt ${run.lastEventAt} not within [${before}, ${after}]`,
+  );
+});
+
+test("applyEvent: tool_result_end push updates run.lastEventAt to ~now", () => {
+  const run = makeRun();
+  run.lastEventAt = run.startTime;
+  const before = Date.now();
+  applyEvent(run, {
+    type: "tool_result_end",
+    message: { role: "user", content: [{ type: "toolResult", id: "abc", content: [{ type: "text", text: "ok" }] }] },
+  });
+  const after = Date.now();
+  assert.ok(
+    run.lastEventAt >= before && run.lastEventAt <= after,
+    `lastEventAt ${run.lastEventAt} not within [${before}, ${after}]`,
+  );
+});
+
+test("applyEvent: each subsequent event monotonically advances lastEventAt", async () => {
+  const run = makeRun();
+  run.lastEventAt = run.startTime;
+  applyEvent(run, {
+    type: "message_end",
+    message: { role: "assistant", content: [{ type: "text", text: "first" }] },
+  });
+  const t1 = run.lastEventAt;
+  await new Promise((resolve) => setTimeout(resolve, 12));
+  applyEvent(run, {
+    type: "tool_result_end",
+    message: { role: "user", content: [{ type: "toolResult", id: "x", content: [] }] },
+  });
+  const t2 = run.lastEventAt;
+  await new Promise((resolve) => setTimeout(resolve, 12));
+  applyEvent(run, {
+    type: "message_end",
+    message: { role: "assistant", content: [{ type: "text", text: "third" }] },
+  });
+  const t3 = run.lastEventAt;
+  assert.ok(t1 < t2, `expected t1 (${t1}) < t2 (${t2})`);
+  assert.ok(t2 < t3, `expected t2 (${t2}) < t3 (${t3})`);
+});
+
+test("applyEvent: no-op events leave run.lastEventAt unchanged", () => {
+  const run = makeRun();
+  run.lastEventAt = 12345;
+  applyEvent(run, { type: "something_we_dont_know_about" });
+  applyEvent(run, { type: "agent_end" });
+  applyEvent(run, { type: "turn_end", message: { role: "assistant", content: [{ type: "text", text: "ok" }] } });
+  applyEvent(run, { type: "message_end" }); // missing message → NONE
+  applyEvent(run, { type: "tool_result_end" }); // missing message → NONE
+  assert.equal(run.lastEventAt, 12345, "events that do not push to messages must not bump lastEventAt");
 });

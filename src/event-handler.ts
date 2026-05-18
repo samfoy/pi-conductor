@@ -61,6 +61,7 @@ export function applyEvent(run: Run, event: unknown): EventEffect {
     if (!e.message) return NONE;
     const msg = e.message as AgentMessage;
     run.messages.push(msg);
+    run.lastEventAt = Date.now();
     if (msg.role === "assistant") {
       run.usage.turns += 1;
       const u = (msg as any).usage;
@@ -93,6 +94,7 @@ export function applyEvent(run: Run, event: unknown): EventEffect {
   if (e.type === "tool_result_end") {
     if (!e.message) return NONE;
     run.messages.push(e.message as AgentMessage);
+    run.lastEventAt = Date.now();
     return UPDATED;
   }
 

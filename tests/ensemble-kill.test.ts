@@ -34,6 +34,7 @@ function makeRun(id: string, overrides: Partial<Run> = {}): Run {
     mode: "background",
     status: "running",
     startTime: Date.now() - 5_000,
+    lastEventAt: Date.now() - 5_000,
     messages: [],
     usage: emptyUsage(),
     cwd: "/tmp",

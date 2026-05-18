@@ -103,6 +103,7 @@ export class SpawnQueue {
       mode: "background", // queued runs are always background once they start
       status: "queued",
       startTime: Date.now(),
+      lastEventAt: Date.now(),
       messages: [],
       usage: emptyUsage(),
       cwd: opts.cwd,

@@ -36,6 +36,7 @@ function makeRun(id: string, status: RunStatus, killSink: KillRecord[]): Run {
     mode: "background",
     status,
     startTime: 0,
+    lastEventAt: 0,
     messages: [],
     usage: {
       turns: 0,

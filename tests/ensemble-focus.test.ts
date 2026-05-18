@@ -23,6 +23,7 @@ function makeRun(id: string): Run {
     mode: "background",
     status: "running",
     startTime: Date.now(),
+    lastEventAt: Date.now(),
     messages: [],
     usage: emptyUsage(),
     cwd: "/tmp",

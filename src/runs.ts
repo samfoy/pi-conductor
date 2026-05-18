@@ -576,6 +576,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     mode: opts.mode,
     status: "running",
     startTime: Date.now(),
+    lastEventAt: Date.now(),
     messages: [],
     usage: emptyUsage(),
     cwd: opts.cwd,

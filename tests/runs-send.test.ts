@@ -36,6 +36,7 @@ function makeRun(overrides: Partial<Run> = {}): Run {
     mode: "background",
     status: "completed",
     startTime: 1_700_000_000_000,
+    lastEventAt: 1_700_000_000_000,
     finishedAt: 1_700_000_001_000,
     messages: [],
     usage: emptyUsage(),

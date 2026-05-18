@@ -21,6 +21,7 @@ function makeRun(overrides: Partial<Run> = {}): Run {
     mode: "foreground",
     status: "running",
     startTime: Date.now() - 14_000,
+    lastEventAt: Date.now() - 14_000,
     messages: [],
     usage: emptyUsage(),
     cwd: "/tmp",
@@ -246,6 +247,7 @@ test("renderForegroundSummary: usage and elapsed appear in the headline", () => 
     status: "completed",
     finishedAt: Date.now(),
     startTime: Date.now() - 14_000,
+    lastEventAt: Date.now() - 14_000,
     usage: { ...emptyUsage(), turns: 3, input: 1200, output: 800, cost: 0.012 },
   });
   const out = renderForegroundSummary(run);

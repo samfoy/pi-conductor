@@ -160,6 +160,13 @@ export interface Run {
   startTime: number;
   /** ms since epoch; set when status transitions to a terminal state. */
   finishedAt?: number;
+  /**
+   * ms since epoch of the most recent event we observed for this run
+   * (currently: every push to `messages`). Initialized to `startTime`
+   * at run creation. Used by `renderHeader` to derive an idle indicator.
+   * Required so consumers don't have to fall back to `startTime`.
+   */
+  lastEventAt: number;
   /** ms timestamp of last pause; cleared on resume. */
   pausedAt?: number;
 
