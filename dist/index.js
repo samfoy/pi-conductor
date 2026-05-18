@@ -1647,6 +1647,7 @@ function runHistory(_opts, ctx, arg) {
 import { Type } from "@sinclair/typebox";
 
 // src/transcript.ts
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 var STATUS_GLYPH2 = {
   queued: "\u25CC",
   running: "\u25CF",
@@ -1810,44 +1811,27 @@ function firstLine(s) {
 }
 function wrap(text, width) {
   if (width <= 0) return [text];
-  const out = [];
-  for (const para of text.split("\n")) {
-    if (para.length <= width) {
-      out.push(para);
-      continue;
-    }
-    let i = 0;
-    while (i < para.length) {
-      const end = Math.min(i + width, para.length);
-      let cut = end;
-      if (end < para.length) {
-        const slice = para.slice(i, end);
-        const lastSpace = slice.lastIndexOf(" ");
-        if (lastSpace >= width - 20) cut = i + lastSpace;
-      }
-      const segment = para.slice(i, cut);
-      out.push(segment);
-      i = cut + (cut < para.length && para[cut] === " " ? 1 : 0);
-    }
-  }
-  return out;
+  return wrapTextWithAnsi(text, width);
 }
 function truncateOrPad(line, width) {
-  if (line.length <= width) return line;
-  return line.slice(0, Math.max(0, width - 1)) + "\u2026";
+  if (visibleWidth(line) <= width) return line;
+  return truncateToWidth(line, width, "\u2026", false);
 }
 function padOrTruncate(left, right, width) {
   if (!right) {
-    return left.length <= width ? left : left.slice(0, Math.max(0, width - 1)) + "\u2026";
+    return visibleWidth(left) <= width ? left : truncateToWidth(left, width, "\u2026", false);
   }
   const minSpace = 1;
-  if (left.length + minSpace + right.length > width) {
-    const leftBudget = Math.max(0, width - right.length - minSpace);
-    const leftCut = left.length > leftBudget ? left.slice(0, Math.max(0, leftBudget - 1)) + "\u2026" : left;
-    const pad2 = Math.max(minSpace, width - leftCut.length - right.length);
+  const leftW = visibleWidth(left);
+  const rightW = visibleWidth(right);
+  if (leftW + minSpace + rightW > width) {
+    const leftBudget = Math.max(0, width - rightW - minSpace);
+    const leftCut = leftW > leftBudget ? truncateToWidth(left, leftBudget, "\u2026", false) : left;
+    const leftCutW = visibleWidth(leftCut);
+    const pad2 = Math.max(minSpace, width - leftCutW - rightW);
     return leftCut + " ".repeat(pad2) + right;
   }
-  const pad = width - left.length - right.length;
+  const pad = width - leftW - rightW;
   return left + " ".repeat(pad) + right;
 }
 

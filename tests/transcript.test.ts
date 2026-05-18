@@ -8,6 +8,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import {
   renderTranscript,
   renderHeader,
@@ -74,9 +75,37 @@ test("renderTranscript: long assistant text wraps to width", () => {
     ],
   });
   const lines = renderTranscript(run, { ...DEFAULT_OPTS, width: 40 });
-  // No line may exceed the width.
+  // No line may exceed the width (measured by terminal columns, not chars).
   for (const line of lines) {
-    assert.equal(line.length <= 40, true, `line too long: "${line}"`);
+    assert.equal(visibleWidth(line) <= 40, true, `line too long: "${line}"`);
+  }
+});
+
+test("renderTranscript: text containing tabs wraps to width (regression: pi-tui counts \\t as 3 cols)", () => {
+  // Each \t counts as 3 visible columns. The previous wrap() used .length
+  // which counted \t as 1, producing lines with visibleWidth > target and
+  // crashing pi-tui's renderer with "exceeds terminal width".
+  const tabbed =
+    "34892\tCDK CLI will collect telemetry data on command usage\n" +
+    "\tOverview: We do not collect customer content\n" +
+    "\t\t\tdeeply\tindented\tstuff";
+  const run = makeRun({
+    messages: [
+      {
+        role: "assistant",
+        content: [{ type: "text", text: tabbed }],
+      } as any,
+    ],
+  });
+  for (const w of [20, 40, 80, 213]) {
+    const lines = renderTranscript(run, { ...DEFAULT_OPTS, width: w });
+    for (const line of lines) {
+      assert.equal(
+        visibleWidth(line) <= w,
+        true,
+        `line too long at width=${w}: visibleWidth=${visibleWidth(line)} line=${JSON.stringify(line)}`,
+      );
+    }
   }
 });
 
@@ -241,7 +270,7 @@ test("renderHeader: never exceeds the requested width", () => {
   });
   const lines = renderHeader(run, 30);
   for (const line of lines) {
-    assert.equal(line.length <= 30, true, `header line exceeded width: "${line}"`);
+    assert.equal(visibleWidth(line) <= 30, true, `header line exceeded width: "${line}"`);
   }
 });
 
@@ -274,6 +303,6 @@ test("renderFooter: includes 's' send hint", () => {
 test("renderFooter: never exceeds the requested width", () => {
   const lines = renderFooter(30);
   for (const line of lines) {
-    assert.equal(line.length <= 30, true, `footer line too long: "${line}"`);
+    assert.equal(visibleWidth(line) <= 30, true, `footer line too long: "${line}"`);
   }
 });

@@ -8,6 +8,7 @@
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { Run } from "./types.ts";
 import { elapsedStr, formatUsage } from "./runs.ts";
 
@@ -222,49 +223,46 @@ function firstLine(s: string): string {
   return idx === -1 ? s : s.slice(0, idx);
 }
 
+// Width-aware wrapping/truncation.
+//
+// IMPORTANT: pi-tui's renderer measures lines with `visibleWidth`, which
+// counts a tab (`\t`) as 3 columns and ignores ANSI escape sequences. If we
+// wrap by raw `.length` / `.slice` (counting tabs as 1 char and ANSI as
+// visible chars), the renderer crashes with
+//   "Rendered line N exceeds terminal width (X > Y)"
+// when a wrapped/padded line contains tabs or ANSI. Always go through
+// pi-tui's helpers below.
+
 function wrap(text: string, width: number): string[] {
   if (width <= 0) return [text];
-  const out: string[] = [];
-  for (const para of text.split("\n")) {
-    if (para.length <= width) {
-      out.push(para);
-      continue;
-    }
-    let i = 0;
-    while (i < para.length) {
-      // Break on a space if available within the last 20 chars; otherwise hard split.
-      const end = Math.min(i + width, para.length);
-      let cut = end;
-      if (end < para.length) {
-        const slice = para.slice(i, end);
-        const lastSpace = slice.lastIndexOf(" ");
-        if (lastSpace >= width - 20) cut = i + lastSpace;
-      }
-      const segment = para.slice(i, cut);
-      out.push(segment);
-      i = cut + (cut < para.length && para[cut] === " " ? 1 : 0);
-    }
-  }
-  return out;
+  // wrapTextWithAnsi handles \n, ANSI escapes, tabs (=3 cols), and word
+  // boundaries. Every returned line satisfies visibleWidth(line) <= width.
+  return wrapTextWithAnsi(text, width);
 }
 
 function truncateOrPad(line: string, width: number): string {
-  if (line.length <= width) return line;
-  return line.slice(0, Math.max(0, width - 1)) + "…";
+  if (visibleWidth(line) <= width) return line;
+  return truncateToWidth(line, width, "…", false);
 }
 
 function padOrTruncate(left: string, right: string, width: number): string {
   if (!right) {
-    return left.length <= width ? left : left.slice(0, Math.max(0, width - 1)) + "…";
+    return visibleWidth(left) <= width
+      ? left
+      : truncateToWidth(left, width, "…", false);
   }
   const minSpace = 1;
-  if (left.length + minSpace + right.length > width) {
+  const leftW = visibleWidth(left);
+  const rightW = visibleWidth(right);
+  if (leftW + minSpace + rightW > width) {
     // Right-align right; truncate left if needed.
-    const leftBudget = Math.max(0, width - right.length - minSpace);
-    const leftCut = left.length > leftBudget ? left.slice(0, Math.max(0, leftBudget - 1)) + "…" : left;
-    const pad = Math.max(minSpace, width - leftCut.length - right.length);
+    const leftBudget = Math.max(0, width - rightW - minSpace);
+    const leftCut =
+      leftW > leftBudget ? truncateToWidth(left, leftBudget, "…", false) : left;
+    const leftCutW = visibleWidth(leftCut);
+    const pad = Math.max(minSpace, width - leftCutW - rightW);
     return leftCut + " ".repeat(pad) + right;
   }
-  const pad = width - left.length - right.length;
+  const pad = width - leftW - rightW;
   return left + " ".repeat(pad) + right;
 }
