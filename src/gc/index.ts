@@ -50,11 +50,12 @@ export interface RunGcOptions {
   /** When true, plan only — no reconcile, no archive, no delete. */
   dryRun?: boolean;
   /**
-   * When true, bypass the auto-debounce check in {@link maybeAutoRunGc}.
-   * `runGc` itself never debounces; the gate lives in the lifecycle
-   * caller. Documented here so the option lands in one place.
+   * Optional persona filter. When set, inventory entries are filtered
+   * to those whose `record.persona === persona` BEFORE planning runs.
+   * Used by the `/conductor gc --persona=<name>` slash command. Slice 5
+   * critic-yjsn flagged the missing API.
    */
-  force?: boolean;
+  persona?: string;
 }
 
 export interface RunGcResult {
@@ -105,13 +106,16 @@ export async function runGc(opts: RunGcOptions): Promise<RunGcResult> {
   const now = resolveNow(opts.now);
 
   const inventory = await walkInventory(opts.runsRoot, opts.registry);
-  const plan = planReclaim(inventory, opts.config, now);
+  const filteredInventory = opts.persona
+    ? inventory.filter((e) => e.persona === opts.persona)
+    : inventory;
+  const plan = planReclaim(filteredInventory, opts.config, now);
 
   const summary = countActions(plan.actions);
 
   if (opts.dryRun) {
     return {
-      scanned: inventory.length,
+      scanned: filteredInventory.length,
       planSummary: summary,
       reconciled: [],
       archived: [],
@@ -157,7 +161,7 @@ export async function runGc(opts: RunGcOptions): Promise<RunGcResult> {
   ];
 
   return {
-    scanned: inventory.length,
+    scanned: filteredInventory.length,
     planSummary: summary,
     reconciled: [...reconcileResult.reconciled],
     archived: [...reclaimResult.archived],
@@ -184,6 +188,13 @@ function countActions(actions: readonly ReclaimAction[]): RunGcResult["planSumma
 }
 
 export interface MaybeAutoRunGcOptions extends RunGcOptions {
+  /**
+   * When true, bypass the auto-debounce check. Only meaningful for
+   * `maybeAutoRunGc` — `runGc` itself never debounces. Slash-command
+   * users get debounce-bypass for free since manual runs skip the
+   * debounce gate by construction.
+   */
+  force?: boolean;
   /** Logger for the one-line completion summary. Defaults to `console.error`. */
   log?: (line: string) => void;
 }

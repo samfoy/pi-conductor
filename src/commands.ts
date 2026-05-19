@@ -38,6 +38,9 @@ import { SpawnQueue } from "./queue.ts";
 import { buildDoctorReport } from "./doctor.ts";
 import { buildHistoryReport } from "./history.ts";
 import { isPinned, pinRun, unpinRun } from "./gc/pinning.ts";
+import { runGc, type RunGcResult } from "./gc/index.ts";
+import { walkInventory } from "./gc/inventory.ts";
+import { planReclaim, type ReclaimAction } from "./gc/policy.ts";
 
 interface RegisterCommandsOpts {
   getCwd: () => string;
@@ -65,6 +68,7 @@ const SUBCOMMANDS = [
   "history",
   "pin",
   "unpin",
+  "gc",
 ];
 
 export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): void {
@@ -502,4 +506,226 @@ export async function runUnpin(
   } catch (e: unknown) {
     ctx.ui.notify(`unpin failed: ${(e as Error)?.message ?? e}`, "warning");
   }
+}
+
+// ── /conductor gc ───────────────────────────────────────────────────────────────────
+
+/**
+ * Dependencies `runGcCmd` actually needs. Structural so tests can pass a
+ * minimal shape without mocking the full `RegisterCommandsOpts`.
+ */
+export interface GcCmdOpts {
+  getCwd: () => string;
+  getRegistry: () => RunRegistry;
+}
+
+interface ParsedGcFlags {
+  dryRun: boolean;
+  force: boolean;
+  verbose: boolean;
+  help: boolean;
+  persona?: string;
+}
+
+const GC_HELP_TEXT = [
+  "/conductor gc [flags]  — reclaim disk used by run records.",
+  "",
+  "  --dry-run           plan only, no disk mutation; print summary.",
+  "  --force             documented no-op for manual gc (debounce only",
+  "                      applies to auto-gc on session_start).",
+  "  --persona=<name>    scope to a single persona's runs.",
+  "  --verbose           include per-action lines, not just totals.",
+  "  --help              print this listing.",
+].join("\n");
+
+/**
+ * Tiny single-purpose flag parser. Returns `{ ok: false, error }` on any
+ * unknown flag or empty `--persona=` so the slash command can render a
+ * tight error notify rather than swallowing the input. Position-free.
+ */
+function parseGcFlags(arg: string): { ok: true; flags: ParsedGcFlags } | { ok: false; error: string } {
+  const out: ParsedGcFlags = {
+    dryRun: false,
+    force: false,
+    verbose: false,
+    help: false,
+  };
+  const tokens = arg.split(/\s+/).filter((t) => t.length > 0);
+  for (const tok of tokens) {
+    if (tok === "--dry-run") out.dryRun = true;
+    else if (tok === "--force") out.force = true;
+    else if (tok === "--verbose") out.verbose = true;
+    else if (tok === "--help" || tok === "-h") out.help = true;
+    else if (tok.startsWith("--persona=")) {
+      const value = tok.slice("--persona=".length);
+      if (!value) {
+        return { ok: false, error: "missing value for --persona=<name>" };
+      }
+      out.persona = value;
+    } else {
+      return { ok: false, error: `unknown flag: ${tok}` };
+    }
+  }
+  return { ok: true, flags: out };
+}
+
+function bytesHuman(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const kb = n / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  return `${(mb / 1024).toFixed(2)} GB`;
+}
+
+function sumBytes(actions: readonly ReclaimAction[], kind: ReclaimAction["kind"]): number {
+  let total = 0;
+  for (const a of actions) {
+    if (a.kind === kind && (a.kind === "cold-archive" || a.kind === "delete")) {
+      total += a.bytesReclaimed;
+    }
+  }
+  return total;
+}
+
+/**
+ * Format the `RunGcResult` for the slash command. Shape matches the
+ * v0.9-gc-plan.md "Slice 6" output spec; A3 totals always present.
+ *
+ * Per-action listing capped at 20 entries (plan §"Risks") with a
+ * "(N more — see /conductor history)" footer when more are present.
+ */
+function formatGcResult(
+  result: RunGcResult,
+  actions: readonly ReclaimAction[],
+  flags: ParsedGcFlags,
+): string {
+  const lines: string[] = [];
+  const dryTag = flags.dryRun ? " (dry-run)" : "";
+  lines.push(`GC plan${dryTag} (n=${result.scanned} scanned):`);
+
+  // Tier byte sums come from the inventory because dry-run executes
+  // nothing (`result.totalBytesReclaimed === 0`).
+  const archiveBytes = sumBytes(actions, "cold-archive");
+  const deleteBytes = sumBytes(actions, "delete");
+  const totalBytes = archiveBytes + deleteBytes;
+
+  lines.push(
+    `  archive: ${result.planSummary.archive} runs, ~${bytesHuman(archiveBytes)}`,
+  );
+  lines.push(
+    `  delete:  ${result.planSummary.delete} runs, ~${bytesHuman(deleteBytes)}`,
+  );
+  lines.push(
+    `  reconcile: ${result.planSummary.reconcile} orphan${result.planSummary.reconcile === 1 ? "" : "s"}`,
+  );
+  lines.push(`  keep: ${result.planSummary.keep} runs`);
+
+  // Oracle amendment A3: dry-run output MUST include all four totals
+  // by name so users can pipeline against them. Always emit — cheap on
+  // wet runs and harmless to consumers that ignore them.
+  lines.push("");
+  lines.push("Totals:");
+  lines.push(`  bytes_to_reclaim:  ${bytesHuman(totalBytes)} (${totalBytes} B)`);
+  lines.push(`  runs_to_archive:   ${result.planSummary.archive}`);
+  lines.push(`  runs_to_delete:    ${result.planSummary.delete}`);
+  lines.push(`  runs_lose_resume:  ${result.runsLoseResume}`);
+
+  if (!flags.dryRun) {
+    lines.push("");
+    lines.push(
+      `Reclaimed: ${bytesHuman(result.totalBytesReclaimed)} ` +
+        `(${result.archived.length} archived, ${result.deleted.length} deleted, ` +
+        `${result.failed.length} failed) in ${result.durationMs}ms`,
+    );
+  }
+
+  if (flags.verbose) {
+    const acts = actions.filter(
+      (a) =>
+        a.kind === "cold-archive" ||
+        a.kind === "delete" ||
+        a.kind === "reconcile-orphan",
+    );
+    if (acts.length > 0) {
+      lines.push("");
+      lines.push("Per-action:");
+      const cap = 20;
+      for (const a of acts.slice(0, cap)) {
+        const tag =
+          a.kind === "cold-archive"
+            ? "cold-archive"
+            : a.kind === "delete"
+              ? "delete       "
+              : "reconcile    ";
+        const bytes =
+          a.kind === "cold-archive" || a.kind === "delete"
+            ? bytesHuman(a.bytesReclaimed)
+            : "—";
+        lines.push(
+          `  ${tag}  ${a.id.padEnd(28)} ${bytes.padStart(10)}  ${a.reason ?? ""}`,
+        );
+      }
+      if (acts.length > cap) {
+        lines.push(`  (${acts.length - cap} more — see /conductor history)`);
+      }
+    }
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * `/conductor gc` slash subcommand. Manual gc never debounces, so
+ * `--force` is a documented no-op (it only matters to `maybeAutoRunGc`).
+ *
+ * Spec: docs/v0.9-gc-plan.md "Slice 6"; oracle A3.
+ */
+export async function runGcCmd(
+  opts: GcCmdOpts,
+  ctx: ExtensionCommandContext,
+  arg: string,
+): Promise<void> {
+  const parsed = parseGcFlags(arg);
+  if (!parsed.ok) {
+    ctx.ui.notify(`${parsed.error}\n\n${GC_HELP_TEXT}`, "warning");
+    return;
+  }
+  const flags = parsed.flags;
+
+  if (flags.help) {
+    ctx.ui.notify(GC_HELP_TEXT, "info");
+    return;
+  }
+
+  const cwd = opts.getCwd();
+  const cfg = loadConfig(cwd);
+  const root = runsRoot();
+  const registry = opts.getRegistry();
+
+  // Re-derive the action list for verbose output + accurate byte sums.
+  // `runGc` doesn't return its plan; one extra `walkInventory` is cheap
+  // for an interactive slash command.
+  const inventoryFull = await walkInventory(root, registry);
+  const inventory = flags.persona
+    ? inventoryFull.filter((e) => e.persona === flags.persona)
+    : inventoryFull;
+  const plan = planReclaim(inventory, cfg.gc, Date.now());
+
+  let result: RunGcResult;
+  try {
+    result = await runGc({
+      runsRoot: root,
+      config: cfg.gc,
+      registry,
+      dryRun: flags.dryRun,
+      persona: flags.persona,
+    });
+  } catch (e: unknown) {
+    ctx.ui.notify(`gc failed: ${(e as Error)?.message ?? e}`, "warning");
+    return;
+  }
+
+  const out = formatGcResult(result, plan.actions, flags);
+  ctx.ui.notify(out, "info");
 }
