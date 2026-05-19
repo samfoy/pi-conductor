@@ -27,6 +27,18 @@ export interface HistoryDeps {
    * record.startTime when a stat fails.
    */
   statMtime: (id: string) => number;
+  /**
+   * True iff `<runDir>/.pinned` exists. Slice 4 sidecar — surfaced in
+   * the history row as a `[P]` marker so users can see which runs are
+   * protected from GC.
+   */
+  isPinned: (id: string) => boolean;
+  /**
+   * True iff `<runDir>/.archived` exists. Slice 3 sidecar set by
+   * cold-archive. Surfaced as `[A]` plus a dim hint that resume will
+   * create a fresh transcript.
+   */
+  isArchived: (id: string) => boolean;
 }
 
 export interface HistoryOpts {
@@ -63,8 +75,18 @@ export function buildHistoryReport(deps: HistoryDeps, opts: HistoryOpts): string
     const elapsed = elapsedStr(r.startTime, r.finishedAt);
     const usage = formatUsage(r.usage);
     const usagePart = usage ? ` [${usage}]` : "";
-    const head = `  ${glyph} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsed}${usagePart}`;
+    const pinned = deps.isPinned(e.id);
+    const archived = deps.isArchived(e.id);
+    const markerParts: string[] = [];
+    if (pinned) markerParts.push("[P]");
+    if (archived) markerParts.push("[A]");
+    const markers = markerParts.length > 0 ? ` ${markerParts.join("")}` : "";
+    const head = `  ${glyph} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsed}${usagePart}${markers}`;
     lines.push(head);
+
+    if (archived) {
+      lines.push("      (archived; resume creates new transcript)");
+    }
 
     if (r.status === "completed") {
       const final = deps.readFinalText(e.id);

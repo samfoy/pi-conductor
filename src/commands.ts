@@ -427,6 +427,8 @@ function runHistory(
           }
         }
       },
+      isPinned: (id: string): boolean => existsSync(join(runDir(id), ".pinned")),
+      isArchived: (id: string): boolean => existsSync(join(runDir(id), ".archived")),
     },
     { limit },
   );

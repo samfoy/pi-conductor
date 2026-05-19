@@ -28,7 +28,7 @@ function rec(overrides: Partial<RunRecord> = {}): RunRecord {
   };
 }
 
-function makeDeps(records: Array<{ id: string; record: RunRecord; finalText?: string; mtime?: number }>): HistoryDeps {
+function makeDeps(records: Array<{ id: string; record: RunRecord; finalText?: string; mtime?: number; pinned?: boolean; archived?: boolean }>): HistoryDeps {
   return {
     listRunIds: () => records.map((r) => r.id),
     readRecord: (id: string) => {
@@ -44,8 +44,76 @@ function makeDeps(records: Array<{ id: string; record: RunRecord; finalText?: st
       // Default mtime to finishedAt for ordering when not supplied.
       return r?.mtime ?? r?.record.finishedAt ?? r?.record.startTime ?? 0;
     },
+    isPinned: (id: string) => {
+      const r = records.find((x) => x.id === id);
+      return r?.pinned === true;
+    },
+    isArchived: (id: string) => {
+      const r = records.find((x) => x.id === id);
+      return r?.archived === true;
+    },
   };
 }
+
+// ── Slice 8 — pinned + archived markers ───────────────────────────────
+
+test("buildHistoryReport: pinned run shows [P] marker", () => {
+  const deps = makeDeps([
+    {
+      id: "oracle-7f3a",
+      record: rec({ id: "oracle-7f3a" }),
+      pinned: true,
+    },
+  ]);
+  const out = buildHistoryReport(deps, { limit: 20 });
+  assert.match(out, /\[P\]/, `expected [P] marker for pinned run in:\n${out}`);
+  assert.doesNotMatch(out, /\[A\]/, "unpinned-but-pinned-only run must not show archived marker");
+});
+
+test("buildHistoryReport: archived run shows [A] marker plus the dim hint", () => {
+  const deps = makeDeps([
+    {
+      id: "oracle-7f3a",
+      record: rec({ id: "oracle-7f3a" }),
+      archived: true,
+    },
+  ]);
+  const out = buildHistoryReport(deps, { limit: 20 });
+  assert.match(out, /\[A\]/, `expected [A] marker for archived run in:\n${out}`);
+  assert.match(
+    out,
+    /archived; resume creates new transcript/,
+    `expected archived hint in:\n${out}`,
+  );
+});
+
+test("buildHistoryReport: pinned + archived run shows both markers", () => {
+  const deps = makeDeps([
+    {
+      id: "oracle-7f3a",
+      record: rec({ id: "oracle-7f3a" }),
+      pinned: true,
+      archived: true,
+    },
+  ]);
+  const out = buildHistoryReport(deps, { limit: 20 });
+  assert.match(out, /\[P\]/);
+  assert.match(out, /\[A\]/);
+  assert.match(out, /archived; resume creates new transcript/);
+});
+
+test("buildHistoryReport: live (unpinned, unarchived) run shows neither marker nor archived hint", () => {
+  const deps = makeDeps([
+    {
+      id: "oracle-7f3a",
+      record: rec({ id: "oracle-7f3a" }),
+    },
+  ]);
+  const out = buildHistoryReport(deps, { limit: 20 });
+  assert.doesNotMatch(out, /\[P\]/);
+  assert.doesNotMatch(out, /\[A\]/);
+  assert.doesNotMatch(out, /archived; resume creates new transcript/);
+});
 
 // ── Empty / edge cases ────────────────────────────────────────────────
 
@@ -60,6 +128,8 @@ test("buildHistoryReport: skips entries whose record.json is missing or unreadab
     readRecord: (id: string) => (id === "good-2" ? rec({ id: "good-2", persona: "oracle" }) : undefined),
     readFinalText: () => undefined,
     statMtime: () => 0,
+    isPinned: () => false,
+    isArchived: () => false,
   };
   const out = buildHistoryReport(deps, { limit: 20 });
   assert.match(out, /good-2/);

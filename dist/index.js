@@ -1882,8 +1882,17 @@ function buildHistoryReport(deps, opts) {
     const elapsed = elapsedStr(r.startTime, r.finishedAt);
     const usage = formatUsage(r.usage);
     const usagePart = usage ? ` [${usage}]` : "";
-    const head = `  ${glyph} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsed}${usagePart}`;
+    const pinned = deps.isPinned(e.id);
+    const archived = deps.isArchived(e.id);
+    const markerParts = [];
+    if (pinned) markerParts.push("[P]");
+    if (archived) markerParts.push("[A]");
+    const markers = markerParts.length > 0 ? ` ${markerParts.join("")}` : "";
+    const head = `  ${glyph} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsed}${usagePart}${markers}`;
     lines.push(head);
+    if (archived) {
+      lines.push("      (archived; resume creates new transcript)");
+    }
     if (r.status === "completed") {
       const final = deps.readFinalText(e.id);
       if (final && final.trim()) {
@@ -2530,7 +2539,9 @@ function runHistory(_opts, ctx, arg) {
             return 0;
           }
         }
-      }
+      },
+      isPinned: (id) => existsSync8(join10(runDir(id), ".pinned")),
+      isArchived: (id) => existsSync8(join10(runDir(id), ".archived"))
     },
     { limit }
   );
