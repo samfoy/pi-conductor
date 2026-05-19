@@ -75,6 +75,13 @@ export interface PersonaLoadError {
 export interface ConductorConfig {
   defaultTimeoutMinutes: number;
   maxConcurrent: number;
+  /**
+   * v0.9 Item 2(c): separate cap on concurrently-running write-capable
+   * sub-agents (`builder`, `simplifier`). Default 1. Read-only personas
+   * are not affected. Set to a number >= maxConcurrent (or any large
+   * value) to disable the cap.
+   */
+  maxConcurrentWriteCapable: number;
   queueOnConcurrencyCap: boolean;
   autoOpenFocusOnSpawn: boolean;
   defaultSpawnMode: "foreground" | "background";
@@ -100,6 +107,7 @@ export interface PersonaOverride {
 export const DEFAULT_CONFIG: ConductorConfig = {
   defaultTimeoutMinutes: 60,
   maxConcurrent: 4,
+  maxConcurrentWriteCapable: 1,
   queueOnConcurrencyCap: true,
   autoOpenFocusOnSpawn: false,
   defaultSpawnMode: "foreground",

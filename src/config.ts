@@ -67,6 +67,12 @@ function mergeConfig(base: ConductorConfig, raw: unknown): ConductorConfig {
   if (typeof r.maxConcurrent === "number" && r.maxConcurrent >= 1) {
     out.maxConcurrent = Math.floor(r.maxConcurrent);
   }
+  if (
+    typeof r.maxConcurrentWriteCapable === "number" &&
+    r.maxConcurrentWriteCapable >= 1
+  ) {
+    out.maxConcurrentWriteCapable = Math.floor(r.maxConcurrentWriteCapable);
+  }
   if (typeof r.queueOnConcurrencyCap === "boolean") {
     out.queueOnConcurrencyCap = r.queueOnConcurrencyCap;
   }

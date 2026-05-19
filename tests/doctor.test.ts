@@ -219,3 +219,23 @@ test("buildDoctorReport: omits legacy-install warning when no index entry exists
     teardown(fx);
   }
 });
+
+test("buildDoctorReport: surfaces maxConcurrentWriteCapable in Resolved config", async () => {
+  const fx = setup();
+  try {
+    const reg = new RunRegistry();
+    const q = new SpawnQueue(reg, 4);
+    const out = await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: q,
+      conductorMode: false,
+      homeDir: fx.homeDir,
+    });
+    assert.match(out, /## Resolved config/);
+    // Default value is 1, surfaced verbatim.
+    assert.match(out, /maxConcurrentWriteCapable:\s*1/);
+  } finally {
+    teardown(fx);
+  }
+});

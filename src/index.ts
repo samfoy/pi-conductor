@@ -46,7 +46,7 @@ export default function (pi: ExtensionAPI): void {
   let widget: EnsembleWidget | null = null;
 
   const registry = new RunRegistry();
-  const queue = new SpawnQueue(registry, 4);
+  const queue = new SpawnQueue(registry, 4, 1);
   const focusModel = new FocusedStreamModel(registry);
 
   // Track whether an overlay is already open so multiple opens don't stack.
@@ -330,6 +330,7 @@ export default function (pi: ExtensionAPI): void {
     try {
       const cfg = loadConfig(cwd);
       queue.setMaxConcurrent(cfg.maxConcurrent);
+      queue.setMaxConcurrentWriteCapable(cfg.maxConcurrentWriteCapable);
       const resolved = await resolvePersonas({
         cwd,
         personaOverrides: cfg.personaOverrides,

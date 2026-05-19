@@ -22,6 +22,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { runDir } from "./runs.ts";
 import { allocateRunId } from "./runs.ts";
+import { WRITE_CAPABLE_PERSONAS } from "./personas.ts";
 
 export interface PendingSpawn {
   /** Pre-allocated id, so the LLM has a stable id to reference even before spawn. */
@@ -53,12 +54,23 @@ export class SpawnQueue {
   constructor(
     private registry: RunRegistry,
     private maxConcurrent: number,
+    /**
+     * v0.9 Item 2(c) cap. Default 1. Independent of `maxConcurrent`.
+     * When this cap is hit, write-capable spawns queue (or auto-downgrade
+     * foreground) even if there are general slots free.
+     */
+    private maxConcurrentWriteCapable: number = 1,
   ) {
     this.registry.onChange(() => this.drain());
   }
 
   setMaxConcurrent(n: number): void {
     this.maxConcurrent = Math.max(1, Math.floor(n));
+    this.drain();
+  }
+
+  setMaxConcurrentWriteCapable(n: number): void {
+    this.maxConcurrentWriteCapable = Math.max(1, Math.floor(n));
     this.drain();
   }
 
@@ -82,8 +94,12 @@ export class SpawnQueue {
   ): SpawnOrQueueResult {
     const registry = opts.registry ?? this.registry;
     const slotsFree = this.maxConcurrent - registry.countActive();
+    const writeCapable = WRITE_CAPABLE_PERSONAS.has(opts.persona.name);
+    const writeSlotsFree =
+      this.maxConcurrentWriteCapable - registry.countActiveBy(WRITE_CAPABLE_PERSONAS);
+    const canSpawnNow = slotsFree > 0 && (!writeCapable || writeSlotsFree > 0);
 
-    if (slotsFree > 0) {
+    if (canSpawnNow) {
       const result = spawnRun({ ...opts, registry });
       return { kind: "spawned", run: result.run, done: result.done };
     }
@@ -151,23 +167,32 @@ export class SpawnQueue {
 
   /** Try to start as many queued spawns as possible. Idempotent. */
   drain(): void {
-    while (this.pending.length > 0) {
+    // Walk pending in FIFO order; only spawn those whose caps allow it.
+    // A blocked write-capable entry does NOT block a later read-only entry,
+    // because the two caps are independent.
+    let i = 0;
+    while (i < this.pending.length) {
+      const next = this.pending[i]!;
       const slotsFree = this.maxConcurrent - this.registry.countActive();
       if (slotsFree <= 0) return;
-      const next = this.pending.shift();
-      if (!next) return;
-
-      // Promote the queued placeholder Run to running.
-      const placeholder = this.registry.get(next.id);
-      if (!placeholder || placeholder.status !== "queued") {
-        // It was cancelled while waiting; skip.
+      const writeCapable = WRITE_CAPABLE_PERSONAS.has(next.persona.name);
+      const writeSlotsFree =
+        this.maxConcurrentWriteCapable -
+        this.registry.countActiveBy(WRITE_CAPABLE_PERSONAS);
+      if (writeCapable && writeSlotsFree <= 0) {
+        // This write-capable spawn must wait; try the next pending entry.
+        i++;
         continue;
       }
 
-      // Drop the placeholder so spawnRun can register a fresh Run with the same id.
-      // We achieve this by directly mutating the placeholder rather than re-registering,
-      // because spawn re-creates the Run and registers it via registry.register, which
-      // would overwrite the placeholder. We just let it overwrite.
+      // Promote: remove from pending and spawn.
+      this.pending.splice(i, 1);
+      const placeholder = this.registry.get(next.id);
+      if (!placeholder || placeholder.status !== "queued") {
+        // It was cancelled while waiting; skip without advancing i (we already spliced).
+        continue;
+      }
+
       spawnRun({
         registry: this.registry,
         persona: next.persona,

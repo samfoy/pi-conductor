@@ -37,6 +37,7 @@ var CONTEXT_INHERITANCE = ["none", "filtered", "full"];
 var DEFAULT_CONFIG = {
   defaultTimeoutMinutes: 60,
   maxConcurrent: 4,
+  maxConcurrentWriteCapable: 1,
   queueOnConcurrencyCap: true,
   autoOpenFocusOnSpawn: false,
   defaultSpawnMode: "foreground",
@@ -77,6 +78,10 @@ function isTerminal(s) {
 }
 
 // src/personas.ts
+var WRITE_CAPABLE_PERSONAS = /* @__PURE__ */ new Set([
+  "builder",
+  "simplifier"
+]);
 function resolveBuiltinPersonasDir(metaUrl) {
   const here = realpathSync(fileURLToPath(metaUrl));
   return resolve(dirname(here), "..", "personas");
@@ -327,6 +332,9 @@ function mergeConfig(base, raw) {
   }
   if (typeof r.maxConcurrent === "number" && r.maxConcurrent >= 1) {
     out.maxConcurrent = Math.floor(r.maxConcurrent);
+  }
+  if (typeof r.maxConcurrentWriteCapable === "number" && r.maxConcurrentWriteCapable >= 1) {
+    out.maxConcurrentWriteCapable = Math.floor(r.maxConcurrentWriteCapable);
   }
   if (typeof r.queueOnConcurrencyCap === "boolean") {
     out.queueOnConcurrencyCap = r.queueOnConcurrencyCap;
@@ -908,6 +916,19 @@ var RunRegistry = class {
     }
     return n;
   }
+  /**
+   * v0.9 Item 2(c): count active runs whose persona name is in the given set.
+   * Used by SpawnQueue to enforce maxConcurrentWriteCapable.
+   */
+  countActiveBy(personaNames) {
+    let n = 0;
+    for (const r of this.runs.values()) {
+      if (!isTerminal(r.status) && r.status !== "queued" && personaNames.has(r.persona)) {
+        n++;
+      }
+    }
+    return n;
+  }
   countQueued() {
     let n = 0;
     for (const r of this.runs.values()) {
@@ -1381,6 +1402,7 @@ async function buildDoctorReport(opts) {
   lines.push("## Resolved config");
   lines.push(`  defaultTimeoutMinutes: ${cfg.defaultTimeoutMinutes}`);
   lines.push(`  maxConcurrent:         ${cfg.maxConcurrent}`);
+  lines.push(`  maxConcurrentWriteCapable: ${cfg.maxConcurrentWriteCapable}`);
   lines.push(`  queueOnConcurrencyCap: ${cfg.queueOnConcurrencyCap}`);
   lines.push(`  defaultSpawnMode:      ${cfg.defaultSpawnMode}`);
   lines.push(`  autoOpenFocusOnSpawn:  ${cfg.autoOpenFocusOnSpawn}`);
@@ -2950,16 +2972,22 @@ function isTerminalStatus(s) {
 import { mkdirSync as mkdirSync3 } from "node:fs";
 import { join as join6 } from "node:path";
 var SpawnQueue = class {
-  constructor(registry, maxConcurrent) {
+  constructor(registry, maxConcurrent, maxConcurrentWriteCapable = 1) {
     this.registry = registry;
     this.maxConcurrent = maxConcurrent;
+    this.maxConcurrentWriteCapable = maxConcurrentWriteCapable;
     this.registry.onChange(() => this.drain());
   }
   registry;
   maxConcurrent;
+  maxConcurrentWriteCapable;
   pending = [];
   setMaxConcurrent(n) {
     this.maxConcurrent = Math.max(1, Math.floor(n));
+    this.drain();
+  }
+  setMaxConcurrentWriteCapable(n) {
+    this.maxConcurrentWriteCapable = Math.max(1, Math.floor(n));
     this.drain();
   }
   list() {
@@ -2978,7 +3006,10 @@ var SpawnQueue = class {
   enqueueOrSpawn(opts) {
     const registry = opts.registry ?? this.registry;
     const slotsFree = this.maxConcurrent - registry.countActive();
-    if (slotsFree > 0) {
+    const writeCapable = WRITE_CAPABLE_PERSONAS.has(opts.persona.name);
+    const writeSlotsFree = this.maxConcurrentWriteCapable - registry.countActiveBy(WRITE_CAPABLE_PERSONAS);
+    const canSpawnNow = slotsFree > 0 && (!writeCapable || writeSlotsFree > 0);
+    if (canSpawnNow) {
       const result = spawnRun({ ...opts, registry });
       return { kind: "spawned", run: result.run, done: result.done };
     }
@@ -3039,11 +3070,18 @@ var SpawnQueue = class {
   }
   /** Try to start as many queued spawns as possible. Idempotent. */
   drain() {
-    while (this.pending.length > 0) {
+    let i = 0;
+    while (i < this.pending.length) {
+      const next = this.pending[i];
       const slotsFree = this.maxConcurrent - this.registry.countActive();
       if (slotsFree <= 0) return;
-      const next = this.pending.shift();
-      if (!next) return;
+      const writeCapable = WRITE_CAPABLE_PERSONAS.has(next.persona.name);
+      const writeSlotsFree = this.maxConcurrentWriteCapable - this.registry.countActiveBy(WRITE_CAPABLE_PERSONAS);
+      if (writeCapable && writeSlotsFree <= 0) {
+        i++;
+        continue;
+      }
+      this.pending.splice(i, 1);
       const placeholder = this.registry.get(next.id);
       if (!placeholder || placeholder.status !== "queued") {
         continue;
@@ -4044,7 +4082,7 @@ function index_default(pi) {
   let ctxRef = null;
   let widget = null;
   const registry = new RunRegistry();
-  const queue = new SpawnQueue(registry, 4);
+  const queue = new SpawnQueue(registry, 4, 1);
   const focusModel = new FocusedStreamModel(registry);
   let overlayOpen = false;
   let unsubFocusedShortcut = null;
@@ -4252,6 +4290,7 @@ function index_default(pi) {
     try {
       const cfg = loadConfig(cwd);
       queue.setMaxConcurrent(cfg.maxConcurrent);
+      queue.setMaxConcurrentWriteCapable(cfg.maxConcurrentWriteCapable);
       const resolved = await resolvePersonas({
         cwd,
         personaOverrides: cfg.personaOverrides

@@ -28,6 +28,28 @@ import {
 // ── Discovery paths ────────────────────────────────────────────────────
 
 /**
+ * Personas that may mutate the working tree / git history.
+ *
+ * v0.9 Item 2(c) cap: a separate `maxConcurrentWriteCapable` (default 1)
+ * limits how many of these may run at once, so two builders can't race
+ * `git commit --amend` on the same shared working tree. Read-only
+ * personas (oracle/redteam/inspector/etc.) are not affected and continue
+ * to be governed only by the general `maxConcurrent` cap.
+ *
+ * Match is by Persona.name (string). The harness owns this set; persona
+ * frontmatter does NOT declare write-capability — we don't trust the
+ * frontmatter to opt out of a serialization invariant.
+ */
+export const WRITE_CAPABLE_PERSONAS: ReadonlySet<string> = new Set([
+  "builder",
+  "simplifier",
+]);
+
+export function isWriteCapable(personaName: string): boolean {
+  return WRITE_CAPABLE_PERSONAS.has(personaName);
+}
+
+/**
  * Resolve the path to the bundled `personas/` directory given a module URL.
  *
  * Exposed as a separate helper so it can be unit-tested with a fake

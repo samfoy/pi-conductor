@@ -501,6 +501,20 @@ export class RunRegistry {
     return n;
   }
 
+  /**
+   * v0.9 Item 2(c): count active runs whose persona name is in the given set.
+   * Used by SpawnQueue to enforce maxConcurrentWriteCapable.
+   */
+  countActiveBy(personaNames: ReadonlySet<string>): number {
+    let n = 0;
+    for (const r of this.runs.values()) {
+      if (!isTerminal(r.status) && r.status !== "queued" && personaNames.has(r.persona)) {
+        n++;
+      }
+    }
+    return n;
+  }
+
   countQueued(): number {
     let n = 0;
     for (const r of this.runs.values()) {

@@ -42,6 +42,21 @@ Implement **exactly the active slice** assigned to you. Do not plan ahead. Do no
 - Match repo conventions and existing patterns. Cite them when relevant.
 - If `git status` is dirty when you start with files unrelated to your slice, do not commit them; flag them in your result.
 
+## Git history hygiene
+
+**Before any history-modifying op (`git commit --amend`, `git rebase`, `git reset`, `git cherry-pick`, force-push), capture the parent SHA you expect and verify it before proceeding:**
+
+```bash
+EXPECTED_PARENT=<sha you saw in the plan/spec or just took with `git rev-parse HEAD` at the start of the slice>
+ACTUAL_PARENT=$(git rev-parse HEAD)
+[ "$EXPECTED_PARENT" = "$ACTUAL_PARENT" ] || {
+  echo "PARENT DRIFT: expected $EXPECTED_PARENT, got $ACTUAL_PARENT — abort" >&2
+  exit 1
+}
+```
+
+If the SHAs don't match, a sibling write happened between when you started the slice and now. **STOP and surface the drift to the conductor** — do not blindly amend, rebase, or force-push. The harness's separate write-capable spawn cap (default 1) is your first defense; this guard is the second.
+
 ## Commit format
 
 - Conventional Commits. **Do NOT use `§` in commit subjects** — some user-side steering hooks reject non-ASCII characters (`§`, `µ`, em-dash, etc.). Substitute spelled-out forms (`section N`). Body text is fine.

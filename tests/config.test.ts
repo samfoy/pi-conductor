@@ -353,3 +353,50 @@ test("loadConfig: malformed defaultMode (array) silently falls back to default",
     teardown(fx);
   }
 });
+
+// ── v0.9 Item 2(c): maxConcurrentWriteCapable ───────────────────
+
+test("loadConfig: maxConcurrentWriteCapable defaults to 1 when unset", () => {
+  const fx = setup();
+  try {
+    const cfg = loadConfig(fx.projectDir);
+    assert.equal(cfg.maxConcurrentWriteCapable, 1);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: maxConcurrentWriteCapable user override is respected", () => {
+  const fx = setup();
+  try {
+    writeUserConfig(fx, JSON.stringify({ maxConcurrentWriteCapable: 3 }));
+    const cfg = loadConfig(fx.projectDir);
+    assert.equal(cfg.maxConcurrentWriteCapable, 3);
+    // Doesn't disturb the general cap.
+    assert.equal(cfg.maxConcurrent, DEFAULT_CONFIG.maxConcurrent);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: maxConcurrentWriteCapable < 1 silently falls back to default", () => {
+  const fx = setup();
+  try {
+    writeUserConfig(fx, JSON.stringify({ maxConcurrentWriteCapable: 0 }));
+    const cfg = loadConfig(fx.projectDir);
+    assert.equal(cfg.maxConcurrentWriteCapable, 1);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: maxConcurrentWriteCapable wrong type falls back to default", () => {
+  const fx = setup();
+  try {
+    writeUserConfig(fx, JSON.stringify({ maxConcurrentWriteCapable: "two" }));
+    const cfg = loadConfig(fx.projectDir);
+    assert.equal(cfg.maxConcurrentWriteCapable, 1);
+  } finally {
+    teardown(fx);
+  }
+});

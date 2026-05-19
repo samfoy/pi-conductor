@@ -141,6 +141,7 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
   lines.push("## Resolved config");
   lines.push(`  defaultTimeoutMinutes: ${cfg.defaultTimeoutMinutes}`);
   lines.push(`  maxConcurrent:         ${cfg.maxConcurrent}`);
+  lines.push(`  maxConcurrentWriteCapable: ${cfg.maxConcurrentWriteCapable}`);
   lines.push(`  queueOnConcurrencyCap: ${cfg.queueOnConcurrencyCap}`);
   lines.push(`  defaultSpawnMode:      ${cfg.defaultSpawnMode}`);
   lines.push(`  autoOpenFocusOnSpawn:  ${cfg.autoOpenFocusOnSpawn}`);
