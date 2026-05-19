@@ -16,7 +16,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { formatCompletionNotification } from "../src/notifications.ts";
+import { formatCompletionNotification, formatCompletionNotificationCompact } from "../src/notifications.ts";
 import { emptyUsage, type Run, type RunStatus } from "../src/types.ts";
 
 const T0 = 1_700_000_000_000; // fixed epoch ms
@@ -212,5 +212,52 @@ test("formatCompletionNotification: escapes XML special chars in warning message
   );
   assert.match(out, /&lt;any&gt;/);
   assert.match(out, /&amp;/);
+});
+
+// ── v0.8.1 Item 5: compact form ──────────────────────────────────
+
+test("formatCompletionNotificationCompact: replaces <result> with <result-summary>", () => {
+  const out = formatCompletionNotificationCompact(
+    makeRun({ messages: [assistantTextMessage("Slice complete: foo bar baz")] }),
+  );
+  assert.match(out, /<result-summary>Slice complete: foo bar baz<\/result-summary>/);
+  assert.doesNotMatch(out, /<result>/);
+  assert.doesNotMatch(out, /<\/result>/);
+});
+
+test("formatCompletionNotificationCompact: preserves header line and all metadata tags", () => {
+  const out = formatCompletionNotificationCompact(
+    makeRun({
+      id: "designer-1234",
+      persona: "designer",
+      status: "completed",
+      messages: [assistantTextMessage("anything")],
+    }),
+  );
+  assert.match(out.split("\n")[0]!, /^## ✓ `designer` completed/);
+  assert.match(out, /<agent-id>designer-1234<\/agent-id>/);
+  assert.match(out, /<persona>designer<\/persona>/);
+  assert.match(out, /<status>completed<\/status>/);
+  assert.match(out, /<duration>/);
+  assert.match(out, /<usage>/);
+  assert.match(out, /<transcript>/);
+});
+
+test("formatCompletionNotificationCompact: truncates long result body", () => {
+  const long = "x".repeat(800);
+  const out = formatCompletionNotificationCompact(
+    makeRun({ messages: [assistantTextMessage(long)] }),
+  );
+  const m = out.match(/<result-summary>([\s\S]*?)<\/result-summary>/);
+  assert.ok(m);
+  assert.ok(m![1]!.endsWith("…"));
+});
+
+test("formatCompletionNotificationCompact: pass-through when no <result> body present", () => {
+  // No final assistant text → full form omits <result>; compact form
+  // also has nothing to rewrite. Idempotent / no-op.
+  const out = formatCompletionNotificationCompact(makeRun({ messages: [] }));
+  assert.doesNotMatch(out, /<result>/);
+  assert.doesNotMatch(out, /<result-summary>/);
 });
 

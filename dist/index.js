@@ -3159,6 +3159,119 @@ function statusColorSlot2(s) {
   }
 }
 
+// src/compaction-hook.ts
+var KEEP_RECENT_ENVELOPES = 2;
+var RESULT_SUMMARY_MAX_CHARS = 200;
+var ENVELOPE_RE = /<sub-agent-completed>[\s\S]*?<\/sub-agent-completed>/g;
+var RESULT_RE = /(\s*)<result>\n([\s\S]*?)\n(\s*)<\/result>\n?/;
+function summarizeResultText(text, max = RESULT_SUMMARY_MAX_CHARS) {
+  const collapsed = text.replace(/\s+/g, " ").trim();
+  if (collapsed.length <= max) return collapsed;
+  return collapsed.slice(0, max).trimEnd() + "\u2026";
+}
+function compactEnvelopeBlock(envelopeXml) {
+  const m = envelopeXml.match(RESULT_RE);
+  if (!m) return envelopeXml;
+  const indent = m[1] ?? "  ";
+  const body = m[2] ?? "";
+  const summary = summarizeResultText(body);
+  const replacement = `${indent}<result-summary>${summary}</result-summary>
+`;
+  return envelopeXml.replace(RESULT_RE, replacement);
+}
+function findEnvelopes(text) {
+  const out = [];
+  ENVELOPE_RE.lastIndex = 0;
+  let m;
+  while ((m = ENVELOPE_RE.exec(text)) !== null) {
+    out.push({ start: m.index, end: m.index + m[0].length, block: m[0] });
+  }
+  return out;
+}
+function rewriteSelected(text, firstEnvelopeIdxOffset, shouldCompact) {
+  const hits = findEnvelopes(text);
+  if (hits.length === 0) return text;
+  let out = "";
+  let cursor = 0;
+  for (let i = 0; i < hits.length; i++) {
+    const hit = hits[i];
+    out += text.slice(cursor, hit.start);
+    const globalIdx = firstEnvelopeIdxOffset + i;
+    out += shouldCompact(globalIdx) ? compactEnvelopeBlock(hit.block) : hit.block;
+    cursor = hit.end;
+  }
+  out += text.slice(cursor);
+  return out;
+}
+function rewriteTextInMessage(msg, rewrite) {
+  if (msg == null) return msg;
+  const content = msg.content;
+  if (typeof content === "string") {
+    const next = rewrite(content);
+    return next === content ? msg : { ...msg, content: next };
+  }
+  if (Array.isArray(content)) {
+    let changed = false;
+    const nextBlocks = content.map((block) => {
+      if (block && typeof block === "object" && block.type === "text" && typeof block.text === "string") {
+        const nextText = rewrite(block.text);
+        if (nextText !== block.text) {
+          changed = true;
+          return { ...block, text: nextText };
+        }
+      }
+      return block;
+    });
+    return changed ? { ...msg, content: nextBlocks } : msg;
+  }
+  return msg;
+}
+function compactOlderEnvelopes(messages, keepRecent = KEEP_RECENT_ENVELOPES) {
+  let total = 0;
+  const perMessageStart = new Array(messages.length).fill(0);
+  for (let i = 0; i < messages.length; i++) {
+    perMessageStart[i] = total;
+    const msg = messages[i];
+    const content = msg?.content;
+    if (typeof content === "string") {
+      total += findEnvelopes(content).length;
+    } else if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block && typeof block === "object" && block.type === "text" && typeof block.text === "string") {
+          total += findEnvelopes(block.text).length;
+        }
+      }
+    }
+  }
+  if (total === 0) return messages;
+  const compactBefore = total - keepRecent;
+  if (compactBefore <= 0) return messages;
+  const shouldCompact = (globalIdx) => globalIdx < compactBefore;
+  let runningGlobalIdx = 0;
+  return messages.map((msg) => {
+    const before = runningGlobalIdx;
+    return rewriteTextInMessage(msg, (text) => {
+      const hits = findEnvelopes(text);
+      if (hits.length === 0) return text;
+      const startIdx = runningGlobalIdx;
+      runningGlobalIdx += hits.length;
+      return rewriteSelected(text, startIdx, shouldCompact);
+    });
+    void before;
+  });
+}
+function installCompactionHook(pi, opts = {}) {
+  const keepRecent = opts.keepRecent ?? KEEP_RECENT_ENVELOPES;
+  pi.on("context", async (event) => {
+    const messages = compactOlderEnvelopes(event.messages, keepRecent);
+    return { messages };
+  });
+  return {
+    reset: () => {
+    }
+  };
+}
+
 // src/notifications.ts
 function formatCompletionNotification(run) {
   const finalText = getFinalText(run.messages);
@@ -3938,6 +4051,7 @@ function index_default(pi) {
   const sanitizerHook = installSanitizerHook(pi, {
     getCtx: () => ctxRef
   });
+  installCompactionHook(pi);
   function openFocusedOverlay(agentId) {
     if (!ctxRef) return;
     if (overlayOpen) {

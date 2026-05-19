@@ -35,6 +35,7 @@ import { installFocusedOverlayShortcut } from "./focused-overlay-shortcut.ts";
 import { forceTerminate, resolveTimeoutMs, sendToRun, validateSendable } from "./runs.ts";
 import type { Run } from "./types.ts";
 import { resolveInitialConductorMode } from "./conductor-mode.ts";
+import { installCompactionHook } from "./compaction-hook.ts";
 import { installSanitizerHook } from "./sanitizer-hook.ts";
 import { handleSessionShutdown } from "./shutdown.ts";
 
@@ -60,6 +61,14 @@ export default function (pi: ExtensionAPI): void {
   const sanitizerHook = installSanitizerHook(pi, {
     getCtx: () => ctxRef,
   });
+
+  // v0.8.1 Item 5 — context-inflation compaction. Older
+  // `<sub-agent-completed>` envelopes (all but the most-recent
+  // KEEP_RECENT_ENVELOPES=2) are rewritten to a `<result-summary>`
+  // form on every context flush. The on-disk session JSONL stays full
+  // fidelity; only the LLM-facing context is rewritten. See
+  // src/compaction-hook.ts.
+  installCompactionHook(pi);
 
   // Note: we used to bind Key.escape and Key.ctrl("g") via
   // pi.registerShortcut, but pi reserves both (`app.interrupt` for Esc,

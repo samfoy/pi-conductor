@@ -11,6 +11,7 @@
  * collapsible cards out of the box.
  */
 
+import { compactEnvelopeBlock } from "./compaction-hook.ts";
 import { elapsedStr, formatUsage, getFinalText } from "./runs.ts";
 import type { Run } from "./types.ts";
 
@@ -65,6 +66,32 @@ function headerLine(run: Run, elapsed: string, usageStr: string): string {
     run.status === "timeout"   ? "timed out" : "failed";
   const usagePart = usageStr ? `, ${usageStr}` : "";
   return `## ${glyph} \`${run.persona}\` ${verb} (${elapsed}${usagePart}) — id \`${run.id}\``;
+}
+
+/**
+ * Compact form of {@link formatCompletionNotification}: replaces the
+ * full `<result>` block with a `<result-summary>` truncated to
+ * `RESULT_SUMMARY_MAX_CHARS` chars. The header line and all other
+ * tags (`<agent-id>`, `<persona>`, `<status>`, `<duration>`,
+ * `<usage>`, `<error>`, `<warning>`, `<transcript>`) are unchanged.
+ *
+ * Used directly by tests; the live extension produces full envelopes
+ * via {@link formatCompletionNotification} and lets the
+ * `installCompactionHook` rewrite older ones at context-flush time.
+ * Both paths reuse {@link compactEnvelopeBlock} so the compact shape
+ * is defined in exactly one place.
+ */
+export function formatCompletionNotificationCompact(run: Run): string {
+  const full = formatCompletionNotification(run);
+  // The full notification embeds the envelope inside a fenced ```xml
+  // block; compactEnvelopeBlock only rewrites the
+  // <sub-agent-completed>...</sub-agent-completed> substring it finds,
+  // so we hand it the full string and let the regex walk to the right
+  // span.
+  return full.replace(
+    /<sub-agent-completed>[\s\S]*?<\/sub-agent-completed>/,
+    (match) => compactEnvelopeBlock(match),
+  );
 }
 
 function escapeXml(s: string): string {
