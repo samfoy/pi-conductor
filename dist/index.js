@@ -1384,9 +1384,9 @@ function elapsedStr(start, end) {
 }
 
 // src/doctor.ts
-import { existsSync as existsSync5 } from "node:fs";
+import { existsSync as existsSync6 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join5 } from "node:path";
+import { join as join6 } from "node:path";
 
 // src/gc/last-gc.ts
 import { existsSync as existsSync4, statSync as statSync2, utimesSync, writeFileSync as writeFileSync2 } from "node:fs";
@@ -1413,212 +1413,13 @@ function writeLastGcMtime(runsRoot2, now) {
   }
 }
 
-// src/doctor.ts
-async function buildDoctorReport(opts) {
-  const { config: cfg, errors: configErrors } = loadConfigWithErrors(opts.cwd);
-  const resolved = await resolvePersonas({
-    cwd: opts.cwd,
-    personaOverrides: cfg.personaOverrides
-  });
-  const lines = ["pi-conductor doctor", ""];
-  lines.push(`## Personas (${resolved.personas.size} resolved)`);
-  if (resolved.personas.size === 0) {
-    lines.push("  \u2717 no personas resolved");
-  } else {
-    const counts = countBySource(resolved);
-    lines.push(`  \u2713 builtin=${counts.builtin}, user=${counts.user}, project=${counts.project}`);
-  }
-  const shadowed = [...resolved.shadowed.entries()].filter(([, list]) => list.length > 1);
-  if (shadowed.length > 0) {
-    lines.push("");
-    lines.push("## Shadowed (overridden) personas");
-    for (const [name, list] of shadowed) {
-      const winning = list[list.length - 1];
-      lines.push(`  ${name}: ${list.length} sources, winning = ${winning.source}`);
-      for (const p of list) {
-        const marker = p === winning ? "  \u2713" : "   ";
-        lines.push(`    ${marker} ${p.source.padEnd(8)} ${p.sourcePath}`);
-      }
-    }
-  }
-  if (resolved.errors.length > 0) {
-    lines.push("");
-    lines.push(`## Persona parse errors (${resolved.errors.length})`);
-    for (const e of resolved.errors) {
-      lines.push(`  \u2717 ${e.path}`);
-      lines.push(`    ${e.reason}`);
-    }
-  }
-  if (configErrors.length > 0) {
-    lines.push("");
-    lines.push(`## Config errors (${configErrors.length})`);
-    for (const e of configErrors) {
-      lines.push(`  \u2717 ${e.path}`);
-      lines.push(`    ${e.reason}`);
-    }
-  }
-  const unknownOverrides = Object.keys(cfg.personaOverrides).filter(
-    (n) => !resolved.shadowed.has(n)
-  );
-  if (unknownOverrides.length > 0) {
-    lines.push("");
-    lines.push("## Unknown persona overrides");
-    for (const n of unknownOverrides) {
-      lines.push(`  \u26A0 override "${n}" does not match any persona`);
-    }
-  }
-  lines.push("");
-  lines.push("## Config files");
-  const userPath = userConfigPath();
-  const projectPath = projectConfigPath(opts.cwd);
-  lines.push(`  user:    ${existsSync5(userPath) ? "\u2713" : "\xB7"} ${userPath}`);
-  lines.push(`  project: ${existsSync5(projectPath) ? "\u2713" : "\xB7"} ${projectPath}`);
-  const home = opts.homeDir ?? homedir4();
-  const legacyDir = join5(home, ".pi", "agent", "extensions", "conductor");
-  const legacyJs = join5(legacyDir, "index.js");
-  const legacyTs = join5(legacyDir, "index.ts");
-  const legacyEntry = existsSync5(legacyJs) ? legacyJs : existsSync5(legacyTs) ? legacyTs : null;
-  if (legacyEntry !== null) {
-    lines.push("");
-    lines.push("## Legacy install path detected");
-    lines.push(`  \u26A0 ${legacyEntry}`);
-    lines.push(
-      "    pi-conductor is being auto-loaded from ~/.pi/agent/extensions/."
-    );
-    lines.push(
-      "    If it is also installed via settings.packages[] or `pi -e`, the"
-    );
-    lines.push(
-      "    dual-load can break persona discovery (0 personas resolved)."
-    );
-    lines.push(
-      `    Recommended fix: rm ${legacyEntry}  (the dir + config.json may stay).`
-    );
-  }
-  lines.push("");
-  lines.push("## Resolved config");
-  lines.push(`  defaultTimeoutMinutes: ${cfg.defaultTimeoutMinutes}`);
-  lines.push(`  maxConcurrent:         ${cfg.maxConcurrent}`);
-  lines.push(`  maxConcurrentWriteCapable: ${cfg.maxConcurrentWriteCapable}`);
-  lines.push(`  queueOnConcurrencyCap: ${cfg.queueOnConcurrencyCap}`);
-  lines.push(`  defaultSpawnMode:      ${cfg.defaultSpawnMode}`);
-  lines.push(`  autoOpenFocusOnSpawn:  ${cfg.autoOpenFocusOnSpawn}`);
-  lines.push(`  personaOverrides:      ${Object.keys(cfg.personaOverrides).length} entries`);
-  lines.push(`  conductorMode:         ${opts.conductorMode ? "ON" : "off"}`);
-  lines.push(
-    `  gc:                    ${cfg.gc.enabled ? "enabled" : "DISABLED"} (completed=${cfg.gc.completedTtlDays}d, failed=${cfg.gc.failedTtlDays}d, budget=${Math.round(cfg.gc.totalSizeBudgetBytes / (1024 * 1024 * 1024))}GB)`
-  );
-  lines.push(
-    `  gc auto:               ${cfg.gc.autoOnSessionStart ? "ON" : "off"} (debounce=${cfg.gc.autoDebounceHours}h)`
-  );
-  {
-    const root = opts.runsRoot ?? join5(opts.homeDir ?? homedir4(), ".pi", "agent", "conductor", "runs");
-    const lastMs = readLastGcMtime(root);
-    const lastStr = lastMs === null ? "never" : new Date(lastMs).toISOString().replace("T", " ").slice(0, 19) + " UTC";
-    lines.push(`  gc last run:           ${lastStr} (${lastGcMarkerPath(root)})`);
-  }
-  lines.push("");
-  lines.push("## Runtime");
-  lines.push(`  active:        ${opts.registry.countActive()}`);
-  lines.push(`  queued:        ${opts.queue.size()}`);
-  lines.push(`  total tracked: ${opts.registry.list().length}`);
-  return lines.join("\n");
-}
-function countBySource(resolved) {
-  const counts = { builtin: 0, user: 0, project: 0 };
-  for (const p of resolved.personas.values()) {
-    counts[p.source] = (counts[p.source] ?? 0) + 1;
-  }
-  return counts;
-}
-
-// src/history.ts
-var EXCERPT_MAX_CHARS = 120;
-function buildHistoryReport(deps, opts) {
-  const ids = deps.listRunIds();
-  const entries = [];
-  for (const id of ids) {
-    const record = deps.readRecord(id);
-    if (!record) continue;
-    entries.push({ id, record, mtime: deps.statMtime(id) });
-  }
-  if (entries.length === 0) {
-    return "no run history yet. Spawn a sub-agent with ensemble_spawn or /conductor and it'll show up here.";
-  }
-  entries.sort((a, b) => b.mtime - a.mtime);
-  const total = entries.length;
-  const shown = entries.slice(0, Math.max(0, opts.limit));
-  const lines = [];
-  lines.push(`run history \u2014 showing ${shown.length} of ${total}:`);
-  lines.push("");
-  for (const e of shown) {
-    const r = e.record;
-    const glyph = STATUS_GLYPH[r.status] ?? "\xB7";
-    const elapsed = elapsedStr(r.startTime, r.finishedAt);
-    const usage = formatUsage(r.usage);
-    const usagePart = usage ? ` [${usage}]` : "";
-    const head = `  ${glyph} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsed}${usagePart}`;
-    lines.push(head);
-    if (r.status === "completed") {
-      const final = deps.readFinalText(e.id);
-      if (final && final.trim()) {
-        const excerpt = truncate(collapseWhitespace(final), EXCERPT_MAX_CHARS);
-        lines.push(`      \u2192 "${excerpt}"`);
-      }
-    } else if (r.errorMessage) {
-      const excerpt = truncate(collapseWhitespace(r.errorMessage), EXCERPT_MAX_CHARS);
-      lines.push(`      \u2192 ${excerpt}`);
-    }
-  }
-  return lines.join("\n");
-}
-function truncate(s, max) {
-  if (s.length <= max) return s;
-  return s.slice(0, Math.max(0, max - 1)) + "\u2026";
-}
-function collapseWhitespace(s) {
-  return s.replace(/\s+/g, " ").trim();
-}
-
-// src/gc/pinning.ts
-import { existsSync as existsSync6 } from "node:fs";
-import { stat as stat2, unlink, writeFile as writeFile2 } from "node:fs/promises";
-import { join as join6 } from "node:path";
-var SIDECAR = ".pinned";
-async function pinRun(runsRoot2, agentId) {
-  const dir = join6(runsRoot2, agentId);
-  let st;
-  try {
-    st = await stat2(dir);
-  } catch {
-    throw new Error(`no such run directory: ${dir}`);
-  }
-  if (!st.isDirectory()) {
-    throw new Error(`not a directory: ${dir}`);
-  }
-  await writeFile2(join6(dir, SIDECAR), "");
-}
-async function unpinRun(runsRoot2, agentId) {
-  const path = join6(runsRoot2, agentId, SIDECAR);
-  try {
-    await unlink(path);
-  } catch (e) {
-    const err = e;
-    if (err && err.code === "ENOENT") return;
-    throw e;
-  }
-}
-function isPinned(runsRoot2, agentId) {
-  return existsSync6(join6(runsRoot2, agentId, SIDECAR));
-}
-
 // src/gc/inventory.ts
-import { readdir as readdir2, readFile as readFile2, stat as stat3 } from "node:fs/promises";
-import { existsSync as existsSync7 } from "node:fs";
-import { join as join7 } from "node:path";
+import { readdir as readdir2, readFile as readFile2, stat as stat2 } from "node:fs/promises";
+import { existsSync as existsSync5 } from "node:fs";
+import { join as join5 } from "node:path";
 async function safeStat(path) {
   try {
-    const s = await stat3(path);
+    const s = await stat2(path);
     return { size: s.size, mtimeMs: s.mtimeMs };
   } catch {
     return null;
@@ -1626,7 +1427,7 @@ async function safeStat(path) {
 }
 async function readRecord(runDir2) {
   try {
-    const text = await readFile2(join7(runDir2, "record.json"), "utf-8");
+    const text = await readFile2(join5(runDir2, "record.json"), "utf-8");
     const parsed = JSON.parse(text);
     if (typeof parsed.id !== "string" || typeof parsed.persona !== "string") {
       return null;
@@ -1637,8 +1438,8 @@ async function readRecord(runDir2) {
   }
 }
 async function detectSessionPath(runDir2) {
-  const sessionDir = join7(runDir2, "session");
-  if (!existsSync7(sessionDir)) return false;
+  const sessionDir = join5(runDir2, "session");
+  if (!existsSync5(sessionDir)) return false;
   try {
     const entries = await readdir2(sessionDir);
     return entries.some((e) => e.endsWith(".jsonl"));
@@ -1647,7 +1448,7 @@ async function detectSessionPath(runDir2) {
   }
 }
 async function walkInventory(runsRoot2, registry) {
-  if (!existsSync7(runsRoot2)) return [];
+  if (!existsSync5(runsRoot2)) return [];
   let entries;
   try {
     entries = await readdir2(runsRoot2);
@@ -1656,10 +1457,10 @@ async function walkInventory(runsRoot2, registry) {
   }
   const out = [];
   for (const id of entries) {
-    const runDir2 = join7(runsRoot2, id);
+    const runDir2 = join5(runsRoot2, id);
     let isDir = false;
     try {
-      isDir = (await stat3(runDir2)).isDirectory();
+      isDir = (await stat2(runDir2)).isDirectory();
     } catch {
       continue;
     }
@@ -1670,11 +1471,11 @@ async function walkInventory(runsRoot2, registry) {
 }
 async function buildEntry(id, runDir2, registry) {
   const record = await readRecord(runDir2);
-  const transcriptStat = await safeStat(join7(runDir2, "transcript.jsonl"));
-  const recordStat = await safeStat(join7(runDir2, "record.json"));
-  const finalStat = await safeStat(join7(runDir2, "final.md"));
-  const archivedStat = await safeStat(join7(runDir2, ".archived"));
-  const pinned = existsSync7(join7(runDir2, ".pinned"));
+  const transcriptStat = await safeStat(join5(runDir2, "transcript.jsonl"));
+  const recordStat = await safeStat(join5(runDir2, "record.json"));
+  const finalStat = await safeStat(join5(runDir2, "final.md"));
+  const archivedStat = await safeStat(join5(runDir2, ".archived"));
+  const pinned = existsSync5(join5(runDir2, ".pinned"));
   const sessionPathPresent = await detectSessionPath(runDir2);
   const inMemory = registry.get(id);
   const transcriptSizeBytes = transcriptStat?.size ?? 0;
@@ -1864,6 +1665,276 @@ function decideForEntry(entry, config, now, orphanThresholdMs) {
     };
   }
   return { kind: "keep", id: entry.id, reason: "within thresholds" };
+}
+
+// src/doctor.ts
+async function buildDoctorReport(opts) {
+  const { config: cfg, errors: configErrors } = loadConfigWithErrors(opts.cwd);
+  const resolved = await resolvePersonas({
+    cwd: opts.cwd,
+    personaOverrides: cfg.personaOverrides
+  });
+  const lines = ["pi-conductor doctor", ""];
+  lines.push(`## Personas (${resolved.personas.size} resolved)`);
+  if (resolved.personas.size === 0) {
+    lines.push("  \u2717 no personas resolved");
+  } else {
+    const counts = countBySource(resolved);
+    lines.push(`  \u2713 builtin=${counts.builtin}, user=${counts.user}, project=${counts.project}`);
+  }
+  const shadowed = [...resolved.shadowed.entries()].filter(([, list]) => list.length > 1);
+  if (shadowed.length > 0) {
+    lines.push("");
+    lines.push("## Shadowed (overridden) personas");
+    for (const [name, list] of shadowed) {
+      const winning = list[list.length - 1];
+      lines.push(`  ${name}: ${list.length} sources, winning = ${winning.source}`);
+      for (const p of list) {
+        const marker = p === winning ? "  \u2713" : "   ";
+        lines.push(`    ${marker} ${p.source.padEnd(8)} ${p.sourcePath}`);
+      }
+    }
+  }
+  if (resolved.errors.length > 0) {
+    lines.push("");
+    lines.push(`## Persona parse errors (${resolved.errors.length})`);
+    for (const e of resolved.errors) {
+      lines.push(`  \u2717 ${e.path}`);
+      lines.push(`    ${e.reason}`);
+    }
+  }
+  if (configErrors.length > 0) {
+    lines.push("");
+    lines.push(`## Config errors (${configErrors.length})`);
+    for (const e of configErrors) {
+      lines.push(`  \u2717 ${e.path}`);
+      lines.push(`    ${e.reason}`);
+    }
+  }
+  const unknownOverrides = Object.keys(cfg.personaOverrides).filter(
+    (n) => !resolved.shadowed.has(n)
+  );
+  if (unknownOverrides.length > 0) {
+    lines.push("");
+    lines.push("## Unknown persona overrides");
+    for (const n of unknownOverrides) {
+      lines.push(`  \u26A0 override "${n}" does not match any persona`);
+    }
+  }
+  lines.push("");
+  lines.push("## Config files");
+  const userPath = userConfigPath();
+  const projectPath = projectConfigPath(opts.cwd);
+  lines.push(`  user:    ${existsSync6(userPath) ? "\u2713" : "\xB7"} ${userPath}`);
+  lines.push(`  project: ${existsSync6(projectPath) ? "\u2713" : "\xB7"} ${projectPath}`);
+  const home = opts.homeDir ?? homedir4();
+  const legacyDir = join6(home, ".pi", "agent", "extensions", "conductor");
+  const legacyJs = join6(legacyDir, "index.js");
+  const legacyTs = join6(legacyDir, "index.ts");
+  const legacyEntry = existsSync6(legacyJs) ? legacyJs : existsSync6(legacyTs) ? legacyTs : null;
+  if (legacyEntry !== null) {
+    lines.push("");
+    lines.push("## Legacy install path detected");
+    lines.push(`  \u26A0 ${legacyEntry}`);
+    lines.push(
+      "    pi-conductor is being auto-loaded from ~/.pi/agent/extensions/."
+    );
+    lines.push(
+      "    If it is also installed via settings.packages[] or `pi -e`, the"
+    );
+    lines.push(
+      "    dual-load can break persona discovery (0 personas resolved)."
+    );
+    lines.push(
+      `    Recommended fix: rm ${legacyEntry}  (the dir + config.json may stay).`
+    );
+  }
+  lines.push("");
+  lines.push("## Resolved config");
+  lines.push(`  defaultTimeoutMinutes: ${cfg.defaultTimeoutMinutes}`);
+  lines.push(`  maxConcurrent:         ${cfg.maxConcurrent}`);
+  lines.push(`  maxConcurrentWriteCapable: ${cfg.maxConcurrentWriteCapable}`);
+  lines.push(`  queueOnConcurrencyCap: ${cfg.queueOnConcurrencyCap}`);
+  lines.push(`  defaultSpawnMode:      ${cfg.defaultSpawnMode}`);
+  lines.push(`  autoOpenFocusOnSpawn:  ${cfg.autoOpenFocusOnSpawn}`);
+  lines.push(`  personaOverrides:      ${Object.keys(cfg.personaOverrides).length} entries`);
+  lines.push(`  conductorMode:         ${opts.conductorMode ? "ON" : "off"}`);
+  lines.push(
+    `  gc:                    ${cfg.gc.enabled ? "enabled" : "DISABLED"} (completed=${cfg.gc.completedTtlDays}d, failed=${cfg.gc.failedTtlDays}d, budget=${Math.round(cfg.gc.totalSizeBudgetBytes / (1024 * 1024 * 1024))}GB)`
+  );
+  lines.push(
+    `  gc auto:               ${cfg.gc.autoOnSessionStart ? "ON" : "off"} (debounce=${cfg.gc.autoDebounceHours}h)`
+  );
+  {
+    const root = opts.runsRoot ?? join6(opts.homeDir ?? homedir4(), ".pi", "agent", "conductor", "runs");
+    const lastMs = readLastGcMtime(root);
+    const lastStr = lastMs === null ? "never" : new Date(lastMs).toISOString().replace("T", " ").slice(0, 19) + " UTC";
+    lines.push(`  gc last run:           ${lastStr} (${lastGcMarkerPath(root)})`);
+  }
+  {
+    const runsRoot2 = opts.runsRoot ?? join6(opts.homeDir ?? homedir4(), ".pi", "agent", "conductor", "runs");
+    lines.push("");
+    lines.push(`## Run records (under ${runsRoot2})`);
+    if (!existsSync6(runsRoot2)) {
+      lines.push("  (no run records)");
+    } else {
+      let inventory;
+      try {
+        inventory = await walkInventory(runsRoot2, opts.registry);
+      } catch {
+        inventory = [];
+      }
+      if (inventory.length === 0) {
+        lines.push("  (no run records)");
+      } else {
+        const totalBytes = inventory.reduce((s, e) => s + e.totalSizeBytes, 0);
+        const pinned = inventory.filter((e) => e.pinned);
+        const pinnedBytes = pinned.reduce((s, e) => s + e.totalSizeBytes, 0);
+        lines.push(
+          `  total:                 ${inventory.length} runs, ${formatBytes(totalBytes)} on disk`
+        );
+        lines.push(
+          `  pinned:                ${pinned.length} runs (${formatBytes(pinnedBytes)} protected)`
+        );
+        if (cfg.gc.enabled) {
+          const now = opts.now ?? Date.now();
+          const plan = planReclaim(inventory, cfg.gc, now);
+          let orphans = 0;
+          let archives = 0;
+          let archiveBytes = 0;
+          let deletes = 0;
+          let deleteBytes = 0;
+          for (const a of plan.actions) {
+            if (a.kind === "reconcile-orphan") orphans++;
+            else if (a.kind === "cold-archive") {
+              archives++;
+              archiveBytes += a.bytesReclaimed;
+            } else if (a.kind === "delete") {
+              deletes++;
+              deleteBytes += a.bytesReclaimed;
+            }
+          }
+          lines.push(
+            `  orphaned:              ${orphans} records (status=running but stale, not in registry)`
+          );
+          lines.push(
+            `  next eviction (dry):   ${archives} archive (~${formatBytes(archiveBytes)}), ${deletes} delete (~${formatBytes(deleteBytes)})`
+          );
+        } else {
+          let orphans = 0;
+          for (const e of inventory) {
+            if (e.status === "running" && e.inMemory === void 0) orphans++;
+          }
+          lines.push(
+            `  orphaned:              ${orphans} records (status=running but stale, not in registry)`
+          );
+          lines.push(`  (GC disabled)`);
+        }
+      }
+    }
+  }
+  lines.push("");
+  lines.push("## Runtime");
+  lines.push(`  active:        ${opts.registry.countActive()}`);
+  lines.push(`  queued:        ${opts.queue.size()}`);
+  lines.push(`  total tracked: ${opts.registry.list().length}`);
+  return lines.join("\n");
+}
+function countBySource(resolved) {
+  const counts = { builtin: 0, user: 0, project: 0 };
+  for (const p of resolved.personas.values()) {
+    counts[p.source] = (counts[p.source] ?? 0) + 1;
+  }
+  return counts;
+}
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  const kb = n / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  const gb = mb / 1024;
+  return `${gb.toFixed(2)} GB`;
+}
+
+// src/history.ts
+var EXCERPT_MAX_CHARS = 120;
+function buildHistoryReport(deps, opts) {
+  const ids = deps.listRunIds();
+  const entries = [];
+  for (const id of ids) {
+    const record = deps.readRecord(id);
+    if (!record) continue;
+    entries.push({ id, record, mtime: deps.statMtime(id) });
+  }
+  if (entries.length === 0) {
+    return "no run history yet. Spawn a sub-agent with ensemble_spawn or /conductor and it'll show up here.";
+  }
+  entries.sort((a, b) => b.mtime - a.mtime);
+  const total = entries.length;
+  const shown = entries.slice(0, Math.max(0, opts.limit));
+  const lines = [];
+  lines.push(`run history \u2014 showing ${shown.length} of ${total}:`);
+  lines.push("");
+  for (const e of shown) {
+    const r = e.record;
+    const glyph = STATUS_GLYPH[r.status] ?? "\xB7";
+    const elapsed = elapsedStr(r.startTime, r.finishedAt);
+    const usage = formatUsage(r.usage);
+    const usagePart = usage ? ` [${usage}]` : "";
+    const head = `  ${glyph} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsed}${usagePart}`;
+    lines.push(head);
+    if (r.status === "completed") {
+      const final = deps.readFinalText(e.id);
+      if (final && final.trim()) {
+        const excerpt = truncate(collapseWhitespace(final), EXCERPT_MAX_CHARS);
+        lines.push(`      \u2192 "${excerpt}"`);
+      }
+    } else if (r.errorMessage) {
+      const excerpt = truncate(collapseWhitespace(r.errorMessage), EXCERPT_MAX_CHARS);
+      lines.push(`      \u2192 ${excerpt}`);
+    }
+  }
+  return lines.join("\n");
+}
+function truncate(s, max) {
+  if (s.length <= max) return s;
+  return s.slice(0, Math.max(0, max - 1)) + "\u2026";
+}
+function collapseWhitespace(s) {
+  return s.replace(/\s+/g, " ").trim();
+}
+
+// src/gc/pinning.ts
+import { existsSync as existsSync7 } from "node:fs";
+import { stat as stat3, unlink, writeFile as writeFile2 } from "node:fs/promises";
+import { join as join7 } from "node:path";
+var SIDECAR = ".pinned";
+async function pinRun(runsRoot2, agentId) {
+  const dir = join7(runsRoot2, agentId);
+  let st;
+  try {
+    st = await stat3(dir);
+  } catch {
+    throw new Error(`no such run directory: ${dir}`);
+  }
+  if (!st.isDirectory()) {
+    throw new Error(`not a directory: ${dir}`);
+  }
+  await writeFile2(join7(dir, SIDECAR), "");
+}
+async function unpinRun(runsRoot2, agentId) {
+  const path = join7(runsRoot2, agentId, SIDECAR);
+  try {
+    await unlink(path);
+  } catch (e) {
+    const err = e;
+    if (err && err.code === "ENOENT") return;
+    throw e;
+  }
+}
+function isPinned(runsRoot2, agentId) {
+  return existsSync7(join7(runsRoot2, agentId, SIDECAR));
 }
 
 // src/gc/reconcile.ts

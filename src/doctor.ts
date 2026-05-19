@@ -18,6 +18,8 @@ import type { RunRegistry } from "./runs.ts";
 import type { SpawnQueue } from "./queue.ts";
 import type { PersonaResolution } from "./types.ts";
 import { lastGcMarkerPath, readLastGcMtime } from "./gc/last-gc.ts";
+import { walkInventory } from "./gc/inventory.ts";
+import { planReclaim } from "./gc/policy.ts";
 
 export interface DoctorReportOptions {
   cwd: string;
@@ -35,6 +37,12 @@ export interface DoctorReportOptions {
    * path without touching the real `~/.pi/agent/conductor/runs`.
    */
   runsRoot?: string;
+  /**
+   * Override `Date.now()` for the v0.9 Slice 7 next-eviction preview.
+   * Lets tests inject a deterministic clock when classifying orphans /
+   * eviction candidates without touching the real wall-clock.
+   */
+  now?: number;
 }
 
 export async function buildDoctorReport(opts: DoctorReportOptions): Promise<string> {
@@ -175,6 +183,79 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
     lines.push(`  gc last run:           ${lastStr} (${lastGcMarkerPath(root)})`);
   }
 
+  // v0.9 Slice 7: Run-record disk usage + next-eviction preview.
+  // Reads the runs/ directory once via walkInventory, then runs a
+  // dry-run plan via planReclaim. No I/O beyond stat()s. Slice 5
+  // already surfaces gc enabled / last-gc-mtime above; this section
+  // adds the operational story (how many records, how big, how many
+  // pinned, how many orphaned, what the next gc pass would do).
+  {
+    const runsRoot = opts.runsRoot ?? join(opts.homeDir ?? homedir(), ".pi", "agent", "conductor", "runs");
+    lines.push("");
+    lines.push(`## Run records (under ${runsRoot})`);
+    if (!existsSync(runsRoot)) {
+      lines.push("  (no run records)");
+    } else {
+      let inventory: Awaited<ReturnType<typeof walkInventory>>;
+      try {
+        inventory = await walkInventory(runsRoot, opts.registry);
+      } catch {
+        inventory = [];
+      }
+      if (inventory.length === 0) {
+        lines.push("  (no run records)");
+      } else {
+        const totalBytes = inventory.reduce((s, e) => s + e.totalSizeBytes, 0);
+        const pinned = inventory.filter((e) => e.pinned);
+        const pinnedBytes = pinned.reduce((s, e) => s + e.totalSizeBytes, 0);
+        lines.push(
+          `  total:                 ${inventory.length} runs, ${formatBytes(totalBytes)} on disk`,
+        );
+        lines.push(
+          `  pinned:                ${pinned.length} runs (${formatBytes(pinnedBytes)} protected)`,
+        );
+
+        if (cfg.gc.enabled) {
+          const now = opts.now ?? Date.now();
+          const plan = planReclaim(inventory, cfg.gc, now);
+          let orphans = 0;
+          let archives = 0;
+          let archiveBytes = 0;
+          let deletes = 0;
+          let deleteBytes = 0;
+          for (const a of plan.actions) {
+            if (a.kind === "reconcile-orphan") orphans++;
+            else if (a.kind === "cold-archive") {
+              archives++;
+              archiveBytes += a.bytesReclaimed;
+            } else if (a.kind === "delete") {
+              deletes++;
+              deleteBytes += a.bytesReclaimed;
+            }
+          }
+          lines.push(
+            `  orphaned:              ${orphans} records (status=running but stale, not in registry)`,
+          );
+          lines.push(
+            `  next eviction (dry):   ${archives} archive (~${formatBytes(archiveBytes)}), ${deletes} delete (~${formatBytes(deleteBytes)})`,
+          );
+        } else {
+          // Still surface the orphan count even when gc is disabled,
+          // because operators care whether the records are stale
+          // regardless of whether reclaim is on.
+          let orphans = 0;
+          for (const e of inventory) {
+            if (e.status === "running" && e.inMemory === undefined) orphans++;
+          }
+          lines.push(
+            `  orphaned:              ${orphans} records (status=running but stale, not in registry)`,
+          );
+          lines.push(`  (GC disabled)`);
+        }
+      }
+    }
+  }
+
   lines.push("");
   lines.push("## Runtime");
   lines.push(`  active:        ${opts.registry.countActive()}`);
@@ -190,4 +271,15 @@ function countBySource(resolved: PersonaResolution): Record<string, number> {
     counts[p.source] = (counts[p.source] ?? 0) + 1;
   }
   return counts;
+}
+
+/** Compact human-readable byte size: 12 B / 4.2 KB / 1.7 GB. */
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const kb = n / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  const gb = mb / 1024;
+  return `${gb.toFixed(2)} GB`;
 }

@@ -12,6 +12,49 @@ import { buildDoctorReport } from "../src/doctor.ts";
 import { RunRegistry } from "../src/runs.ts";
 import { SpawnQueue } from "../src/queue.ts";
 import { userConfigPath } from "../src/config.ts";
+import { emptyUsage, type RunRecord, type RunStatus } from "../src/types.ts";
+
+/**
+ * Build a minimal run dir layout under <runsRoot>/<id>/ with a record.json,
+ * an optional transcript.jsonl of given byte size, and optional .pinned
+ * sidecar. Used by Slice 7 doctor tests to exercise the GC surface.
+ */
+function makeRun(
+  runsRoot: string,
+  id: string,
+  partial: {
+    persona?: string;
+    status?: RunStatus;
+    finishedAt?: number | null;
+    transcriptBytes?: number;
+    pinned?: boolean;
+  } = {},
+): void {
+  const runDir = join(runsRoot, id);
+  mkdirSync(runDir, { recursive: true });
+  const rec: RunRecord = {
+    id,
+    persona: partial.persona ?? "inspector",
+    task: "noop",
+    mode: "foreground",
+    status: partial.status ?? "completed",
+    startTime: 1_700_000_000_000,
+    finishedAt: partial.finishedAt ?? 1_700_000_010_000,
+    usage: emptyUsage(),
+    cwd: "/tmp",
+    recordPath: join(runDir, "record.json"),
+    transcriptPath: join(runDir, "transcript.jsonl"),
+    finalPath: join(runDir, "final.md"),
+  };
+  writeFileSync(rec.recordPath, JSON.stringify(rec));
+  const bytes = partial.transcriptBytes ?? 0;
+  if (bytes > 0) {
+    writeFileSync(rec.transcriptPath, "a".repeat(bytes));
+  }
+  if (partial.pinned) {
+    writeFileSync(join(runDir, ".pinned"), "");
+  }
+}
 
 interface Fx {
   root: string;
@@ -281,6 +324,192 @@ test("buildDoctorReport: gc last run shows ISO-ish timestamp once marker exists"
       runsRoot,
     });
     assert.match(out, /gc last run:\s+\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC/);
+  } finally {
+    teardown(fx);
+  }
+});
+
+// ── Slice 7: run-record disk usage + GC eviction preview ───────────
+
+test("buildDoctorReport: shows '(no run records)' when runs root is empty (Slice 7)", async () => {
+  const fx = setup();
+  try {
+    const reg = new RunRegistry();
+    const q = new SpawnQueue(reg, 4);
+    const runsRoot = join(fx.homeDir, ".pi", "agent", "conductor", "runs");
+    mkdirSync(runsRoot, { recursive: true });
+    const out = await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: q,
+      conductorMode: false,
+      homeDir: fx.homeDir,
+      runsRoot,
+    });
+    assert.match(out, /## Run records/);
+    assert.match(out, /\(no run records\)/);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("buildDoctorReport: surfaces total runs + bytes when records exist (Slice 7)", async () => {
+  const fx = setup();
+  try {
+    const reg = new RunRegistry();
+    const q = new SpawnQueue(reg, 4);
+    const runsRoot = join(fx.homeDir, ".pi", "agent", "conductor", "runs");
+    mkdirSync(runsRoot, { recursive: true });
+    makeRun(runsRoot, "inspector-aaaa", { transcriptBytes: 1024 });
+    makeRun(runsRoot, "designer-bbbb", { persona: "designer", transcriptBytes: 2048 });
+    const out = await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: q,
+      conductorMode: false,
+      homeDir: fx.homeDir,
+      runsRoot,
+    });
+    assert.match(out, /## Run records/);
+    assert.match(out, /total:\s+2 runs/);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("buildDoctorReport: surfaces pinned count and bytes (Slice 7)", async () => {
+  const fx = setup();
+  try {
+    const reg = new RunRegistry();
+    const q = new SpawnQueue(reg, 4);
+    const runsRoot = join(fx.homeDir, ".pi", "agent", "conductor", "runs");
+    mkdirSync(runsRoot, { recursive: true });
+    makeRun(runsRoot, "inspector-aaaa", { transcriptBytes: 1024 });
+    makeRun(runsRoot, "designer-bbbb", { transcriptBytes: 2048, pinned: true });
+    makeRun(runsRoot, "planner-cccc", { pinned: true });
+    const out = await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: q,
+      conductorMode: false,
+      homeDir: fx.homeDir,
+      runsRoot,
+    });
+    assert.match(out, /pinned:\s+2 runs/);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("buildDoctorReport: surfaces orphan count when status=running but not in registry (Slice 7)", async () => {
+  const fx = setup();
+  try {
+    const reg = new RunRegistry();
+    const q = new SpawnQueue(reg, 4);
+    const runsRoot = join(fx.homeDir, ".pi", "agent", "conductor", "runs");
+    mkdirSync(runsRoot, { recursive: true });
+    makeRun(runsRoot, "inspector-aaaa", {
+      status: "running",
+      finishedAt: null,
+      transcriptBytes: 100,
+    });
+    makeRun(runsRoot, "designer-bbbb", {
+      status: "running",
+      finishedAt: null,
+      transcriptBytes: 100,
+    });
+    makeRun(runsRoot, "planner-cccc", { transcriptBytes: 100 });
+    const out = await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: q,
+      conductorMode: false,
+      homeDir: fx.homeDir,
+      runsRoot,
+      now: 1_800_000_000_000,
+    });
+    assert.match(out, /orphaned:\s+2 records/);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("buildDoctorReport: shows next-eviction preview as archive/delete counts + bytes (Slice 7)", async () => {
+  const fx = setup();
+  try {
+    const reg = new RunRegistry();
+    const q = new SpawnQueue(reg, 4);
+    const runsRoot = join(fx.homeDir, ".pi", "agent", "conductor", "runs");
+    mkdirSync(runsRoot, { recursive: true });
+    const projConfig = join(fx.projectDir, ".pi", "conductor.json");
+    writeFileSync(
+      projConfig,
+      JSON.stringify({
+        gc: {
+          enabled: true,
+          transcriptSizeCapBytes: 1024,
+          completedTtlDays: 30,
+          failedTtlDays: 60,
+          totalSizeBudgetBytes: 5 * 1024 * 1024 * 1024,
+          orphanTtlHours: 24,
+          autoOnSessionStart: true,
+          autoDebounceHours: 6,
+          perPersonaTtlDays: {},
+        },
+      }),
+    );
+    makeRun(runsRoot, "inspector-aaaa", { transcriptBytes: 4096 });
+    const out = await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: q,
+      conductorMode: false,
+      homeDir: fx.homeDir,
+      runsRoot,
+    });
+    assert.match(out, /next eviction/);
+    assert.match(out, /\d+ archive/);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("buildDoctorReport: omits next-eviction line when GC is disabled (Slice 7)", async () => {
+  const fx = setup();
+  try {
+    const reg = new RunRegistry();
+    const q = new SpawnQueue(reg, 4);
+    const runsRoot = join(fx.homeDir, ".pi", "agent", "conductor", "runs");
+    mkdirSync(runsRoot, { recursive: true });
+    const projConfig = join(fx.projectDir, ".pi", "conductor.json");
+    writeFileSync(
+      projConfig,
+      JSON.stringify({
+        gc: {
+          enabled: false,
+          completedTtlDays: 30,
+          failedTtlDays: 60,
+          totalSizeBudgetBytes: 5 * 1024 * 1024 * 1024,
+          transcriptSizeCapBytes: 100 * 1024 * 1024,
+          orphanTtlHours: 24,
+          autoOnSessionStart: true,
+          autoDebounceHours: 6,
+          perPersonaTtlDays: {},
+        },
+      }),
+    );
+    makeRun(runsRoot, "inspector-aaaa", { transcriptBytes: 1024 });
+    const out = await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: q,
+      conductorMode: false,
+      homeDir: fx.homeDir,
+      runsRoot,
+    });
+    assert.match(out, /## Run records/);
+    assert.doesNotMatch(out, /next eviction/);
+    assert.match(out, /\(GC disabled\)/);
   } finally {
     teardown(fx);
   }
