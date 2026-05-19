@@ -147,6 +147,13 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
   lines.push(`  autoOpenFocusOnSpawn:  ${cfg.autoOpenFocusOnSpawn}`);
   lines.push(`  personaOverrides:      ${Object.keys(cfg.personaOverrides).length} entries`);
   lines.push(`  conductorMode:         ${opts.conductorMode ? "ON" : "off"}`);
+  // v0.9 Slice 1: minimal GC surface. Slice 7 will polish with usage,
+  // next-eviction preview, and orphan count.
+  lines.push(
+    `  gc:                    ${cfg.gc.enabled ? "enabled" : "DISABLED"} ` +
+      `(completed=${cfg.gc.completedTtlDays}d, failed=${cfg.gc.failedTtlDays}d, ` +
+      `budget=${Math.round(cfg.gc.totalSizeBudgetBytes / (1024 * 1024 * 1024))}GB)`,
+  );
 
   lines.push("");
   lines.push("## Runtime");

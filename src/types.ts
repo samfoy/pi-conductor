@@ -93,6 +93,34 @@ export interface ConductorConfig {
   defaultMode: "on" | "off";
   personaOverrides: Record<string, PersonaOverride>;
   conductorPromptPath: string | null;
+  /**
+   * v0.9 — Run-record garbage collection (capstone). Default-on with
+   * conservative thresholds; the auto-on-session-start trigger is
+   * debounced and dry-run-logs the plan before reclaiming. See
+   * docs/v0.9-gc-design.md (D1–D8) for the policy semantics.
+   */
+  gc: GcConfig;
+}
+
+export interface GcConfig {
+  /** Master switch. When false, all GC paths (auto + manual) no-op. */
+  enabled: boolean;
+  /** Age (days) at which a `completed` run becomes delete-eligible (after cold-archive). */
+  completedTtlDays: number;
+  /** Age (days) for `failed`/`killed`/`timeout` runs. Diagnostic-gold; kept longer. */
+  failedTtlDays: number;
+  /** Total disk budget across all runs. Above this, largest non-pinned non-archived runs cold-archive first. */
+  totalSizeBudgetBytes: number;
+  /** Per-transcript cap. A single transcript exceeding this cold-archives regardless of age. */
+  transcriptSizeCapBytes: number;
+  /** Orphan-detection age in hours: a `running` record with no live process and stale mtime reconciles to `killed`. */
+  orphanReconcileAfterHours: number;
+  /** Auto-trigger on `session_start` (debounced). Disable to make GC manual-only. */
+  autoOnSessionStart: boolean;
+  /** Skip auto-GC if last GC ran within this window. */
+  autoDebounceHours: number;
+  /** Per-persona TTL override (days). Empty by default. Lets users shorten designer/planner without affecting other personas. */
+  perPersonaTtlDays: Record<string, number>;
 }
 
 export interface PersonaOverride {
@@ -114,6 +142,17 @@ export const DEFAULT_CONFIG: ConductorConfig = {
   defaultMode: "off",
   personaOverrides: {},
   conductorPromptPath: null,
+  gc: {
+    enabled: true,
+    completedTtlDays: 30,
+    failedTtlDays: 60,
+    totalSizeBudgetBytes: 5 * 1024 * 1024 * 1024,
+    transcriptSizeCapBytes: 100 * 1024 * 1024,
+    orphanReconcileAfterHours: 24,
+    autoOnSessionStart: true,
+    autoDebounceHours: 6,
+    perPersonaTtlDays: {},
+  },
 };
 
 // ── Run lifecycle types (v0.2) ────────────────────────────────────────

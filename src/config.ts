@@ -100,6 +100,50 @@ function mergeConfig(base: ConductorConfig, raw: unknown): ConductorConfig {
     out.conductorPromptPath = r.conductorPromptPath;
   }
 
+  if (r.gc && typeof r.gc === "object") {
+    out.gc = mergeGcConfig(out.gc, r.gc as Record<string, unknown>);
+  }
+
+  return out;
+}
+
+function mergeGcConfig(
+  base: ConductorConfig["gc"],
+  raw: Record<string, unknown>,
+): ConductorConfig["gc"] {
+  const out = { ...base };
+  if (typeof raw.enabled === "boolean") out.enabled = raw.enabled;
+  if (typeof raw.completedTtlDays === "number" && raw.completedTtlDays > 0) {
+    out.completedTtlDays = Math.floor(raw.completedTtlDays);
+  }
+  if (typeof raw.failedTtlDays === "number" && raw.failedTtlDays > 0) {
+    out.failedTtlDays = Math.floor(raw.failedTtlDays);
+  }
+  if (typeof raw.totalSizeBudgetBytes === "number" && raw.totalSizeBudgetBytes >= 0) {
+    out.totalSizeBudgetBytes = Math.floor(raw.totalSizeBudgetBytes);
+  }
+  if (typeof raw.transcriptSizeCapBytes === "number" && raw.transcriptSizeCapBytes >= 0) {
+    out.transcriptSizeCapBytes = Math.floor(raw.transcriptSizeCapBytes);
+  }
+  if (typeof raw.orphanReconcileAfterHours === "number" && raw.orphanReconcileAfterHours > 0) {
+    out.orphanReconcileAfterHours = raw.orphanReconcileAfterHours;
+  }
+  if (typeof raw.autoOnSessionStart === "boolean") {
+    out.autoOnSessionStart = raw.autoOnSessionStart;
+  }
+  if (typeof raw.autoDebounceHours === "number" && raw.autoDebounceHours >= 0) {
+    out.autoDebounceHours = raw.autoDebounceHours;
+  }
+  if (raw.perPersonaTtlDays && typeof raw.perPersonaTtlDays === "object") {
+    const incoming = raw.perPersonaTtlDays as Record<string, unknown>;
+    const merged = { ...out.perPersonaTtlDays };
+    for (const [name, days] of Object.entries(incoming)) {
+      if (typeof days === "number" && days > 0) {
+        merged[name] = Math.floor(days);
+      }
+    }
+    out.perPersonaTtlDays = merged;
+  }
   return out;
 }
 

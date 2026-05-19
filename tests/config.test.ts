@@ -400,3 +400,112 @@ test("loadConfig: maxConcurrentWriteCapable wrong type falls back to default", (
     teardown(fx);
   }
 });
+
+// ────────────────────────────────────────────────────────────────────
+// v0.9 — gc config block (Slice 1)
+// ────────────────────────────────────────────────────────────────────
+
+test("loadConfig: defaults populate gc block with conservative thresholds", () => {
+  const fx = setup();
+  try {
+    const cfg = loadConfig(fx.projectDir);
+    assert.equal(cfg.gc.enabled, true);
+    assert.equal(cfg.gc.completedTtlDays, 30);
+    assert.equal(cfg.gc.failedTtlDays, 60);
+    assert.equal(cfg.gc.totalSizeBudgetBytes, 5 * 1024 * 1024 * 1024);
+    assert.equal(cfg.gc.transcriptSizeCapBytes, 100 * 1024 * 1024);
+    assert.equal(cfg.gc.orphanReconcileAfterHours, 24);
+    assert.equal(cfg.gc.autoOnSessionStart, true);
+    assert.equal(cfg.gc.autoDebounceHours, 6);
+    assert.deepEqual(cfg.gc.perPersonaTtlDays, {});
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: partial gc overrides merge field-level over defaults", () => {
+  const fx = setup();
+  try {
+    writeUserConfig(
+      fx,
+      JSON.stringify({ gc: { completedTtlDays: 7, transcriptSizeCapBytes: 1024 } }),
+    );
+    const cfg = loadConfig(fx.projectDir);
+    assert.equal(cfg.gc.completedTtlDays, 7);
+    assert.equal(cfg.gc.transcriptSizeCapBytes, 1024);
+    assert.equal(cfg.gc.failedTtlDays, 60);
+    assert.equal(cfg.gc.enabled, true);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: gc rejects negative / wrong-typed values, keeps defaults", () => {
+  const fx = setup();
+  try {
+    writeUserConfig(
+      fx,
+      JSON.stringify({
+        gc: {
+          completedTtlDays: -5,
+          totalSizeBudgetBytes: "wrong",
+          autoOnSessionStart: "yes",
+          enabled: 1,
+          orphanReconcileAfterHours: 0,
+        },
+      }),
+    );
+    const cfg = loadConfig(fx.projectDir);
+    assert.equal(cfg.gc.completedTtlDays, 30);
+    assert.equal(cfg.gc.totalSizeBudgetBytes, 5 * 1024 * 1024 * 1024);
+    assert.equal(cfg.gc.autoOnSessionStart, true);
+    assert.equal(cfg.gc.enabled, true);
+    assert.equal(cfg.gc.orphanReconcileAfterHours, 24);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: project gc block layers over user gc block", () => {
+  const fx = setup();
+  try {
+    writeUserConfig(fx, JSON.stringify({ gc: { completedTtlDays: 7 } }));
+    writeProjectConfig(fx, JSON.stringify({ gc: { completedTtlDays: 14, failedTtlDays: 90 } }));
+    const cfg = loadConfig(fx.projectDir);
+    assert.equal(cfg.gc.completedTtlDays, 14);
+    assert.equal(cfg.gc.failedTtlDays, 90);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: gc.perPersonaTtlDays accepts positive numbers per persona", () => {
+  const fx = setup();
+  try {
+    writeUserConfig(
+      fx,
+      JSON.stringify({
+        gc: { perPersonaTtlDays: { designer: 14, planner: 21, bogus: -3, alsoBogus: "x" } },
+      }),
+    );
+    const cfg = loadConfig(fx.projectDir);
+    assert.equal(cfg.gc.perPersonaTtlDays["designer"], 14);
+    assert.equal(cfg.gc.perPersonaTtlDays["planner"], 21);
+    assert.equal(cfg.gc.perPersonaTtlDays["bogus"], undefined);
+    assert.equal(cfg.gc.perPersonaTtlDays["alsoBogus"], undefined);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: gc.enabled=false is honored as an explicit opt-out", () => {
+  const fx = setup();
+  try {
+    writeUserConfig(fx, JSON.stringify({ gc: { enabled: false, autoOnSessionStart: false } }));
+    const cfg = loadConfig(fx.projectDir);
+    assert.equal(cfg.gc.enabled, false);
+    assert.equal(cfg.gc.autoOnSessionStart, false);
+  } finally {
+    teardown(fx);
+  }
+});
