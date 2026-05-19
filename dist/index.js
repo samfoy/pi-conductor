@@ -4,7 +4,7 @@ import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
 
 // src/commands.ts
 import { existsSync as existsSync5, readdirSync as readdirSync2, readFileSync as readFileSync2, statSync as statSync2 } from "node:fs";
-import { join as join4 } from "node:path";
+import { join as join5 } from "node:path";
 
 // src/status-glyph.ts
 var STATUS_GLYPH = {
@@ -19,7 +19,7 @@ var STATUS_GLYPH = {
 
 // src/personas.ts
 import { readdir, readFile, stat } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -77,9 +77,12 @@ function isTerminal(s) {
 }
 
 // src/personas.ts
-function builtinPersonasDir() {
-  const here = fileURLToPath(import.meta.url);
+function resolveBuiltinPersonasDir(metaUrl) {
+  const here = realpathSync(fileURLToPath(metaUrl));
   return resolve(dirname(here), "..", "personas");
+}
+function builtinPersonasDir() {
+  return resolveBuiltinPersonasDir(import.meta.url);
 }
 function userPersonasDir() {
   return join(homedir(), ".pi", "agent", "conductor", "personas");
@@ -1230,6 +1233,8 @@ function elapsedStr(start, end) {
 
 // src/doctor.ts
 import { existsSync as existsSync4 } from "node:fs";
+import { homedir as homedir4 } from "node:os";
+import { join as join4 } from "node:path";
 async function buildDoctorReport(opts) {
   const { config: cfg, errors: configErrors } = loadConfigWithErrors(opts.cwd);
   const resolved = await resolvePersonas({
@@ -1289,6 +1294,28 @@ async function buildDoctorReport(opts) {
   const projectPath = projectConfigPath(opts.cwd);
   lines.push(`  user:    ${existsSync4(userPath) ? "\u2713" : "\xB7"} ${userPath}`);
   lines.push(`  project: ${existsSync4(projectPath) ? "\u2713" : "\xB7"} ${projectPath}`);
+  const home = opts.homeDir ?? homedir4();
+  const legacyDir = join4(home, ".pi", "agent", "extensions", "conductor");
+  const legacyJs = join4(legacyDir, "index.js");
+  const legacyTs = join4(legacyDir, "index.ts");
+  const legacyEntry = existsSync4(legacyJs) ? legacyJs : existsSync4(legacyTs) ? legacyTs : null;
+  if (legacyEntry !== null) {
+    lines.push("");
+    lines.push("## Legacy install path detected");
+    lines.push(`  \u26A0 ${legacyEntry}`);
+    lines.push(
+      "    pi-conductor is being auto-loaded from ~/.pi/agent/extensions/."
+    );
+    lines.push(
+      "    If it is also installed via settings.packages[] or `pi -e`, the"
+    );
+    lines.push(
+      "    dual-load can break persona discovery (0 personas resolved)."
+    );
+    lines.push(
+      `    Recommended fix: rm ${legacyEntry}  (the dir + config.json may stay).`
+    );
+  }
   lines.push("");
   lines.push("## Resolved config");
   lines.push(`  defaultTimeoutMinutes: ${cfg.defaultTimeoutMinutes}`);
@@ -1639,7 +1666,7 @@ function runHistory(_opts, ctx, arg) {
         }
       },
       readRecord: (id) => {
-        const p = join4(runDir(id), "record.json");
+        const p = join5(runDir(id), "record.json");
         try {
           return JSON.parse(readFileSync2(p, "utf8"));
         } catch {
@@ -1647,7 +1674,7 @@ function runHistory(_opts, ctx, arg) {
         }
       },
       readFinalText: (id) => {
-        const p = join4(runDir(id), "final.md");
+        const p = join5(runDir(id), "final.md");
         try {
           return readFileSync2(p, "utf8");
         } catch {
@@ -1656,7 +1683,7 @@ function runHistory(_opts, ctx, arg) {
       },
       statMtime: (id) => {
         try {
-          return statSync2(join4(runDir(id), "record.json")).mtimeMs;
+          return statSync2(join5(runDir(id), "record.json")).mtimeMs;
         } catch {
           try {
             return statSync2(runDir(id)).mtimeMs;
@@ -2860,7 +2887,7 @@ function isTerminalStatus(s) {
 
 // src/queue.ts
 import { mkdirSync as mkdirSync3 } from "node:fs";
-import { join as join5 } from "node:path";
+import { join as join6 } from "node:path";
 var SpawnQueue = class {
   constructor(registry, maxConcurrent) {
     this.registry = registry;
@@ -2911,9 +2938,9 @@ var SpawnQueue = class {
       messages: [],
       usage: emptyUsage(),
       cwd: opts.cwd,
-      recordPath: join5(dir, "record.json"),
-      transcriptPath: join5(dir, "transcript.jsonl"),
-      finalPath: join5(dir, "final.md")
+      recordPath: join6(dir, "record.json"),
+      transcriptPath: join6(dir, "transcript.jsonl"),
+      finalPath: join6(dir, "final.md")
     };
     registry.register(placeholder);
     const pending = {

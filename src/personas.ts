@@ -10,7 +10,7 @@
  */
 
 import { readdir, readFile, stat } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,14 +28,31 @@ import {
 // ── Discovery paths ────────────────────────────────────────────────────
 
 /**
+ * Resolve the path to the bundled `personas/` directory given a module URL.
+ *
+ * Exposed as a separate helper so it can be unit-tested with a fake
+ * symlinked layout. Production code calls {@link builtinPersonasDir}.
+ *
+ * Critical: the `realpathSync` call canonicalizes symlinks. Without it,
+ * loading the bundle through a legacy `~/.pi/agent/extensions/conductor/`
+ * symlink would walk `..` from the symlink path (e.g. `~/.pi/agent/extensions/`)
+ * instead of the real package root, and the `personas/` dir would not
+ * be found. See `docs/v0.9-symlink-investigation.md` for the failure mode.
+ */
+export function resolveBuiltinPersonasDir(metaUrl: string): string {
+  const here = realpathSync(fileURLToPath(metaUrl));
+  return resolve(dirname(here), "..", "personas");
+}
+
+/**
  * Resolve the path to the bundled `personas/` directory next to this source file.
- * Works whether the extension is loaded from src/ (dev) or after a publish.
+ * Works whether the extension is loaded from src/ (dev), after a publish, or via
+ * a legacy `~/.pi/agent/extensions/conductor/` symlink (canonicalized).
  */
 export function builtinPersonasDir(): string {
-  // Walk up from this file's location to find the `personas/` dir at package root.
+  // Walk up from this file's real path to find the `personas/` dir at package root.
   // This file: <pkg>/src/personas.ts → <pkg>/personas/
-  const here = fileURLToPath(import.meta.url);
-  return resolve(dirname(here), "..", "personas");
+  return resolveBuiltinPersonasDir(import.meta.url);
 }
 
 export function userPersonasDir(): string {

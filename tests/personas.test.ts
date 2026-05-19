@@ -4,10 +4,16 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { builtinPersonasDir, parseFrontmatter, resolvePersonas } from "../src/personas.ts";
+import { pathToFileURL } from "node:url";
+import {
+  builtinPersonasDir,
+  parseFrontmatter,
+  resolveBuiltinPersonasDir,
+  resolvePersonas,
+} from "../src/personas.ts";
 
 test("parseFrontmatter: empty body without frontmatter", () => {
   const r = parseFrontmatter("hello world");
@@ -261,4 +267,54 @@ test("personas: v0.8.1 inherit_context audit (PRD Open Q #16 fold-in)", () => {
       `persona '${name}' inherit_context drifted from v0.8.1 audit (expected '${expectedInherit}', got '${frontmatter.inherit_context}')`,
     );
   }
+});
+
+test("resolveBuiltinPersonasDir: canonicalizes through legacy symlink layout", () => {
+  // Reproduces the v0.8 failure mode: pi-conductor loaded via a legacy
+  // ~/.pi/agent/extensions/conductor/index.js symlink whose target lives
+  // at <pkg>/dist/index.js. Without realpathSync, walking `..` from the
+  // symlink path lands on ~/.pi/agent/extensions/, which has no
+  // personas/ dir, so 0 personas resolve.
+  const root = mkdtempSync(join(tmpdir(), "conductor-symlink-test-"));
+  // Real package layout: <root>/pkg/{dist/index.js, personas/<name>.md}
+  const pkgDir = join(root, "pkg");
+  const distDir = join(pkgDir, "dist");
+  const personasDir = join(pkgDir, "personas");
+  mkdirSync(distDir, { recursive: true });
+  mkdirSync(personasDir, { recursive: true });
+  const realDistFile = join(distDir, "index.js");
+  writeFileSync(realDistFile, "// fake bundle\n");
+  writeFileSync(
+    join(personasDir, "tester.md"),
+    "---\nname: tester\ndescription: t\n---\nbody",
+  );
+
+  // Legacy install: <root>/legacy/conductor/index.js -> <root>/pkg/dist/index.js
+  const legacyConductorDir = join(root, "legacy", "conductor");
+  mkdirSync(legacyConductorDir, { recursive: true });
+  const legacySymlink = join(legacyConductorDir, "index.js");
+  symlinkSync(realDistFile, legacySymlink);
+
+  // Caller-perspective: import.meta.url would resolve to the symlink path.
+  const symlinkUrl = pathToFileURL(legacySymlink).href;
+  const resolved = resolveBuiltinPersonasDir(symlinkUrl);
+
+  // Must resolve to the REAL package's personas/, not <root>/legacy/personas/.
+  assert.equal(resolved, personasDir);
+  assert.notEqual(resolved, join(root, "legacy", "personas"));
+});
+
+test("resolveBuiltinPersonasDir: passes through non-symlink paths unchanged", () => {
+  // Sanity: realpathSync on a real file is a no-op (modulo absolute-path
+  // canonicalization). The walk still lands on <pkg>/personas/.
+  const root = mkdtempSync(join(tmpdir(), "conductor-realpath-test-"));
+  const distDir = join(root, "dist");
+  const personasDir = join(root, "personas");
+  mkdirSync(distDir, { recursive: true });
+  mkdirSync(personasDir, { recursive: true });
+  const realFile = join(distDir, "index.js");
+  writeFileSync(realFile, "// real bundle\n");
+
+  const resolved = resolveBuiltinPersonasDir(pathToFileURL(realFile).href);
+  assert.equal(resolved, personasDir);
 });

@@ -1,3 +1,12 @@
+# pi-conductor — Handover (v0.7-era, archived)
+
+> **ARCHIVED 2026-05-19.** This document was the v0.7-era onboarding
+> guide. It contains stale defaults (e.g. the `mkdir + ln -s` install
+> snippet that produced the legacy-symlink dual-load failure addressed
+> in v0.9 — see `docs/v0.9-symlink-investigation.md`). It is preserved
+> for historical reference only. For current install / config / status
+> guidance, read `README.md` and `PRD.md`.
+
 # pi-conductor — Handover
 
 **Date:** 2026-05-15

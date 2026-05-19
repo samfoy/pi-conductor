@@ -137,3 +137,85 @@ test("buildDoctorReport: shows runtime active/queued counts", async () => {
     teardown(fx);
   }
 });
+
+test("buildDoctorReport: warns on legacy ~/.pi/agent/extensions/conductor/index.js", async () => {
+  const fx = setup();
+  try {
+    // Simulate the v0.8 failure mode: a legacy install symlink (or file)
+    // at ~/.pi/agent/extensions/conductor/index.js. The dir already exists
+    // (it houses config.json); the smell is the index.{js,ts} entry.
+    const legacyEntry = join(
+      fx.homeDir,
+      ".pi",
+      "agent",
+      "extensions",
+      "conductor",
+      "index.js",
+    );
+    writeFileSync(legacyEntry, "// pretend symlink target\n");
+
+    const reg = new RunRegistry();
+    const q = new SpawnQueue(reg, 4);
+    const out = await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: q,
+      conductorMode: false,
+      homeDir: fx.homeDir,
+    });
+    assert.match(out, /## Legacy install path detected/);
+    assert.match(out, /index\.js/);
+    assert.match(out, /Recommended fix:/);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("buildDoctorReport: also warns on legacy index.ts entry", async () => {
+  const fx = setup();
+  try {
+    const legacyEntry = join(
+      fx.homeDir,
+      ".pi",
+      "agent",
+      "extensions",
+      "conductor",
+      "index.ts",
+    );
+    writeFileSync(legacyEntry, "// pretend src symlink target\n");
+
+    const reg = new RunRegistry();
+    const q = new SpawnQueue(reg, 4);
+    const out = await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: q,
+      conductorMode: false,
+      homeDir: fx.homeDir,
+    });
+    assert.match(out, /## Legacy install path detected/);
+    assert.match(out, /index\.ts/);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("buildDoctorReport: omits legacy-install warning when no index entry exists", async () => {
+  const fx = setup();
+  try {
+    // setup() already creates ~/.pi/agent/extensions/conductor/ (for
+    // config.json). With NO index.{js,ts} inside, the warning must NOT fire.
+    const reg = new RunRegistry();
+    const q = new SpawnQueue(reg, 4);
+    const out = await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: q,
+      conductorMode: false,
+      homeDir: fx.homeDir,
+    });
+    assert.doesNotMatch(out, /## Legacy install path detected/);
+  } finally {
+    teardown(fx);
+  }
+});

@@ -63,11 +63,21 @@ npm install --registry https://registry.npmjs.org    # @earendil-works packages
 npm test
 
 # Load locally with pi (per session)
-pi -e /path/to/pi-conductor/src/index.ts
+pi -e /path/to/pi-conductor/dist/index.js
 
-# Or auto-load every session
-mkdir -p ~/.pi/agent/extensions/conductor
-ln -s /path/to/pi-conductor/src/index.ts ~/.pi/agent/extensions/conductor/index.ts
+# Or auto-load every session: add the package path to settings.packages[].
+# Edit ~/.pi/agent/settings.json and append the absolute repo root:
+#
+#   {
+#     "packages": [
+#       "/path/to/pi-conductor"
+#     ]
+#   }
+#
+# pi reads `pi.extensions` from the repo's package.json (./dist/index.js)
+# and loads it on every startup. Do NOT symlink into
+# ~/.pi/agent/extensions/conductor/ — the dual-load breaks persona
+# discovery. See docs/v0.9-symlink-investigation.md.
 ```
 
 > Conductor mode is **OFF by default** in v0.8 (was ON in v0.7). Three opt-in paths:

@@ -6,6 +6,8 @@
  */
 
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { resolvePersonas } from "./personas.ts";
 import {
   loadConfigWithErrors,
@@ -21,6 +23,11 @@ export interface DoctorReportOptions {
   registry: RunRegistry;
   queue: SpawnQueue;
   conductorMode: boolean;
+  /**
+   * Override $HOME for the legacy-install audit. Defaults to {@link homedir}.
+   * Lets tests stub the home dir without touching `process.env.HOME`.
+   */
+  homeDir?: string;
 }
 
 export async function buildDoctorReport(opts: DoctorReportOptions): Promise<string> {
@@ -95,6 +102,39 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
   const projectPath = projectConfigPath(opts.cwd);
   lines.push(`  user:    ${existsSync(userPath) ? "✓" : "·"} ${userPath}`);
   lines.push(`  project: ${existsSync(projectPath) ? "✓" : "·"} ${projectPath}`);
+
+  // Legacy-install audit. The dir at ~/.pi/agent/extensions/conductor/ is
+  // expected (it houses config.json), but an `index.{js,ts}` inside it means
+  // pi-conductor is being auto-discovered as a standalone extension in
+  // addition to whatever load path settings.packages[] (or `pi -e`) set up.
+  // The dual-load can resolve `import.meta.url` to the symlink path and
+  // break persona discovery silently. See docs/v0.9-symlink-investigation.md.
+  const home = opts.homeDir ?? homedir();
+  const legacyDir = join(home, ".pi", "agent", "extensions", "conductor");
+  const legacyJs = join(legacyDir, "index.js");
+  const legacyTs = join(legacyDir, "index.ts");
+  const legacyEntry = existsSync(legacyJs)
+    ? legacyJs
+    : existsSync(legacyTs)
+      ? legacyTs
+      : null;
+  if (legacyEntry !== null) {
+    lines.push("");
+    lines.push("## Legacy install path detected");
+    lines.push(`  ⚠ ${legacyEntry}`);
+    lines.push(
+      "    pi-conductor is being auto-loaded from ~/.pi/agent/extensions/.",
+    );
+    lines.push(
+      "    If it is also installed via settings.packages[] or `pi -e`, the",
+    );
+    lines.push(
+      "    dual-load can break persona discovery (0 personas resolved).",
+    );
+    lines.push(
+      `    Recommended fix: rm ${legacyEntry}  (the dir + config.json may stay).`,
+    );
+  }
 
   // Resolved settings.
   lines.push("");
