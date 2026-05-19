@@ -179,3 +179,38 @@ test("formatCompletionNotification: each terminal status produces a header that 
     assert.match(out.split("\n")[0]!, /`builder`/, `header for ${s} mentions persona`);
   }
 });
+
+// ── v0.8.1 Item 4: non-substantive-final-message warning ──────────────
+
+test("formatCompletionNotification: emits <warning> when run.nonSubstantiveFinal is set", () => {
+  const out = formatCompletionNotification(
+    makeRun({
+      nonSubstantiveFinal: {
+        reason: "too_short",
+        message: "Final assistant text is 18 chars (< 200); likely an orient-yourself preamble rather than the substantive report.",
+      },
+    }),
+  );
+  assert.match(out, /<warning reason="too_short">/);
+  assert.match(out, /18 chars/);
+  assert.match(out, /<\/warning>/);
+});
+
+test("formatCompletionNotification: omits <warning> when nonSubstantiveFinal is unset", () => {
+  const out = formatCompletionNotification(makeRun());
+  assert.doesNotMatch(out, /<warning/);
+});
+
+test("formatCompletionNotification: escapes XML special chars in warning message", () => {
+  const out = formatCompletionNotification(
+    makeRun({
+      nonSubstantiveFinal: {
+        reason: "orient_phrase",
+        message: 'Final text starts with "Let me check <any> & finalize…"',
+      },
+    }),
+  );
+  assert.match(out, /&lt;any&gt;/);
+  assert.match(out, /&amp;/);
+});
+

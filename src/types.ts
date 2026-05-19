@@ -183,6 +183,14 @@ export interface Run {
   usage: Usage;
   /** Latest tool-call summary for the live widget (e.g. "$ git diff"). */
   lastToolCall?: string;
+  /**
+   * Set on `completed`-bound runs whose final assistant message looks
+   * non-substantive (no terminal text, < 200 chars, or starts with an
+   * orient-yourself preamble). See `src/substance-check.ts`. Surfaced
+   * in the `<sub-agent-completed>` envelope as a `<warning>` line.
+   * Does NOT block completion — advisory only.
+   */
+  nonSubstantiveFinal?: { reason: string; message: string };
 
   /** Path to record.json for this run. */
   recordPath: string;

@@ -33,6 +33,12 @@ export function formatCompletionNotification(run: Run): string {
   if (run.errorMessage) {
     lines.push(`  <error>${escapeXml(run.errorMessage)}</error>`);
   }
+  if (run.nonSubstantiveFinal) {
+    lines.push(
+      `  <warning reason="${run.nonSubstantiveFinal.reason}">` +
+        `${escapeXml(run.nonSubstantiveFinal.message)}</warning>`,
+    );
+  }
   if (finalText) {
     lines.push("  <result>");
     lines.push(escapeXml(finalText));

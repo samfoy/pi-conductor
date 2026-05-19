@@ -640,6 +640,58 @@ function seedSessionFile(path, messages, cwd) {
   writeFileSync(path, lines.join("\n") + "\n");
 }
 
+// src/substance-check.ts
+var SUBSTANTIVE_MIN_CHARS = 200;
+var ORIENT_PHRASE_RE = /^\s*(let me|now i'?ll|next i'?ll|i'?ll now|i need to|let's|first[,]?\s+i)\b/i;
+function isNonSubstantiveFinalMessage(messages) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (!msg || msg.role !== "assistant") continue;
+    const content = msg.content;
+    if (!Array.isArray(content)) continue;
+    const texts = [];
+    let lastBlockKind;
+    for (const part of content) {
+      const kind = part?.type;
+      if (typeof kind === "string") lastBlockKind = kind;
+      if (kind === "text") {
+        const t = part.text;
+        if (typeof t === "string") texts.push(t);
+      }
+    }
+    const finalText = texts.join("").trim();
+    const lastIsThinking = typeof lastBlockKind === "string" && lastBlockKind.startsWith("thinking");
+    if (finalText.length === 0 || lastIsThinking) {
+      return {
+        warn: true,
+        reason: "no_text",
+        message: `Final assistant message contained no terminal text (last block: ${lastBlockKind ?? "<empty>"}).`
+      };
+    }
+    if (finalText.length < SUBSTANTIVE_MIN_CHARS) {
+      return {
+        warn: true,
+        reason: "too_short",
+        message: `Final assistant text is ${finalText.length} chars (< ${SUBSTANTIVE_MIN_CHARS}); likely an orient-yourself preamble rather than the substantive report.`
+      };
+    }
+    if (ORIENT_PHRASE_RE.test(finalText)) {
+      const preview = finalText.slice(0, 80).replace(/\s+/g, " ");
+      return {
+        warn: true,
+        reason: "orient_phrase",
+        message: `Final assistant text begins with an orient-yourself phrase ("${preview}\u2026"); likely the sub-agent stopped mid-plan.`
+      };
+    }
+    return { warn: false };
+  }
+  return {
+    warn: true,
+    reason: "no_text",
+    message: "Run produced no assistant messages."
+  };
+}
+
 // src/runs.ts
 function runsRoot() {
   return join3(homedir3(), ".pi", "agent", "conductor", "runs");
@@ -983,6 +1035,7 @@ function runPiSubprocess(run, piArgs, opts) {
     if (terminal === "failed" && !run.errorMessage) {
       run.errorMessage = stderr.trim() || `pi subprocess exited with code ${exitCode}`;
     }
+    applySubstanceCheck(run, terminal);
     discoverSessionPathIfMissing(run, opts.sessionDir);
     run.proc = void 0;
     opts.registry.notify(run);
@@ -1120,6 +1173,14 @@ function applyCloseHandlerTerminal(run, terminal, exitCode) {
   run.exitCode = exitCode;
   run.finishedAt = Date.now();
   return true;
+}
+function applySubstanceCheck(run, terminal) {
+  if (terminal !== "completed") return;
+  if (run.nonSubstantiveFinal) return;
+  const check = isNonSubstantiveFinalMessage(run.messages);
+  if (check.warn && check.reason && check.message) {
+    run.nonSubstantiveFinal = { reason: check.reason, message: check.message };
+  }
 }
 function forceTerminate(run, reason, registry, onComplete) {
   if (isTerminal(run.status)) return;
@@ -3115,6 +3176,11 @@ function formatCompletionNotification(run) {
   );
   if (run.errorMessage) {
     lines.push(`  <error>${escapeXml(run.errorMessage)}</error>`);
+  }
+  if (run.nonSubstantiveFinal) {
+    lines.push(
+      `  <warning reason="${run.nonSubstantiveFinal.reason}">${escapeXml(run.nonSubstantiveFinal.message)}</warning>`
+    );
   }
   if (finalText) {
     lines.push("  <result>");

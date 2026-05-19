@@ -26,6 +26,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { applyEvent } from "./event-handler.ts";
 import { filterParentContext } from "./context-filter.ts";
 import { seedSessionFile } from "./session-seed.ts";
+import { isNonSubstantiveFinalMessage } from "./substance-check.ts";
 import {
   emptyUsage,
   isTerminal,
@@ -722,6 +723,7 @@ function runPiSubprocess(
     if (terminal === "failed" && !run.errorMessage) {
       run.errorMessage = stderr.trim() || `pi subprocess exited with code ${exitCode}`;
     }
+    applySubstanceCheck(run, terminal);
     discoverSessionPathIfMissing(run, opts.sessionDir);
     run.proc = undefined;
     opts.registry.notify(run);
@@ -959,6 +961,26 @@ export function applyCloseHandlerTerminal(
   run.exitCode = exitCode;
   run.finishedAt = Date.now();
   return true;
+}
+
+/**
+ * v0.8.1 Item 4: when a run is about to flip to `completed`, run the
+ * substance heuristic against its message stream and stash any warning
+ * on `run.nonSubstantiveFinal` for the completion notification to
+ * surface. No-op for non-completed terminals (failed/killed/timeout
+ * already have an error story; the heuristic would create noisy false
+ * positives) and idempotent (won't overwrite an existing flag).
+ *
+ * Exported for unit-test access; production callsite is the `finalize`
+ * closure inside `attachLifecycleHandlers`.
+ */
+export function applySubstanceCheck(run: Run, terminal: RunStatus): void {
+  if (terminal !== "completed") return;
+  if (run.nonSubstantiveFinal) return;
+  const check = isNonSubstantiveFinalMessage(run.messages);
+  if (check.warn && check.reason && check.message) {
+    run.nonSubstantiveFinal = { reason: check.reason, message: check.message };
+  }
 }
 
 export function forceTerminate(

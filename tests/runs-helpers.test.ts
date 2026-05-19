@@ -37,6 +37,7 @@ import {
   RunRegistry,
   allocateRunId,
   applyCloseHandlerTerminal,
+  applySubstanceCheck,
   buildPiArgs,
   buildSubAgentPrompt,
   discoverSessionPathIfMissing,
@@ -809,4 +810,63 @@ test("bail path composition: after forceTerminate, discoverSessionPathIfMissing 
   } finally {
     rmSync(paths.dir, { recursive: true, force: true });
   }
+});
+
+// ── applySubstanceCheck (v0.8.1 Item 4) ───────────────────────────
+//
+// The integration seam: finalize() calls applySubstanceCheck(run, terminal)
+// only on the completed path; failed/killed/timeout paths skip it. These
+// tests pin that contract without spawning a real subprocess.
+
+function asstMessage(text: string): AgentMessage {
+  return {
+    role: "assistant",
+    content: [{ type: "text", text }],
+  } as unknown as AgentMessage;
+}
+
+test("applySubstanceCheck: completed run with short final text sets nonSubstantiveFinal", () => {
+  const run = makeRun({ status: "completed", messages: [asstMessage("Done.")] });
+  applySubstanceCheck(run, "completed");
+  assert.equal(run.nonSubstantiveFinal?.reason, "too_short");
+  assert.match(run.nonSubstantiveFinal!.message, /5 chars/);
+});
+
+test("applySubstanceCheck: completed run with substantive text leaves the field unset", () => {
+  const longText =
+    "## Verdict\n\nAll three slices land cleanly. The regression net pins each " +
+    "branch with byte-exact assertions; mutation tests confirm teeth on the load-bearing " +
+    "checks. No drift detected vs the design or the PRD locks. Ship it.";
+  const run = makeRun({ status: "completed", messages: [asstMessage(longText)] });
+  applySubstanceCheck(run, "completed");
+  assert.equal(run.nonSubstantiveFinal, undefined);
+});
+
+test("applySubstanceCheck: failed terminal does NOT trigger the heuristic", () => {
+  const run = makeRun({ status: "failed", messages: [asstMessage("x")] });
+  applySubstanceCheck(run, "failed");
+  assert.equal(run.nonSubstantiveFinal, undefined);
+});
+
+test("applySubstanceCheck: killed terminal does NOT trigger the heuristic", () => {
+  const run = makeRun({ status: "killed", messages: [asstMessage("Let me check.")] });
+  applySubstanceCheck(run, "killed");
+  assert.equal(run.nonSubstantiveFinal, undefined);
+});
+
+test("applySubstanceCheck: timeout terminal does NOT trigger the heuristic", () => {
+  const run = makeRun({ status: "timeout", messages: [asstMessage("Now I'll inspect.")] });
+  applySubstanceCheck(run, "timeout");
+  assert.equal(run.nonSubstantiveFinal, undefined);
+});
+
+test("applySubstanceCheck: idempotent — a second call does not overwrite the existing flag", () => {
+  const run = makeRun({
+    status: "completed",
+    messages: [asstMessage("Brief.")],
+    nonSubstantiveFinal: { reason: "existing", message: "prior warning" },
+  });
+  applySubstanceCheck(run, "completed");
+  assert.equal(run.nonSubstantiveFinal?.reason, "existing");
+  assert.equal(run.nonSubstantiveFinal?.message, "prior warning");
 });
