@@ -1090,6 +1090,30 @@ export function resumeRun(
 
 // ── Persistence ──────────────────────────────────────────────────────
 
+/**
+ * Public best-effort wrapper that mutates a `Run` to a terminal state
+ * and persists `record.json`. Used by
+ * `src/shutdown.ts.handleSessionShutdown`'s A1 reconcile path — the
+ * orphan-creation window where SIGTERM has fired but no other code
+ * path will call `writeRecord` before the runtime tears down.
+ *
+ * Idempotent and exception-swallowing per the rest of the
+ * lifecycle's persistence semantics. Returns the `Promise` from
+ * `writeRecord` so callers may await if they want, but the
+ * convention is fire-and-forget (`void reconcileRecord(...)`).
+ */
+export async function reconcileRecord(
+  run: Run,
+  status: RunStatus,
+  errorMessage: string,
+  finishedAt: number,
+): Promise<void> {
+  run.status = status;
+  run.finishedAt = finishedAt;
+  run.errorMessage = errorMessage;
+  await writeRecord(run);
+}
+
 async function writeRecord(run: Run): Promise<void> {
   try {
     await mkdir(dirname(run.recordPath), { recursive: true });

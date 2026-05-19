@@ -165,3 +165,89 @@ for (const reason of ["new", "resume", "fork"] as const) {
     assert.equal(resetCalls, 1, `sanitizer reset for reason=${reason}`);
   });
 }
+
+// ─────────────────────────────────────────────────────────────────
+// A1: orphan reconciliation on shutdown (reason !== "reload")
+// ─────────────────────────────────────────────────────────────────
+//
+// Without this hook, `session_shutdown` reason="quit" SIGTERMs running
+// children but never updates their `record.json` — leaving disk frozen at
+// `status: "running"` until the next session_start runs the GC orphan
+// sweep. Closes oracle amendment A1 / inspector surprise #1.
+
+interface ReconcileCall {
+  runs: Run[];
+  reason: string;
+}
+
+test("handleSessionShutdown: reason=quit reconciles running/paused runs after SIGTERM", () => {
+  const kills: KillRecord[] = [];
+  const reconciled: ReconcileCall[] = [];
+  const runs: Run[] = [
+    makeRun("a", "running", kills),
+    makeRun("b", "paused", kills),
+    makeRun("c", "completed", kills),
+    makeRun("d", "queued", kills),
+  ];
+  handleSessionShutdown(
+    { reason: "quit" },
+    {
+      runs,
+      resetSanitizer: () => {},
+      reconcileRunning: (rs, reason) => reconciled.push({ runs: rs, reason }),
+    },
+  );
+  assert.equal(reconciled.length, 1, "reconcileRunning called once");
+  const ids = reconciled[0]!.runs.map((r) => r.id).sort();
+  assert.deepEqual(ids, ["a", "b"], "only running/paused passed to reconciler");
+  assert.equal(reconciled[0]!.reason, "quit", "reason forwarded for marker construction");
+});
+
+test("handleSessionShutdown: reason=reload does NOT call reconcileRunning (lifecycle preservation, 1c72856)", () => {
+  const kills: KillRecord[] = [];
+  const reconciled: ReconcileCall[] = [];
+  const runs: Run[] = [makeRun("a", "running", kills), makeRun("b", "paused", kills)];
+  handleSessionShutdown(
+    { reason: "reload" },
+    {
+      runs,
+      resetSanitizer: () => {},
+      reconcileRunning: (rs, reason) => reconciled.push({ runs: rs, reason }),
+    },
+  );
+  assert.equal(reconciled.length, 0, "reload skips the reconciler entirely");
+});
+
+test("handleSessionShutdown: reconcileRunning errors are swallowed (best-effort)", () => {
+  const kills: KillRecord[] = [];
+  let resetCalls = 0;
+  const runs: Run[] = [makeRun("a", "running", kills)];
+  assert.doesNotThrow(() =>
+    handleSessionShutdown(
+      { reason: "quit" },
+      {
+        runs,
+        resetSanitizer: () => resetCalls++,
+        reconcileRunning: () => {
+          throw new Error("disk full");
+        },
+      },
+    ),
+  );
+  assert.equal(resetCalls, 1, "sanitizer.reset still runs after reconciler throws");
+});
+
+test("handleSessionShutdown: no running/paused runs skips reconcileRunning", () => {
+  const kills: KillRecord[] = [];
+  const reconciled: ReconcileCall[] = [];
+  const runs: Run[] = [makeRun("a", "completed", kills), makeRun("b", "queued", kills)];
+  handleSessionShutdown(
+    { reason: "quit" },
+    {
+      runs,
+      resetSanitizer: () => {},
+      reconcileRunning: (rs, reason) => reconciled.push({ runs: rs, reason }),
+    },
+  );
+  assert.equal(reconciled.length, 0, "reconcileRunning not called when nothing was active");
+});

@@ -32,7 +32,7 @@ import { loadConfig } from "./config.ts";
 import { FocusedStreamModel } from "./focused-stream-model.ts";
 import { createFocusedOverlayComponent } from "./focused-overlay-factory.ts";
 import { installFocusedOverlayShortcut } from "./focused-overlay-shortcut.ts";
-import { forceTerminate, resolveTimeoutMs, sendToRun, validateSendable } from "./runs.ts";
+import { forceTerminate, reconcileRecord, resolveTimeoutMs, sendToRun, validateSendable } from "./runs.ts";
 import type { Run } from "./types.ts";
 import { resolveInitialConductorMode } from "./conductor-mode.ts";
 import { installCompactionHook } from "./compaction-hook.ts";
@@ -314,6 +314,15 @@ export default function (pi: ExtensionAPI): void {
     handleSessionShutdown(event, {
       runs: registry.list(),
       resetSanitizer: () => sanitizerHook.reset(),
+      // A1: close the orphan-creation window. SIGTERM races the runtime
+      // teardown; without this the on-disk record stays "running" until
+      // the next session_start runs the GC orphan sweep.
+      reconcileRunning: (runs, reason) => {
+        const now = Date.now();
+        for (const r of runs) {
+          void reconcileRecord(r, "killed", `shutdown: ${reason}`, now);
+        }
+      },
     });
     ctxRef = null;
   });

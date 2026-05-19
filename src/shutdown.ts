@@ -53,6 +53,23 @@ export interface ShutdownDeps {
    * symmetry with the "leave reload alone" invariant.
    */
   resetSanitizer: () => void;
+  /**
+   * Reconcile the on-disk `record.json` of each running/paused run
+   * after SIGTERM. Closes the orphan-creation window flagged by
+   * inspector surprise #1 and oracle amendment A1: without this,
+   * `session_shutdown` reason="quit" leaves records frozen at
+   * `status: "running"` until the next session_start runs the GC
+   * orphan sweep. With this hook, the record flips to `killed` with a
+   * shutdown-reason marker before the runtime tears down.
+   *
+   * Best-effort, fire-and-forget. Skipped on reason="reload" so the
+   * v0.8.2 lifecycle preservation feature (commit 1c72856) keeps its
+   * "don't touch records on developer reload" invariant.
+   *
+   * Optional so existing test fixtures and the unit-tests don't need
+   * to wire it; production sites in src/index.ts always provide it.
+   */
+  reconcileRunning?: (runs: Run[], reason: ShutdownEventLike["reason"]) => void;
 }
 
 /**
@@ -70,13 +87,23 @@ export function handleSessionShutdown(
   deps: ShutdownDeps,
 ): void {
   if (event.reason === "reload") return;
+  const stillActive: Run[] = [];
   for (const r of deps.runs) {
     if (r.status === "running" || r.status === "paused") {
+      stillActive.push(r);
       try {
         r.proc?.kill("SIGTERM");
       } catch {
         // already dead — non-fatal
       }
+    }
+  }
+  if (stillActive.length > 0 && deps.reconcileRunning) {
+    try {
+      deps.reconcileRunning(stillActive, event.reason);
+    } catch {
+      // best-effort — orphan sweep on next session_start picks up
+      // anything we missed
     }
   }
   deps.resetSanitizer();

@@ -115,6 +115,14 @@ test("planReclaim: in-memory run with non-terminal status (no proc) → keep", (
   const inv = [makeEntry({ id: "paused-dddd", status: "paused", inMemory: live })];
   const plan = planReclaim(inv, defaultGcConfig(), NOW);
   assert.equal(plan.actions[0]!.kind, "keep");
+  // F-S1.3: pin the exact reason so removing rule 1 (active-in-registry
+  // gate) flips the action to a non-keep kind — without this assertion,
+  // a mutated rule 1 would still keep paused entries via rule 3 / 9 and
+  // the test would silently pass.
+  assert.match(
+    (plan.actions[0] as { reason: string }).reason,
+    /active in registry/,
+  );
 });
 
 // ────────────────────────────────────────────────────────────────────
@@ -213,6 +221,53 @@ test("planReclaim: archived run beyond TTL → delete (uses completedTtlDays)", 
   if (a.kind === "delete") {
     assert.ok(a.bytesReclaimed > 0);
   }
+});
+
+// F-S1.1 (slice 0 critic followup): TTL boundary mutation gap.
+// `policy.ts` uses `ageMs > ttlDays * DAY_MS` (strict greater-than).
+// At age == ttlDays*DAY_MS exactly the entry stays kept; mutating the
+// comparator to `>=` would flip this to delete. Pin the boundary so
+// MUT-B is caught.
+test("planReclaim: archived run with age === completedTtlDays * DAY_MS exactly → keep (boundary, F-S1.1)", () => {
+  const ttlDays = 30;
+  const inv = [
+    makeEntry({
+      id: "boundary-archive-kkkk",
+      status: "completed",
+      archived: true,
+      archivedAt: NOW - ttlDays * DAY_MS, // exact boundary
+    }),
+  ];
+  const plan = planReclaim(inv, defaultGcConfig({ completedTtlDays: ttlDays }), NOW);
+  assert.equal(
+    plan.actions[0]!.kind,
+    "keep",
+    "strict `>` boundary: at age == ttl, the entry is kept; only age > ttl deletes",
+  );
+  assert.match((plan.actions[0] as { reason: string }).reason, /archived; within TTL/);
+});
+
+// F-S1.2 (slice 0 critic followup): the dead `pinned (archived)` branch
+// in policy.ts has been removed because rule 5 (pinned + terminal)
+// already wins for any pinned archived entry (archived implies terminal).
+// Pin the invariant so a future change can't accidentally revive the
+// dead branch by reordering the rules.
+test("planReclaim: pinned + archived run is kept by rule 5, not the archived branch (F-S1.2)", () => {
+  const inv = [
+    makeEntry({
+      id: "pinned-archive-llll",
+      status: "completed",
+      archived: true,
+      archivedAt: NOW - 365 * DAY_MS, // way past TTL; archived branch would delete
+      pinned: true,
+    }),
+  ];
+  const plan = planReclaim(inv, defaultGcConfig({ completedTtlDays: 30 }), NOW);
+  assert.equal(plan.actions[0]!.kind, "keep");
+  // Rule 5's reason is the literal string "pinned" — the dead branch
+  // would have produced "pinned (archived)". Pinning the exact reason
+  // string locks the rule order.
+  assert.equal((plan.actions[0] as { reason: string }).reason, "pinned");
 });
 
 test("planReclaim: failed-status archived run uses failedTtlDays", () => {

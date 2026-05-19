@@ -1314,6 +1314,12 @@ function resumeRun(run, registry, signaler = defaultSignaler) {
   void writeRecord(run);
   return true;
 }
+async function reconcileRecord(run, status, errorMessage, finishedAt) {
+  run.status = status;
+  run.finishedAt = finishedAt;
+  run.errorMessage = errorMessage;
+  await writeRecord(run);
+}
 async function writeRecord(run) {
   try {
     await mkdir(dirname3(run.recordPath), { recursive: true });
@@ -4131,12 +4137,20 @@ function installSanitizerHook(pi, opts) {
 // src/shutdown.ts
 function handleSessionShutdown(event, deps) {
   if (event.reason === "reload") return;
+  const stillActive = [];
   for (const r of deps.runs) {
     if (r.status === "running" || r.status === "paused") {
+      stillActive.push(r);
       try {
         r.proc?.kill("SIGTERM");
       } catch {
       }
+    }
+  }
+  if (stillActive.length > 0 && deps.reconcileRunning) {
+    try {
+      deps.reconcileRunning(stillActive, event.reason);
+    } catch {
     }
   }
   deps.resetSanitizer();
@@ -4342,7 +4356,16 @@ function index_default(pi) {
     }
     handleSessionShutdown(event, {
       runs: registry.list(),
-      resetSanitizer: () => sanitizerHook.reset()
+      resetSanitizer: () => sanitizerHook.reset(),
+      // A1: close the orphan-creation window. SIGTERM races the runtime
+      // teardown; without this the on-disk record stays "running" until
+      // the next session_start runs the GC orphan sweep.
+      reconcileRunning: (runs, reason) => {
+        const now = Date.now();
+        for (const r of runs) {
+          void reconcileRecord(r, "killed", `shutdown: ${reason}`, now);
+        }
+      }
     });
     ctxRef = null;
   });

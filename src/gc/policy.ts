@@ -203,9 +203,10 @@ function decideForEntry(
 
   // Rules 6/7: already-archived.
   if (entry.archived) {
-    if (entry.pinned) {
-      return { kind: "keep", id: entry.id, reason: "pinned (archived)" };
-    }
+    // Note: rule 5 above already handles `pinned + terminal` (and an
+    // archived entry is by definition terminal), so any pinned entry
+    // returns `keep` before we reach this branch. The archived path
+    // here only sees unpinned entries.
     const archivedAt = entry.archivedAt ?? entry.startTime;
     const ageMs = now - archivedAt;
     const ttlDays = ttlDaysFor(entry, config);
