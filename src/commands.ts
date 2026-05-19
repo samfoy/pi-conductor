@@ -13,6 +13,8 @@
  *   /conductor queue                 — show the spawn queue
  *   /conductor focus [agent-id]      — open the focused-stream overlay
  *   /conductor history [N]           — list past sub-agent runs (default 20)
+ *   /conductor pin <agent-id>        — pin a run (protect from GC)
+ *   /conductor unpin <agent-id>      — unpin a run
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
@@ -35,6 +37,7 @@ import {
 import { SpawnQueue } from "./queue.ts";
 import { buildDoctorReport } from "./doctor.ts";
 import { buildHistoryReport } from "./history.ts";
+import { isPinned, pinRun, unpinRun } from "./gc/pinning.ts";
 
 interface RegisterCommandsOpts {
   getCwd: () => string;
@@ -60,6 +63,8 @@ const SUBCOMMANDS = [
   "queue",
   "focus",
   "history",
+  "pin",
+  "unpin",
 ];
 
 export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): void {
@@ -118,6 +123,12 @@ export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): 
           return;
         case "history":
           runHistory(opts, ctx, subRest);
+          return;
+        case "pin":
+          await runPin(ctx, subRest);
+          return;
+        case "unpin":
+          await runUnpin(ctx, subRest);
           return;
         default:
           ctx.ui.notify(
@@ -417,4 +428,78 @@ function runHistory(
   );
 
   ctx.ui.notify(report, "info");
+}
+
+// ── Pinning subcommands (v0.9 GC slice 4) ─────────────────────
+
+/**
+ * Defense-in-depth on `<agent_id>` shape so a malicious-or-mistyped
+ * input cannot escape the runs dir via path traversal. Allocator
+ * outputs match `<persona>-<4hex>` (with an optional `-<timestamp>`
+ * collision-fallback suffix per `runs.ts:allocateRunId`); this regex
+ * is intentionally permissive of letters/digits/underscores/hyphens
+ * to tolerate future id formats while still rejecting `..`, `/`, etc.
+ */
+const AGENT_ID_RE = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
+
+/** Exported for unit tests; called from the slash dispatch above. */
+export async function runPin(
+  ctx: ExtensionCommandContext,
+  arg: string,
+): Promise<void> {
+  const id = arg.trim();
+  if (!id) {
+    ctx.ui.notify("usage: /conductor pin <agent-id>", "warning");
+    return;
+  }
+  if (!AGENT_ID_RE.test(id)) {
+    ctx.ui.notify(`invalid agent_id format: "${id}"`, "warning");
+    return;
+  }
+  const root = runsRoot();
+  if (!existsSync(join(root, id))) {
+    ctx.ui.notify(`No such run: ${id}`, "warning");
+    return;
+  }
+  if (isPinned(root, id)) {
+    ctx.ui.notify(`Already pinned: ${id}.`, "info");
+    return;
+  }
+  try {
+    await pinRun(root, id);
+    ctx.ui.notify(`Pinned ${id}.`, "info");
+  } catch (e: unknown) {
+    ctx.ui.notify(`pin failed: ${(e as Error)?.message ?? e}`, "warning");
+  }
+}
+
+/** Exported for unit tests; called from the slash dispatch above. */
+export async function runUnpin(
+  ctx: ExtensionCommandContext,
+  arg: string,
+): Promise<void> {
+  const id = arg.trim();
+  if (!id) {
+    ctx.ui.notify("usage: /conductor unpin <agent-id>", "warning");
+    return;
+  }
+  if (!AGENT_ID_RE.test(id)) {
+    ctx.ui.notify(`invalid agent_id format: "${id}"`, "warning");
+    return;
+  }
+  const root = runsRoot();
+  if (!existsSync(join(root, id))) {
+    ctx.ui.notify(`No such run: ${id}`, "warning");
+    return;
+  }
+  if (!isPinned(root, id)) {
+    ctx.ui.notify(`Not pinned: ${id}.`, "info");
+    return;
+  }
+  try {
+    await unpinRun(root, id);
+    ctx.ui.notify(`Unpinned ${id}.`, "info");
+  } catch (e: unknown) {
+    ctx.ui.notify(`unpin failed: ${(e as Error)?.message ?? e}`, "warning");
+  }
 }

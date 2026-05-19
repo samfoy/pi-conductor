@@ -3,8 +3,8 @@ import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
 
 // src/commands.ts
-import { existsSync as existsSync5, readdirSync as readdirSync2, readFileSync as readFileSync2, statSync as statSync2 } from "node:fs";
-import { join as join5 } from "node:path";
+import { existsSync as existsSync6, readdirSync as readdirSync2, readFileSync as readFileSync2, statSync as statSync2 } from "node:fs";
+import { join as join6 } from "node:path";
 
 // src/status-glyph.ts
 var STATUS_GLYPH = {
@@ -1530,6 +1530,38 @@ function collapseWhitespace(s) {
   return s.replace(/\s+/g, " ").trim();
 }
 
+// src/gc/pinning.ts
+import { existsSync as existsSync5 } from "node:fs";
+import { stat as stat2, unlink, writeFile as writeFile2 } from "node:fs/promises";
+import { join as join5 } from "node:path";
+var SIDECAR = ".pinned";
+async function pinRun(runsRoot2, agentId) {
+  const dir = join5(runsRoot2, agentId);
+  let st;
+  try {
+    st = await stat2(dir);
+  } catch {
+    throw new Error(`no such run directory: ${dir}`);
+  }
+  if (!st.isDirectory()) {
+    throw new Error(`not a directory: ${dir}`);
+  }
+  await writeFile2(join5(dir, SIDECAR), "");
+}
+async function unpinRun(runsRoot2, agentId) {
+  const path = join5(runsRoot2, agentId, SIDECAR);
+  try {
+    await unlink(path);
+  } catch (e) {
+    const err = e;
+    if (err && err.code === "ENOENT") return;
+    throw e;
+  }
+}
+function isPinned(runsRoot2, agentId) {
+  return existsSync5(join5(runsRoot2, agentId, SIDECAR));
+}
+
 // src/commands.ts
 var SUBCOMMANDS = [
   "list",
@@ -1543,7 +1575,9 @@ var SUBCOMMANDS = [
   "resume",
   "queue",
   "focus",
-  "history"
+  "history",
+  "pin",
+  "unpin"
 ];
 function registerCommands(pi, opts) {
   pi.registerCommand("conductor", {
@@ -1600,6 +1634,12 @@ function registerCommands(pi, opts) {
           return;
         case "history":
           runHistory(opts, ctx, subRest);
+          return;
+        case "pin":
+          await runPin(ctx, subRest);
+          return;
+        case "unpin":
+          await runUnpin(ctx, subRest);
           return;
         default:
           ctx.ui.notify(
@@ -1789,7 +1829,7 @@ function formatRunRow(r) {
 }
 function runHistory(_opts, ctx, arg) {
   const root = runsRoot();
-  if (!existsSync5(root)) {
+  if (!existsSync6(root)) {
     ctx.ui.notify(
       "no run history yet. Spawn a sub-agent and it'll show up here.",
       "info"
@@ -1808,7 +1848,7 @@ function runHistory(_opts, ctx, arg) {
         }
       },
       readRecord: (id) => {
-        const p = join5(runDir(id), "record.json");
+        const p = join6(runDir(id), "record.json");
         try {
           return JSON.parse(readFileSync2(p, "utf8"));
         } catch {
@@ -1816,7 +1856,7 @@ function runHistory(_opts, ctx, arg) {
         }
       },
       readFinalText: (id) => {
-        const p = join5(runDir(id), "final.md");
+        const p = join6(runDir(id), "final.md");
         try {
           return readFileSync2(p, "utf8");
         } catch {
@@ -1825,7 +1865,7 @@ function runHistory(_opts, ctx, arg) {
       },
       statMtime: (id) => {
         try {
-          return statSync2(join5(runDir(id), "record.json")).mtimeMs;
+          return statSync2(join6(runDir(id), "record.json")).mtimeMs;
         } catch {
           try {
             return statSync2(runDir(id)).mtimeMs;
@@ -1838,6 +1878,59 @@ function runHistory(_opts, ctx, arg) {
     { limit }
   );
   ctx.ui.notify(report, "info");
+}
+var AGENT_ID_RE = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
+async function runPin(ctx, arg) {
+  const id = arg.trim();
+  if (!id) {
+    ctx.ui.notify("usage: /conductor pin <agent-id>", "warning");
+    return;
+  }
+  if (!AGENT_ID_RE.test(id)) {
+    ctx.ui.notify(`invalid agent_id format: "${id}"`, "warning");
+    return;
+  }
+  const root = runsRoot();
+  if (!existsSync6(join6(root, id))) {
+    ctx.ui.notify(`No such run: ${id}`, "warning");
+    return;
+  }
+  if (isPinned(root, id)) {
+    ctx.ui.notify(`Already pinned: ${id}.`, "info");
+    return;
+  }
+  try {
+    await pinRun(root, id);
+    ctx.ui.notify(`Pinned ${id}.`, "info");
+  } catch (e) {
+    ctx.ui.notify(`pin failed: ${e?.message ?? e}`, "warning");
+  }
+}
+async function runUnpin(ctx, arg) {
+  const id = arg.trim();
+  if (!id) {
+    ctx.ui.notify("usage: /conductor unpin <agent-id>", "warning");
+    return;
+  }
+  if (!AGENT_ID_RE.test(id)) {
+    ctx.ui.notify(`invalid agent_id format: "${id}"`, "warning");
+    return;
+  }
+  const root = runsRoot();
+  if (!existsSync6(join6(root, id))) {
+    ctx.ui.notify(`No such run: ${id}`, "warning");
+    return;
+  }
+  if (!isPinned(root, id)) {
+    ctx.ui.notify(`Not pinned: ${id}.`, "info");
+    return;
+  }
+  try {
+    await unpinRun(root, id);
+    ctx.ui.notify(`Unpinned ${id}.`, "info");
+  } catch (e) {
+    ctx.ui.notify(`unpin failed: ${e?.message ?? e}`, "warning");
+  }
 }
 
 // src/tools.ts
@@ -3029,7 +3122,7 @@ function isTerminalStatus(s) {
 
 // src/queue.ts
 import { mkdirSync as mkdirSync3 } from "node:fs";
-import { join as join6 } from "node:path";
+import { join as join7 } from "node:path";
 var SpawnQueue = class {
   constructor(registry, maxConcurrent, maxConcurrentWriteCapable = 1) {
     this.registry = registry;
@@ -3089,9 +3182,9 @@ var SpawnQueue = class {
       messages: [],
       usage: emptyUsage(),
       cwd: opts.cwd,
-      recordPath: join6(dir, "record.json"),
-      transcriptPath: join6(dir, "transcript.jsonl"),
-      finalPath: join6(dir, "final.md")
+      recordPath: join7(dir, "record.json"),
+      transcriptPath: join7(dir, "transcript.jsonl"),
+      finalPath: join7(dir, "final.md")
     };
     registry.register(placeholder);
     const pending = {

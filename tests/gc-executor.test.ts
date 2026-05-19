@@ -298,3 +298,30 @@ test("executeReclaim: cold-archive preserves .pinned sidecar if present", async 
   assert.equal(existsSync(join(runDir, ".pinned")), true, ".pinned must survive cold-archive");
   assert.equal(existsSync(join(runDir, ".archived")), true);
 });
+
+// F-S3.3 followup from docs/v0.9-gc-slice3-critic.md §F-S3.3 —
+// `executor.ts:101-114` cold-archive on missing record/runDir branch
+// is reachable (race between plan and execute) but was not covered
+// by Slice 3's tests. Slice 4 adds the witness here.
+test("executeReclaim: cold-archive on missing runDir collects to failed[] (F-S3.3)", async () => {
+  const runsRoot = makeTempRunsRoot();
+  // Don't create any run dir — cold-archive against a vanished run.
+
+  const result = await executeReclaim(
+    [archiveAction("inspector-oooo")],
+    runsRoot,
+    new Set(),
+    NOW,
+  );
+
+  assert.equal(result.archived.length, 0);
+  assert.equal(result.deleted.length, 0);
+  assert.equal(result.failed.length, 1, "vanished cold-archive target → failed");
+  assert.equal(result.failed[0]?.agentId, "inspector-oooo");
+  assert.equal(result.failed[0]?.action, "cold-archive");
+  assert.match(
+    result.failed[0]?.error ?? "",
+    /runDir missing during cold-archive/,
+    "error message identifies the vanished-run cause",
+  );
+});
