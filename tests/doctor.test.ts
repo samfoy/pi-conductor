@@ -239,3 +239,49 @@ test("buildDoctorReport: surfaces maxConcurrentWriteCapable in Resolved config",
     teardown(fx);
   }
 });
+
+test("buildDoctorReport: surfaces gc auto trigger state and last-run timestamp (Slice 5)", async () => {
+  const fx = setup();
+  try {
+    const reg = new RunRegistry();
+    const q = new SpawnQueue(reg, 4);
+    const runsRoot = join(fx.homeDir, ".pi", "agent", "conductor", "runs");
+    mkdirSync(runsRoot, { recursive: true });
+    const out = await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: q,
+      conductorMode: false,
+      homeDir: fx.homeDir,
+      runsRoot,
+    });
+    assert.match(out, /gc:\s+enabled/);
+    assert.match(out, /gc auto:\s+ON\s+\(debounce=6h\)/);
+    assert.match(out, /gc last run:\s+never/);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("buildDoctorReport: gc last run shows ISO-ish timestamp once marker exists", async () => {
+  const fx = setup();
+  try {
+    const reg = new RunRegistry();
+    const q = new SpawnQueue(reg, 4);
+    const runsRoot = join(fx.homeDir, ".pi", "agent", "conductor", "runs");
+    mkdirSync(runsRoot, { recursive: true });
+    const { writeLastGcMtime } = await import("../src/gc/last-gc.ts");
+    writeLastGcMtime(runsRoot, 1_750_000_000_000);
+    const out = await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: q,
+      conductorMode: false,
+      homeDir: fx.homeDir,
+      runsRoot,
+    });
+    assert.match(out, /gc last run:\s+\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} UTC/);
+  } finally {
+    teardown(fx);
+  }
+});

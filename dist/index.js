@@ -3,8 +3,8 @@ import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
 
 // src/commands.ts
-import { existsSync as existsSync6, readdirSync as readdirSync2, readFileSync as readFileSync2, statSync as statSync2 } from "node:fs";
-import { join as join6 } from "node:path";
+import { existsSync as existsSync7, readdirSync as readdirSync2, readFileSync as readFileSync2, statSync as statSync3 } from "node:fs";
+import { join as join7 } from "node:path";
 
 // src/status-glyph.ts
 var STATUS_GLYPH = {
@@ -434,6 +434,17 @@ import { mkdir, writeFile, appendFile } from "node:fs/promises";
 import { homedir as homedir3 } from "node:os";
 import { dirname as dirname3, join as join3 } from "node:path";
 
+// src/gc/id-reuse.ts
+var recentlyDeletedIds = /* @__PURE__ */ new Set();
+function noteDeletedId(id) {
+  recentlyDeletedIds.add(id);
+}
+function noteAllocatedId(id, log = (l) => console.error(l)) {
+  if (recentlyDeletedIds.has(id)) {
+    log(`gc.id_reused: ${id}`);
+  }
+}
+
 // src/tool-summary.ts
 import { visibleWidth } from "@earendil-works/pi-tui";
 var MAX_SUMMARY_LEN = 50;
@@ -804,7 +815,10 @@ function shortHash() {
 function allocateRunId(persona, registry) {
   for (let i = 0; i < 32; i++) {
     const id = `${persona}-${shortHash()}`;
-    if (!registry.has(id) && !existsSync3(runDir(id))) return id;
+    if (!registry.has(id) && !existsSync3(runDir(id))) {
+      noteAllocatedId(id);
+      return id;
+    }
   }
   return `${persona}-${shortHash()}-${Date.now()}`;
 }
@@ -1370,9 +1384,36 @@ function elapsedStr(start, end) {
 }
 
 // src/doctor.ts
-import { existsSync as existsSync4 } from "node:fs";
+import { existsSync as existsSync5 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join4 } from "node:path";
+import { join as join5 } from "node:path";
+
+// src/gc/last-gc.ts
+import { existsSync as existsSync4, statSync as statSync2, utimesSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { dirname as dirname4, join as join4 } from "node:path";
+function lastGcMarkerPath(runsRoot2) {
+  return join4(dirname4(runsRoot2), ".last-gc");
+}
+function readLastGcMtime(runsRoot2) {
+  const path = lastGcMarkerPath(runsRoot2);
+  if (!existsSync4(path)) return null;
+  try {
+    return statSync2(path).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+function writeLastGcMtime(runsRoot2, now) {
+  const path = lastGcMarkerPath(runsRoot2);
+  try {
+    if (!existsSync4(path)) writeFileSync2(path, "");
+    const t = new Date(now);
+    utimesSync(path, t, t);
+  } catch {
+  }
+}
+
+// src/doctor.ts
 async function buildDoctorReport(opts) {
   const { config: cfg, errors: configErrors } = loadConfigWithErrors(opts.cwd);
   const resolved = await resolvePersonas({
@@ -1430,13 +1471,13 @@ async function buildDoctorReport(opts) {
   lines.push("## Config files");
   const userPath = userConfigPath();
   const projectPath = projectConfigPath(opts.cwd);
-  lines.push(`  user:    ${existsSync4(userPath) ? "\u2713" : "\xB7"} ${userPath}`);
-  lines.push(`  project: ${existsSync4(projectPath) ? "\u2713" : "\xB7"} ${projectPath}`);
+  lines.push(`  user:    ${existsSync5(userPath) ? "\u2713" : "\xB7"} ${userPath}`);
+  lines.push(`  project: ${existsSync5(projectPath) ? "\u2713" : "\xB7"} ${projectPath}`);
   const home = opts.homeDir ?? homedir4();
-  const legacyDir = join4(home, ".pi", "agent", "extensions", "conductor");
-  const legacyJs = join4(legacyDir, "index.js");
-  const legacyTs = join4(legacyDir, "index.ts");
-  const legacyEntry = existsSync4(legacyJs) ? legacyJs : existsSync4(legacyTs) ? legacyTs : null;
+  const legacyDir = join5(home, ".pi", "agent", "extensions", "conductor");
+  const legacyJs = join5(legacyDir, "index.js");
+  const legacyTs = join5(legacyDir, "index.ts");
+  const legacyEntry = existsSync5(legacyJs) ? legacyJs : existsSync5(legacyTs) ? legacyTs : null;
   if (legacyEntry !== null) {
     lines.push("");
     lines.push("## Legacy install path detected");
@@ -1467,6 +1508,15 @@ async function buildDoctorReport(opts) {
   lines.push(
     `  gc:                    ${cfg.gc.enabled ? "enabled" : "DISABLED"} (completed=${cfg.gc.completedTtlDays}d, failed=${cfg.gc.failedTtlDays}d, budget=${Math.round(cfg.gc.totalSizeBudgetBytes / (1024 * 1024 * 1024))}GB)`
   );
+  lines.push(
+    `  gc auto:               ${cfg.gc.autoOnSessionStart ? "ON" : "off"} (debounce=${cfg.gc.autoDebounceHours}h)`
+  );
+  {
+    const root = opts.runsRoot ?? join5(opts.homeDir ?? homedir4(), ".pi", "agent", "conductor", "runs");
+    const lastMs = readLastGcMtime(root);
+    const lastStr = lastMs === null ? "never" : new Date(lastMs).toISOString().replace("T", " ").slice(0, 19) + " UTC";
+    lines.push(`  gc last run:           ${lastStr} (${lastGcMarkerPath(root)})`);
+  }
   lines.push("");
   lines.push("## Runtime");
   lines.push(`  active:        ${opts.registry.countActive()}`);
@@ -1531,12 +1581,12 @@ function collapseWhitespace(s) {
 }
 
 // src/gc/pinning.ts
-import { existsSync as existsSync5 } from "node:fs";
+import { existsSync as existsSync6 } from "node:fs";
 import { stat as stat2, unlink, writeFile as writeFile2 } from "node:fs/promises";
-import { join as join5 } from "node:path";
+import { join as join6 } from "node:path";
 var SIDECAR = ".pinned";
 async function pinRun(runsRoot2, agentId) {
-  const dir = join5(runsRoot2, agentId);
+  const dir = join6(runsRoot2, agentId);
   let st;
   try {
     st = await stat2(dir);
@@ -1546,10 +1596,10 @@ async function pinRun(runsRoot2, agentId) {
   if (!st.isDirectory()) {
     throw new Error(`not a directory: ${dir}`);
   }
-  await writeFile2(join5(dir, SIDECAR), "");
+  await writeFile2(join6(dir, SIDECAR), "");
 }
 async function unpinRun(runsRoot2, agentId) {
-  const path = join5(runsRoot2, agentId, SIDECAR);
+  const path = join6(runsRoot2, agentId, SIDECAR);
   try {
     await unlink(path);
   } catch (e) {
@@ -1559,7 +1609,7 @@ async function unpinRun(runsRoot2, agentId) {
   }
 }
 function isPinned(runsRoot2, agentId) {
-  return existsSync5(join5(runsRoot2, agentId, SIDECAR));
+  return existsSync6(join6(runsRoot2, agentId, SIDECAR));
 }
 
 // src/commands.ts
@@ -1829,7 +1879,7 @@ function formatRunRow(r) {
 }
 function runHistory(_opts, ctx, arg) {
   const root = runsRoot();
-  if (!existsSync6(root)) {
+  if (!existsSync7(root)) {
     ctx.ui.notify(
       "no run history yet. Spawn a sub-agent and it'll show up here.",
       "info"
@@ -1848,7 +1898,7 @@ function runHistory(_opts, ctx, arg) {
         }
       },
       readRecord: (id) => {
-        const p = join6(runDir(id), "record.json");
+        const p = join7(runDir(id), "record.json");
         try {
           return JSON.parse(readFileSync2(p, "utf8"));
         } catch {
@@ -1856,7 +1906,7 @@ function runHistory(_opts, ctx, arg) {
         }
       },
       readFinalText: (id) => {
-        const p = join6(runDir(id), "final.md");
+        const p = join7(runDir(id), "final.md");
         try {
           return readFileSync2(p, "utf8");
         } catch {
@@ -1865,10 +1915,10 @@ function runHistory(_opts, ctx, arg) {
       },
       statMtime: (id) => {
         try {
-          return statSync2(join6(runDir(id), "record.json")).mtimeMs;
+          return statSync3(join7(runDir(id), "record.json")).mtimeMs;
         } catch {
           try {
-            return statSync2(runDir(id)).mtimeMs;
+            return statSync3(runDir(id)).mtimeMs;
           } catch {
             return 0;
           }
@@ -1891,7 +1941,7 @@ async function runPin(ctx, arg) {
     return;
   }
   const root = runsRoot();
-  if (!existsSync6(join6(root, id))) {
+  if (!existsSync7(join7(root, id))) {
     ctx.ui.notify(`No such run: ${id}`, "warning");
     return;
   }
@@ -1917,7 +1967,7 @@ async function runUnpin(ctx, arg) {
     return;
   }
   const root = runsRoot();
-  if (!existsSync6(join6(root, id))) {
+  if (!existsSync7(join7(root, id))) {
     ctx.ui.notify(`No such run: ${id}`, "warning");
     return;
   }
@@ -3122,7 +3172,7 @@ function isTerminalStatus(s) {
 
 // src/queue.ts
 import { mkdirSync as mkdirSync3 } from "node:fs";
-import { join as join7 } from "node:path";
+import { join as join8 } from "node:path";
 var SpawnQueue = class {
   constructor(registry, maxConcurrent, maxConcurrentWriteCapable = 1) {
     this.registry = registry;
@@ -3182,9 +3232,9 @@ var SpawnQueue = class {
       messages: [],
       usage: emptyUsage(),
       cwd: opts.cwd,
-      recordPath: join7(dir, "record.json"),
-      transcriptPath: join7(dir, "transcript.jsonl"),
-      finalPath: join7(dir, "final.md")
+      recordPath: join8(dir, "record.json"),
+      transcriptPath: join8(dir, "transcript.jsonl"),
+      finalPath: join8(dir, "final.md")
     };
     registry.register(placeholder);
     const pending = {
@@ -4073,6 +4123,540 @@ function installFocusedOverlayShortcut(ctx, options) {
   };
 }
 
+// src/gc/inventory.ts
+import { readdir as readdir2, readFile as readFile2, stat as stat3 } from "node:fs/promises";
+import { existsSync as existsSync8 } from "node:fs";
+import { join as join9 } from "node:path";
+async function safeStat(path) {
+  try {
+    const s = await stat3(path);
+    return { size: s.size, mtimeMs: s.mtimeMs };
+  } catch {
+    return null;
+  }
+}
+async function readRecord(runDir2) {
+  try {
+    const text = await readFile2(join9(runDir2, "record.json"), "utf-8");
+    const parsed = JSON.parse(text);
+    if (typeof parsed.id !== "string" || typeof parsed.persona !== "string") {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+async function detectSessionPath(runDir2) {
+  const sessionDir = join9(runDir2, "session");
+  if (!existsSync8(sessionDir)) return false;
+  try {
+    const entries = await readdir2(sessionDir);
+    return entries.some((e) => e.endsWith(".jsonl"));
+  } catch {
+    return false;
+  }
+}
+async function walkInventory(runsRoot2, registry) {
+  if (!existsSync8(runsRoot2)) return [];
+  let entries;
+  try {
+    entries = await readdir2(runsRoot2);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const id of entries) {
+    const runDir2 = join9(runsRoot2, id);
+    let isDir = false;
+    try {
+      isDir = (await stat3(runDir2)).isDirectory();
+    } catch {
+      continue;
+    }
+    if (!isDir) continue;
+    out.push(await buildEntry(id, runDir2, registry));
+  }
+  return out;
+}
+async function buildEntry(id, runDir2, registry) {
+  const record = await readRecord(runDir2);
+  const transcriptStat = await safeStat(join9(runDir2, "transcript.jsonl"));
+  const recordStat = await safeStat(join9(runDir2, "record.json"));
+  const finalStat = await safeStat(join9(runDir2, "final.md"));
+  const archivedStat = await safeStat(join9(runDir2, ".archived"));
+  const pinned = existsSync8(join9(runDir2, ".pinned"));
+  const sessionPathPresent = await detectSessionPath(runDir2);
+  const inMemory = registry.get(id);
+  const transcriptSizeBytes = transcriptStat?.size ?? 0;
+  const recordSizeBytes = recordStat?.size ?? 0;
+  const finalSizeBytes = finalStat?.size ?? 0;
+  const totalSizeBytes = transcriptSizeBytes + recordSizeBytes + finalSizeBytes;
+  if (!record) {
+    return {
+      id,
+      runDir: runDir2,
+      persona: "<unknown>",
+      status: "failed",
+      startTime: 0,
+      finishedAt: null,
+      transcriptMtime: transcriptStat?.mtimeMs ?? null,
+      transcriptSizeBytes,
+      recordSizeBytes,
+      finalSizeBytes,
+      totalSizeBytes,
+      pinned,
+      archived: archivedStat !== null,
+      archivedAt: archivedStat?.mtimeMs ?? null,
+      sessionPathPresent,
+      inMemory,
+      malformed: true
+    };
+  }
+  return {
+    id,
+    runDir: runDir2,
+    persona: record.persona,
+    status: record.status,
+    startTime: record.startTime,
+    finishedAt: record.finishedAt ?? null,
+    transcriptMtime: transcriptStat?.mtimeMs ?? null,
+    transcriptSizeBytes,
+    recordSizeBytes,
+    finalSizeBytes,
+    totalSizeBytes,
+    pinned,
+    archived: archivedStat !== null,
+    archivedAt: archivedStat?.mtimeMs ?? null,
+    sessionPathPresent,
+    inMemory,
+    malformed: false
+  };
+}
+
+// src/gc/policy.ts
+var HOUR_MS = 60 * 60 * 1e3;
+var DAY_MS = 24 * HOUR_MS;
+function ttlDaysFor(entry, config) {
+  const personaOverride = config.perPersonaTtlDays[entry.persona];
+  if (typeof personaOverride === "number" && personaOverride > 0) {
+    return personaOverride;
+  }
+  return entry.status === "completed" ? config.completedTtlDays : config.failedTtlDays;
+}
+function transcriptCapFor(_entry, config) {
+  return config.transcriptSizeCapBytes;
+}
+function planReclaim(inventory, config, now) {
+  if (!config.enabled) {
+    const totalBytes = inventory.reduce((s, e) => s + e.totalSizeBytes, 0);
+    return {
+      actions: inventory.map((e) => ({
+        kind: "keep",
+        id: e.id,
+        reason: "gc disabled"
+      })),
+      totalBytesBefore: totalBytes,
+      totalBytesReclaimed: 0,
+      pinnedBytes: inventory.filter((e) => e.pinned).reduce((s, e) => s + e.totalSizeBytes, 0),
+      runsLoseResume: 0
+    };
+  }
+  const orphanThresholdMs = now - config.orphanReconcileAfterHours * HOUR_MS;
+  const actions = [];
+  const eligibleForBudget = [];
+  for (const entry of inventory) {
+    const action = decideForEntry(entry, config, now, orphanThresholdMs);
+    actions.push(action);
+    if (action.kind === "keep" && action.reason === "within thresholds") {
+      eligibleForBudget.push(entry);
+    }
+  }
+  const totalBytesBefore = inventory.reduce((s, e) => s + e.totalSizeBytes, 0);
+  let projectedBytes = totalBytesBefore;
+  for (const a of actions) {
+    if (a.kind === "cold-archive" || a.kind === "delete") projectedBytes -= a.bytesReclaimed;
+  }
+  if (projectedBytes > config.totalSizeBudgetBytes && eligibleForBudget.length > 0) {
+    const ranked = [...eligibleForBudget].sort((a, b) => {
+      if (b.transcriptSizeBytes !== a.transcriptSizeBytes) {
+        return b.transcriptSizeBytes - a.transcriptSizeBytes;
+      }
+      return (a.finishedAt ?? a.startTime) - (b.finishedAt ?? b.startTime);
+    });
+    for (const entry of ranked) {
+      if (projectedBytes <= config.totalSizeBudgetBytes) break;
+      const idx = actions.findIndex((a) => a.id === entry.id);
+      if (idx === -1) continue;
+      const reclaim = entry.transcriptSizeBytes;
+      actions[idx] = {
+        kind: "cold-archive",
+        id: entry.id,
+        reason: "size-budget eviction (largest-first)",
+        bytesReclaimed: reclaim
+      };
+      projectedBytes -= reclaim;
+    }
+  }
+  let totalBytesReclaimed = 0;
+  let runsLoseResume = 0;
+  let pinnedBytes = 0;
+  for (let i = 0; i < actions.length; i++) {
+    const a = actions[i];
+    const e = inventory[i];
+    if (a.kind === "cold-archive" || a.kind === "delete") {
+      totalBytesReclaimed += a.bytesReclaimed;
+    }
+    if (a.kind === "delete" && e.sessionPathPresent) runsLoseResume++;
+    if (e.pinned) pinnedBytes += e.totalSizeBytes;
+  }
+  return {
+    actions,
+    totalBytesBefore,
+    totalBytesReclaimed,
+    pinnedBytes,
+    runsLoseResume
+  };
+}
+function decideForEntry(entry, config, now, orphanThresholdMs) {
+  if (entry.inMemory) {
+    const mem = entry.inMemory;
+    const proc = mem.proc;
+    if (proc !== void 0 || !isTerminal(mem.status)) {
+      return { kind: "keep", id: entry.id, reason: "active in registry" };
+    }
+  }
+  if (entry.status === "running" && !entry.inMemory) {
+    const ageBasis = entry.transcriptMtime ?? entry.startTime;
+    if (ageBasis < orphanThresholdMs) {
+      return {
+        kind: "reconcile-orphan",
+        id: entry.id,
+        reason: `orphaned: status=running, no live process, stale > ${config.orphanReconcileAfterHours}h`
+      };
+    }
+    return {
+      kind: "keep",
+      id: entry.id,
+      reason: "running but fresh; awaiting orphan TTL"
+    };
+  }
+  if (entry.malformed) {
+    return {
+      kind: "keep",
+      id: entry.id,
+      reason: "malformed record; surfaced for manual review"
+    };
+  }
+  if (entry.pinned && isTerminal(entry.status)) {
+    return { kind: "keep", id: entry.id, reason: "pinned" };
+  }
+  if (entry.archived) {
+    const archivedAt = entry.archivedAt ?? entry.startTime;
+    const ageMs = now - archivedAt;
+    const ttlDays = ttlDaysFor(entry, config);
+    if (ageMs > ttlDays * DAY_MS) {
+      return {
+        kind: "delete",
+        id: entry.id,
+        reason: `archived for > ${ttlDays}d`,
+        bytesReclaimed: entry.totalSizeBytes,
+        losesResume: entry.sessionPathPresent
+      };
+    }
+    return { kind: "keep", id: entry.id, reason: "archived; within TTL" };
+  }
+  if (isTerminal(entry.status) && entry.transcriptSizeBytes > transcriptCapFor(entry, config)) {
+    return {
+      kind: "cold-archive",
+      id: entry.id,
+      reason: `transcript-cap exceeded (${entry.transcriptSizeBytes} > ${transcriptCapFor(entry, config)})`,
+      bytesReclaimed: entry.transcriptSizeBytes
+    };
+  }
+  return { kind: "keep", id: entry.id, reason: "within thresholds" };
+}
+
+// src/gc/reconcile.ts
+import { readFile as readFile3, writeFile as writeFile3 } from "node:fs/promises";
+import { join as join10 } from "node:path";
+async function reconcileOrphans(actions, runsRoot2, now) {
+  const reconciled = [];
+  const failed = [];
+  for (const action of actions) {
+    if (action.kind !== "reconcile-orphan") continue;
+    const agentId = action.id;
+    const recordPath = join10(runsRoot2, agentId, "record.json");
+    let raw;
+    try {
+      raw = await readFile3(recordPath, "utf-8");
+    } catch (e) {
+      const err = e;
+      if (err && err.code === "ENOENT") {
+        continue;
+      }
+      failed.push({ agentId, error: String(e?.message ?? e) });
+      continue;
+    }
+    let record;
+    try {
+      record = JSON.parse(raw);
+    } catch (e) {
+      failed.push({ agentId, error: `parse error: ${e?.message ?? e}` });
+      continue;
+    }
+    if (record.status !== "running") {
+      continue;
+    }
+    const updated = {
+      ...record,
+      status: "killed",
+      finishedAt: now,
+      errorMessage: `${action.reason} (reconciled by GC)`
+    };
+    try {
+      await writeFile3(recordPath, JSON.stringify(updated, null, 2));
+      reconciled.push(agentId);
+    } catch (e) {
+      failed.push({ agentId, error: String(e?.message ?? e) });
+    }
+  }
+  return { reconciled, failed };
+}
+
+// src/gc/executor.ts
+import { readFile as readFile4, rm, stat as stat4, unlink as unlink2, utimes, writeFile as writeFile4, readdir as readdir3 } from "node:fs/promises";
+import { join as join11 } from "node:path";
+async function executeReclaim(actions, runsRoot2, registryActive, now) {
+  const archived = [];
+  const deleted = [];
+  const failed = [];
+  for (const action of actions) {
+    if (action.kind !== "cold-archive" && action.kind !== "delete") continue;
+    const agentId = action.id;
+    const runDir2 = join11(runsRoot2, agentId);
+    const actionKind = action.kind;
+    if (registryActive.has(agentId)) {
+      failed.push({
+        agentId,
+        action: actionKind,
+        error: "active during reclaim (registry has live proc)"
+      });
+      continue;
+    }
+    const recordPath = join11(runDir2, "record.json");
+    let record;
+    try {
+      const raw = await readFile4(recordPath, "utf-8");
+      record = JSON.parse(raw);
+    } catch (e) {
+      const err = e;
+      if (err && err.code === "ENOENT") {
+        if (actionKind === "delete") {
+          deleted.push({ agentId, bytesReclaimed: 0 });
+          continue;
+        }
+        failed.push({
+          agentId,
+          action: actionKind,
+          error: "runDir missing during cold-archive"
+        });
+        continue;
+      }
+      failed.push({
+        agentId,
+        action: actionKind,
+        error: `record read/parse error: ${e?.message ?? e}`
+      });
+      continue;
+    }
+    if (!isTerminal(record.status)) {
+      failed.push({
+        agentId,
+        action: actionKind,
+        error: `non-terminal status ${record.status} (changed since plan)`
+      });
+      continue;
+    }
+    if (actionKind === "cold-archive") {
+      try {
+        const bytes = await coldArchive(runDir2, now);
+        archived.push({ agentId, bytesReclaimed: bytes });
+      } catch (e) {
+        failed.push({
+          agentId,
+          action: actionKind,
+          error: `cold-archive failed: ${e?.message ?? e}`
+        });
+      }
+    } else {
+      try {
+        const bytes = await fullDelete(runDir2);
+        deleted.push({ agentId, bytesReclaimed: bytes });
+      } catch (e) {
+        failed.push({
+          agentId,
+          action: actionKind,
+          error: `delete failed: ${e?.message ?? e}`
+        });
+      }
+    }
+  }
+  return { archived, deleted, failed };
+}
+async function coldArchive(runDir2, now) {
+  const transcriptPath = join11(runDir2, "transcript.jsonl");
+  let bytes = 0;
+  try {
+    const s = await stat4(transcriptPath);
+    bytes = s.size;
+  } catch {
+  }
+  if (bytes > 0) {
+    try {
+      await unlink2(transcriptPath);
+    } catch (e) {
+      const err = e;
+      if (err?.code !== "ENOENT") throw e;
+      bytes = 0;
+    }
+  }
+  const sidecarPath = join11(runDir2, ".archived");
+  await writeFile4(sidecarPath, "");
+  const nowSec = now / 1e3;
+  await utimes(sidecarPath, nowSec, nowSec);
+  return bytes;
+}
+async function fullDelete(runDir2) {
+  let bytes = 0;
+  try {
+    bytes = await walkSize(runDir2);
+  } catch (e) {
+    const err = e;
+    if (err?.code === "ENOENT") return 0;
+    throw e;
+  }
+  await rm(runDir2, { recursive: true, force: true });
+  return bytes;
+}
+async function walkSize(path) {
+  let total = 0;
+  const entries = await readdir3(path, { withFileTypes: true });
+  for (const entry of entries) {
+    const child = join11(path, entry.name);
+    if (entry.isDirectory()) {
+      total += await walkSize(child);
+    } else if (entry.isFile()) {
+      try {
+        const s = await stat4(child);
+        total += s.size;
+      } catch {
+      }
+    }
+  }
+  return total;
+}
+
+// src/gc/index.ts
+var HOUR_MS2 = 60 * 60 * 1e3;
+function activeIdSet(registry) {
+  const out = /* @__PURE__ */ new Set();
+  for (const r of registry.list()) {
+    if (r.proc !== void 0) out.add(r.id);
+  }
+  return out;
+}
+function resolveNow(now) {
+  if (typeof now === "function") return now();
+  if (typeof now === "number") return now;
+  return Date.now();
+}
+async function runGc(opts) {
+  const startedAt = Date.now();
+  const now = resolveNow(opts.now);
+  const inventory = await walkInventory(opts.runsRoot, opts.registry);
+  const plan = planReclaim(inventory, opts.config, now);
+  const summary = countActions(plan.actions);
+  if (opts.dryRun) {
+    return {
+      scanned: inventory.length,
+      planSummary: summary,
+      reconciled: [],
+      archived: [],
+      deleted: [],
+      failed: [],
+      totalBytesReclaimed: 0,
+      runsLoseResume: plan.runsLoseResume,
+      durationMs: Math.max(1, Date.now() - startedAt)
+    };
+  }
+  const reconcileResult = await reconcileOrphans(plan.actions, opts.runsRoot, now);
+  const reclaimResult = await executeReclaim(
+    plan.actions,
+    opts.runsRoot,
+    activeIdSet(opts.registry),
+    now
+  );
+  for (const d of reclaimResult.deleted) noteDeletedId(d.agentId);
+  const totalBytesReclaimed = reclaimResult.archived.reduce((s, a) => s + a.bytesReclaimed, 0) + reclaimResult.deleted.reduce((s, a) => s + a.bytesReclaimed, 0);
+  const failed = [
+    ...reconcileResult.failed.map((f) => ({
+      agentId: f.agentId,
+      action: "reconcile",
+      error: f.error
+    })),
+    ...reclaimResult.failed.map((f) => ({
+      agentId: f.agentId,
+      action: f.action,
+      error: f.error
+    }))
+  ];
+  return {
+    scanned: inventory.length,
+    planSummary: summary,
+    reconciled: [...reconcileResult.reconciled],
+    archived: [...reclaimResult.archived],
+    deleted: [...reclaimResult.deleted],
+    failed,
+    totalBytesReclaimed,
+    runsLoseResume: plan.runsLoseResume,
+    durationMs: Math.max(1, Date.now() - startedAt)
+  };
+}
+function countActions(actions) {
+  let archive = 0;
+  let del = 0;
+  let reconcile = 0;
+  let keep = 0;
+  for (const a of actions) {
+    if (a.kind === "cold-archive") archive++;
+    else if (a.kind === "delete") del++;
+    else if (a.kind === "reconcile-orphan") reconcile++;
+    else keep++;
+  }
+  return { archive, delete: del, reconcile, keep };
+}
+async function maybeAutoRunGc(opts) {
+  if (!opts.config.enabled) return { ran: false, reason: "disabled" };
+  if (!opts.config.autoOnSessionStart) return { ran: false, reason: "auto-disabled" };
+  const now = resolveNow(opts.now);
+  const last = readLastGcMtime(opts.runsRoot);
+  const debounceMs = Math.max(0, opts.config.autoDebounceHours * HOUR_MS2);
+  if (!opts.force && last !== null && now - last < debounceMs) {
+    return { ran: false, reason: "debounced" };
+  }
+  const result = await runGc({ ...opts, now });
+  writeLastGcMtime(opts.runsRoot, now);
+  const log = opts.log ?? ((line) => console.error(line));
+  const sumPlan = result.planSummary;
+  const failedCount = result.failed.length;
+  const mb = (result.totalBytesReclaimed / (1024 * 1024)).toFixed(1);
+  log(
+    `gc auto: scanned=${result.scanned} archive=${sumPlan.archive} delete=${sumPlan.delete} reconcile=${sumPlan.reconcile} reclaimedMB=${mb} failed=${failedCount} dur=${result.durationMs}ms`
+  );
+  return { ran: true, result };
+}
+
 // src/conductor-mode.ts
 var OFF_TOKENS = /* @__PURE__ */ new Set(["0", "false", "off", "no"]);
 var ON_TOKENS = /* @__PURE__ */ new Set(["1", "true", "on", "yes"]);
@@ -4436,6 +5020,16 @@ function index_default(pi) {
       // Lives here (session-scoped) rather than in the overlay factory
       // (per-open) so re-opening the overlay does NOT stack listeners.
       subscribeToRegistry: () => registry.onChange(() => focusModel.refresh())
+    });
+    setImmediate(() => {
+      const cfg = loadConfig(cwd);
+      void maybeAutoRunGc({
+        runsRoot: runsRoot(),
+        config: cfg.gc,
+        registry
+      }).catch((err) => {
+        console.error(`gc auto: failed: ${err?.message ?? String(err)}`);
+      });
     });
   });
   pi.on("session_shutdown", async (event) => {

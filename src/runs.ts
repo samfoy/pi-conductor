@@ -23,6 +23,7 @@ import { mkdir, writeFile, appendFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { noteAllocatedId } from "./gc/id-reuse.ts";
 import { applyEvent } from "./event-handler.ts";
 import { filterParentContext } from "./context-filter.ts";
 import { seedSessionFile } from "./session-seed.ts";
@@ -144,7 +145,12 @@ function shortHash(): string {
 export function allocateRunId(persona: string, registry: Map<string, Run>): string {
   for (let i = 0; i < 32; i++) {
     const id = `${persona}-${shortHash()}`;
-    if (!registry.has(id) && !existsSync(runDir(id))) return id;
+    if (!registry.has(id) && !existsSync(runDir(id))) {
+      // v0.9 Slice 5 / oracle review R10: surface id-reuse-after-GC for
+      // tooling that cites run ids by name (vault notes, dashboards).
+      noteAllocatedId(id);
+      return id;
+    }
   }
   // Last resort — append timestamp for uniqueness.
   return `${persona}-${shortHash()}-${Date.now()}`;

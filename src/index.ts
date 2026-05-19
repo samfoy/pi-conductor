@@ -32,7 +32,8 @@ import { loadConfig } from "./config.ts";
 import { FocusedStreamModel } from "./focused-stream-model.ts";
 import { createFocusedOverlayComponent } from "./focused-overlay-factory.ts";
 import { installFocusedOverlayShortcut } from "./focused-overlay-shortcut.ts";
-import { forceTerminate, reconcileRecord, resolveTimeoutMs, sendToRun, validateSendable } from "./runs.ts";
+import { forceTerminate, reconcileRecord, resolveTimeoutMs, runsRoot, sendToRun, validateSendable } from "./runs.ts";
+import { maybeAutoRunGc } from "./gc/index.ts";
 import type { Run } from "./types.ts";
 import { resolveInitialConductorMode } from "./conductor-mode.ts";
 import { installCompactionHook } from "./compaction-hook.ts";
@@ -291,6 +292,22 @@ export default function (pi: ExtensionAPI): void {
       // Lives here (session-scoped) rather than in the overlay factory
       // (per-open) so re-opening the overlay does NOT stack listeners.
       subscribeToRegistry: () => registry.onChange(() => focusModel.refresh()),
+    });
+
+    // v0.9 Slice 5: auto-trigger GC on session_start, debounced + fire-
+    // and-forget. Bootstrap MUST NOT block on disk I/O — the orphan
+    // sweep + reclaim runs on the next event-loop tick. Per oracle R11
+    // the marker lives at <conductorRoot>/.last-gc, NOT under runs/.
+    setImmediate(() => {
+      const cfg = loadConfig(cwd);
+      void maybeAutoRunGc({
+        runsRoot: runsRoot(),
+        config: cfg.gc,
+        registry,
+      }).catch((err: unknown) => {
+        // Best-effort: never let GC break session bootstrap.
+        console.error(`gc auto: failed: ${(err as Error)?.message ?? String(err)}`);
+      });
     });
   });
 

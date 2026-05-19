@@ -17,6 +17,7 @@ import {
 import type { RunRegistry } from "./runs.ts";
 import type { SpawnQueue } from "./queue.ts";
 import type { PersonaResolution } from "./types.ts";
+import { lastGcMarkerPath, readLastGcMtime } from "./gc/last-gc.ts";
 
 export interface DoctorReportOptions {
   cwd: string;
@@ -28,6 +29,12 @@ export interface DoctorReportOptions {
    * Lets tests stub the home dir without touching `process.env.HOME`.
    */
   homeDir?: string;
+  /**
+   * Override the conductor runs root (parent of the runs/ dir). Used by
+   * the v0.9 Slice 5 "Last GC" surface so tests can stub the marker
+   * path without touching the real `~/.pi/agent/conductor/runs`.
+   */
+  runsRoot?: string;
 }
 
 export async function buildDoctorReport(opts: DoctorReportOptions): Promise<string> {
@@ -147,13 +154,26 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
   lines.push(`  autoOpenFocusOnSpawn:  ${cfg.autoOpenFocusOnSpawn}`);
   lines.push(`  personaOverrides:      ${Object.keys(cfg.personaOverrides).length} entries`);
   lines.push(`  conductorMode:         ${opts.conductorMode ? "ON" : "off"}`);
-  // v0.9 Slice 1: minimal GC surface. Slice 7 will polish with usage,
-  // next-eviction preview, and orphan count.
+  // v0.9 Slice 5: minimal GC autotrigger + last-run surface. Slice 7
+  // polishes with usage, next-eviction preview, and orphan count.
   lines.push(
     `  gc:                    ${cfg.gc.enabled ? "enabled" : "DISABLED"} ` +
       `(completed=${cfg.gc.completedTtlDays}d, failed=${cfg.gc.failedTtlDays}d, ` +
       `budget=${Math.round(cfg.gc.totalSizeBudgetBytes / (1024 * 1024 * 1024))}GB)`,
   );
+  lines.push(
+    `  gc auto:               ${cfg.gc.autoOnSessionStart ? "ON" : "off"} ` +
+      `(debounce=${cfg.gc.autoDebounceHours}h)`,
+  );
+  {
+    const root = opts.runsRoot ?? join(opts.homeDir ?? homedir(), ".pi", "agent", "conductor", "runs");
+    const lastMs = readLastGcMtime(root);
+    const lastStr =
+      lastMs === null
+        ? "never"
+        : new Date(lastMs).toISOString().replace("T", " ").slice(0, 19) + " UTC";
+    lines.push(`  gc last run:           ${lastStr} (${lastGcMarkerPath(root)})`);
+  }
 
   lines.push("");
   lines.push("## Runtime");
