@@ -246,7 +246,13 @@ export class FocusedStreamOverlay implements Component {
 
   render(width: number): string[] {
     const { model, theme } = this.opts;
-    model.refresh();
+    // Slice 11: render() is now a pure projection. The previous
+    // implementation called `model.refresh()` here as a side effect,
+    // which (a) made re-renders shift focus when the registry changed,
+    // (b) coupled rendering to model lifecycle, and (c) duplicated
+    // refresh work that the keystroke dispatch + registry-listener
+    // (registered by installFocusedOverlayShortcut, session-scoped) now
+    // own. See docs/v0.8.3-item3-plan.md "### Slice 11" + design row O6.
     const focused = model.focused();
     // Slice 9: footer is built (and styled) here, separately from the
     // body. We thread it through `applyThemeToLines` only when no theme
@@ -307,6 +313,13 @@ export class FocusedStreamOverlay implements Component {
   }
 
   handleInput(data: string): void {
+    // Slice 11: refresh the model on every keystroke, *before* dispatch.
+    // This replaces the side-effect refresh that used to live in
+    // render() — see the comment block above. Refreshing unconditionally
+    // (rather than only when the keystroke matches a binding) keeps the
+    // model fresh for any bindings whose dispatch reads the focused run
+    // (e.g. 'k' kill, 's' send, 'Tab' cycle).
+    this.opts.model.refresh();
     // Slice 9: dispatch via FOOTER_BINDINGS — single source of truth.
     // The bindings cover Esc, Tab/Sh-Tab, arrow keys, c, t, s, k. Any
     // input not matched by a binding is a no-op (preserves the prior

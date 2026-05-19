@@ -278,6 +278,10 @@ export default function (pi: ExtensionAPI): void {
     unsubFocusedShortcut = installFocusedOverlayShortcut(ctx, {
       openFocusedOverlay: () => openFocusedOverlay(),
       isOverlayOpen: () => overlayOpen,
+      // Slice 11: keep the focus model fresh as the registry mutates.
+      // Lives here (session-scoped) rather than in the overlay factory
+      // (per-open) so re-opening the overlay does NOT stack listeners.
+      subscribeToRegistry: () => registry.onChange(() => focusModel.refresh()),
     });
   });
 

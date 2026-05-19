@@ -3558,7 +3558,6 @@ var FocusedStreamOverlay = class {
   _opts;
   render(width) {
     const { model, theme } = this.opts;
-    model.refresh();
     const focused = model.focused();
     const footerLines = renderFooterLine(FOOTER_BINDINGS, width, theme);
     let bodyLines;
@@ -3597,6 +3596,7 @@ var FocusedStreamOverlay = class {
     return this._opts;
   }
   handleInput(data) {
+    this.opts.model.refresh();
     for (const binding of FOOTER_BINDINGS) {
       if (binding.matches.includes(data)) {
         binding.action(this, data);
@@ -3651,10 +3651,15 @@ function installFocusedOverlayShortcut(ctx, options) {
     }
     return void 0;
   });
+  let unsubRegistry = options.subscribeToRegistry ? options.subscribeToRegistry() : null;
   return () => {
     if (unsubInput) {
       unsubInput();
       unsubInput = null;
+    }
+    if (unsubRegistry) {
+      unsubRegistry();
+      unsubRegistry = null;
     }
   };
 }
@@ -4008,7 +4013,11 @@ function index_default(pi) {
     if (unsubFocusedShortcut) unsubFocusedShortcut();
     unsubFocusedShortcut = installFocusedOverlayShortcut(ctx, {
       openFocusedOverlay: () => openFocusedOverlay(),
-      isOverlayOpen: () => overlayOpen
+      isOverlayOpen: () => overlayOpen,
+      // Slice 11: keep the focus model fresh as the registry mutates.
+      // Lives here (session-scoped) rather than in the overlay factory
+      // (per-open) so re-opening the overlay does NOT stack listeners.
+      subscribeToRegistry: () => registry.onChange(() => focusModel.refresh())
     });
   });
   pi.on("session_shutdown", async (event) => {

@@ -129,3 +129,128 @@ test("installFocusedOverlayShortcut: returned unsub calls the underlying onTermi
     "subsequent unsub calls must be idempotent (no double-fire)",
   );
 });
+
+// ── Slice 11: registry-listener subscription ─────────────────────────
+//
+// The shortcut owns the lifetime of the registry-change subscription
+// that keeps `model.refresh()` firing as runs change. This replaces
+// `FocusedStreamOverlay.render()`'s side-effect refresh — render is
+// now pure. The subscription lives in the *shortcut* (session-scoped,
+// idempotent unsub), not in the *factory* (which gets re-built on
+// every overlay open and would leak one listener per open). See
+// docs/v0.8.3-item3-plan.md §A8 + design row O6.
+
+test(
+  "installFocusedOverlayShortcut: subscribeToRegistry is invoked exactly once on install",
+  () => {
+    const fake = makeFakeCtx({ hasUI: true });
+    let installs = 0;
+    let unsubs = 0;
+    installFocusedOverlayShortcut(fake.ctx, {
+      openFocusedOverlay: () => {},
+      isOverlayOpen: () => false,
+      subscribeToRegistry: () => {
+        installs += 1;
+        return () => {
+          unsubs += 1;
+        };
+      },
+    });
+    assert.equal(installs, 1, "subscribeToRegistry called exactly once on install");
+    assert.equal(unsubs, 0, "registry unsub not yet fired");
+  },
+);
+
+test(
+  "installFocusedOverlayShortcut: returned unsub fires the registry unsub exactly once",
+  () => {
+    const fake = makeFakeCtx({ hasUI: true });
+    let unsubs = 0;
+    const unsub = installFocusedOverlayShortcut(fake.ctx, {
+      openFocusedOverlay: () => {},
+      isOverlayOpen: () => false,
+      subscribeToRegistry: () => () => {
+        unsubs += 1;
+      },
+    });
+    assert.equal(unsubs, 0);
+    unsub();
+    assert.equal(unsubs, 1, "registry unsub fires once");
+    unsub();
+    assert.equal(unsubs, 1, "idempotent — second unsub does not double-fire");
+  },
+);
+
+test(
+  "installFocusedOverlayShortcut: 5 install/uninstall cycles do NOT stack registry listeners (load-bearing)",
+  async () => {
+    // Use a real RunRegistry so we measure real listener count, not a
+    // fake. This is the load-bearing leak invariant pinned in plan §A8
+    // + oracle review §"Slice 11 listener-leak invariant". Five cycles
+    // is arbitrary but matches the suggested probe in the slice spec.
+    const { RunRegistry } = await import("../src/runs.ts");
+    const registry = new RunRegistry();
+    const baseline = (registry as any).listeners.size;
+
+    for (let i = 0; i < 5; i++) {
+      const fake = makeFakeCtx({ hasUI: true });
+      const unsub = installFocusedOverlayShortcut(fake.ctx, {
+        openFocusedOverlay: () => {},
+        isOverlayOpen: () => false,
+        subscribeToRegistry: () => registry.onChange(() => {}),
+      });
+      // While installed, exactly one listener should be registered.
+      assert.equal(
+        (registry as any).listeners.size,
+        baseline + 1,
+        `cycle ${i}: while installed, exactly +1 listener over baseline; got ${(registry as any).listeners.size - baseline}`,
+      );
+      unsub();
+      assert.equal(
+        (registry as any).listeners.size,
+        baseline,
+        `cycle ${i}: after unsub, listener count returns to baseline`,
+      );
+    }
+    assert.equal(
+      (registry as any).listeners.size,
+      baseline,
+      "after 5 cycles, listener count is bounded — no leak",
+    );
+  },
+);
+
+test(
+  "installFocusedOverlayShortcut: subscribeToRegistry omitted → no registry wiring, unsub still works",
+  () => {
+    const fake = makeFakeCtx({ hasUI: true });
+    // No subscribeToRegistry — should not crash, should still unsub the
+    // input handler cleanly.
+    const unsub = installFocusedOverlayShortcut(fake.ctx, {
+      openFocusedOverlay: () => {},
+      isOverlayOpen: () => false,
+    });
+    assert.doesNotThrow(() => unsub());
+  },
+);
+
+test(
+  "installFocusedOverlayShortcut: headless ctx ignores subscribeToRegistry (no listener registered)",
+  () => {
+    const fake = makeFakeCtx({ hasUI: false });
+    let installs = 0;
+    const unsub = installFocusedOverlayShortcut(fake.ctx, {
+      openFocusedOverlay: () => {},
+      isOverlayOpen: () => false,
+      subscribeToRegistry: () => {
+        installs += 1;
+        return () => {};
+      },
+    });
+    // Headless: no input handler, and we also skip the registry
+    // subscription — there's nothing to keep fresh because there's no
+    // overlay to render.
+    assert.equal(installs, 0, "headless context skips registry subscription");
+    assert.doesNotThrow(() => unsub());
+  },
+);

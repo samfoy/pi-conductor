@@ -367,3 +367,105 @@ test("FocusedStreamOverlay.handleInput: unknown keys are no-ops", () => {
     before,
   );
 });
+
+// ── Slice 11: render purity + refresh-on-keystroke ────────────────────
+//
+// Pre-Slice-11, FocusedStreamOverlay.render() called model.refresh() as
+// a side effect. That made render impure (a re-render shifted focus to
+// the most recently started run when registry contents changed) AND
+// pushed responsibility for "keep the model fresh" into the wrong
+// layer. Slice 11 moves refresh to:
+//   1. handleInput dispatch (every key press refreshes once before
+//      dispatch), and
+//   2. installFocusedOverlayShortcut's RunRegistry subscription
+//      (covered in tests/focused-overlay-shortcut.test.ts).
+//
+// See docs/v0.8.3-item3-plan.md "### Slice 11" + design row O6.
+
+test("FocusedStreamOverlay.render: does NOT call model.refresh (Slice 11 purity)", () => {
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  const model = new FocusedStreamModel(reg);
+  let refreshCalls = 0;
+  // Spy on refresh by replacing the bound method.
+  const realRefresh = model.refresh.bind(model);
+  (model as any).refresh = () => {
+    refreshCalls += 1;
+    realRefresh();
+  };
+  // Construction + setup may have called refresh; reset the counter
+  // so we measure only what render() does.
+  refreshCalls = 0;
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {},
+    onKill: () => {},
+  });
+  overlay.render(80);
+  overlay.render(80);
+  overlay.render(80);
+  assert.equal(
+    refreshCalls,
+    0,
+    "render() must be a pure projection — no model.refresh() side effects",
+  );
+});
+
+test("FocusedStreamOverlay.handleInput: calls model.refresh exactly once before dispatching", () => {
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  reg.register(makeRun("b-2"));
+  const model = new FocusedStreamModel(reg);
+  let refreshCalls = 0;
+  let cycleCalls = 0;
+  const realRefresh = model.refresh.bind(model);
+  (model as any).refresh = () => {
+    refreshCalls += 1;
+    realRefresh();
+  };
+  const realCycleNext = model.cycleNext.bind(model);
+  (model as any).cycleNext = () => {
+    // Refresh must have been called BEFORE we get here so the dispatch
+    // sees the fresh registry view.
+    assert.ok(refreshCalls >= 1, "model.refresh must run before keystroke dispatch");
+    cycleCalls += 1;
+    realCycleNext();
+  };
+  refreshCalls = 0;
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {},
+    onKill: () => {},
+  });
+  overlay.handleInput("\t");
+  assert.equal(refreshCalls, 1, "refresh fires exactly once per keystroke");
+  assert.equal(cycleCalls, 1, "dispatch still fires after refresh");
+});
+
+test(
+  "FocusedStreamOverlay.handleInput: refresh fires even for unknown keys (defensive)",
+  () => {
+    const reg = new RunRegistry();
+    reg.register(makeRun("a-1"));
+    const model = new FocusedStreamModel(reg);
+    let refreshCalls = 0;
+    const realRefresh = model.refresh.bind(model);
+    (model as any).refresh = () => {
+      refreshCalls += 1;
+      realRefresh();
+    };
+    refreshCalls = 0;
+    const overlay = new FocusedStreamOverlay({
+      model,
+      onClose: () => {},
+      onKill: () => {},
+    });
+    overlay.handleInput("z");
+    overlay.handleInput("\x1bz");
+    // Two keystrokes, two refreshes — independent of whether they
+    // matched a binding. Keeping refresh unconditional avoids a drift
+    // case where the registry mutated between renders and the user
+    // pressed a binding that depends on the freshest list.
+    assert.equal(refreshCalls, 2);
+  },
+);
