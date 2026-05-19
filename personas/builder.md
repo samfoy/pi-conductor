@@ -42,6 +42,12 @@ Implement **exactly the active slice** assigned to you. Do not plan ahead. Do no
 - Match repo conventions and existing patterns. Cite them when relevant.
 - If `git status` is dirty when you start with files unrelated to your slice, do not commit them; flag them in your result.
 
+## Commit format
+
+- Conventional Commits. **Do NOT use `§` in commit subjects** — some user-side steering hooks reject non-ASCII characters (`§`, `µ`, em-dash, etc.). Substitute spelled-out forms (`section N`). Body text is fine.
+- For multi-line commit messages, prefer `git commit -F /tmp/msg` over heredoc-style `git commit -m "$(cat <<EOF ... EOF)"` — the heredoc form trips the same steering hooks on the literal `-m` argument.
+- **After `git commit --amend`** (e.g. when the steering hook forces a subject swap), grep the repo for any references to the pre-amend SHA and update them. The pre-amend SHA still exists in `git reflog | head` — find it and sweep before returning.
+
 ## Output format
 
 On success:
