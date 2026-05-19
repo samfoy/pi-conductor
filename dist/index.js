@@ -2017,7 +2017,7 @@ function classifyLine(line) {
   if (line.startsWith("  \u2503")) {
     return { kind: "thinking", glyph: "\u2503" };
   }
-  if (/^[↑↓] \d+ hidden/.test(line)) {
+  if (/^[↑↓] \d+ hidden/.test(line) || /^[A-Za-z][A-Za-z0-9_-]* \(line \d+\/\d+\)$/.test(line)) {
     return { kind: "scrollHint", glyph: line[0] };
   }
   if (line.startsWith("Esc ")) {
@@ -3694,7 +3694,7 @@ var FocusedStreamModel = class {
 };
 
 // src/focused-stream-overlay.ts
-import { visibleWidth as visibleWidth3 } from "@earendil-works/pi-tui";
+import { truncateToWidth as truncateToWidth2, visibleWidth as visibleWidth3 } from "@earendil-works/pi-tui";
 var EMPTY_HEADING = "(no sub-agents running)";
 var EMPTY_PROSE = "Spawn one via ensemble_spawn or /conductor spawn.";
 function renderEmpty(width, viewportHeight, theme) {
@@ -3702,7 +3702,7 @@ function renderEmpty(width, viewportHeight, theme) {
   const topPad = Math.max(1, Math.floor(slack / 2));
   const indent = "  ";
   const headingLine = theme ? indent + theme.fg("muted", EMPTY_HEADING) : indent + EMPTY_HEADING;
-  const proseLine = theme ? indent + theme.fg("dim", clip(EMPTY_PROSE, Math.max(0, width - indent.length))) : indent + clip(EMPTY_PROSE, Math.max(0, width - indent.length));
+  const proseLine = theme ? indent + theme.fg("dim", clip(EMPTY_PROSE, Math.max(0, width - visibleWidth3(indent)))) : indent + clip(EMPTY_PROSE, Math.max(0, width - visibleWidth3(indent)));
   const top = Array(topPad).fill("");
   return [...top, headingLine, "", proseLine];
 }
@@ -3820,7 +3820,10 @@ var FocusedStreamOverlay = class {
       const offset = Math.min(model.scrollOffset(), Math.max(0, transcript.length - 1));
       const visibleTranscript = transcript.slice(offset);
       const viewportHeight = this.opts.getViewportHeight?.() ?? 0;
-      const hint = renderScrollHint(offset, transcript.length, viewportHeight);
+      const hint = renderScrollHint(offset, transcript.length, viewportHeight, {
+        id: focused.id,
+        agentCount: model.agentCount()
+      });
       const hintLines = hint === null ? [] : [hint];
       bodyLines = [...header, ...visibleTranscript, ...hintLines];
       status = focused.status;
@@ -3850,17 +3853,27 @@ var FocusedStreamOverlay = class {
   }
 };
 function clip(s, width) {
-  if (s.length <= width) return s;
-  return s.slice(0, Math.max(0, width - 1)) + "\u2026";
+  if (visibleWidth3(s) <= width) return s;
+  return truncateToWidth2(s, width, "\u2026", false);
 }
-function renderScrollHint(scrollOffset, transcriptLineCount, viewportHeight) {
+function renderScrollHint(scrollOffset, transcriptLineCount, viewportHeight, agentContext) {
   if (viewportHeight <= 0) return null;
   const above = Math.max(0, Math.min(scrollOffset, transcriptLineCount));
   const below = Math.max(0, transcriptLineCount - above - viewportHeight);
-  if (above === 0 && below === 0) return null;
-  if (above > 0 && below > 0) return `\u2191 ${above} hidden  \xB7  \u2193 ${below} hidden`;
-  if (above > 0) return `\u2191 ${above} hidden`;
-  return `\u2193 ${below} hidden`;
+  let scrollPart;
+  if (above === 0 && below === 0) scrollPart = null;
+  else if (above > 0 && below > 0) scrollPart = `\u2191 ${above} hidden  \xB7  \u2193 ${below} hidden`;
+  else if (above > 0) scrollPart = `\u2191 ${above} hidden`;
+  else scrollPart = `\u2193 ${below} hidden`;
+  let agentPart = null;
+  if (agentContext && agentContext.agentCount > 1 && transcriptLineCount > 0) {
+    const lineNum = Math.min(scrollOffset + 1, transcriptLineCount);
+    agentPart = `${agentContext.id} (line ${lineNum}/${transcriptLineCount})`;
+  }
+  if (scrollPart && agentPart) return `${scrollPart}  \xB7  ${agentPart}`;
+  if (scrollPart) return scrollPart;
+  if (agentPart) return agentPart;
+  return null;
 }
 
 // src/focused-overlay-factory.ts

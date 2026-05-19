@@ -6,7 +6,7 @@
  * actual rendering and state live in their respective pure modules.
  */
 
-import { visibleWidth, type Component } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 import type { FocusedStreamModel } from "./focused-stream-model.ts";
 import { renderHeader, renderTranscript } from "./transcript.ts";
 import { classifyLine } from "./transcript-classify.ts";
@@ -96,8 +96,8 @@ export function renderEmpty(
     ? indent + theme.fg("muted", EMPTY_HEADING)
     : indent + EMPTY_HEADING;
   const proseLine = theme
-    ? indent + theme.fg("dim", clip(EMPTY_PROSE, Math.max(0, width - indent.length)))
-    : indent + clip(EMPTY_PROSE, Math.max(0, width - indent.length));
+    ? indent + theme.fg("dim", clip(EMPTY_PROSE, Math.max(0, width - visibleWidth(indent))))
+    : indent + clip(EMPTY_PROSE, Math.max(0, width - visibleWidth(indent)));
 
   const top = Array<string>(topPad).fill("");
   return [...top, headingLine, "", proseLine];
@@ -285,8 +285,13 @@ export class FocusedStreamOverlay implements Component {
 
       // Slice 8: optional scroll-position hint between body and footer.
       // Suppressed when nothing is hidden either way.
+      // v0.9 deferral 1: pass agent context so multi-agent overlays
+      // include a `<id> (line K/M)` breadcrumb after a Tab cycle.
       const viewportHeight = this.opts.getViewportHeight?.() ?? 0;
-      const hint = renderScrollHint(offset, transcript.length, viewportHeight);
+      const hint = renderScrollHint(offset, transcript.length, viewportHeight, {
+        id: focused.id,
+        agentCount: model.agentCount(),
+      });
       const hintLines = hint === null ? [] : [hint];
 
       bodyLines = [...header, ...visibleTranscript, ...hintLines];
@@ -333,9 +338,15 @@ export class FocusedStreamOverlay implements Component {
   }
 }
 
+// v0.9 deferral 2: clip uses pi-tui's visibleWidth + truncateToWidth
+// instead of raw `.length` / `.slice()` so tabs (3 cols) and ANSI escape
+// sequences are measured correctly. EMPTY_PROSE is plain ASCII today so
+// the practical behavior is unchanged, but routing through the host
+// helpers keeps the overlay safe if either constant later embeds a tab
+// or pre-styled glyph.
 function clip(s: string, width: number): string {
-  if (s.length <= width) return s;
-  return s.slice(0, Math.max(0, width - 1)) + "…";
+  if (visibleWidth(s) <= width) return s;
+  return truncateToWidth(s, width, "…", false);
 }
 
 /**
@@ -343,26 +354,54 @@ function clip(s: string, width: number): string {
  * suppressed. Slice 8 of v0.8.3 Item 3 — closes Ctrl+G overlay sub-issue
  * O2 ("`model.scrollOffset()` slices silently…").
  *
+ * v0.9 deferral 1 — per-agent scroll-cycle annotation: when an
+ * `agentContext` is supplied AND `agentCount > 1`, append a `<id>
+ * (line N/M)` segment so the user has a navigation breadcrumb after
+ * Tab-cycling between agents. The annotation is suppressed for single-
+ * agent overlays (it would be redundant) and for empty transcripts
+ * (line 0/0 is noise).
+ *
  * Shapes:
- *   `↑ N hidden  ·  ↓ M hidden`  (both top-clipped and bottom-clipped)
- *   `↑ N hidden`                  (top-clipped only)
- *   `↓ M hidden`                  (bottom-clipped only)
- *   null                          (nothing scrolled and content fits)
+ *   `↑ N hidden  ·  ↓ M hidden`                          (single agent)
+ *   `↑ N hidden  ·  ↓ M hidden  ·  <id> (line K/M)`      (multi-agent)
+ *   `↑ N hidden`                                          (top-clipped)
+ *   `↓ M hidden`                                          (bottom-clipped)
+ *   `<id> (line K/M)`                                     (multi-agent, no scroll)
+ *   null                                                  (single agent, content fits)
  *
  * Suppression rule: if `viewportHeight <= 0`, suppress — we have no
  * basis to compute what's hidden below. Otherwise, suppress when both
- * `aboveCount` and `belowCount` clamp to zero.
+ * `aboveCount` and `belowCount` clamp to zero AND no agent annotation
+ * applies.
  */
 export function renderScrollHint(
   scrollOffset: number,
   transcriptLineCount: number,
   viewportHeight: number,
+  agentContext?: { id: string; agentCount: number },
 ): string | null {
   if (viewportHeight <= 0) return null;
   const above = Math.max(0, Math.min(scrollOffset, transcriptLineCount));
   const below = Math.max(0, transcriptLineCount - above - viewportHeight);
-  if (above === 0 && below === 0) return null;
-  if (above > 0 && below > 0) return `↑ ${above} hidden  ·  ↓ ${below} hidden`;
-  if (above > 0) return `↑ ${above} hidden`;
-  return `↓ ${below} hidden`;
+
+  let scrollPart: string | null;
+  if (above === 0 && below === 0) scrollPart = null;
+  else if (above > 0 && below > 0) scrollPart = `↑ ${above} hidden  ·  ↓ ${below} hidden`;
+  else if (above > 0) scrollPart = `↑ ${above} hidden`;
+  else scrollPart = `↓ ${below} hidden`;
+
+  let agentPart: string | null = null;
+  if (
+    agentContext &&
+    agentContext.agentCount > 1 &&
+    transcriptLineCount > 0
+  ) {
+    const lineNum = Math.min(scrollOffset + 1, transcriptLineCount);
+    agentPart = `${agentContext.id} (line ${lineNum}/${transcriptLineCount})`;
+  }
+
+  if (scrollPart && agentPart) return `${scrollPart}  ·  ${agentPart}`;
+  if (scrollPart) return scrollPart;
+  if (agentPart) return agentPart;
+  return null;
 }

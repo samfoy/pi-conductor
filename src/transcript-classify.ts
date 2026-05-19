@@ -121,10 +121,11 @@ export function classifyLine(line: string): ClassifiedLine {
     return { kind: "thinking", glyph: "┃" };
   }
 
-  // Scroll hint: `↑ N hidden`, `↓ M hidden`, or the combined form
-  // `↑ N hidden  ·  ↓ M hidden`. Emitted by the overlay between the
+  // Scroll hint: `↑ N hidden`, `↓ M hidden`, the combined form
+  // `↑ N hidden  ·  ↓ M hidden`, and the v0.9 multi-agent variants
+  // ending in `<id> (line K/M)`. Emitted by the overlay between the
   // transcript body and footer; styling layer dims it.
-  if (/^[↑↓] \d+ hidden/.test(line)) {
+  if (/^[↑↓] \d+ hidden/.test(line) || /^[A-Za-z][A-Za-z0-9_-]* \(line \d+\/\d+\)$/.test(line)) {
     return { kind: "scrollHint", glyph: line[0]! };
   }
 

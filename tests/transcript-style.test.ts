@@ -12,6 +12,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+
 import {
   applyTheme,
   applyThemeToLines,
@@ -218,4 +220,41 @@ test("applyThemeToLines: status defaults to accent when omitted", () => {
 
 test("applyThemeToLines: empty input → empty output", () => {
   assert.deepEqual(applyThemeToLines([], classifyLine, stub), []);
+});
+
+// ── v0.9 deferral 2: wrap() / wrapTextWithAnsi audit ─────────────────
+//
+// The local `wrap()` helper in src/transcript.ts is now a thin delegate
+// to pi-tui's `wrapTextWithAnsi` (commit 6793a5a). The renderer always
+// wraps text BEFORE `applyTheme` injects ANSI, so the wrap path never
+// sees ANSI in the production flow. These regressions pin both
+// invariants: the helper itself stays ANSI-aware, and downstream styled
+// output respects width when re-wrapped.
+
+test("wrapTextWithAnsi invariant: ANSI-styled lines re-wrapped preserve visibleWidth ≤ source width", () => {
+  // If anyone re-routes styled output back through a wrap path, we want
+  // a green test to catch the moment they do — wrapTextWithAnsi handles
+  // ANSI, but raw .length / .slice would visibly mis-wrap.
+  // Use real ANSI escapes (CSI ... m) so visibleWidth strips them, just
+  // like the production Theme.fg() output.
+  const ansiFg = (text: string) => `\u001b[36m${text}\u001b[0m`;
+  const styled = `${ansiFg("▸ ")}bash echo hello world ${ansiFg(
+    "with arguments and more text to force wrapping",
+  )}`;
+  // Sanity: visibleWidth strips ANSI.
+  assert.ok(
+    visibleWidth(styled) < styled.length,
+    "ANSI-wrapped string should be longer in raw chars than visible cols",
+  );
+  for (const w of [10, 20, 40, 80]) {
+    const wrapped = wrapTextWithAnsi(styled, w);
+    for (const line of wrapped) {
+      assert.ok(
+        visibleWidth(line) <= w,
+        `wrapped line exceeded width=${w}: visibleWidth=${visibleWidth(
+          line,
+        )} line=${JSON.stringify(line)}`,
+      );
+    }
+  }
 });

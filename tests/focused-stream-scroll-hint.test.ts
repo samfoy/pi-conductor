@@ -65,6 +65,69 @@ test("renderScrollHint: scrolled but viewport >= remaining → only up arrow", (
   assert.equal(hint, "↑ 25 hidden");
 });
 
+// ── v0.9 deferral 1: per-agent scroll-cycle annotation ────────────────
+
+test("renderScrollHint: single agent + no scroll → null (existing behavior preserved)", () => {
+  // agentContext supplied but agentCount=1: no breadcrumb needed.
+  assert.equal(
+    renderScrollHint(0, 5, 10, { id: "only-agent", agentCount: 1 }),
+    null,
+  );
+});
+
+test("renderScrollHint: multi-agent + no scroll → agent-only breadcrumb", () => {
+  const hint = renderScrollHint(0, 30, 100, {
+    id: "builder-x7k2",
+    agentCount: 3,
+  });
+  assert.equal(hint, "builder-x7k2 (line 1/30)");
+});
+
+test("renderScrollHint: multi-agent + scrolled → combined hint with breadcrumb", () => {
+  // 100 transcript lines, viewport 20, scrolled 30.
+  const hint = renderScrollHint(30, 100, 20, {
+    id: "oracle-9k7r",
+    agentCount: 4,
+  });
+  assert.equal(hint, "↑ 30 hidden  ·  ↓ 50 hidden  ·  oracle-9k7r (line 31/100)");
+});
+
+test("renderScrollHint: multi-agent + tail-only scroll → up arrow + breadcrumb", () => {
+  const hint = renderScrollHint(80, 100, 20, {
+    id: "critic-bcjg",
+    agentCount: 2,
+  });
+  assert.equal(hint, "↑ 80 hidden  ·  critic-bcjg (line 81/100)");
+});
+
+test("renderScrollHint: multi-agent + empty transcript → null (line 0/0 is noise)", () => {
+  // Edge: agent has zero rendered lines yet (just spawned). No breadcrumb.
+  assert.equal(
+    renderScrollHint(0, 0, 20, { id: "fresh", agentCount: 5 }),
+    null,
+  );
+});
+
+test("renderScrollHint: multi-agent + scroll past tail clamps line number", () => {
+  // scrollOffset (120) past transcript length (100); line should clamp to 100.
+  const hint = renderScrollHint(120, 100, 20, {
+    id: "runaway",
+    agentCount: 2,
+  });
+  assert.equal(hint, "↑ 100 hidden  ·  runaway (line 100/100)");
+});
+
+test("classifyLine: scrollHint kind detected for agent-only breadcrumb line", () => {
+  assert.equal(classifyLine("builder-x7k2 (line 27/55)").kind, "scrollHint");
+});
+
+test("applyTheme: agent-only breadcrumb → dim slot via theme.fg", () => {
+  const stub: ThemeFg = { fg: (slot, text) => `[${slot}]${text}[/]` };
+  const line = "builder-x7k2 (line 27/55)";
+  const out = applyTheme(line, classifyLine(line), stub);
+  assert.equal(out, `[dim]${line}[/]`);
+});
+
 // ── classifier coverage ──────────────────────────────────────────────
 
 test("classifyLine: scrollHint kind detected for `↑ N hidden` line", () => {
@@ -150,5 +213,48 @@ test("overlay.render: scroll hint suppressed when transcript fits and offset=0",
     lines.findIndex((l) => /^↑ \d+ hidden/.test(l) || /^↓ \d+ hidden/.test(l)),
     -1,
     "expected no scroll hint when transcript fits",
+  );
+});
+
+test("overlay.render: multi-agent overlay shows breadcrumb even when content fits", () => {
+  // v0.9 deferral 1: when there are 2+ agents, the overlay annotates which
+  // agent the user is currently viewing so Tab cycles have a navigation cue.
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1", { messageCount: 4 }));
+  reg.register(makeRun("b-1", { messageCount: 4 }));
+  const model = new FocusedStreamModel(reg);
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {},
+    onKill: () => {},
+    getViewportHeight: () => 100,
+  });
+  const lines = overlay.render(80);
+  // Should contain a breadcrumb for the focused agent (most recently started).
+  const focusedId = model.focused()!.id;
+  const breadcrumb = lines.find((l) =>
+    new RegExp(`${focusedId} \\(line \\d+/\\d+\\)`).test(l),
+  );
+  assert.ok(breadcrumb, `expected agent breadcrumb for ${focusedId} in overlay output`);
+});
+
+test("overlay.render: single-agent overlay shows NO breadcrumb (avoids redundant chrome)", () => {
+  // v0.9 deferral 1: with one agent the breadcrumb would just repeat the
+  // header. Suppress to keep the overlay clean.
+  const reg = new RunRegistry();
+  reg.register(makeRun("solo-1", { messageCount: 4 }));
+  const model = new FocusedStreamModel(reg);
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {},
+    onKill: () => {},
+    getViewportHeight: () => 100,
+  });
+  const lines = overlay.render(80);
+  const breadcrumb = lines.find((l) => /\(line \d+\/\d+\)$/.test(l));
+  assert.equal(
+    breadcrumb,
+    undefined,
+    "single-agent overlay should not include the breadcrumb",
   );
 });
