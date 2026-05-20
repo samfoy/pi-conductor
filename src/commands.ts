@@ -41,6 +41,7 @@ import { isPinned, pinRun, unpinRun } from "./gc/pinning.ts";
 import { runGc, type RunGcResult } from "./gc/index.ts";
 import { walkInventory } from "./gc/inventory.ts";
 import { planReclaim, type ReclaimAction } from "./gc/policy.ts";
+import { classifyStall, resolveKillOnStall } from "./watchdog.ts";
 
 interface RegisterCommandsOpts {
   getCwd: () => string;
@@ -69,6 +70,7 @@ const SUBCOMMANDS = [
   "pin",
   "unpin",
   "gc",
+  "watchdog",
 ];
 
 export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): void {
@@ -133,6 +135,9 @@ export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): 
           return;
         case "unpin":
           await runUnpin(ctx, subRest);
+          return;
+        case "watchdog":
+          runWatchdog(opts, ctx, subRest);
           return;
         default:
           ctx.ui.notify(
@@ -730,4 +735,166 @@ export async function runGcCmd(
 
   const out = formatGcResult(result, plan.actions, flags);
   ctx.ui.notify(out, "info");
+}
+
+// ── /conductor watchdog ─────────────────────────────────────────────────
+//
+// v0.10 Slice 4. One subcommand today (`status`); kept as a dispatcher
+// so future slices (e.g. `/conductor watchdog reset`, `/conductor
+// watchdog tune`) can land without reshuffling the SUBCOMMANDS array.
+
+/**
+ * Slash dispatcher for `/conductor watchdog <sub>`. Currently routes:
+ * - `status` (default when subRest is empty) → table of active runs
+ *   with stall classification, per-run thresholds, kill_on_stall.
+ *
+ * Anything else → warning notify.
+ */
+export function runWatchdog(
+  opts: RegisterCommandsOpts,
+  ctx: ExtensionCommandContext,
+  subRest: string,
+): void {
+  const [sub] = subRest.split(/\s+/);
+  switch (sub) {
+    case "":
+    case "status":
+      runWatchdogStatus(opts, ctx);
+      return;
+    default:
+      ctx.ui.notify(
+        `unknown watchdog subcommand: ${sub}. Try: /conductor watchdog status`,
+        "warning",
+      );
+  }
+}
+
+/**
+ * Render the `/conductor watchdog status` report and notify. Pure
+ * report builder lives in {@link buildWatchdogStatusReport} so tests
+ * can drive it directly without faking ExtensionCommandContext.
+ */
+function runWatchdogStatus(
+  opts: RegisterCommandsOpts,
+  ctx: ExtensionCommandContext,
+): void {
+  const cfg = loadConfig(opts.getCwd());
+  const out = buildWatchdogStatusReport({
+    registry: opts.getRegistry(),
+    watchdogConfig: {
+      softThresholdSeconds: cfg.watchdog.defaultSoftSeconds,
+      hardThresholdSeconds: cfg.watchdog.defaultHardSeconds,
+      graceSeconds: cfg.watchdog.graceSeconds,
+    },
+    defaultKillOnStall: cfg.watchdog.defaultKillOnStall,
+    enabled: cfg.watchdog.enabled,
+    now: Date.now(),
+  });
+  ctx.ui.notify(out, "info");
+}
+
+interface WatchdogConfigForReport {
+  readonly softThresholdSeconds: number;
+  readonly hardThresholdSeconds: number;
+  readonly graceSeconds: number;
+}
+
+/**
+ * Pure renderer for `/conductor watchdog status`. Output shape mirrors
+ * the example in docs/v0.10-watchdog-design.md §5: `<N> active runs`
+ * banner, then a header row, then one row per active (running, not
+ * paused, not terminal) run with its silent-seconds count, classified
+ * state, threshold pair, and kill_on_stall action descriptor.
+ *
+ * Empty-state when no active runs: a single line. Disabled-state when
+ * watchdog.enabled === false: a leading `(watchdog DISABLED)` note so
+ * operators don't think the empty table means "no stalls".
+ *
+ * Exported so the slice-4 commands-watchdog tests can pin output shape
+ * without setting up the full ExtensionCommandContext + cwd plumbing.
+ */
+export function buildWatchdogStatusReport(args: {
+  registry: RunRegistry;
+  watchdogConfig: WatchdogConfigForReport;
+  defaultKillOnStall: boolean;
+  enabled: boolean;
+  now: number;
+}): string {
+  const { registry, watchdogConfig, defaultKillOnStall, enabled, now } = args;
+  // Active = non-terminal AND not paused (paused runs intentionally
+  // freeze their lastEventAt; they're not stall candidates).
+  const active = registry
+    .list()
+    .filter(
+      (r) =>
+        r.status !== "completed" &&
+        r.status !== "failed" &&
+        r.status !== "killed" &&
+        r.status !== "timeout" &&
+        r.status !== "paused" &&
+        r.status !== "queued",
+    );
+
+  const lines: string[] = [];
+  lines.push("## Watchdog");
+  if (!enabled) lines.push("(watchdog DISABLED)");
+  lines.push(
+    `${active.length} active run${active.length === 1 ? "" : "s"}`,
+  );
+  lines.push("");
+
+  if (active.length === 0) {
+    lines.push("  (no active runs)");
+    return lines.join("\n");
+  }
+
+  // Column widths chosen to match the §5 example: id ≥14, persona ≥10,
+  // silent ≥6, state ≥7, threshold ≥10, action wraps. Padding picks
+  // max(actual, minimum) so longer ids don't visually collapse.
+  const idW = Math.max(14, ...active.map((r) => r.id.length));
+  const personaW = Math.max(10, ...active.map((r) => r.persona.length));
+  lines.push(
+    "  " +
+      "id".padEnd(idW) +
+      "  " +
+      "persona".padEnd(personaW) +
+      "  " +
+      "silent".padEnd(7) +
+      "  " +
+      "state".padEnd(7) +
+      "  " +
+      "threshold".padEnd(11) +
+      "  " +
+      "action",
+  );
+  for (const r of active) {
+    const c = classifyStall(r, now, watchdogConfig);
+    const silent = c ? `${c.silentSeconds}s` : "—";
+    const state = c ? c.severity : "fresh";
+    const soft = c ? c.softThresholdSeconds : watchdogConfig.softThresholdSeconds;
+    const hard = c ? c.hardThresholdSeconds : watchdogConfig.hardThresholdSeconds;
+    const threshold = `${soft}s/${hard}s`;
+    const kos = resolveKillOnStall(r, defaultKillOnStall);
+    const action =
+      state === "fresh"
+        ? "—"
+        : kos
+          ? "kill (kill_on_stall=true)"
+          : "warn (kill_on_stall=false)";
+    lines.push(
+      "  " +
+        r.id.padEnd(idW) +
+        "  " +
+        r.persona.padEnd(personaW) +
+        "  " +
+        silent.padEnd(7) +
+        "  " +
+        state.padEnd(7) +
+        "  " +
+        threshold.padEnd(11) +
+        "  " +
+        action,
+    );
+  }
+  return lines.join("\n");
 }

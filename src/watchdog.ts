@@ -277,6 +277,53 @@ export function resolveKillOnStall(run: Run, defaultKillOnStall: boolean): boole
 }
 
 /**
+ * v0.10 Slice 4: render-time stall classification used by the widget,
+ * the transcript header `deriveActivity`, and the `/conductor watchdog
+ * status` table. Pure: no I/O, deterministic on (run, nowMs, defaults).
+ *
+ * Returns:
+ * - `null` when the run is not a stall candidate (terminal, paused,
+ *   queued, within grace).
+ * - `{ silentSeconds, severity: "fresh" | "soft" | "hard", soft, hard }`
+ *   otherwise. `silentSeconds` is `floor((nowMs - lastEventAt)/1000)`,
+ *   non-negative. `severity` reflects the threshold the run has
+ *   crossed *right now* (computed from elapsed silence, not from
+ *   `Run.stalledSince` which the enforcer flips at threshold transitions
+ *   only). Render surfaces should use `severity` for the styling slot,
+ *   `silentSeconds` for the count.
+ *
+ * Threshold inputs honor any per-run override via {@link effectiveConfig}.
+ */
+export function classifyStall(
+  run: Run,
+  nowMs: number,
+  defaults: WatchdogConfig,
+): {
+  silentSeconds: number;
+  severity: "fresh" | "soft" | "hard";
+  softThresholdSeconds: number;
+  hardThresholdSeconds: number;
+} | null {
+  if (run.status !== "running") return null;
+  if (run.pausedAt !== undefined) return null;
+  const eff = effectiveConfig(run, defaults);
+  const silentMs = Math.max(0, nowMs - run.lastEventAt);
+  const silentSeconds = Math.floor(silentMs / 1000);
+  // Grace window suppresses *all* classification (matches evaluateRun).
+  const ageMs = nowMs - run.startTime;
+  if (ageMs < eff.graceSeconds * 1000) return null;
+  let severity: "fresh" | "soft" | "hard" = "fresh";
+  if (silentSeconds >= eff.hardThresholdSeconds) severity = "hard";
+  else if (silentSeconds >= eff.softThresholdSeconds) severity = "soft";
+  return {
+    silentSeconds,
+    severity,
+    softThresholdSeconds: eff.softThresholdSeconds,
+    hardThresholdSeconds: eff.hardThresholdSeconds,
+  };
+}
+
+/**
  * Sub-agent stall enforcer. Wraps the pure {@link evaluateRun} with:
  *   - registry subscription (wake on state change)
  *   - interval ticker (catch silent runs that never fire registry events)

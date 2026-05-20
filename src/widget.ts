@@ -12,6 +12,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { elapsedStr, formatUsage, type RunRegistry } from "./runs.ts";
 import { STATUS_GLYPH } from "./status-glyph.ts";
 import type { Run, RunStatus } from "./types.ts";
+import { classifyStall, type WatchdogConfig } from "./watchdog.ts";
 
 const WIDGET_KEY = "conductor-ensemble";
 const FINISHED_LINGER_MS = 8000;
@@ -35,6 +36,7 @@ export interface EnsembleWidget {
 export function mountEnsembleWidget(
   registry: RunRegistry,
   getCtx: () => ExtensionContext | null,
+  getWatchdogConfig?: () => WatchdogConfig,
 ): EnsembleWidget {
   const recentlyFinished: RecentlyFinished[] = [];
   let lingerTimer: NodeJS.Timeout | undefined;
@@ -66,8 +68,9 @@ export function mountEnsembleWidget(
       (_tui, theme) => {
         const lines: string[] = [];
         lines.push(theme.fg("dim", `── conductor ensemble (${active.length} active${linger.length ? `, ${linger.length} done` : ""}) ──`));
-        for (const r of active) lines.push(formatRow(r, theme));
-        for (const r of linger) lines.push(formatRow(r, theme));
+        const wdCfg = getWatchdogConfig?.();
+        for (const r of active) lines.push(formatRow(r, theme, now, wdCfg));
+        for (const r of linger) lines.push(formatRow(r, theme, now, wdCfg));
         return new Text(lines.join("\n"), 0, 0);
       },
       { placement: "belowEditor" },
@@ -110,7 +113,12 @@ export function mountEnsembleWidget(
   };
 }
 
-function formatRow(r: Run, theme: any): string {
+function formatRow(
+  r: Run,
+  theme: any,
+  nowMs?: number,
+  wdCfg?: WatchdogConfig,
+): string {
   const glyph = statusGlyph(r.status, theme);
   const name = theme.fg("accent", r.persona) + theme.fg("dim", `:${r.id.split("-").pop() ?? r.id}`);
   const elapsed = theme.fg("dim", elapsedStr(r.startTime, r.finishedAt));
@@ -126,7 +134,35 @@ function formatRow(r: Run, theme: any): string {
             : "";
   const usage =
     r.usage.turns > 0 ? theme.fg("muted", ` [${formatUsage(r.usage)}]`) : "";
-  return `${glyph} ${name} ${elapsed}${activity}${usage}`;
+  // v0.10 Slice 4: stall indicator. Sourced from classifyStall (pure)
+  // so widget output stays deterministic and mutation-witness-able.
+  // Soft → warning slot; hard → error slot with trailing `!`.
+  const stall = formatStallSegment(r, theme, nowMs, wdCfg);
+  return `${glyph} ${name} ${elapsed}${activity}${stall}${usage}`;
+}
+
+/**
+ * v0.10 Slice 4: pure rendered string for the stall segment of a run
+ * row. Returns the empty string when the run is fresh/not classified;
+ * `· STALLED Ns` (warning slot) on soft; `· STALLED Ns!` (error slot)
+ * on hard. Exported for direct testing — the widget render path goes
+ * through ctx.ui.setWidget which is awkward to fake, but the segment
+ * builder is pure.
+ */
+export function formatStallSegment(
+  r: Run,
+  theme: any,
+  nowMs?: number,
+  wdCfg?: WatchdogConfig,
+): string {
+  if (nowMs === undefined || wdCfg === undefined) return "";
+  const c = classifyStall(r, nowMs, wdCfg);
+  if (c === null) return "";
+  if (c.severity === "fresh") return "";
+  if (c.severity === "hard") {
+    return theme.fg("error", ` · STALLED ${c.silentSeconds}s!`);
+  }
+  return theme.fg("warning", ` · STALLED ${c.silentSeconds}s`);
 }
 
 function statusGlyph(s: RunStatus, theme: any): string {

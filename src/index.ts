@@ -290,7 +290,16 @@ export default function (pi: ExtensionAPI): void {
     cwd = ctx.cwd;
     ctxRef = ctx;
     if (widget) widget.dispose();
-    widget = mountEnsembleWidget(registry, () => ctxRef);
+    widget = mountEnsembleWidget(registry, () => ctxRef, () => {
+      // v0.10 Slice 4: feed live watchdog thresholds to the widget so it
+      // can render `· STALLED Ns` glyphs that respect per-cwd config.
+      const cfg = loadConfig(cwd);
+      return {
+        softThresholdSeconds: cfg.watchdog.defaultSoftSeconds,
+        hardThresholdSeconds: cfg.watchdog.defaultHardSeconds,
+        graceSeconds: cfg.watchdog.graceSeconds,
+      };
+    });
     if (unsubFocusedShortcut) unsubFocusedShortcut();
     unsubFocusedShortcut = installFocusedOverlayShortcut(ctx, {
       openFocusedOverlay: () => openFocusedOverlay(),

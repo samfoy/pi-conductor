@@ -184,6 +184,21 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
     `  watchdog kill_on_stall: ${cfg.watchdog.defaultKillOnStall ? "ON (default)" : "off (default)"} ` +
       `— per-spawn override via ensemble_spawn kill_on_stall arg`,
   );
+  // v0.10 Slice 4: live stall counter. Counts runs whose enforcer has
+  // marked stalledSince — i.e. runs that crossed soft or hard at last
+  // tick. Pure read off the registry; no clock arithmetic here
+  // (`/conductor watchdog status` does the live silent-seconds math).
+  {
+    const all = opts.registry.list();
+    const activeCount = all.filter(
+      (r) =>
+        r.status === "running" || r.status === "queued" || r.status === "paused",
+    ).length;
+    const stalledCount = all.filter((r) => r.stalledSince !== undefined).length;
+    lines.push(
+      `  watchdog runtime:      active=${activeCount}  stalled=${stalledCount}`,
+    );
+  }
   {
     const root = opts.runsRoot ?? join(opts.homeDir ?? homedir(), ".pi", "agent", "conductor", "runs");
     const lastMs = readLastGcMtime(root);

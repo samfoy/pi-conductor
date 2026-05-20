@@ -539,3 +539,63 @@ test("buildDoctorReport: omits next-eviction line when GC is disabled (Slice 7)"
     teardown(fx);
   }
 });
+
+// ── v0.10 Slice 4: watchdog runtime counters ──
+
+test("buildDoctorReport: watchdog runtime line shows active=0 stalled=0 on empty registry (Slice 4)", async () => {
+  const fx = setup();
+  try {
+    const reg = new RunRegistry();
+    const q = new SpawnQueue(reg, 4);
+    const out = await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: q,
+      conductorMode: false,
+      homeDir: fx.homeDir,
+    });
+    assert.match(out, /watchdog runtime:\s+active=0\s+stalled=0/);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("buildDoctorReport: watchdog runtime line counts running + stalled runs (Slice 4)", async () => {
+  const fx = setup();
+  try {
+    const reg = new RunRegistry();
+    const q = new SpawnQueue(reg, 4);
+    // Two running runs; one of them flagged as stalled by the enforcer.
+    const baseRun = {
+      id: "builder-aaaa",
+      persona: "builder",
+      task: "test",
+      mode: "background" as const,
+      status: "running" as const,
+      startTime: 1_700_000_000_000,
+      lastEventAt: 1_700_000_000_000,
+      messages: [],
+      usage: emptyUsage(),
+      cwd: "/tmp",
+      recordPath: "/dev/null/record.json",
+      transcriptPath: "/dev/null/transcript.jsonl",
+      finalPath: "/dev/null/final.md",
+    };
+    reg.register({ ...baseRun, id: "builder-aaaa" });
+    reg.register({
+      ...baseRun,
+      id: "builder-bbbb",
+      stalledSince: 1_700_000_180_000,
+    });
+    const out = await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: q,
+      conductorMode: false,
+      homeDir: fx.homeDir,
+    });
+    assert.match(out, /watchdog runtime:\s+active=2\s+stalled=1/);
+  } finally {
+    teardown(fx);
+  }
+});
