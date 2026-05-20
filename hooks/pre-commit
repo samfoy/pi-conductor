@@ -46,7 +46,14 @@ if git diff --cached --name-only | grep -q '^src/'; then
 fi
 
 echo "pre-commit: running npm test (unit suite)…"
-if ! npm test --silent; then
+# v0.10 watchdog: env var must be unset for the unit suite. The R7
+# guard in `Watchdog.start()` makes the enforcer a no-op when
+# CONDUCTOR_SUBAGENT=1, which the watchdog-enforcer tests interpret
+# as a failure (they assert the enforcer ticks and dispatches). When
+# the hook fires from inside a conductor sub-agent (e.g. the builder
+# running this commit), CONDUCTOR_SUBAGENT=1 is inherited and the
+# tests fail spuriously. Unset it for the test run only.
+if ! env -u CONDUCTOR_SUBAGENT npm test --silent; then
   echo
   echo "pre-commit: tests FAILED. Commit rejected." >&2
   echo "pre-commit: fix the tests or the code, then commit again." >&2
