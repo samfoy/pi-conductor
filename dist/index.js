@@ -2620,6 +2620,9 @@ function registerCommands(pi, opts) {
         case "unpin":
           await runUnpin(ctx, subRest);
           return;
+        case "gc":
+          await runGcCmd(opts, ctx, subRest);
+          return;
         case "watchdog":
           runWatchdog(opts, ctx, subRest);
           return;
@@ -2926,6 +2929,135 @@ var GC_HELP_TEXT = [
   "  --verbose           include per-action lines, not just totals.",
   "  --help              print this listing."
 ].join("\n");
+function parseGcFlags(arg) {
+  const out = {
+    dryRun: false,
+    force: false,
+    verbose: false,
+    help: false
+  };
+  const tokens = arg.split(/\s+/).filter((t) => t.length > 0);
+  for (const tok of tokens) {
+    if (tok === "--dry-run") out.dryRun = true;
+    else if (tok === "--force") out.force = true;
+    else if (tok === "--verbose") out.verbose = true;
+    else if (tok === "--help" || tok === "-h") out.help = true;
+    else if (tok.startsWith("--persona=")) {
+      const value = tok.slice("--persona=".length);
+      if (!value) {
+        return { ok: false, error: "missing value for --persona=<name>" };
+      }
+      out.persona = value;
+    } else {
+      return { ok: false, error: `unknown flag: ${tok}` };
+    }
+  }
+  return { ok: true, flags: out };
+}
+function bytesHuman(n) {
+  if (n < 1024) return `${n} B`;
+  const kb = n / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(1)} MB`;
+  return `${(mb / 1024).toFixed(2)} GB`;
+}
+function sumBytes(actions, kind) {
+  let total = 0;
+  for (const a of actions) {
+    if (a.kind === kind && (a.kind === "cold-archive" || a.kind === "delete")) {
+      total += a.bytesReclaimed;
+    }
+  }
+  return total;
+}
+function formatGcResult(result, actions, flags) {
+  const lines = [];
+  const dryTag = flags.dryRun ? " (dry-run)" : "";
+  lines.push(`GC plan${dryTag} (n=${result.scanned} scanned):`);
+  const archiveBytes = sumBytes(actions, "cold-archive");
+  const deleteBytes = sumBytes(actions, "delete");
+  const totalBytes = archiveBytes + deleteBytes;
+  lines.push(
+    `  archive: ${result.planSummary.archive} runs, ~${bytesHuman(archiveBytes)}`
+  );
+  lines.push(
+    `  delete:  ${result.planSummary.delete} runs, ~${bytesHuman(deleteBytes)}`
+  );
+  lines.push(
+    `  reconcile: ${result.planSummary.reconcile} orphan${result.planSummary.reconcile === 1 ? "" : "s"}`
+  );
+  lines.push(`  keep: ${result.planSummary.keep} runs`);
+  lines.push("");
+  lines.push("Totals:");
+  lines.push(`  bytes_to_reclaim:  ${bytesHuman(totalBytes)} (${totalBytes} B)`);
+  lines.push(`  runs_to_archive:   ${result.planSummary.archive}`);
+  lines.push(`  runs_to_delete:    ${result.planSummary.delete}`);
+  lines.push(`  runs_lose_resume:  ${result.runsLoseResume}`);
+  if (!flags.dryRun) {
+    lines.push("");
+    lines.push(
+      `Reclaimed: ${bytesHuman(result.totalBytesReclaimed)} (${result.archived.length} archived, ${result.deleted.length} deleted, ${result.failed.length} failed) in ${result.durationMs}ms`
+    );
+  }
+  if (flags.verbose) {
+    const acts = actions.filter(
+      (a) => a.kind === "cold-archive" || a.kind === "delete" || a.kind === "reconcile-orphan"
+    );
+    if (acts.length > 0) {
+      lines.push("");
+      lines.push("Per-action:");
+      const cap = 20;
+      for (const a of acts.slice(0, cap)) {
+        const tag = a.kind === "cold-archive" ? "cold-archive" : a.kind === "delete" ? "delete       " : "reconcile    ";
+        const bytes = a.kind === "cold-archive" || a.kind === "delete" ? bytesHuman(a.bytesReclaimed) : "\u2014";
+        lines.push(
+          `  ${tag}  ${a.id.padEnd(28)} ${bytes.padStart(10)}  ${a.reason ?? ""}`
+        );
+      }
+      if (acts.length > cap) {
+        lines.push(`  (${acts.length - cap} more \u2014 see /conductor history)`);
+      }
+    }
+  }
+  return lines.join("\n");
+}
+async function runGcCmd(opts, ctx, arg) {
+  const parsed = parseGcFlags(arg);
+  if (!parsed.ok) {
+    ctx.ui.notify(`${parsed.error}
+
+${GC_HELP_TEXT}`, "warning");
+    return;
+  }
+  const flags = parsed.flags;
+  if (flags.help) {
+    ctx.ui.notify(GC_HELP_TEXT, "info");
+    return;
+  }
+  const cwd = opts.getCwd();
+  const cfg = loadConfig(cwd);
+  const root = runsRoot();
+  const registry = opts.getRegistry();
+  const inventoryFull = await walkInventory(root, registry);
+  const inventory = flags.persona ? inventoryFull.filter((e) => e.persona === flags.persona) : inventoryFull;
+  const plan = planReclaim(inventory, cfg.gc, Date.now());
+  let result;
+  try {
+    result = await runGc({
+      runsRoot: root,
+      config: cfg.gc,
+      registry,
+      dryRun: flags.dryRun,
+      persona: flags.persona
+    });
+  } catch (e) {
+    ctx.ui.notify(`gc failed: ${e?.message ?? e}`, "warning");
+    return;
+  }
+  const out = formatGcResult(result, plan.actions, flags);
+  ctx.ui.notify(out, "info");
+}
 function runWatchdog(opts, ctx, subRest) {
   const [sub] = subRest.split(/\s+/);
   switch (sub) {

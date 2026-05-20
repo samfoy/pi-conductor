@@ -136,6 +136,9 @@ export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): 
         case "unpin":
           await runUnpin(ctx, subRest);
           return;
+        case "gc":
+          await runGcCmd(opts, ctx, subRest);
+          return;
         case "watchdog":
           runWatchdog(opts, ctx, subRest);
           return;

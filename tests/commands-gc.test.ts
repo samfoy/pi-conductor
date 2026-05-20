@@ -396,3 +396,54 @@ test("runGc: persona filter with unknown persona returns empty result", async ()
     await teardown(fx);
   }
 });
+
+// ── Slash dispatch regression (W1 witness for case "gc" arm) ──────────
+//
+// Drives `registerCommands` end-to-end through a captured handler.
+// Pre-existing v0.9 bug: `gc` was in SUBCOMMANDS + GC_HELP_TEXT but
+// missing from the dispatch switch, so users typing `/conductor gc`
+// fell through to the "unknown subcommand" path. This test pins the
+// case arm: `/conductor gc --help` must reach `runGcCmd` (which prints
+// GC_HELP_TEXT) and NOT the default unknown-subcommand notify.
+//
+// Mutation witness: removing the `case "gc":` arm in src/commands.ts
+// causes the handler to dispatch to default → notify says
+// "unknown subcommand: gc" → the GC_HELP_TEXT match fails. Verified
+// via `git stash` per docs/wdd.md.
+import { registerCommands } from "../src/commands.ts";
+import { SpawnQueue } from "../src/queue.ts";
+
+test("slash /conductor gc --help reaches runGcCmd (W1 witness)", async () => {
+  const fx = setup();
+  try {
+    const calls: NotifyCall[] = [];
+    let captured: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+    const fakePi = {
+      registerCommand: (name: string, spec: { handler: (args: string, ctx: unknown) => Promise<void> }) => {
+        if (name === "conductor") captured = spec.handler;
+      },
+    } as unknown as Parameters<typeof registerCommands>[0];
+    const opts = {
+      getCwd: () => fx.root,
+      getRegistry: () => new RunRegistry(),
+      getQueue: () => new SpawnQueue(new RunRegistry(), 4),
+      getConductorMode: () => false,
+      setConductorMode: () => {},
+      openFocusedOverlay: () => {},
+    } as unknown as Parameters<typeof registerCommands>[1];
+    registerCommands(fakePi, opts);
+    assert.ok(captured, "registerCommand(\"conductor\", ...) was called");
+    const ctx = {
+      ui: { notify: (msg: string, level?: string) => { calls.push({ message: msg, level: level ?? "info" }); } },
+    };
+    await captured!("gc --help", ctx);
+    const text = calls.map((c) => c.message).join("\n");
+    // Reaching runGcCmd → GC_HELP_TEXT printed.
+    assert.match(text, /\/conductor gc \[flags\]/, "GC_HELP_TEXT header must appear");
+    assert.match(text, /--dry-run/, "GC_HELP_TEXT body must appear");
+    // Not the unknown-subcommand fallthrough.
+    assert.doesNotMatch(text, /unknown subcommand/i, "must NOT fall through to default");
+  } finally {
+    await teardown(fx);
+  }
+});
