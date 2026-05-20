@@ -95,11 +95,18 @@ function setup(extraRuns: Run[] = []) {
 // Build a queue whose only job is to capture enqueueOrSpawn opts and queue
 // a placeholder, never spawning a real subprocess.
 function captureQueue(reg: RunRegistry) {
-  const captured: { timeoutMs?: number; called: boolean } = { called: false };
+  const captured: {
+    timeoutMs?: number;
+    killOnStall?: boolean;
+    softStallSeconds?: number;
+    called: boolean;
+  } = { called: false };
   const fakeQueue = {
     enqueueOrSpawn(opts: any) {
       captured.called = true;
       captured.timeoutMs = opts.timeoutMs;
+      captured.killOnStall = opts.killOnStall;
+      captured.softStallSeconds = opts.softStallSeconds;
       const placeholder = makeRun(`fake-${Math.random().toString(36).slice(2, 6)}`, {
         status: "queued",
         persona: opts.persona.name,
@@ -319,4 +326,159 @@ test("ensemble_send: timeout_minutes=1441 is rejected", async () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── v0.10 Slice 3: kill_on_stall + stall_threshold_seconds ────────────
+//
+// Mirrors the timeout_minutes pattern: schema pinning, propagation
+// through the queue capture, and tool-level range validation. The
+// watchdog enforcement itself is exercised in tests/watchdog-*.test.ts.
+
+test("ensemble_spawn schema declares optional kill_on_stall boolean", () => {
+  const { spawnTool } = setup();
+  const props = spawnTool.parameters?.properties;
+  assert.ok(props.kill_on_stall, "kill_on_stall is in the schema");
+  const required: string[] = spawnTool.parameters.required ?? [];
+  assert.ok(!required.includes("kill_on_stall"), "kill_on_stall is optional");
+  assert.equal(props.kill_on_stall.type, "boolean");
+  // Description must mention the watchdog so the LLM understands the
+  // semantic, not just the field shape.
+  assert.match(String(props.kill_on_stall.description ?? ""), /watchdog/i);
+});
+
+test("ensemble_spawn schema declares optional stall_threshold_seconds integer >= 30", () => {
+  const { spawnTool } = setup();
+  const props = spawnTool.parameters?.properties;
+  assert.ok(props.stall_threshold_seconds, "stall_threshold_seconds is in the schema");
+  const required: string[] = spawnTool.parameters.required ?? [];
+  assert.ok(
+    !required.includes("stall_threshold_seconds"),
+    "stall_threshold_seconds is optional",
+  );
+  assert.equal(props.stall_threshold_seconds.minimum, 30);
+  assert.match(
+    String(props.stall_threshold_seconds.description ?? ""),
+    /watchdog|soft|stall/i,
+  );
+});
+
+test("ensemble_send schema declares optional kill_on_stall boolean", () => {
+  const { sendTool } = setup();
+  const props = sendTool.parameters?.properties;
+  assert.ok(props.kill_on_stall, "kill_on_stall is in the send schema");
+  const required: string[] = sendTool.parameters.required ?? [];
+  assert.ok(!required.includes("kill_on_stall"));
+  assert.equal(props.kill_on_stall.type, "boolean");
+});
+
+test("ensemble_send schema declares optional stall_threshold_seconds integer >= 30", () => {
+  const { sendTool } = setup();
+  const props = sendTool.parameters?.properties;
+  assert.ok(props.stall_threshold_seconds, "stall_threshold_seconds is in the send schema");
+  const required: string[] = sendTool.parameters.required ?? [];
+  assert.ok(!required.includes("stall_threshold_seconds"));
+  assert.equal(props.stall_threshold_seconds.minimum, 30);
+});
+
+test("ensemble_spawn: kill_on_stall=true propagates to queue opts.killOnStall", async () => {
+  const { spawnTool, captured } = setupWithCaptureQueue();
+  await spawnTool.execute("call-kos-1", {
+    persona: "inspector",
+    task: "noop",
+    foreground: false,
+    kill_on_stall: true,
+  });
+  assert.equal(captured.called, true);
+  assert.equal(captured.killOnStall, true);
+});
+
+test("ensemble_spawn: omitting kill_on_stall leaves opts.killOnStall undefined (defaults apply downstream)", async () => {
+  const { spawnTool, captured } = setupWithCaptureQueue();
+  await spawnTool.execute("call-kos-2", {
+    persona: "inspector",
+    task: "noop",
+    foreground: false,
+  });
+  assert.equal(captured.called, true);
+  assert.equal(
+    captured.killOnStall,
+    undefined,
+    "undefined → conductor default applies at watchdog-dispatch time",
+  );
+});
+
+test("ensemble_spawn: stall_threshold_seconds=300 propagates to opts.softStallSeconds", async () => {
+  const { spawnTool, captured } = setupWithCaptureQueue();
+  await spawnTool.execute("call-sts-1", {
+    persona: "inspector",
+    task: "noop",
+    foreground: false,
+    stall_threshold_seconds: 300,
+  });
+  assert.equal(captured.called, true);
+  assert.equal(captured.softStallSeconds, 300);
+});
+
+test("ensemble_spawn: stall_threshold_seconds=29 is rejected (< 30 floor)", async () => {
+  const { spawnTool, captured } = setupWithCaptureQueue();
+  const result = await spawnTool.execute("call-sts-rej", {
+    persona: "inspector",
+    task: "noop",
+    foreground: false,
+    stall_threshold_seconds: 29,
+  });
+  assert.equal(captured.called, false, "validation runs before queue dispatch");
+  const text = result.content.map((c: any) => c.text).join("\n");
+  assert.match(text, /stall_threshold_seconds/i);
+  assert.match(text, /\b30\b/);
+  assert.ok(result.details?.error);
+});
+
+test("ensemble_spawn: stall_threshold_seconds=-1 is rejected", async () => {
+  const { spawnTool, captured } = setupWithCaptureQueue();
+  const result = await spawnTool.execute("call-sts-neg", {
+    persona: "inspector",
+    task: "noop",
+    foreground: false,
+    stall_threshold_seconds: -1,
+  });
+  assert.equal(captured.called, false);
+  const text = result.content.map((c: any) => c.text).join("\n");
+  assert.match(text, /stall_threshold_seconds/i);
+});
+
+test("ensemble_send: stall_threshold_seconds=20 is rejected (sub-30 floor)", async () => {
+  const { dir, path } = tmpSessionFile();
+  try {
+    const run = makeRun("inspector-w0w0", {
+      status: "completed",
+      sessionPath: path,
+    });
+    const { sendTool } = setup([run]);
+    const result = await sendTool.execute("call-send-sts", {
+      agent_id: run.id,
+      message: "hi",
+      stall_threshold_seconds: 20,
+    });
+    const text = result.content.map((c: any) => c.text).join("\n");
+    assert.match(text, /stall_threshold_seconds/i);
+    assert.equal(run.status, "completed");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("DEFAULT_CONFIG: watchdog defaults are present and default-off for kill_on_stall", () => {
+  // Pin the design's chosen defaults so a careless config refactor
+  // doesn't silently drop the watchdog. defaultKillOnStall is OFF by
+  // design (advisory-only); autonomous chains opt in.
+  assert.equal(DEFAULT_CONFIG.watchdog.enabled, true);
+  assert.equal(DEFAULT_CONFIG.watchdog.defaultSoftSeconds, 120);
+  assert.equal(DEFAULT_CONFIG.watchdog.defaultHardSeconds, 600);
+  assert.equal(DEFAULT_CONFIG.watchdog.graceSeconds, 30);
+  assert.equal(
+    DEFAULT_CONFIG.watchdog.defaultKillOnStall,
+    false,
+    "default-off guards against surprise auto-kills",
+  );
 });

@@ -18,7 +18,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { Watchdog, type WatchdogDeps, type WatchdogLog } from "../src/watchdog.ts";
-import { DEFAULT_WATCHDOG_CONFIG, type WatchdogConfig } from "../src/watchdog.ts";
+import { DEFAULT_WATCHDOG_CONFIG, resolveKillOnStall, type WatchdogConfig } from "../src/watchdog.ts";
 import { emptyUsage, type Run, type RunStatus } from "../src/types.ts";
 import type { TerminationReason } from "../src/runs.ts";
 
@@ -109,6 +109,7 @@ function makeDeps(opts: {
   runs: Run[];
   config?: WatchdogConfig;
   killOnStall?: boolean;
+  killOnStallFn?: (run: Run) => boolean;
   log?: FakeLog;
   nowRef?: { value: number };
 }): {
@@ -129,7 +130,7 @@ function makeDeps(opts: {
     kill: (run, reason) => {
       kills.push({ runId: run.id, reason });
     },
-    isKillOnStall: () => opts.killOnStall ?? false,
+    isKillOnStall: opts.killOnStallFn ?? (() => opts.killOnStall ?? false),
   };
   return { deps, kills, registry, log };
 }
@@ -402,3 +403,97 @@ test("Watchdog: tickIntervalMs override is honoured", () => {
   assert.equal(intervalMs, 5_000);
   dispose();
 });
+
+// ── v0.10 Slice 3: per-run policy plumbing through dispatch ────────────
+
+test("Watchdog.tick: per-run killOnStall=true (via isKillOnStall(run)) escalates hard to kill (LOAD-BEARING)", () => {
+  // Mirrors the index.ts wiring: isKillOnStall reads run.killOnStall.
+  // Two runs share a registry; only the one with killOnStall=true is
+  // killed when both cross hard. Mutation: drop the per-run lookup
+  // (always return false) → no kills → this test fires both negatives.
+  const target = runFx({
+    id: "builder-kill",
+    persona: "builder",
+    killOnStall: true,
+    startTime: T0,
+    lastEventAt: T0,
+  });
+  const bystander = runFx({
+    id: "inspector-keep",
+    persona: "inspector",
+    killOnStall: false,
+    startTime: T0,
+    lastEventAt: T0,
+  });
+  const nowRef = { value: T0 };
+  const { deps, kills } = makeDeps({
+    runs: [target, bystander],
+    nowRef,
+    killOnStallFn: (run) => run.killOnStall === true,
+  });
+  const wd = new Watchdog(deps);
+  // Advance past hard threshold (600s) for both.
+  nowRef.value = T0 + 700_000;
+  wd.tick();
+  assert.equal(kills.length, 1, "only one run is killed");
+  assert.equal(kills[0]?.runId, target.id);
+  assert.equal(kills[0]?.reason, "stalled");
+});
+
+test("Watchdog.tick: per-run softStallSeconds override changes the soft fire boundary", () => {
+  // Run with softStallSeconds=300; CFG default soft=120. 200s of
+  // silence is below the override soft and should NOT fire. Crossing
+  // 300s does fire as soft.
+  const run = runFx({
+    id: "builder-slow",
+    softStallSeconds: 300,
+    startTime: T0,
+    lastEventAt: T0,
+  });
+  const nowRef = { value: T0 };
+  const log = fakeLog();
+  const { deps } = makeDeps({ runs: [run], nowRef, log });
+  const wd = new Watchdog(deps);
+
+  // 200s in: still below override soft (300s).
+  nowRef.value = T0 + 200_000;
+  wd.tick();
+  assert.equal(
+    log.warns.length,
+    0,
+    "override raised soft to 300s; 200s of silence is healthy",
+  );
+
+  // 300s in: crosses override soft.
+  nowRef.value = T0 + 300_000;
+  wd.tick();
+  assert.equal(log.warns.length, 1, "crossed override soft");
+  assert.match(log.warns[0]?.msg ?? "", /soft-stall/);
+});
+
+test("resolveKillOnStall: per-run override wins; falls through to cfg default (LOAD-BEARING — W1 witness for src/index.ts:391)", () => {
+  // The session_start handler in src/index.ts wires the watchdog's
+  // `isKillOnStall` to `resolveKillOnStall(run, cfg.watchdog.defaultKillOnStall)`.
+  // Mutation: dropping the per-run lookup in `resolveKillOnStall`
+  // (i.e. body becomes `return defaultKillOnStall;`) flips assertions 1
+  // and 3 below. The other Slice 3 enforcer tests inject their own
+  // killOnStallFn into deps, bypassing the production formula — this
+  // test pins the formula directly so a regression cannot slip through.
+  const r = (k?: boolean): Run => runFx({ killOnStall: k });
+  assert.equal(
+    resolveKillOnStall(r(true), false),
+    true,
+    "override true wins over default false",
+  );
+  assert.equal(
+    resolveKillOnStall(r(undefined), true),
+    true,
+    "undefined run.killOnStall falls through to cfg default",
+  );
+  assert.equal(
+    resolveKillOnStall(r(false), true),
+    false,
+    "explicit false wins over default true",
+  );
+});
+

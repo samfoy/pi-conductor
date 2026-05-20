@@ -1070,7 +1070,11 @@ function spawnRun(opts) {
     sessionPath: void 0,
     // Capture the persona body now so future ensemble_send calls can
     // re-pass it on resume. Pi doesn't persist system prompts to disk.
-    systemPrompt: opts.persona.systemPrompt
+    systemPrompt: opts.persona.systemPrompt,
+    // v0.10 watchdog (Slice 3) per-spawn overrides; undefined falls
+    // back to conductor-wide defaults at watchdog dispatch time.
+    killOnStall: opts.killOnStall,
+    softStallSeconds: opts.softStallSeconds
   };
   opts.registry.register(run);
   void writeRecord(run);
@@ -1277,6 +1281,8 @@ function sendToRun(run, message, opts) {
   run.errorMessage = void 0;
   run.stopReason = void 0;
   run.lastToolCall = void 0;
+  if (opts.killOnStall !== void 0) run.killOnStall = opts.killOnStall;
+  if (opts.softStallSeconds !== void 0) run.softStallSeconds = opts.softStallSeconds;
   opts.registry.notify(run);
   const sessionPath = run.sessionPath;
   const piArgs = buildResumePiArgs(run, trimmed);
@@ -1807,6 +1813,12 @@ async function buildDoctorReport(opts) {
   );
   lines.push(
     `  gc auto:               ${cfg.gc.autoOnSessionStart ? "ON" : "off"} (debounce=${cfg.gc.autoDebounceHours}h)`
+  );
+  lines.push(
+    `  watchdog:              ${cfg.watchdog.enabled ? "enabled" : "DISABLED"} (soft=${cfg.watchdog.defaultSoftSeconds}s, hard=${cfg.watchdog.defaultHardSeconds}s, grace=${cfg.watchdog.graceSeconds}s)`
+  );
+  lines.push(
+    `  watchdog kill_on_stall: ${cfg.watchdog.defaultKillOnStall ? "ON (default)" : "off (default)"} \u2014 per-spawn override via ensemble_spawn kill_on_stall arg`
   );
   {
     const root = opts.runsRoot ?? join6(opts.homeDir ?? homedir4(), ".pi", "agent", "conductor", "runs");
@@ -3224,7 +3236,9 @@ function registerSpawnTool(pi, opts) {
       "For read-only personas (oracle, redteam, inspector, analyst, profiler, investigator), prefer parallel background spawns.",
       "For write-capable personas (builder, simplifier), run one at a time per set of files.",
       "Foreground spawns may auto-downgrade to background under load \u2014 handle the queued-as-background return cleanly without re-spawning.",
-      "Pass timeout_minutes to override the per-persona / global default for a single risky run; default applies if omitted."
+      "Pass timeout_minutes to override the per-persona / global default for a single risky run; default applies if omitted.",
+      "Pass kill_on_stall=true on autonomous chains where you can't manually intervene; the v0.10 watchdog will hard-kill a sub-agent that goes silent past its hard threshold.",
+      "Pass stall_threshold_seconds (\u2265 30) on spawns whose tool calls are known-slow (npm install, brazil-build, big test suites) to suppress noisy soft-stall advisories."
     ],
     parameters: Type.Object({
       persona: Type.String({
@@ -3244,11 +3258,24 @@ function registerSpawnTool(pi, opts) {
           maximum: 1440,
           description: "Wall-clock timeout for this sub-agent in minutes (1\u20131440). Overrides the per-persona override and the global default. Omit to use the cascade."
         })
+      ),
+      kill_on_stall: Type.Optional(
+        Type.Boolean({
+          description: "v0.10 watchdog opt-in. true \u2192 the sub-agent is auto-killed if it goes silent past the hard-stall threshold (default 600s). false / omitted \u2192 advisory-only; the wall-clock timeout still applies. Recommend true on autonomous chains; default off for interactive sessions."
+        })
+      ),
+      stall_threshold_seconds: Type.Optional(
+        Type.Integer({
+          minimum: 30,
+          description: "v0.10 watchdog soft-stall threshold for this spawn, in seconds (\u2265 30). Hard threshold scales with the same ratio as conductor defaults (typically 5\xD7). Override when the persona's expected tool calls are legitimately slow (npm install, brazil-build, large test suites). Default: 120s."
+        })
       )
     }),
     async execute(_id, params, signal, onUpdate) {
       const tmRange = validateTimeoutMinutes(params.timeout_minutes);
       if (tmRange) return errorResult(tmRange);
+      const stallRange = validateStallThresholdSeconds(params.stall_threshold_seconds);
+      if (stallRange) return errorResult(stallRange);
       const cwd = opts.getCwd();
       const cfg = loadConfig(cwd);
       const resolved = await resolvePersonas({ cwd, personaOverrides: cfg.personaOverrides });
@@ -3278,6 +3305,10 @@ function registerSpawnTool(pi, opts) {
         // Snapshot parent context at spawn time. Honors inherit_context
         // (filtered/full) inside spawnRun via planSpawnPiArgs.
         parentMessages: opts.getParentMessages(),
+        // v0.10 Slice 3: per-spawn watchdog overrides. Undefined →
+        // conductor default (off / 120s soft).
+        killOnStall: params.kill_on_stall,
+        softStallSeconds: params.stall_threshold_seconds,
         onUpdate: foreground ? () => {
         } : void 0,
         // foreground uses our own onUpdate below
@@ -3418,11 +3449,24 @@ function registerSendTool(pi, opts) {
           maximum: 1440,
           description: "Wall-clock timeout for this resumed turn in minutes (1\u20131440). Overrides per-persona and global defaults. Send arms a fresh budget per call."
         })
+      ),
+      kill_on_stall: Type.Optional(
+        Type.Boolean({
+          description: "v0.10 watchdog opt-in for the resumed turn. true \u2192 auto-kill on hard-stall. Replaces the original spawn's value and persists for subsequent sends. Omit to keep the existing setting."
+        })
+      ),
+      stall_threshold_seconds: Type.Optional(
+        Type.Integer({
+          minimum: 30,
+          description: "v0.10 watchdog soft-stall threshold for the resumed turn, in seconds (\u2265 30). Hard threshold scales with the same ratio as conductor defaults. Replaces the original spawn's value."
+        })
       )
     }),
     async execute(_id, params, signal, onUpdate) {
       const tmRange = validateTimeoutMinutes(params.timeout_minutes);
       if (tmRange) return errorResult(tmRange);
+      const stallRange = validateStallThresholdSeconds(params.stall_threshold_seconds);
+      if (stallRange) return errorResult(stallRange);
       const cwd = opts.getCwd();
       const cfg = loadConfig(cwd);
       const registry = opts.getRegistry();
@@ -3441,7 +3485,11 @@ function registerSendTool(pi, opts) {
       const result = sendToRun(run, params.message, {
         registry,
         timeoutMs,
-        onComplete: foreground ? void 0 : (r) => opts.pushCompletionNotification(r)
+        onComplete: foreground ? void 0 : (r) => opts.pushCompletionNotification(r),
+        // v0.10 Slice 3: per-send watchdog overrides. Undefined → keep
+        // the run's existing values.
+        killOnStall: params.kill_on_stall,
+        softStallSeconds: params.stall_threshold_seconds
       });
       if (result.kind === "rejected") {
         return errorResult(result.reason);
@@ -3840,6 +3888,13 @@ function validateTimeoutMinutes(tm) {
   }
   return void 0;
 }
+function validateStallThresholdSeconds(s) {
+  if (s === void 0) return void 0;
+  if (!Number.isFinite(s) || !Number.isInteger(s) || s < 30) {
+    return `stall_threshold_seconds must be an integer \u2265 30; got ${s}`;
+  }
+  return void 0;
+}
 function isTerminalStatus(s) {
   return s === "completed" || s === "failed" || s === "killed" || s === "timeout";
 }
@@ -3923,7 +3978,9 @@ var SpawnQueue = class {
       timeoutMs: opts.timeoutMs,
       enqueuedAt: Date.now(),
       parentMessages: opts.parentMessages,
-      onComplete: opts.onComplete
+      onComplete: opts.onComplete,
+      killOnStall: opts.killOnStall,
+      softStallSeconds: opts.softStallSeconds
     };
     this.pending.push(pending);
     return {
@@ -3973,7 +4030,9 @@ var SpawnQueue = class {
         timeoutMs: next.timeoutMs,
         preAllocatedId: next.id,
         parentMessages: next.parentMessages,
-        onComplete: next.onComplete
+        onComplete: next.onComplete,
+        killOnStall: next.killOnStall,
+        softStallSeconds: next.softStallSeconds
       });
     }
   }
@@ -5050,6 +5109,23 @@ function evaluateRun(run, state, config, now) {
   return { transition: { kind: "none" }, nextState: current };
 }
 var DEFAULT_TICK_INTERVAL_MS = 3e4;
+function effectiveConfig(run, defaults) {
+  const overrideSoft = run.softStallSeconds;
+  if (overrideSoft === void 0) return defaults;
+  const ratio = defaults.softThresholdSeconds > 0 ? defaults.hardThresholdSeconds / defaults.softThresholdSeconds : 5;
+  const scaledHard = Math.max(
+    Math.round(overrideSoft * ratio),
+    overrideSoft + 60
+  );
+  return {
+    softThresholdSeconds: overrideSoft,
+    hardThresholdSeconds: scaledHard,
+    graceSeconds: defaults.graceSeconds
+  };
+}
+function resolveKillOnStall(run, defaultKillOnStall) {
+  return run.killOnStall ?? defaultKillOnStall;
+}
 var Watchdog = class {
   constructor(deps) {
     this.deps = deps;
@@ -5116,12 +5192,13 @@ var Watchdog = class {
     const now = this.deps.now();
     for (const run of this.deps.registry.list()) {
       const prev = this.states.get(run.id);
-      const { transition, nextState } = evaluateRun(run, prev, this.deps.config, now);
+      const effective = effectiveConfig(run, this.deps.config);
+      const { transition, nextState } = evaluateRun(run, prev, effective, now);
       this.states.set(run.id, nextState);
       if (run.status !== "running") {
         this.states.delete(run.id);
       }
-      this.dispatch(run, transition);
+      this.dispatch(run, transition, effective);
     }
   }
   /**
@@ -5131,7 +5208,7 @@ var Watchdog = class {
    * recheck**: re-read `now() - run.lastEventAt` and abort the kill if
    * the run recovered between the detector verdict and the dispatch.
    */
-  dispatch(run, transition) {
+  dispatch(run, transition, effective) {
     switch (transition.kind) {
       case "none":
         return;
@@ -5165,7 +5242,7 @@ var Watchdog = class {
         }
         const nowAfter = this.deps.now();
         const stillStaleMs = nowAfter - run.lastEventAt;
-        if (stillStaleMs < this.deps.config.hardThresholdSeconds * 1e3) {
+        if (stillStaleMs < effective.hardThresholdSeconds * 1e3) {
           run.stalledSince = void 0;
           this.states.set(run.id, { kind: "fresh" });
           this.deps.log.info(
@@ -5455,7 +5532,12 @@ function index_default(pi) {
         kill: (run, reason) => {
           forceTerminate(run, reason, registry);
         },
-        isKillOnStall: () => cfg.watchdog.defaultKillOnStall,
+        // v0.10 Slice 3: per-run `kill_on_stall` overrides the
+        // conductor-wide default. The lambda delegates to
+        // `resolveKillOnStall` (exported, witness-pinned by
+        // `tests/watchdog-enforcer.test.ts`) so a regression in the
+        // formula is caught by the W1 mutation witness.
+        isKillOnStall: (run) => resolveKillOnStall(run, cfg.watchdog.defaultKillOnStall),
         isEnabled: () => cfg.watchdog.enabled
       });
       watchdogDispose = wd.start();

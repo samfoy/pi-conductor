@@ -232,6 +232,51 @@ export interface WatchdogDeps {
 const DEFAULT_TICK_INTERVAL_MS = 30_000;
 
 /**
+ * v0.10 Slice 3: derive the effective {@link WatchdogConfig} for a
+ * single run. When the run carries a `softStallSeconds` override
+ * (set at spawn or send time), compute matching thresholds at the
+ * same hard:soft ratio as the conductor defaults so a longer soft
+ * also implies a proportionally longer hard.
+ *
+ * Pure: no I/O, deterministic on (run, defaults). Exposed for tests.
+ */
+export function effectiveConfig(run: Run, defaults: WatchdogConfig): WatchdogConfig {
+  const overrideSoft = run.softStallSeconds;
+  if (overrideSoft === undefined) return defaults;
+  const ratio =
+    defaults.softThresholdSeconds > 0
+      ? defaults.hardThresholdSeconds / defaults.softThresholdSeconds
+      : 5;
+  // Hard stays a multiple of soft (default 5× — 600/120). Floor at
+  // soft + 60s so a tight soft override never collapses hard onto it.
+  const scaledHard = Math.max(
+    Math.round(overrideSoft * ratio),
+    overrideSoft + 60,
+  );
+  return {
+    softThresholdSeconds: overrideSoft,
+    hardThresholdSeconds: scaledHard,
+    graceSeconds: defaults.graceSeconds,
+  };
+}
+
+/**
+ * Resolve `kill_on_stall` for a single run. Per-run override (set by
+ * the spawn/send pipeline from the LLM tool arg) wins over the
+ * conductor-wide default. Returns `false` only when both the run's
+ * `killOnStall` is explicitly `false` or the default is `false` and
+ * the run's value is `undefined`.
+ *
+ * Pure: no I/O, deterministic on (run, defaultKillOnStall). Exposed
+ * for tests so the W1 mutation witness can pin the formula directly
+ * (see `personas/critic.md`'s mutation-test rule and `docs/wdd.md`).
+ * Imported by `src/index.ts`'s session_start watchdog wiring.
+ */
+export function resolveKillOnStall(run: Run, defaultKillOnStall: boolean): boolean {
+  return run.killOnStall ?? defaultKillOnStall;
+}
+
+/**
  * Sub-agent stall enforcer. Wraps the pure {@link evaluateRun} with:
  *   - registry subscription (wake on state change)
  *   - interval ticker (catch silent runs that never fire registry events)
@@ -325,7 +370,11 @@ export class Watchdog {
     const now = this.deps.now();
     for (const run of this.deps.registry.list()) {
       const prev = this.states.get(run.id);
-      const { transition, nextState } = evaluateRun(run, prev, this.deps.config, now);
+      // v0.10 Slice 3: per-run effective config so a spawn that overrode
+      // `stall_threshold_seconds` gets its own thresholds. Pure helper;
+      // the detector itself stays config-driven.
+      const effective = effectiveConfig(run, this.deps.config);
+      const { transition, nextState } = evaluateRun(run, prev, effective, now);
 
       // Persist state so the next tick can dedupe + detect recovery.
       this.states.set(run.id, nextState);
@@ -337,7 +386,7 @@ export class Watchdog {
         this.states.delete(run.id);
       }
 
-      this.dispatch(run, transition);
+      this.dispatch(run, transition, effective);
     }
   }
 
@@ -348,7 +397,7 @@ export class Watchdog {
    * recheck**: re-read `now() - run.lastEventAt` and abort the kill if
    * the run recovered between the detector verdict and the dispatch.
    */
-  private dispatch(run: Run, transition: WatchdogTransition): void {
+  private dispatch(run: Run, transition: WatchdogTransition, effective: WatchdogConfig): void {
     switch (transition.kind) {
       case "none":
         return;
@@ -391,7 +440,7 @@ export class Watchdog {
         // the corresponding test flip from "recovered" to "killed".
         const nowAfter = this.deps.now();
         const stillStaleMs = nowAfter - run.lastEventAt;
-        if (stillStaleMs < this.deps.config.hardThresholdSeconds * 1000) {
+        if (stillStaleMs < effective.hardThresholdSeconds * 1000) {
           // Recovered between detector and kill. Treat as recovered:
           // clear stalledSince, reset state, log info.
           run.stalledSince = undefined;

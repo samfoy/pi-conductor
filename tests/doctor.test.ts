@@ -181,6 +181,31 @@ test("buildDoctorReport: shows runtime active/queued counts", async () => {
   }
 });
 
+// v0.10 Slice 3: watchdog defaults surface in /conductor doctor.
+test("buildDoctorReport: surfaces watchdog defaults under Resolved config", async () => {
+  const fx = setup();
+  try {
+    const reg = new RunRegistry();
+    const q = new SpawnQueue(reg, 4);
+    const out = await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: q,
+      conductorMode: false,
+    });
+    // Threshold + grace numbers come from DEFAULT_CONFIG.watchdog.
+    assert.match(out, /watchdog:\s+enabled/);
+    assert.match(out, /soft=120s/);
+    assert.match(out, /hard=600s/);
+    assert.match(out, /grace=30s/);
+    // kill_on_stall default-off must be visible so operators know what
+    // they're getting without overriding.
+    assert.match(out, /watchdog kill_on_stall:\s+off/);
+  } finally {
+    teardown(fx);
+  }
+});
+
 test("buildDoctorReport: warns on legacy ~/.pi/agent/extensions/conductor/index.js", async () => {
   const fx = setup();
   try {

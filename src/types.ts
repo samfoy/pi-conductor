@@ -259,6 +259,30 @@ export interface Run {
    * to it from the watchdog enforcer.
    */
   stalledSince?: number;
+  /**
+   * v0.10 watchdog (Slice 3) per-spawn override. When `true`, the
+   * watchdog auto-kills this run on hard-stall. When undefined, the
+   * conductor-wide default `cfg.watchdog.defaultKillOnStall` applies.
+   *
+   * Set by the spawn pipeline from the `kill_on_stall` LLM tool arg or
+   * persona override, never by event handlers. Persists for the
+   * lifetime of the run (re-spawned `ensemble_send` calls keep the
+   * original spawn's value unless explicitly re-overridden).
+   */
+  killOnStall?: boolean;
+  /**
+   * v0.10 watchdog (Slice 3) per-spawn override of the soft threshold,
+   * in seconds. The hard threshold scales with the soft override at
+   * the same ratio as the conductor defaults
+   * (`defaultHardSeconds / defaultSoftSeconds`, typically 5×). When
+   * undefined, both thresholds come from
+   * `cfg.watchdog.defaultSoftSeconds` / `defaultHardSeconds`.
+   *
+   * Validated at the tool boundary: must be ≥ 30. Tighter values would
+   * fire on legitimate slow operations (npm install, brazil-build)
+   * with no user benefit.
+   */
+  softStallSeconds?: number;
 
   /** Exit code of the pi subprocess; set on close. */
   exitCode?: number;

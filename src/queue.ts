@@ -46,6 +46,10 @@ export interface PendingSpawn {
   parentMessages?: AgentMessage[];
   /** Non-foreground onComplete plumbed through from the spawner. */
   onComplete?: (run: Run) => void;
+  /** v0.10 watchdog (Slice 3) per-spawn override; threaded to spawnRun. */
+  killOnStall?: boolean;
+  /** v0.10 watchdog (Slice 3) per-spawn soft-threshold (seconds). */
+  softStallSeconds?: number;
 }
 
 export class SpawnQueue {
@@ -142,6 +146,8 @@ export class SpawnQueue {
       enqueuedAt: Date.now(),
       parentMessages: opts.parentMessages,
       onComplete: opts.onComplete,
+      killOnStall: opts.killOnStall,
+      softStallSeconds: opts.softStallSeconds,
     };
     this.pending.push(pending);
     return {
@@ -205,6 +211,8 @@ export class SpawnQueue {
         preAllocatedId: next.id,
         parentMessages: next.parentMessages,
         onComplete: next.onComplete,
+        killOnStall: next.killOnStall,
+        softStallSeconds: next.softStallSeconds,
       });
     }
   }

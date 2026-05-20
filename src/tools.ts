@@ -200,6 +200,8 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       "For write-capable personas (builder, simplifier), run one at a time per set of files.",
       "Foreground spawns may auto-downgrade to background under load — handle the queued-as-background return cleanly without re-spawning.",
       "Pass timeout_minutes to override the per-persona / global default for a single risky run; default applies if omitted.",
+      "Pass kill_on_stall=true on autonomous chains where you can't manually intervene; the v0.10 watchdog will hard-kill a sub-agent that goes silent past its hard threshold.",
+      "Pass stall_threshold_seconds (≥ 30) on spawns whose tool calls are known-slow (npm install, brazil-build, big test suites) to suppress noisy soft-stall advisories.",
     ],
     parameters: Type.Object({
       persona: Type.String({
@@ -223,10 +225,25 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
             "Wall-clock timeout for this sub-agent in minutes (1–1440). Overrides the per-persona override and the global default. Omit to use the cascade.",
         }),
       ),
+      kill_on_stall: Type.Optional(
+        Type.Boolean({
+          description:
+            "v0.10 watchdog opt-in. true → the sub-agent is auto-killed if it goes silent past the hard-stall threshold (default 600s). false / omitted → advisory-only; the wall-clock timeout still applies. Recommend true on autonomous chains; default off for interactive sessions.",
+        }),
+      ),
+      stall_threshold_seconds: Type.Optional(
+        Type.Integer({
+          minimum: 30,
+          description:
+            "v0.10 watchdog soft-stall threshold for this spawn, in seconds (≥ 30). Hard threshold scales with the same ratio as conductor defaults (typically 5×). Override when the persona's expected tool calls are legitimately slow (npm install, brazil-build, large test suites). Default: 120s.",
+        }),
+      ),
     }),
     async execute(_id, params, signal, onUpdate) {
       const tmRange = validateTimeoutMinutes(params.timeout_minutes);
       if (tmRange) return errorResult(tmRange);
+      const stallRange = validateStallThresholdSeconds(params.stall_threshold_seconds);
+      if (stallRange) return errorResult(stallRange);
 
       const cwd = opts.getCwd();
       const cfg = loadConfig(cwd);
@@ -267,6 +284,10 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         // Snapshot parent context at spawn time. Honors inherit_context
         // (filtered/full) inside spawnRun via planSpawnPiArgs.
         parentMessages: opts.getParentMessages(),
+        // v0.10 Slice 3: per-spawn watchdog overrides. Undefined →
+        // conductor default (off / 120s soft).
+        killOnStall: params.kill_on_stall,
+        softStallSeconds: params.stall_threshold_seconds,
         onUpdate: foreground ? () => {} : undefined, // foreground uses our own onUpdate below
         onComplete: foreground
           ? undefined
@@ -451,10 +472,25 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
             "Wall-clock timeout for this resumed turn in minutes (1–1440). Overrides per-persona and global defaults. Send arms a fresh budget per call.",
         }),
       ),
+      kill_on_stall: Type.Optional(
+        Type.Boolean({
+          description:
+            "v0.10 watchdog opt-in for the resumed turn. true → auto-kill on hard-stall. Replaces the original spawn's value and persists for subsequent sends. Omit to keep the existing setting.",
+        }),
+      ),
+      stall_threshold_seconds: Type.Optional(
+        Type.Integer({
+          minimum: 30,
+          description:
+            "v0.10 watchdog soft-stall threshold for the resumed turn, in seconds (≥ 30). Hard threshold scales with the same ratio as conductor defaults. Replaces the original spawn's value.",
+        }),
+      ),
     }),
     async execute(_id, params, signal, onUpdate) {
       const tmRange = validateTimeoutMinutes(params.timeout_minutes);
       if (tmRange) return errorResult(tmRange);
+      const stallRange = validateStallThresholdSeconds(params.stall_threshold_seconds);
+      if (stallRange) return errorResult(stallRange);
 
       const cwd = opts.getCwd();
       const cfg = loadConfig(cwd);
@@ -487,6 +523,10 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         onComplete: foreground
           ? undefined
           : (r) => opts.pushCompletionNotification(r),
+        // v0.10 Slice 3: per-send watchdog overrides. Undefined → keep
+        // the run's existing values.
+        killOnStall: params.kill_on_stall,
+        softStallSeconds: params.stall_threshold_seconds,
       });
 
       if (result.kind === "rejected") {
@@ -967,6 +1007,19 @@ function validateTimeoutMinutes(tm: number | undefined): string | undefined {
   if (tm === undefined) return undefined;
   if (!Number.isFinite(tm) || !Number.isInteger(tm) || tm < 1 || tm > 1440) {
     return `timeout_minutes must be an integer in [1, 1440]; got ${tm}`;
+  }
+  return undefined;
+}
+
+/**
+ * Validate a per-call `stall_threshold_seconds` tool argument. Mirrors
+ * {@link validateTimeoutMinutes}; minimum is 30 (tighter watchdogs fire
+ * on legitimate slow operations like `npm install` / `brazil-build`).
+ */
+function validateStallThresholdSeconds(s: number | undefined): string | undefined {
+  if (s === undefined) return undefined;
+  if (!Number.isFinite(s) || !Number.isInteger(s) || s < 30) {
+    return `stall_threshold_seconds must be an integer ≥ 30; got ${s}`;
   }
   return undefined;
 }

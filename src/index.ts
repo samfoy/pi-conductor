@@ -39,7 +39,7 @@ import { resolveInitialConductorMode } from "./conductor-mode.ts";
 import { installCompactionHook } from "./compaction-hook.ts";
 import { installSanitizerHook } from "./sanitizer-hook.ts";
 import { handleSessionShutdown } from "./shutdown.ts";
-import { Watchdog } from "./watchdog.ts";
+import { Watchdog, resolveKillOnStall } from "./watchdog.ts";
 import { formatStallNotification } from "./notifications.ts";
 
 export default function (pi: ExtensionAPI): void {
@@ -384,7 +384,12 @@ export default function (pi: ExtensionAPI): void {
         kill: (run, reason) => {
           forceTerminate(run, reason, registry);
         },
-        isKillOnStall: () => cfg.watchdog.defaultKillOnStall,
+        // v0.10 Slice 3: per-run `kill_on_stall` overrides the
+        // conductor-wide default. The lambda delegates to
+        // `resolveKillOnStall` (exported, witness-pinned by
+        // `tests/watchdog-enforcer.test.ts`) so a regression in the
+        // formula is caught by the W1 mutation witness.
+        isKillOnStall: (run) => resolveKillOnStall(run, cfg.watchdog.defaultKillOnStall),
         isEnabled: () => cfg.watchdog.enabled,
       });
       watchdogDispose = wd.start();

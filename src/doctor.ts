@@ -173,6 +173,17 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
     `  gc auto:               ${cfg.gc.autoOnSessionStart ? "ON" : "off"} ` +
       `(debounce=${cfg.gc.autoDebounceHours}h)`,
   );
+  // v0.10 Slice 3: surface watchdog defaults so operators see what
+  // thresholds apply to spawns that don't override them.
+  lines.push(
+    `  watchdog:              ${cfg.watchdog.enabled ? "enabled" : "DISABLED"} ` +
+      `(soft=${cfg.watchdog.defaultSoftSeconds}s, hard=${cfg.watchdog.defaultHardSeconds}s, ` +
+      `grace=${cfg.watchdog.graceSeconds}s)`,
+  );
+  lines.push(
+    `  watchdog kill_on_stall: ${cfg.watchdog.defaultKillOnStall ? "ON (default)" : "off (default)"} ` +
+      `— per-spawn override via ensemble_spawn kill_on_stall arg`,
+  );
   {
     const root = opts.runsRoot ?? join(opts.homeDir ?? homedir(), ".pi", "agent", "conductor", "runs");
     const lastMs = readLastGcMtime(root);

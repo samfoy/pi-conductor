@@ -659,6 +659,18 @@ export interface SpawnOptions {
   onUpdate?: (run: Run) => void;
   /** Fired when the run reaches a terminal status (completed/failed/killed/timeout). */
   onComplete?: (run: Run) => void;
+  /**
+   * v0.10 watchdog (Slice 3) per-spawn `kill_on_stall` override.
+   * Propagated to `Run.killOnStall`. Undefined → conductor default.
+   */
+  killOnStall?: boolean;
+  /**
+   * v0.10 watchdog (Slice 3) per-spawn soft-threshold override
+   * (seconds). Propagated to `Run.softStallSeconds`. Undefined →
+   * conductor default. Must be ≥ 30 if set; tools.ts validates before
+   * reaching here.
+   */
+  softStallSeconds?: number;
 }
 
 /**
@@ -693,6 +705,10 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // Capture the persona body now so future ensemble_send calls can
     // re-pass it on resume. Pi doesn't persist system prompts to disk.
     systemPrompt: opts.persona.systemPrompt,
+    // v0.10 watchdog (Slice 3) per-spawn overrides; undefined falls
+    // back to conductor-wide defaults at watchdog dispatch time.
+    killOnStall: opts.killOnStall,
+    softStallSeconds: opts.softStallSeconds,
   };
   opts.registry.register(run);
   void writeRecord(run);
@@ -928,6 +944,18 @@ export interface SendToRunOptions {
   timeoutMs: number;
   onUpdate?: (run: Run) => void;
   onComplete?: (run: Run) => void;
+  /**
+   * v0.10 watchdog (Slice 3) per-send override. When provided,
+   * replaces the run's existing `killOnStall` for the resumed turn
+   * (and onward). Useful if the operator decides mid-flight that a
+   * previously-conservative spawn should now auto-kill on stall.
+   */
+  killOnStall?: boolean;
+  /**
+   * v0.10 watchdog (Slice 3) per-send soft-threshold override
+   * (seconds). When provided, replaces `Run.softStallSeconds`.
+   */
+  softStallSeconds?: number;
 }
 
 export type SendToRunResult =
@@ -1016,6 +1044,10 @@ export function sendToRun(
   run.errorMessage = undefined;
   run.stopReason = undefined;
   run.lastToolCall = undefined;
+  // v0.10 watchdog (Slice 3) per-send overrides. Replace prior values
+  // when provided; leave the spawn-time values alone otherwise.
+  if (opts.killOnStall !== undefined) run.killOnStall = opts.killOnStall;
+  if (opts.softStallSeconds !== undefined) run.softStallSeconds = opts.softStallSeconds;
   opts.registry.notify(run);
 
   // validateSendable guarantees sessionPath is set, but TS can't see

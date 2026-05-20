@@ -24,6 +24,7 @@ import assert from "node:assert/strict";
 
 import {
   evaluateRun,
+  effectiveConfig,
   DEFAULT_WATCHDOG_CONFIG,
   type WatchdogConfig,
   type WatchdogState,
@@ -283,4 +284,55 @@ test("evaluateRun: undefined state defaults to fresh", () => {
   const run = runFx({ startTime: T0, lastEventAt: T0 });
   const out = evaluateRun(run, undefined, CFG, T0 + 130_000);
   assert.equal(out.transition.kind, "soft");
+});
+
+// ── v0.10 Slice 3: per-run effectiveConfig override ─────────────────
+
+test("effectiveConfig: returns defaults verbatim when run has no override", () => {
+  const run = runFx();
+  assert.deepEqual(effectiveConfig(run, CFG), CFG);
+});
+
+test("effectiveConfig: softStallSeconds=300 scales hard at the same 5x ratio (default 120/600)", () => {
+  const run = runFx({ softStallSeconds: 300 });
+  const eff = effectiveConfig(run, CFG);
+  assert.equal(eff.softThresholdSeconds, 300);
+  assert.equal(eff.hardThresholdSeconds, 1500); // 300 * 5
+  assert.equal(eff.graceSeconds, CFG.graceSeconds, "grace inherits");
+});
+
+test("effectiveConfig: tight soft override never collapses hard onto it (floor soft+60)", () => {
+  // Pathological config (soft == hard) should still produce a sane gap.
+  const tight: WatchdogConfig = {
+    softThresholdSeconds: 100,
+    hardThresholdSeconds: 100,
+    graceSeconds: 30,
+  };
+  const run = runFx({ softStallSeconds: 30 });
+  const eff = effectiveConfig(run, tight);
+  assert.equal(eff.softThresholdSeconds, 30);
+  assert.ok(
+    eff.hardThresholdSeconds >= 30 + 60,
+    "hard floored at soft + 60s",
+  );
+});
+
+test("evaluateRun: per-run softStallSeconds override changes the soft-fire boundary", () => {
+  // With CFG soft=120, a 200s silence would normally be soft. With
+  // per-run override of 300, the same 200s silence is BELOW soft.
+  const run = runFx({
+    startTime: T0,
+    lastEventAt: T0,
+    softStallSeconds: 300,
+  });
+  const eff = effectiveConfig(run, CFG);
+  const out = evaluateRun(run, { kind: "fresh" }, eff, T0 + 200_000);
+  assert.equal(out.transition.kind, "none", "200s < 300s override soft");
+  // Crossing the override soft (at 300s) does fire.
+  const out2 = evaluateRun(run, { kind: "fresh" }, eff, T0 + 300_000);
+  assert.equal(out2.transition.kind, "soft");
+  assert.equal(
+    out2.transition.kind === "soft" ? out2.transition.thresholdSeconds : -1,
+    300,
+  );
 });
