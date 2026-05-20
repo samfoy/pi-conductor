@@ -12,6 +12,7 @@
  */
 
 import type { Run } from "./types.ts";
+import type { TerminationReason, RunRegistry } from "./runs.ts";
 
 // ── Public API ────────────────────────────────────────────────────────
 
@@ -180,4 +181,256 @@ export function evaluateRun(
 
   // Healthy and was already fresh — no transition.
   return { transition: { kind: "none" }, nextState: current };
+}
+
+// ── Enforcer (Slice 2) ────────────────────────────────────────────────
+
+/**
+ * Logger used by the enforcer for soft/hard advisories and recovery.
+ * Production wires this to `console.error` (matching the GC pattern);
+ * tests pass a fake to capture calls.
+ */
+export interface WatchdogLog {
+  warn(msg: string, data?: unknown): void;
+  info(msg: string, data?: unknown): void;
+}
+
+/**
+ * Dependencies for the {@link Watchdog} class. Everything is injectable
+ * to keep the enforcer testable without real clocks, intervals, or
+ * subprocess kills.
+ */
+export interface WatchdogDeps {
+  readonly registry: Pick<RunRegistry, "list" | "onChange">;
+  /** Detector config (thresholds + grace). Tick interval is separate. */
+  readonly config: WatchdogConfig;
+  readonly log: WatchdogLog;
+  /** Current wall-clock time in ms. Production: `Date.now`. */
+  readonly now: () => number;
+  /** Force-terminate a stalled run. Production: `forceTerminate(run, reason, registry)`. */
+  readonly kill: (run: Run, reason: TerminationReason) => void;
+  /**
+   * Per-spawn `kill_on_stall` policy. Default off (advisory-only). Slice
+   * 3 will plumb per-spawn overrides through SpawnOptions; until then
+   * this returns the conductor-wide default.
+   */
+  readonly isKillOnStall: (run: Run) => boolean;
+  /**
+   * Master enable switch. Mirrors the v0.9 GC pattern: `enabled=false`
+   * makes every code path a no-op without changing wiring. Defaults to
+   * `true` when omitted.
+   */
+  readonly isEnabled?: () => boolean;
+  /** Detector tick interval in ms. Default 30 000 (30s). */
+  readonly tickIntervalMs?: number;
+  /** Injectable for tests. Default: globalThis.setInterval. */
+  readonly setInterval?: (fn: () => void, ms: number) => NodeJS.Timeout;
+  /** Injectable for tests. Default: globalThis.clearInterval. */
+  readonly clearInterval?: (t: NodeJS.Timeout) => void;
+}
+
+const DEFAULT_TICK_INTERVAL_MS = 30_000;
+
+/**
+ * Sub-agent stall enforcer. Wraps the pure {@link evaluateRun} with:
+ *   - registry subscription (wake on state change)
+ *   - interval ticker (catch silent runs that never fire registry events)
+ *   - per-run `WatchdogState` map
+ *   - dispatch of soft/hard/recovered transitions to log + kill
+ *   - **A2 pre-kill recheck** so a recovered run is not killed by a
+ *     stale verdict
+ *   - **R7 sub-agent skip**: when running inside a sub-agent
+ *     (`CONDUCTOR_SUBAGENT === "1"`), `start()` is a no-op so the
+ *     sub-agent's pi instance does not spawn a phantom watchdog that
+ *     would kill its siblings on the parent's behalf.
+ *
+ * Lifecycle: `start()` returns a dispose function. The dispose unsubs
+ * from the registry and clears the interval. Idempotent.
+ */
+export class Watchdog {
+  private readonly states = new Map<string, WatchdogState>();
+  private timer: NodeJS.Timeout | null = null;
+  private unsub: (() => void) | null = null;
+  private disposed = false;
+  private readonly setIntervalFn: (fn: () => void, ms: number) => NodeJS.Timeout;
+  private readonly clearIntervalFn: (t: NodeJS.Timeout) => void;
+  private readonly tickIntervalMs: number;
+
+  constructor(private readonly deps: WatchdogDeps) {
+    this.setIntervalFn =
+      deps.setInterval ?? ((fn, ms) => globalThis.setInterval(fn, ms));
+    this.clearIntervalFn =
+      deps.clearInterval ?? ((t) => globalThis.clearInterval(t));
+    this.tickIntervalMs = deps.tickIntervalMs ?? DEFAULT_TICK_INTERVAL_MS;
+  }
+
+  /**
+   * Start the watchdog: subscribe to registry changes + arm interval.
+   * Returns a dispose function. R7: when `CONDUCTOR_SUBAGENT=1`, this
+   * is a no-op so a sub-agent's conductor extension does not run a
+   * watchdog that would race the parent's. Same pattern as the v0.9
+   * auto-GC sub-agent skip.
+   */
+  start(): () => void {
+    if (process.env.CONDUCTOR_SUBAGENT === "1") {
+      // No subscription, no timer; dispose is a no-op.
+      return () => {};
+    }
+    if (this.disposed) {
+      // Treat re-start after dispose as a fresh subscription.
+      this.disposed = false;
+    }
+
+    // Wake up on any registry change so we observe new runs and status
+    // transitions promptly (between interval ticks).
+    this.unsub = this.deps.registry.onChange(() => {
+      // Cheap: just runs the detector pass. No kill happens here unless
+      // a run somehow crossed hard between ticks — same dispatch path.
+      this.tick();
+    });
+
+    this.timer = this.setIntervalFn(() => this.tick(), this.tickIntervalMs);
+    if (typeof (this.timer as { unref?: () => void } | null)?.unref === "function") {
+      (this.timer as unknown as { unref: () => void }).unref();
+    }
+
+    return () => {
+      if (this.disposed) return;
+      this.disposed = true;
+      if (this.unsub) {
+        this.unsub();
+        this.unsub = null;
+      }
+      if (this.timer) {
+        this.clearIntervalFn(this.timer);
+        this.timer = null;
+      }
+      this.states.clear();
+    };
+  }
+
+  /**
+   * Run one detector pass over every run in the registry. Public so
+   * tests can drive deterministic ticks; production triggers via
+   * `setInterval` and registry change notifications.
+   *
+   * In sub-agent context this is a guarded no-op (R7) so test
+   * environments that flip the env var for a single test don't leak
+   * ticks into other tests.
+   */
+  tick(): void {
+    if (process.env.CONDUCTOR_SUBAGENT === "1") return;
+    if (this.deps.isEnabled && !this.deps.isEnabled()) return;
+
+    const now = this.deps.now();
+    for (const run of this.deps.registry.list()) {
+      const prev = this.states.get(run.id);
+      const { transition, nextState } = evaluateRun(run, prev, this.deps.config, now);
+
+      // Persist state so the next tick can dedupe + detect recovery.
+      this.states.set(run.id, nextState);
+
+      // Garbage-collect terminal runs so the map doesn't grow unbounded.
+      // (For the regular case we set then delete — cheap; the alternative
+      // is to skip the set, but writing first keeps the ordering simple.)
+      if (run.status !== "running") {
+        this.states.delete(run.id);
+      }
+
+      this.dispatch(run, transition);
+    }
+  }
+
+  /**
+   * Side-effect dispatcher for one transition. Soft/recovered are pure
+   * advisories. Hard either kills (`kill_on_stall` true) or warns and
+   * leaves the run alive. The kill path performs the **A2 pre-kill
+   * recheck**: re-read `now() - run.lastEventAt` and abort the kill if
+   * the run recovered between the detector verdict and the dispatch.
+   */
+  private dispatch(run: Run, transition: WatchdogTransition): void {
+    switch (transition.kind) {
+      case "none":
+        return;
+      case "soft": {
+        run.stalledSince = this.deps.now();
+        this.deps.log.warn(
+          `watchdog: soft-stall on ${run.id} (silent ${transition.silentSeconds}s)`,
+          {
+            agentId: run.id,
+            persona: run.persona,
+            silentSeconds: transition.silentSeconds,
+            severity: "soft",
+          },
+        );
+        return;
+      }
+      case "hard": {
+        run.stalledSince = this.deps.now();
+        const killOnStall = this.deps.isKillOnStall(run);
+        if (!killOnStall) {
+          this.deps.log.warn(
+            `watchdog: hard-stall on ${run.id} (silent ${transition.silentSeconds}s) — kill_on_stall=false; leaving alive`,
+            {
+              agentId: run.id,
+              persona: run.persona,
+              silentSeconds: transition.silentSeconds,
+              severity: "hard",
+            },
+          );
+          return;
+        }
+
+        // A2 pre-kill recheck. The detector verdict was computed with
+        // some (possibly stale by a few ms) `now`; before we actually
+        // pull the trigger, re-read `now()` and `run.lastEventAt`. If
+        // the run recovered (event landed between detector and kill),
+        // emit a recovery info and bail. Without this guard, a run
+        // that just emitted its first event after a long bash hang
+        // would still die. Mutation-witness: deleting the recheck makes
+        // the corresponding test flip from "recovered" to "killed".
+        const nowAfter = this.deps.now();
+        const stillStaleMs = nowAfter - run.lastEventAt;
+        if (stillStaleMs < this.deps.config.hardThresholdSeconds * 1000) {
+          // Recovered between detector and kill. Treat as recovered:
+          // clear stalledSince, reset state, log info.
+          run.stalledSince = undefined;
+          this.states.set(run.id, { kind: "fresh" });
+          this.deps.log.info(
+            `watchdog: kill aborted for ${run.id} — recovered before kill (A2)`,
+            {
+              agentId: run.id,
+              persona: run.persona,
+              recoveredFrom: "hard",
+            },
+          );
+          return;
+        }
+
+        this.deps.log.warn(
+          `watchdog: hard-stall on ${run.id} (silent ${transition.silentSeconds}s) — killing (kill_on_stall=true)`,
+          {
+            agentId: run.id,
+            persona: run.persona,
+            silentSeconds: transition.silentSeconds,
+            severity: "hard",
+          },
+        );
+        this.deps.kill(run, "stalled");
+        return;
+      }
+      case "recovered": {
+        run.stalledSince = undefined;
+        this.deps.log.info(
+          `watchdog: ${run.id} recovered from ${transition.previousKind}-stall`,
+          {
+            agentId: run.id,
+            persona: run.persona,
+            previousKind: transition.previousKind,
+          },
+        );
+        return;
+      }
+    }
+  }
 }

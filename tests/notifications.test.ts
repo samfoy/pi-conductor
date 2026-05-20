@@ -261,3 +261,93 @@ test("formatCompletionNotificationCompact: pass-through when no <result> body pr
   assert.doesNotMatch(out, /<result-summary>/);
 });
 
+// ── v0.10 watchdog stall advisory ───────────────────────────────
+
+import { formatStallNotification } from "../src/notifications.ts";
+
+test("formatStallNotification: emits <sub-agent-stalled> envelope with severity + silent-seconds", () => {
+  const run = makeRun({ status: "running" as RunStatus, finishedAt: undefined });
+  const out = formatStallNotification(run, {
+    severity: "soft",
+    silentSeconds: 130,
+    thresholdSeconds: 120,
+  });
+  assert.match(out, /<sub-agent-stalled>/);
+  assert.match(out, /<\/sub-agent-stalled>/);
+  assert.match(out, /<severity>soft<\/severity>/);
+  assert.match(out, /<silent-seconds>130<\/silent-seconds>/);
+  assert.match(out, /<threshold-seconds>120<\/threshold-seconds>/);
+  assert.match(out, /<status>running<\/status>/);
+});
+
+test("formatStallNotification: header reads 'soft-stalled' for soft severity", () => {
+  const run = makeRun({ status: "running" as RunStatus, finishedAt: undefined });
+  const out = formatStallNotification(run, {
+    severity: "soft",
+    silentSeconds: 130,
+    thresholdSeconds: 120,
+  });
+  assert.match(out, /soft-stalled/);
+});
+
+test("formatStallNotification: header reads 'hard-stalled' with warning glyph for hard severity", () => {
+  const run = makeRun({ status: "running" as RunStatus, finishedAt: undefined });
+  const out = formatStallNotification(run, {
+    severity: "hard",
+    silentSeconds: 700,
+    thresholdSeconds: 600,
+  });
+  assert.match(out, /hard-stalled/);
+  assert.match(out, /⚠/);
+});
+
+test("formatStallNotification: includes <last-tool> when run.lastToolCall set", () => {
+  const run = makeRun({
+    status: "running" as RunStatus,
+    finishedAt: undefined,
+    lastToolCall: "$ npm test",
+  });
+  const out = formatStallNotification(run, {
+    severity: "hard",
+    silentSeconds: 700,
+    thresholdSeconds: 600,
+  });
+  assert.match(out, /<last-tool>\$ npm test<\/last-tool>/);
+});
+
+test("formatStallNotification: omits <last-tool> when run.lastToolCall unset", () => {
+  const run = makeRun({ status: "running" as RunStatus, finishedAt: undefined });
+  const out = formatStallNotification(run, {
+    severity: "soft",
+    silentSeconds: 130,
+    thresholdSeconds: 120,
+  });
+  assert.doesNotMatch(out, /<last-tool>/);
+});
+
+test("formatStallNotification: escapes XML special chars in lastToolCall", () => {
+  const run = makeRun({
+    status: "running" as RunStatus,
+    finishedAt: undefined,
+    lastToolCall: "echo '<bad> & </worse>'",
+  });
+  const out = formatStallNotification(run, {
+    severity: "hard",
+    silentSeconds: 700,
+    thresholdSeconds: 600,
+  });
+  assert.match(out, /&lt;bad&gt;/);
+  assert.match(out, /&amp;/);
+  assert.match(out, /&lt;\/worse&gt;/);
+});
+
+test("formatStallNotification: emits transcript path", () => {
+  const run = makeRun({ status: "running" as RunStatus, finishedAt: undefined });
+  const out = formatStallNotification(run, {
+    severity: "hard",
+    silentSeconds: 700,
+    thresholdSeconds: 600,
+  });
+  assert.match(out, /<transcript>\/tmp\/oracle-abcd\/transcript\.jsonl<\/transcript>/);
+});
+

@@ -100,3 +100,53 @@ function escapeXml(s: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 }
+
+// ── v0.10 watchdog stall advisory ───────────────────────────────
+
+/**
+ * Render a `<sub-agent-stalled>` advisory envelope. Distinct shape from
+ * `<sub-agent-completed>` so the parent LLM (and any tooling that
+ * scrapes the conversation) can disambiguate "still running but silent"
+ * from "terminal".
+ *
+ * Severity values:
+ *   - `"soft"`: silent past the soft threshold. Run is alive; no kill.
+ *   - `"hard"`: silent past the hard threshold. The kill (if any) is
+ *     dispatched via {@link forceTerminate} which produces a separate
+ *     `<sub-agent-completed status="killed">` envelope; this advisory is
+ *     informational and may also appear when `kill_on_stall=false`.
+ *
+ * `silentSeconds` is computed by the caller from `now() - run.lastEventAt`.
+ */
+export function formatStallNotification(
+  run: Run,
+  args: { severity: "soft" | "hard"; silentSeconds: number; thresholdSeconds: number },
+): string {
+  const elapsed = elapsedStr(run.startTime);
+
+  const lines: string[] = [];
+  lines.push("```xml");
+  lines.push("<sub-agent-stalled>");
+  lines.push(`  <agent-id>${run.id}</agent-id>`);
+  lines.push(`  <persona>${run.persona}</persona>`);
+  lines.push(`  <status>${run.status}</status>`);
+  lines.push(`  <duration>${elapsed}</duration>`);
+  lines.push(
+    `  <stall><severity>${args.severity}</severity>` +
+      `<silent-seconds>${args.silentSeconds}</silent-seconds>` +
+      `<threshold-seconds>${args.thresholdSeconds}</threshold-seconds></stall>`,
+  );
+  if (run.lastToolCall) {
+    lines.push(`  <last-tool>${escapeXml(run.lastToolCall)}</last-tool>`);
+  }
+  lines.push(`  <transcript>${run.transcriptPath}</transcript>`);
+  lines.push("</sub-agent-stalled>");
+  lines.push("```");
+  lines.push("");
+
+  const glyph = args.severity === "hard" ? "⚠" : "·";
+  const verb = args.severity === "hard" ? "hard-stalled" : "soft-stalled";
+  const lastTool = run.lastToolCall ? `, last: ${run.lastToolCall}` : "";
+  const header = `## ${glyph} \`${run.persona}\` ${verb} — silent ${args.silentSeconds}s${lastTool} — id \`${run.id}\``;
+  return [header, "", ...lines].join("\n");
+}

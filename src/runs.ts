@@ -561,7 +561,7 @@ export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
 export type RunListener = (run: Run) => void;
 
 /** Reasons we report when forcing a terminal state externally. */
-export type TerminationReason = "killed" | "timeout";
+export type TerminationReason = "killed" | "timeout" | "stalled";
 
 export class RunRegistry {
   private runs = new Map<string, Run>();
@@ -1123,7 +1123,18 @@ export function forceTerminate(
       }
     }, 2000).unref();
   }
-  run.status = reason === "timeout" ? "timeout" : "killed";
+  run.status =
+    reason === "timeout" ? "timeout" :
+    reason === "stalled" ? "killed" :
+    "killed";
+  // v0.10 watchdog: stalled hard-kills are reported via run.errorMessage
+  // (status stays "killed" so existing UI/persistence paths don't grow a
+  // new branch; the reason is surfaced in the completion envelope and
+  // history annotation). Same shape as v0.8.1's nonSubstantiveFinal
+  // advisory — informational, not a new lifecycle state.
+  if (reason === "stalled" && !run.errorMessage) {
+    run.errorMessage = "watchdog: hard-stalled (no events past hard threshold)";
+  }
   run.finishedAt = Date.now();
   registry.notify(run);
   void writeRecord(run);

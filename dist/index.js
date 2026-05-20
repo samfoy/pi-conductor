@@ -1325,7 +1325,10 @@ function forceTerminate(run, reason, registry, onComplete) {
       }
     }, 2e3).unref();
   }
-  run.status = reason === "timeout" ? "timeout" : "killed";
+  run.status = reason === "timeout" ? "timeout" : reason === "stalled" ? "killed" : "killed";
+  if (reason === "stalled" && !run.errorMessage) {
+    run.errorMessage = "watchdog: hard-stalled (no events past hard threshold)";
+  }
   run.finishedAt = Date.now();
   registry.notify(run);
   void writeRecord(run);
@@ -4227,6 +4230,31 @@ function headerLine(run, elapsed, usageStr) {
 function escapeXml(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
+function formatStallNotification(run, args) {
+  const elapsed = elapsedStr(run.startTime);
+  const lines = [];
+  lines.push("```xml");
+  lines.push("<sub-agent-stalled>");
+  lines.push(`  <agent-id>${run.id}</agent-id>`);
+  lines.push(`  <persona>${run.persona}</persona>`);
+  lines.push(`  <status>${run.status}</status>`);
+  lines.push(`  <duration>${elapsed}</duration>`);
+  lines.push(
+    `  <stall><severity>${args.severity}</severity><silent-seconds>${args.silentSeconds}</silent-seconds><threshold-seconds>${args.thresholdSeconds}</threshold-seconds></stall>`
+  );
+  if (run.lastToolCall) {
+    lines.push(`  <last-tool>${escapeXml(run.lastToolCall)}</last-tool>`);
+  }
+  lines.push(`  <transcript>${run.transcriptPath}</transcript>`);
+  lines.push("</sub-agent-stalled>");
+  lines.push("```");
+  lines.push("");
+  const glyph = args.severity === "hard" ? "\u26A0" : "\xB7";
+  const verb = args.severity === "hard" ? "hard-stalled" : "soft-stalled";
+  const lastTool = run.lastToolCall ? `, last: ${run.lastToolCall}` : "";
+  const header = `## ${glyph} \`${run.persona}\` ${verb} \u2014 silent ${args.silentSeconds}s${lastTool} \u2014 id \`${run.id}\``;
+  return [header, "", ...lines].join("\n");
+}
 
 // src/conductor-prompt.ts
 function buildConductorSystemPrompt(opts) {
@@ -4970,6 +4998,214 @@ function handleSessionShutdown(event, deps) {
   deps.resetSanitizer();
 }
 
+// src/watchdog.ts
+function evaluateRun(run, state, config, now) {
+  const current = state ?? { kind: "fresh" };
+  if (run.status !== "running") {
+    return { transition: { kind: "none" }, nextState: current };
+  }
+  if (run.pausedAt !== void 0) {
+    return { transition: { kind: "none" }, nextState: current };
+  }
+  const ageMs = now - run.startTime;
+  if (ageMs < config.graceSeconds * 1e3) {
+    return { transition: { kind: "none" }, nextState: current };
+  }
+  const silentMs = now - run.lastEventAt;
+  const silentSeconds = Math.floor(silentMs / 1e3);
+  const softMs = config.softThresholdSeconds * 1e3;
+  const hardMs = config.hardThresholdSeconds * 1e3;
+  if (current.kind !== "fresh" && silentMs < softMs) {
+    return {
+      transition: { kind: "recovered", previousKind: current.kind },
+      nextState: { kind: "fresh" }
+    };
+  }
+  if (silentMs >= hardMs) {
+    if (current.kind === "hard") {
+      return { transition: { kind: "none" }, nextState: current };
+    }
+    return {
+      transition: {
+        kind: "hard",
+        silentSeconds,
+        thresholdSeconds: config.hardThresholdSeconds
+      },
+      nextState: { kind: "hard", crossedAt: now }
+    };
+  }
+  if (silentMs >= softMs) {
+    if (current.kind === "soft") {
+      return { transition: { kind: "none" }, nextState: current };
+    }
+    return {
+      transition: {
+        kind: "soft",
+        silentSeconds,
+        thresholdSeconds: config.softThresholdSeconds
+      },
+      nextState: { kind: "soft", crossedAt: now }
+    };
+  }
+  return { transition: { kind: "none" }, nextState: current };
+}
+var DEFAULT_TICK_INTERVAL_MS = 3e4;
+var Watchdog = class {
+  constructor(deps) {
+    this.deps = deps;
+    this.setIntervalFn = deps.setInterval ?? ((fn, ms) => globalThis.setInterval(fn, ms));
+    this.clearIntervalFn = deps.clearInterval ?? ((t) => globalThis.clearInterval(t));
+    this.tickIntervalMs = deps.tickIntervalMs ?? DEFAULT_TICK_INTERVAL_MS;
+  }
+  deps;
+  states = /* @__PURE__ */ new Map();
+  timer = null;
+  unsub = null;
+  disposed = false;
+  setIntervalFn;
+  clearIntervalFn;
+  tickIntervalMs;
+  /**
+   * Start the watchdog: subscribe to registry changes + arm interval.
+   * Returns a dispose function. R7: when `CONDUCTOR_SUBAGENT=1`, this
+   * is a no-op so a sub-agent's conductor extension does not run a
+   * watchdog that would race the parent's. Same pattern as the v0.9
+   * auto-GC sub-agent skip.
+   */
+  start() {
+    if (process.env.CONDUCTOR_SUBAGENT === "1") {
+      return () => {
+      };
+    }
+    if (this.disposed) {
+      this.disposed = false;
+    }
+    this.unsub = this.deps.registry.onChange(() => {
+      this.tick();
+    });
+    this.timer = this.setIntervalFn(() => this.tick(), this.tickIntervalMs);
+    if (typeof this.timer?.unref === "function") {
+      this.timer.unref();
+    }
+    return () => {
+      if (this.disposed) return;
+      this.disposed = true;
+      if (this.unsub) {
+        this.unsub();
+        this.unsub = null;
+      }
+      if (this.timer) {
+        this.clearIntervalFn(this.timer);
+        this.timer = null;
+      }
+      this.states.clear();
+    };
+  }
+  /**
+   * Run one detector pass over every run in the registry. Public so
+   * tests can drive deterministic ticks; production triggers via
+   * `setInterval` and registry change notifications.
+   *
+   * In sub-agent context this is a guarded no-op (R7) so test
+   * environments that flip the env var for a single test don't leak
+   * ticks into other tests.
+   */
+  tick() {
+    if (process.env.CONDUCTOR_SUBAGENT === "1") return;
+    if (this.deps.isEnabled && !this.deps.isEnabled()) return;
+    const now = this.deps.now();
+    for (const run of this.deps.registry.list()) {
+      const prev = this.states.get(run.id);
+      const { transition, nextState } = evaluateRun(run, prev, this.deps.config, now);
+      this.states.set(run.id, nextState);
+      if (run.status !== "running") {
+        this.states.delete(run.id);
+      }
+      this.dispatch(run, transition);
+    }
+  }
+  /**
+   * Side-effect dispatcher for one transition. Soft/recovered are pure
+   * advisories. Hard either kills (`kill_on_stall` true) or warns and
+   * leaves the run alive. The kill path performs the **A2 pre-kill
+   * recheck**: re-read `now() - run.lastEventAt` and abort the kill if
+   * the run recovered between the detector verdict and the dispatch.
+   */
+  dispatch(run, transition) {
+    switch (transition.kind) {
+      case "none":
+        return;
+      case "soft": {
+        run.stalledSince = this.deps.now();
+        this.deps.log.warn(
+          `watchdog: soft-stall on ${run.id} (silent ${transition.silentSeconds}s)`,
+          {
+            agentId: run.id,
+            persona: run.persona,
+            silentSeconds: transition.silentSeconds,
+            severity: "soft"
+          }
+        );
+        return;
+      }
+      case "hard": {
+        run.stalledSince = this.deps.now();
+        const killOnStall = this.deps.isKillOnStall(run);
+        if (!killOnStall) {
+          this.deps.log.warn(
+            `watchdog: hard-stall on ${run.id} (silent ${transition.silentSeconds}s) \u2014 kill_on_stall=false; leaving alive`,
+            {
+              agentId: run.id,
+              persona: run.persona,
+              silentSeconds: transition.silentSeconds,
+              severity: "hard"
+            }
+          );
+          return;
+        }
+        const nowAfter = this.deps.now();
+        const stillStaleMs = nowAfter - run.lastEventAt;
+        if (stillStaleMs < this.deps.config.hardThresholdSeconds * 1e3) {
+          run.stalledSince = void 0;
+          this.states.set(run.id, { kind: "fresh" });
+          this.deps.log.info(
+            `watchdog: kill aborted for ${run.id} \u2014 recovered before kill (A2)`,
+            {
+              agentId: run.id,
+              persona: run.persona,
+              recoveredFrom: "hard"
+            }
+          );
+          return;
+        }
+        this.deps.log.warn(
+          `watchdog: hard-stall on ${run.id} (silent ${transition.silentSeconds}s) \u2014 killing (kill_on_stall=true)`,
+          {
+            agentId: run.id,
+            persona: run.persona,
+            silentSeconds: transition.silentSeconds,
+            severity: "hard"
+          }
+        );
+        this.deps.kill(run, "stalled");
+        return;
+      }
+      case "recovered": {
+        run.stalledSince = void 0;
+        this.deps.log.info(
+          `watchdog: ${run.id} recovered from ${transition.previousKind}-stall`,
+          {
+            agentId: run.id,
+            persona: run.persona,
+            previousKind: transition.previousKind
+          }
+        );
+        return;
+      }
+    }
+  }
+};
+
 // src/index.ts
 function index_default(pi) {
   let cwd = process.cwd();
@@ -4980,6 +5216,7 @@ function index_default(pi) {
   const focusModel = new FocusedStreamModel(registry);
   let overlayOpen = false;
   let unsubFocusedShortcut = null;
+  let watchdogDispose = null;
   const sanitizerHook = installSanitizerHook(pi, {
     getCtx: () => ctxRef
   });
@@ -5168,6 +5405,61 @@ function index_default(pi) {
         console.error(`gc auto: failed: ${err?.message ?? String(err)}`);
       });
     });
+    if (watchdogDispose) {
+      watchdogDispose();
+      watchdogDispose = null;
+    }
+    {
+      const cfg = loadConfig(cwd);
+      const wd = new Watchdog({
+        registry,
+        config: {
+          softThresholdSeconds: cfg.watchdog.defaultSoftSeconds,
+          hardThresholdSeconds: cfg.watchdog.defaultHardSeconds,
+          graceSeconds: cfg.watchdog.graceSeconds
+        },
+        tickIntervalMs: cfg.watchdog.tickIntervalSeconds * 1e3,
+        log: {
+          warn: (msg, data) => {
+            const meta = data;
+            const run = meta?.agentId ? registry.get(meta.agentId) : void 0;
+            if (run && meta?.severity && typeof meta.silentSeconds === "number") {
+              const thresholdSeconds = meta.severity === "hard" ? cfg.watchdog.defaultHardSeconds : cfg.watchdog.defaultSoftSeconds;
+              const text = formatStallNotification(run, {
+                severity: meta.severity,
+                silentSeconds: meta.silentSeconds,
+                thresholdSeconds
+              });
+              try {
+                pi.sendMessage(
+                  {
+                    customType: "ensemble-notification",
+                    content: text,
+                    display: true
+                  },
+                  { triggerTurn: false, deliverAs: "followUp" }
+                );
+              } catch (err) {
+                console.error(`watchdog: ${msg}`);
+                void err;
+              }
+            } else {
+              console.error(`watchdog: ${msg}`);
+            }
+          },
+          info: (msg) => {
+            console.error(`watchdog: ${msg}`);
+          }
+        },
+        now: () => Date.now(),
+        kill: (run, reason) => {
+          forceTerminate(run, reason, registry);
+        },
+        isKillOnStall: () => cfg.watchdog.defaultKillOnStall,
+        isEnabled: () => cfg.watchdog.enabled
+      });
+      watchdogDispose = wd.start();
+    }
   });
   pi.on("session_shutdown", async (event) => {
     if (unsubFocusedShortcut) {
@@ -5177,6 +5469,10 @@ function index_default(pi) {
     if (widget) {
       widget.dispose();
       widget = null;
+    }
+    if (watchdogDispose) {
+      watchdogDispose();
+      watchdogDispose = null;
     }
     handleSessionShutdown(event, {
       runs: registry.list(),

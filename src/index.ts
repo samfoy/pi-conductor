@@ -39,6 +39,8 @@ import { resolveInitialConductorMode } from "./conductor-mode.ts";
 import { installCompactionHook } from "./compaction-hook.ts";
 import { installSanitizerHook } from "./sanitizer-hook.ts";
 import { handleSessionShutdown } from "./shutdown.ts";
+import { Watchdog } from "./watchdog.ts";
+import { formatStallNotification } from "./notifications.ts";
 
 export default function (pi: ExtensionAPI): void {
   // ── Mutable session-scoped state ─────────────────────────────────────
@@ -54,6 +56,11 @@ export default function (pi: ExtensionAPI): void {
   let overlayOpen = false;
   // Session-scoped unsub for the Ctrl+G focused-overlay shortcut.
   let unsubFocusedShortcut: (() => void) | null = null;
+
+  // v0.10 watchdog: detector + enforcer for sub-agent stalls. Lives
+  // here as a session-scoped instance; restarted on session_start,
+  // disposed on session_shutdown. See src/watchdog.ts (Slice 2).
+  let watchdogDispose: (() => void) | null = null;
 
   // v0.8.2 (B-4) — toolUse.name sanitizer hook. Owns its own
   // session-scoped warned-set; we hold the handle to call reset() in
@@ -309,6 +316,79 @@ export default function (pi: ExtensionAPI): void {
         console.error(`gc auto: failed: ${(err as Error)?.message ?? String(err)}`);
       });
     });
+
+    // v0.10 Slice 2: start the watchdog. Subscribes to registry +
+    // ticks every 30s; escalates hard-stalls to forceTerminate when
+    // the spawn carries kill_on_stall (slice 3 plumbs per-spawn
+    // overrides; until then we read the conductor-wide default).
+    if (watchdogDispose) {
+      watchdogDispose();
+      watchdogDispose = null;
+    }
+    {
+      const cfg = loadConfig(cwd);
+      const wd = new Watchdog({
+        registry,
+        config: {
+          softThresholdSeconds: cfg.watchdog.defaultSoftSeconds,
+          hardThresholdSeconds: cfg.watchdog.defaultHardSeconds,
+          graceSeconds: cfg.watchdog.graceSeconds,
+        },
+        tickIntervalMs: cfg.watchdog.tickIntervalSeconds * 1000,
+        log: {
+          warn: (msg, data) => {
+            // Surface stall advisories as `<sub-agent-stalled>` cards
+            // in the parent's conversation. The advisory is
+            // followUp-style (no triggerTurn) so it doesn't yank the
+            // user mid-edit; the parent LLM sees it on its next turn.
+            const meta = data as
+              | { agentId?: string; severity?: "soft" | "hard"; silentSeconds?: number }
+              | undefined;
+            const run = meta?.agentId ? registry.get(meta.agentId) : undefined;
+            if (run && meta?.severity && typeof meta.silentSeconds === "number") {
+              const thresholdSeconds =
+                meta.severity === "hard"
+                  ? cfg.watchdog.defaultHardSeconds
+                  : cfg.watchdog.defaultSoftSeconds;
+              const text = formatStallNotification(run, {
+                severity: meta.severity,
+                silentSeconds: meta.silentSeconds,
+                thresholdSeconds,
+              });
+              try {
+                pi.sendMessage(
+                  {
+                    customType: "ensemble-notification",
+                    content: text,
+                    display: true,
+                  },
+                  { triggerTurn: false, deliverAs: "followUp" },
+                );
+              } catch (err) {
+                // Best-effort. Fall back to console so the warn isn't lost.
+                console.error(`watchdog: ${msg}`);
+                void err;
+              }
+            } else {
+              console.error(`watchdog: ${msg}`);
+            }
+          },
+          info: (msg) => {
+            // Recovery / A2 abort: log only. No envelope so we don't
+            // spam the conversation with "recovered" lines for runs
+            // that came back on their own.
+            console.error(`watchdog: ${msg}`);
+          },
+        },
+        now: () => Date.now(),
+        kill: (run, reason) => {
+          forceTerminate(run, reason, registry);
+        },
+        isKillOnStall: () => cfg.watchdog.defaultKillOnStall,
+        isEnabled: () => cfg.watchdog.enabled,
+      });
+      watchdogDispose = wd.start();
+    }
   });
 
   pi.on("session_shutdown", async (event) => {
@@ -319,6 +399,12 @@ export default function (pi: ExtensionAPI): void {
     if (widget) {
       widget.dispose();
       widget = null;
+    }
+    // v0.10: dispose the watchdog. Same lifecycle as the focused-overlay
+    // shortcut: re-armed on next session_start.
+    if (watchdogDispose) {
+      watchdogDispose();
+      watchdogDispose = null;
     }
     // Reason-aware tear-down. On `/reload` (reason === "reload") the
     // host re-imports dist/index.js while preserving chat + scratchpad +
