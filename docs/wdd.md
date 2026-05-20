@@ -34,6 +34,37 @@ teeth — reject the slice.
 - **Bare slice** — a slice without a witness. Allowed only for doc-only or
   purely additive work.
 
+## Witness anti-pattern: parallel-formula tests
+
+A killing test that re-implements the production formula inline, instead of
+importing the production code path, **has no teeth**. Mutating the
+production source leaves the inline copy untouched, the test stays green,
+the witness lies.
+
+The anti-pattern is seductive because the formula is usually one line.
+Copying `(run) => run.killOnStall ?? d` into a test feels lighter than
+refactoring production to expose a helper. It is the wrong trade: the test
+no longer pins the production code, it pins a parallel copy of itself.
+
+**The rule.** The killing test must execute production code. If the formula
+isn't yet importable, *extract it* before writing the test. The extraction
+is part of the witness work, not separate plumbing.
+
+**Concrete example.** v0.10 watchdog Slice 3 (`9bed244`). The original
+brief prescribed a W1 killing test that reconstructed the `isKillOnStall`
+lambda inline, mirroring `src/index.ts:391`. The builder mutated
+`src/index.ts:391` and the test silently passed — the witness had no teeth.
+The fix was to extract the formula as `resolveKillOnStall(run,
+defaultKillOnStall)` in `src/watchdog.ts`, have the production lambda
+call it, and rewrite the test to import and exercise the helper directly.
+Mutating either the helper or the production call site now reds the test.
+
+**Spotting it at brief time.** If the brief says "reconstruct the
+production lambda" or "mirrors `src/foo.ts:bar`", that's a smell. Replace
+with "imports `<helper>` from `src/foo.ts` and exercises it directly." The
+brief should never describe a test that re-derives production logic; it
+should describe a test that *calls* production logic.
+
 ## Why this exists
 
 WDD is **not** a coverage-discovery tool like PIT / Stryker / mutmut. Those
