@@ -41,6 +41,7 @@ import {
   buildPiArgs,
   buildSubAgentPrompt,
   buildSubagentEnv,
+  collectInheritedSkillPaths,
   discoverSessionPathIfMissing,
   elapsedStr,
   findSessionFile,
@@ -49,6 +50,7 @@ import {
   formatUsage,
   getFinalText,
   pauseRun,
+  planSpawnPiArgs,
   resumeRun,
 } from "../src/runs.ts";
 import { emptyUsage, type Persona, type Run } from "../src/types.ts";
@@ -905,4 +907,147 @@ test("buildSubagentEnv: defaults to process.env when no base provided", () => {
     if (prev === undefined) delete process.env.CONDUCTOR_TEST_MARKER;
     else process.env.CONDUCTOR_TEST_MARKER = prev;
   }
+});
+
+// ── inherit_skills (PRD #15) ────────────────────────────────
+
+test("collectInheritedSkillPaths: both dirs absent → [] (no error)", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "pic-skills-none-"));
+  try {
+    const fakeHome = join(tmp, "home");
+    const fakeCwd = join(tmp, "proj");
+    const paths = collectInheritedSkillPaths({ homeDir: fakeHome, cwd: fakeCwd });
+    assert.deepEqual(paths, []);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("collectInheritedSkillPaths: user dir exists, project dir absent → ONE path (user only)", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "pic-skills-user-"));
+  try {
+    const fakeHome = join(tmp, "home");
+    const userSkills = join(fakeHome, ".pi", "agent", "skills");
+    mkdirSync(userSkills, { recursive: true });
+    const fakeCwd = join(tmp, "proj");
+    const paths = collectInheritedSkillPaths({ homeDir: fakeHome, cwd: fakeCwd });
+    assert.deepEqual(paths, [userSkills]);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("collectInheritedSkillPaths: both dirs exist → TWO paths in user-then-project order", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "pic-skills-both-"));
+  try {
+    const fakeHome = join(tmp, "home");
+    const fakeCwd = join(tmp, "proj");
+    const userSkills = join(fakeHome, ".pi", "agent", "skills");
+    const projectSkills = join(fakeCwd, ".pi", "skills");
+    mkdirSync(userSkills, { recursive: true });
+    mkdirSync(projectSkills, { recursive: true });
+    const paths = collectInheritedSkillPaths({ homeDir: fakeHome, cwd: fakeCwd });
+    assert.deepEqual(paths, [userSkills, projectSkills]);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("collectInheritedSkillPaths: project dir exists, user dir absent → ONE path (project only)", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "pic-skills-proj-"));
+  try {
+    const fakeHome = join(tmp, "home");
+    const fakeCwd = join(tmp, "proj");
+    const projectSkills = join(fakeCwd, ".pi", "skills");
+    mkdirSync(projectSkills, { recursive: true });
+    const paths = collectInheritedSkillPaths({ homeDir: fakeHome, cwd: fakeCwd });
+    assert.deepEqual(paths, [projectSkills]);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("collectInheritedSkillPaths: existsFn injection probes both candidates, no real fs touch", () => {
+  const probed: string[] = [];
+  const paths = collectInheritedSkillPaths({
+    homeDir: "/fake/home",
+    cwd: "/fake/proj",
+    existsFn: (p) => {
+      probed.push(p);
+      return p === "/fake/home/.pi/agent/skills";
+    },
+  });
+  assert.deepEqual(probed, ["/fake/home/.pi/agent/skills", "/fake/proj/.pi/skills"]);
+  assert.deepEqual(paths, ["/fake/home/.pi/agent/skills"]);
+});
+
+test("buildPiArgs(fresh) + skillPaths: emits one --skill <path> per entry, all before the prompt", () => {
+  const args = buildPiArgs({
+    kind: "fresh",
+    sessionDir: "/tmp/sess",
+    systemPrompt: "S",
+    prompt: "P",
+    skillPaths: ["/u/skills", "/p/skills"],
+  });
+  const skillIdxs: number[] = [];
+  for (let i = 0; i < args.length; i++) if (args[i] === "--skill") skillIdxs.push(i);
+  assert.equal(skillIdxs.length, 2, "expected exactly two --skill flags");
+  assert.equal(args[skillIdxs[0]! + 1], "/u/skills");
+  assert.equal(args[skillIdxs[1]! + 1], "/p/skills");
+  for (const i of skillIdxs) assert.ok(i < args.length - 1, "--skill must precede prompt");
+  assert.equal(args[args.length - 1], "P");
+});
+
+test("buildPiArgs: omits --skill when skillPaths is undefined or empty (default behavior unchanged)", () => {
+  const a1 = buildPiArgs({ kind: "fresh", sessionDir: "/tmp", systemPrompt: "S", prompt: "P" });
+  assert.equal(a1.includes("--skill"), false);
+  const a2 = buildPiArgs({
+    kind: "fresh",
+    sessionDir: "/tmp",
+    systemPrompt: "S",
+    prompt: "P",
+    skillPaths: [],
+  });
+  assert.equal(a2.includes("--skill"), false);
+});
+
+test("buildPiArgs(resume) + skillPaths: emits --skill flags on resume too", () => {
+  const args = buildPiArgs({
+    kind: "resume",
+    sessionPath: "/tmp/s.jsonl",
+    prompt: "msg",
+    skillPaths: ["/u/skills"],
+  });
+  const i = args.indexOf("--skill");
+  assert.ok(i > 0);
+  assert.equal(args[i + 1], "/u/skills");
+  assert.equal(args[args.length - 1], "msg");
+});
+
+test("planSpawnPiArgs: skillPaths threads through to fresh-mode piArgs in caller order", () => {
+  const persona: Persona = {
+    name: "tester",
+    description: "",
+    systemPrompt: "S",
+    inheritContext: "none",
+    inheritSkills: true,
+    defaultReads: [],
+    worktree: false,
+    timeoutMinutes: 30,
+    source: "builtin",
+    sourcePath: "<test>",
+  } as Persona;
+  const plan = planSpawnPiArgs({
+    persona,
+    sessionDir: "/tmp/sess",
+    systemPrompt: "S",
+    prompt: "P",
+    cwd: "/proj",
+    skillPaths: ["/u/skills", "/p/skills"],
+  });
+  assert.equal(plan.mode, "fresh");
+  const skillIdxs = plan.piArgs.map((a, i) => (a === "--skill" ? i : -1)).filter((i) => i >= 0);
+  assert.equal(skillIdxs.length, 2);
+  assert.equal(plan.piArgs[skillIdxs[0]! + 1], "/u/skills");
+  assert.equal(plan.piArgs[skillIdxs[1]! + 1], "/p/skills");
 });

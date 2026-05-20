@@ -51,6 +51,47 @@ export function runDir(id: string): string {
   return join(runsRoot(), id);
 }
 
+// ── Inherited skill paths (PRD #15: inherit_skills frontmatter) ─────
+
+export interface CollectInheritedSkillPathsOptions {
+  /** Resolved $HOME (defaults to `homedir()`). Injectable for tests. */
+  homeDir?: string;
+  /** Sub-agent cwd. Used to find `<cwd>/.pi/skills/`. */
+  cwd: string;
+  /**
+   * Pluggable existence check. Defaults to `existsSync` from node:fs.
+   * Tests pass a fake to assert which paths get probed without
+   * touching the real filesystem.
+   */
+  existsFn?: (p: string) => boolean;
+}
+
+/**
+ * Resolve the parent skill directories that should be inherited by a
+ * sub-agent whose persona has `inherit_skills: true`.
+ *
+ * Walks the standard pi skill discovery locations:
+ *   - `~/.pi/agent/skills/` (user-level)
+ *   - `<cwd>/.pi/skills/`   (project-level)
+ *
+ * Returns absolute paths in user-then-project order. Skips entries that
+ * do not exist; never throws. The returned list is appended to the
+ * sub-agent's argv as repeated `--skill <path>` flags by `buildPiArgs`.
+ *
+ * Pure (assuming `existsFn` is pure): no fs writes, no subprocess.
+ */
+export function collectInheritedSkillPaths(
+  opts: CollectInheritedSkillPathsOptions,
+): string[] {
+  const home = opts.homeDir ?? homedir();
+  const exists = opts.existsFn ?? existsSync;
+  const candidates = [
+    join(home, ".pi", "agent", "skills"),
+    join(opts.cwd, ".pi", "skills"),
+  ];
+  return candidates.filter((p) => exists(p));
+}
+
 // ── Timeout resolution ──────────────────────────────────────────────
 
 /**
@@ -255,6 +296,12 @@ export type PiArgsOptions =
       prompt: string;
       model?: string;
       thinking?: ThinkingLevel;
+      /**
+       * Absolute paths passed as repeated `--skill <path>` flags. Set
+       * by spawnRun when the persona has `inherit_skills: true`.
+       * Empty/undefined → no `--skill` flags emitted.
+       */
+      skillPaths?: string[];
     }
   | {
       kind: "resume";
@@ -272,6 +319,8 @@ export type PiArgsOptions =
        * v0.5's `sendToRun` does NOT pass this (preserves prior behavior).
        */
       systemPrompt?: string;
+      /** See fresh-mode `skillPaths` above. Same semantics on resume. */
+      skillPaths?: string[];
     };
 
 export function buildPiArgs(opts: PiArgsOptions): string[] {
@@ -293,6 +342,13 @@ export function buildPiArgs(opts: PiArgsOptions): string[] {
     // a resumed sub-agent boots with pi's default prompt and loses its
     // persona identity.
     args.push("--append-system-prompt", opts.systemPrompt);
+  }
+  // Inherit_skills (PRD #15): repeated --skill flags after the system
+  // prompt and before the trailing positional. Order matches
+  // `collectInheritedSkillPaths` (user-then-project) so pi's own
+  // collision-handling sees user dir first.
+  if (opts.skillPaths && opts.skillPaths.length > 0) {
+    for (const p of opts.skillPaths) args.push("--skill", p);
   }
   args.push(opts.prompt);
   return args;
@@ -350,6 +406,14 @@ export interface PlanSpawnOptions {
   cwd: string;
   model?: string;
   thinking?: ThinkingLevel;
+  /**
+   * Absolute skill directory paths to be inherited by the sub-agent
+   * (one `--skill <path>` flag per entry). Computed by `spawnRun` from
+   * `collectInheritedSkillPaths` when the persona has
+   * `inherit_skills: true`. Empty/undefined → sub-agent loads no
+   * inherited skills (default behavior pre-PRD #15).
+   */
+  skillPaths?: string[];
 }
 
 export interface PlanSpawnResult {
@@ -425,7 +489,7 @@ function filteredHistorySentinel(): AgentMessage {
  * respect to the rest of the spawn pipeline (no subprocess, no registry).
  */
 export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
-  const { persona, parentMessages = [], sessionDir, systemPrompt, prompt, cwd, model, thinking } = opts;
+  const { persona, parentMessages = [], sessionDir, systemPrompt, prompt, cwd, model, thinking, skillPaths } = opts;
 
   let seedMessages: AgentMessage[] | null = null;
   // Did filtering actually remove anything? If yes, prepend a sentinel
@@ -473,6 +537,7 @@ export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
         // prompt entry. Without this the sub-agent boots with pi's
         // default coding-agent prompt and loses its persona identity.
         systemPrompt,
+        skillPaths,
       }),
     };
   }
@@ -486,6 +551,7 @@ export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
       prompt,
       model,
       thinking,
+      skillPaths,
     }),
   };
 }
@@ -646,6 +712,14 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     cwd: opts.cwd,
     model: opts.model,
     thinking: opts.thinking,
+    // PRD #15: when `inherit_skills: true`, pass the parent's user +
+    // project skill dirs to the sub-agent via `--skill <path>`. The
+    // flag is consumed at spawn time and not propagated into the
+    // sub-agent's env, so a sub-agent spawning a further sub-agent
+    // does NOT re-inherit (we discourage that pattern anyway).
+    skillPaths: opts.persona.inheritSkills
+      ? collectInheritedSkillPaths({ cwd: opts.cwd })
+      : undefined,
   });
   // When we seeded a session, populate run.sessionPath up-front so callers
   // (e.g. ensemble_send mid-run) can find it without waiting for finalize().

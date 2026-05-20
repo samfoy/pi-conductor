@@ -768,6 +768,15 @@ function runsRoot() {
 function runDir(id) {
   return join3(runsRoot(), id);
 }
+function collectInheritedSkillPaths(opts) {
+  const home = opts.homeDir ?? homedir3();
+  const exists = opts.existsFn ?? existsSync3;
+  const candidates = [
+    join3(home, ".pi", "agent", "skills"),
+    join3(opts.cwd, ".pi", "skills")
+  ];
+  return candidates.filter((p) => exists(p));
+}
 function resolveTimeoutMs(persona, ov, cfg) {
   const minutes = ov?.timeoutMinutes ?? persona?.timeoutMinutes ?? cfg.defaultTimeoutMinutes;
   return minutes * 6e4;
@@ -875,6 +884,9 @@ function buildPiArgs(opts) {
   } else if (opts.systemPrompt) {
     args.push("--append-system-prompt", opts.systemPrompt);
   }
+  if (opts.skillPaths && opts.skillPaths.length > 0) {
+    for (const p of opts.skillPaths) args.push("--skill", p);
+  }
   args.push(opts.prompt);
   return args;
 }
@@ -906,7 +918,7 @@ function filteredHistorySentinel() {
   };
 }
 function planSpawnPiArgs(opts) {
-  const { persona, parentMessages = [], sessionDir, systemPrompt, prompt, cwd, model, thinking } = opts;
+  const { persona, parentMessages = [], sessionDir, systemPrompt, prompt, cwd, model, thinking, skillPaths } = opts;
   let seedMessages = null;
   let dropped = false;
   if (persona.inheritContext === "filtered" && parentMessages.length > 0) {
@@ -944,7 +956,8 @@ function planSpawnPiArgs(opts) {
         // Re-inject the persona body — the seeded JSONL has no system
         // prompt entry. Without this the sub-agent boots with pi's
         // default coding-agent prompt and loses its persona identity.
-        systemPrompt
+        systemPrompt,
+        skillPaths
       })
     };
   }
@@ -956,7 +969,8 @@ function planSpawnPiArgs(opts) {
       systemPrompt,
       prompt,
       model,
-      thinking
+      thinking,
+      skillPaths
     })
   };
 }
@@ -1055,7 +1069,13 @@ function spawnRun(opts) {
     prompt,
     cwd: opts.cwd,
     model: opts.model,
-    thinking: opts.thinking
+    thinking: opts.thinking,
+    // PRD #15: when `inherit_skills: true`, pass the parent's user +
+    // project skill dirs to the sub-agent via `--skill <path>`. The
+    // flag is consumed at spawn time and not propagated into the
+    // sub-agent's env, so a sub-agent spawning a further sub-agent
+    // does NOT re-inherit (we discourage that pattern anyway).
+    skillPaths: opts.persona.inheritSkills ? collectInheritedSkillPaths({ cwd: opts.cwd }) : void 0
   });
   if (plan.seededSessionPath) run.sessionPath = plan.seededSessionPath;
   const done = runPiSubprocess(run, plan.piArgs, {
