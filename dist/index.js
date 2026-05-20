@@ -596,10 +596,18 @@ function filterParentContext(messages, opts = {}) {
     if (!msg || msg.role !== "assistant") continue;
     const content = msg.content;
     if (!Array.isArray(content)) continue;
+    let willDrop = false;
     for (const block of content) {
       if (block?.type === "toolCall" && typeof block.name === "string" && matchesAnyPrefix(block.name, excludeToolPrefixes)) {
-        if (typeof block.id === "string") excludedCallIds.add(block.id);
-        droppedAssistantIndices.add(i);
+        willDrop = true;
+        break;
+      }
+    }
+    if (!willDrop) continue;
+    droppedAssistantIndices.add(i);
+    for (const block of content) {
+      if (block?.type === "toolCall" && typeof block.id === "string") {
+        excludedCallIds.add(block.id);
       }
     }
   }

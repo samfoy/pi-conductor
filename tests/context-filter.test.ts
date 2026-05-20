@@ -597,3 +597,115 @@ test("filterParentContext: dropThinking [thinking,toolCall] with stopReason='too
   assert.ok(blocks.some((b) => b.type === "toolCall" && b.name === "read"));
   assert.ok(blocks.every((b) => b.type !== "thinking"));
 });
+
+// ── v0.10: orphan-toolResult bug fix (long conductor sessions) ─────
+// Bug: when a parent assistant turn fires both ensemble_spawn AND a non-
+// excluded tool (note/bash/read), the v0.8.1 design section 3 "drop whole
+// message" rule discards the assistant turn but only excluded the
+// ensemble_spawn callId — sibling toolResults survived as orphans,
+// breaking Bedrock's invariant "every toolResult must have a preceding
+// toolUse with the same id". See
+// docs/bugs/ensemble-spawn-validation-error-long-conductor-sessions.md.
+function assistantMixedToolCalls(
+  calls: Array<{ name: string; id: string }>,
+  preface?: string,
+): AgentMessage {
+  const content: any[] = [];
+  if (preface) content.push({ type: "text", text: preface });
+  for (const c of calls) {
+    content.push({ type: "toolCall", id: c.id, name: c.name, arguments: {} });
+  }
+  return {
+    role: "assistant",
+    content,
+    api: "anthropic-messages" as any,
+    provider: "anthropic" as any,
+    model: "claude-sonnet-4-5",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "toolUse",
+    timestamp: 0,
+  } as AgentMessage;
+}
+
+test("filterParentContext: dropped assistant turn excludes ALL sibling toolCall ids (mixed ensemble_spawn + note -> no orphan note result)", () => {
+  // Reproduction of
+  // docs/bugs/ensemble-spawn-validation-error-long-conductor-sessions.md.
+  // Parent fires ensemble_spawn alongside `note` in the same assistant
+  // turn — common in long conductor sessions juggling state saves
+  // and spawns. Pre-fix, the assistant message was dropped (correct)
+  // but the `note` toolResult survived as an orphan (Bedrock rejects).
+  const msgs = [
+    user("plan: spawn an inspector and remember that we're mid-design"),
+    assistantMixedToolCalls(
+      [
+        { name: "ensemble_spawn", id: "es-1" },
+        { name: "note", id: "note-1" },
+      ],
+      "Spawning inspector and saving state",
+    ),
+    toolResult("es-1", "ensemble_spawn", "agent_id=inspector-7f3a"),
+    toolResult("note-1", "note", "saved"),
+    user("ok"),
+  ];
+  const out = filterParentContext(msgs);
+  // Both toolResults must be excluded along with the dropped assistant turn.
+  // Survivors: the two user messages only.
+  const toolResults = out.filter((m: any) => m.role === "toolResult");
+  assert.equal(
+    toolResults.length,
+    0,
+    "no toolResult should survive a fully-dropped assistant turn — the `note` result has no preceding toolUse",
+  );
+  assert.equal(out.length, 2);
+  assert.equal(out[0].role, "user");
+  assert.equal(out[1].role, "user");
+});
+
+test("filterParentContext: no orphan toolResult invariant — every surviving toolResult has a preceding toolUse with the same id", () => {
+  // Generalized invariant the bug-fix must preserve. Build a varied transcript
+  // including: a non-dropped read+result, a dropped ensemble_spawn+bash pair,
+  // and a final user message. Filter, then for every toolResult in the
+  // output, assert there is a toolCall in some prior assistant message with
+  // the same id.
+  const msgs = [
+    assistantToolCall("read", "r-1", "let me look"),
+    toolResult("r-1", "read", "contents"),
+    assistantMixedToolCalls(
+      [
+        { name: "ensemble_spawn", id: "es-2" },
+        { name: "bash", id: "b-1" },
+      ],
+      "spawn + remember",
+    ),
+    toolResult("es-2", "ensemble_spawn", "agent_id=designer-4"),
+    toolResult("b-1", "bash", "stdout"),
+    user("continue"),
+  ];
+  const out = filterParentContext(msgs);
+  const seenCallIds = new Set<string>();
+  for (const m of out) {
+    if ((m as any).role === "assistant") {
+      const blocks = (m as any).content;
+      if (Array.isArray(blocks)) {
+        for (const b of blocks) {
+          if (b?.type === "toolCall" && typeof b.id === "string") {
+            seenCallIds.add(b.id);
+          }
+        }
+      }
+    } else if ((m as any).role === "toolResult") {
+      const callId = (m as any).toolCallId;
+      assert.ok(
+        typeof callId === "string" && seenCallIds.has(callId),
+        `orphan toolResult callId=${callId} has no preceding toolUse — would break Bedrock`,
+      );
+    }
+  }
+});

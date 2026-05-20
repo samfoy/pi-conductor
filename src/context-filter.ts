@@ -97,14 +97,28 @@ export function filterParentContext(
     if (!msg || (msg as any).role !== "assistant") continue;
     const content = (msg as any).content;
     if (!Array.isArray(content)) continue;
+    // First sub-pass: does this message contain ANY excluded toolCall?
+    let willDrop = false;
     for (const block of content) {
       if (
         block?.type === "toolCall" &&
         typeof block.name === "string" &&
         matchesAnyPrefix(block.name, excludeToolPrefixes)
       ) {
-        if (typeof block.id === "string") excludedCallIds.add(block.id);
-        droppedAssistantIndices.add(i);
+        willDrop = true;
+        break;
+      }
+    }
+    if (!willDrop) continue;
+    // Drop the whole message AND exclude EVERY toolCall id in it — not
+    // just the prefix-matching ones — so sibling tool results (e.g.
+    // `note`/`bash` in the same dropped turn) do not survive as orphans.
+    // See docs/bugs/ensemble-spawn-validation-error-long-conductor-sessions.md
+    // for the Bedrock failure mode this prevents.
+    droppedAssistantIndices.add(i);
+    for (const block of content) {
+      if (block?.type === "toolCall" && typeof block.id === "string") {
+        excludedCallIds.add(block.id);
       }
     }
   }
