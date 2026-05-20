@@ -100,6 +100,34 @@ export interface ConductorConfig {
    * docs/v0.9-gc-design.md (D1–D8) for the policy semantics.
    */
   gc: GcConfig;
+  /**
+   * v0.10 sub-agent watchdog defaults. Per-spawn arguments override
+   * these (slice 3). See docs/v0.10-watchdog-design.md.
+   */
+  watchdog: WatchdogConfigDefaults;
+}
+
+/**
+ * Defaults for the v0.10 watchdog. The runtime detector type lives in
+ * `src/watchdog.ts` (`WatchdogConfig`) but ConductorConfig stores the
+ * user-tunable defaults plus the spawn default for `kill_on_stall`.
+ */
+export interface WatchdogConfigDefaults {
+  /** Master switch. When false, the watchdog never fires. */
+  enabled: boolean;
+  /** Default soft-stall threshold (seconds). Per-spawn override allowed. */
+  defaultSoftSeconds: number;
+  /** Default hard-stall threshold (seconds). Per-spawn override allowed. */
+  defaultHardSeconds: number;
+  /** Cold-start grace window (seconds). */
+  graceSeconds: number;
+  /** Detector tick interval (seconds). */
+  tickIntervalSeconds: number;
+  /**
+   * Default `kill_on_stall` for spawns that don't override. OFF by
+   * design (advisory-only); autonomous chains opt in.
+   */
+  defaultKillOnStall: boolean;
 }
 
 export interface GcConfig {
@@ -152,6 +180,14 @@ export const DEFAULT_CONFIG: ConductorConfig = {
     autoOnSessionStart: true,
     autoDebounceHours: 6,
     perPersonaTtlDays: {},
+  },
+  watchdog: {
+    enabled: true,
+    defaultSoftSeconds: 120,
+    defaultHardSeconds: 600,
+    graceSeconds: 30,
+    tickIntervalSeconds: 30,
+    defaultKillOnStall: false,
   },
 };
 
@@ -216,6 +252,13 @@ export interface Run {
   lastEventAt: number;
   /** ms timestamp of last pause; cleared on resume. */
   pausedAt?: number;
+  /**
+   * v0.10 watchdog: ms-since-epoch the run last crossed a stall
+   * threshold (soft or hard). Cleared by the enforcer on recovery or
+   * terminal status. Slice 1 only declares the field; Slice 2 writes
+   * to it from the watchdog enforcer.
+   */
+  stalledSince?: number;
 
   /** Exit code of the pi subprocess; set on close. */
   exitCode?: number;

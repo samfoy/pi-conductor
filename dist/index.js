@@ -54,6 +54,14 @@ var DEFAULT_CONFIG = {
     autoOnSessionStart: true,
     autoDebounceHours: 6,
     perPersonaTtlDays: {}
+  },
+  watchdog: {
+    enabled: true,
+    defaultSoftSeconds: 120,
+    defaultHardSeconds: 600,
+    graceSeconds: 30,
+    tickIntervalSeconds: 30,
+    defaultKillOnStall: false
   }
 };
 function emptyUsage() {
