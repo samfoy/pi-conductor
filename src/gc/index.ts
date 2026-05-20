@@ -202,7 +202,7 @@ export interface MaybeAutoRunGcOptions extends RunGcOptions {
 export interface MaybeAutoRunGcResult {
   ran: boolean;
   /** Reason the pass was skipped (debounced / disabled). Set when ran=false. */
-  reason?: "disabled" | "debounced" | "auto-disabled";
+  reason?: "disabled" | "debounced" | "auto-disabled" | "subagent-context";
   /** Result when ran=true. */
   result?: RunGcResult;
 }
@@ -217,6 +217,17 @@ export interface MaybeAutoRunGcResult {
 export async function maybeAutoRunGc(
   opts: MaybeAutoRunGcOptions,
 ): Promise<MaybeAutoRunGcResult> {
+  // v0.10 A1: skip when this process is a conductor sub-agent. Otherwise
+  // every sub-agent's pi subprocess loads the conductor extension on its
+  // own session_start and runs auto-GC, wasting work and (worse) leaking
+  // its `gc auto: …` log line into the parent's captured stderr — which
+  // ends up assigned to `run.errorMessage` on the sub-agent's record
+  // (witnessed in dogfood: critic-yjsn carried a GC summary as its error
+  // string). The marker env var is set on every sub-agent spawn in
+  // `src/runs.ts` (see `buildSubagentEnv`).
+  if (process.env.CONDUCTOR_SUBAGENT === "1") {
+    return { ran: false, reason: "subagent-context" };
+  }
   if (!opts.config.enabled) return { ran: false, reason: "disabled" };
   if (!opts.config.autoOnSessionStart) return { ran: false, reason: "auto-disabled" };
 

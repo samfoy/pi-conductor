@@ -40,6 +40,7 @@ import {
   applySubstanceCheck,
   buildPiArgs,
   buildSubAgentPrompt,
+  buildSubagentEnv,
   discoverSessionPathIfMissing,
   elapsedStr,
   findSessionFile,
@@ -869,4 +870,39 @@ test("applySubstanceCheck: idempotent — a second call does not overwrite the e
   applySubstanceCheck(run, "completed");
   assert.equal(run.nonSubstantiveFinal?.reason, "existing");
   assert.equal(run.nonSubstantiveFinal?.message, "prior warning");
+});
+
+// ── v0.10 A1: buildSubagentEnv ────────────────────────────────────────────────────
+
+test("buildSubagentEnv: sets CONDUCTOR_SUBAGENT=1", () => {
+  const env = buildSubagentEnv({ FOO: "bar" });
+  assert.equal(env.CONDUCTOR_SUBAGENT, "1");
+});
+
+test("buildSubagentEnv: passes through caller env keys verbatim", () => {
+  const env = buildSubagentEnv({ FOO: "bar", PATH: "/usr/bin" });
+  assert.equal(env.FOO, "bar");
+  assert.equal(env.PATH, "/usr/bin");
+});
+
+test("buildSubagentEnv: caller-supplied CONDUCTOR_SUBAGENT is overridden to 1 (transitive sub-spawns)", () => {
+  // Even if the caller is itself a sub-agent (CONDUCTOR_SUBAGENT=1) or has
+  // some other value, the spawn helper pins it to "1" — conductor-context
+  // propagates transitively.
+  const env = buildSubagentEnv({ CONDUCTOR_SUBAGENT: "0", OTHER: "keep" });
+  assert.equal(env.CONDUCTOR_SUBAGENT, "1");
+  assert.equal(env.OTHER, "keep");
+});
+
+test("buildSubagentEnv: defaults to process.env when no base provided", () => {
+  const prev = process.env.CONDUCTOR_TEST_MARKER;
+  process.env.CONDUCTOR_TEST_MARKER = "sentinel";
+  try {
+    const env = buildSubagentEnv();
+    assert.equal(env.CONDUCTOR_TEST_MARKER, "sentinel");
+    assert.equal(env.CONDUCTOR_SUBAGENT, "1");
+  } finally {
+    if (prev === undefined) delete process.env.CONDUCTOR_TEST_MARKER;
+    else process.env.CONDUCTOR_TEST_MARKER = prev;
+  }
 });

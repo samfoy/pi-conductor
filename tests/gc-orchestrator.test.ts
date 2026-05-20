@@ -387,3 +387,79 @@ test("maybeAutoRunGc: force=true bypasses debounce", async () => {
   });
   assert.equal(r.ran, true);
 });
+
+// ── v0.10 A1: sub-agent context skip ─────────────────────────────────────────
+//
+// Conductor extension loads in BOTH the parent pi session and every
+// sub-agent's pi subprocess. Without a guard, every sub-agent runs auto-
+// GC on its own session_start — wasted work, plus its log line leaks
+// into stderr which the parent captures and assigns to errorMessage.
+// Witnessed in v0.9 dogfood (critic-yjsn). Marker env var
+// `CONDUCTOR_SUBAGENT=1` is set by `buildSubagentEnv()` in `src/runs.ts`.
+
+test("maybeAutoRunGc: subagent context (CONDUCTOR_SUBAGENT=1) → skipped, no inventory walk", async () => {
+  const { runsRoot } = makeFakeRoot();
+  const prev = process.env.CONDUCTOR_SUBAGENT;
+  process.env.CONDUCTOR_SUBAGENT = "1";
+  let logged = false;
+  try {
+    const r = await maybeAutoRunGc({
+      runsRoot,
+      config: gcCfg(),
+      registry: new RunRegistry(),
+      now: NOW,
+      log: () => {
+        // The completion-summary log only fires when runGc actually ran.
+        // If this fires, the skip guard has been removed.
+        logged = true;
+      },
+    });
+    assert.equal(r.ran, false);
+    assert.equal(r.reason, "subagent-context");
+    assert.equal(logged, false, "runGc body must not execute in sub-agent context");
+    // Marker must NOT be written when we skip due to sub-agent context.
+    assert.equal(existsSync(lastGcMarkerPath(runsRoot)), false);
+  } finally {
+    if (prev === undefined) delete process.env.CONDUCTOR_SUBAGENT;
+    else process.env.CONDUCTOR_SUBAGENT = prev;
+  }
+});
+
+test("maybeAutoRunGc: subagent skip wins over force=true (transitive sub-agent must not run GC)", async () => {
+  const { runsRoot } = makeFakeRoot();
+  const prev = process.env.CONDUCTOR_SUBAGENT;
+  process.env.CONDUCTOR_SUBAGENT = "1";
+  try {
+    const r = await maybeAutoRunGc({
+      runsRoot,
+      config: gcCfg(),
+      registry: new RunRegistry(),
+      now: NOW,
+      force: true,
+      log: () => undefined,
+    });
+    assert.equal(r.ran, false);
+    assert.equal(r.reason, "subagent-context");
+  } finally {
+    if (prev === undefined) delete process.env.CONDUCTOR_SUBAGENT;
+    else process.env.CONDUCTOR_SUBAGENT = prev;
+  }
+});
+
+test("maybeAutoRunGc: parent context (CONDUCTOR_SUBAGENT unset) → runs normally", async () => {
+  const { runsRoot } = makeFakeRoot();
+  const prev = process.env.CONDUCTOR_SUBAGENT;
+  delete process.env.CONDUCTOR_SUBAGENT;
+  try {
+    const r = await maybeAutoRunGc({
+      runsRoot,
+      config: gcCfg(),
+      registry: new RunRegistry(),
+      now: NOW,
+      log: () => undefined,
+    });
+    assert.equal(r.ran, true);
+  } finally {
+    if (prev !== undefined) process.env.CONDUCTOR_SUBAGENT = prev;
+  }
+});

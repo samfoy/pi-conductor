@@ -158,6 +158,25 @@ export function allocateRunId(persona: string, registry: Map<string, Run>): stri
 
 // ── pi invocation discovery (lifted from pi-essentials) ──────────────
 
+/**
+ * v0.10 A1: build the env a sub-agent pi subprocess inherits. Sets
+ * `CONDUCTOR_SUBAGENT=1` so the child's conductor extension knows to
+ * skip auto-GC (and any other parent-only side effects) on its own
+ * `session_start`. Without this, the child would run a full GC pass
+ * and leak its `gc auto: …` summary into stderr — which the parent
+ * captures (`runs.ts` stdio=["ignore","pipe","pipe"]) and assigns to
+ * `run.errorMessage`.
+ *
+ * Transitive sub-spawns (a sub-agent's own `bash` calls, or a sub-agent
+ * legitimately spawning another `pi --session …` process) inherit the
+ * marker, which is the desired behavior — conductor-context propagates.
+ */
+export function buildSubagentEnv(
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return { ...baseEnv, CONDUCTOR_SUBAGENT: "1" };
+}
+
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
   // Test-friendly override: PI_BIN=<path-to-pi-cli.js> forces a specific
   // pi CLI invocation regardless of how the parent was started.
@@ -679,6 +698,7 @@ function runPiSubprocess(
       cwd: opts.cwd,
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
+      env: buildSubagentEnv(),
     });
   } catch (e) {
     run.status = "failed";

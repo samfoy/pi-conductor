@@ -822,6 +822,9 @@ function allocateRunId(persona, registry) {
   }
   return `${persona}-${shortHash()}-${Date.now()}`;
 }
+function buildSubagentEnv(baseEnv = process.env) {
+  return { ...baseEnv, CONDUCTOR_SUBAGENT: "1" };
+}
 function getPiInvocation(args) {
   const piBinEnv = process.env.PI_BIN;
   if (piBinEnv && existsSync3(piBinEnv)) {
@@ -1074,7 +1077,8 @@ function runPiSubprocess(run, piArgs, opts) {
     proc = spawn(invocation.command, invocation.args, {
       cwd: opts.cwd,
       shell: false,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      env: buildSubagentEnv()
     });
   } catch (e) {
     run.status = "failed";
@@ -2207,6 +2211,9 @@ function countActions(actions) {
   return { archive, delete: del, reconcile, keep };
 }
 async function maybeAutoRunGc(opts) {
+  if (process.env.CONDUCTOR_SUBAGENT === "1") {
+    return { ran: false, reason: "subagent-context" };
+  }
   if (!opts.config.enabled) return { ran: false, reason: "disabled" };
   if (!opts.config.autoOnSessionStart) return { ran: false, reason: "auto-disabled" };
   const now = resolveNow(opts.now);
