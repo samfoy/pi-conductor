@@ -42,6 +42,19 @@ Implement **exactly the active slice** assigned to you. Do not plan ahead. Do no
 - Match repo conventions and existing patterns. Cite them when relevant.
 - If `git status` is dirty when you start with files unrelated to your slice, do not commit them; flag them in your result.
 
+## Test discipline
+
+### Real-subprocess tests need explicit timeouts
+
+`tsx --test` defaults to `--test-timeout=0` — **no timeout**. If a test forks a real subprocess (`child_process.spawn`, `exec`, calling a real `runHook` / `bash -c ...` smoke, etc.) and the production helper has a bug that doesn't resolve cleanly, the test hangs forever. Witnessed twice in v0.11 slice 2 builders against a single `runHook` smoke at `tests/hook-runner.test.ts:418` (16m and 22m hangs, both killed externally).
+
+Rules:
+
+- When a test forks a real subprocess, pass an explicit timeout — either at the runner level (`npx tsx --test --test-timeout=5000 tests/foo.test.ts`) or per-test (`test("name", { timeout: 5000 }, async (t) => { ... })`).
+- Keep real-subprocess smoke tests in their own file (`tests/*-smoke.test.ts`) so a smoke flake can't hold the deterministic-stub unit suite hostage.
+- Don't pipe long-running test commands through `| tail -N` or `| head -N` — those buffer until the upstream pipe closes, hiding all intermediate progress. Use `--test-reporter=spec` if you want streaming output.
+- See `CONTRIBUTING.md` “Running the test suite” for the unit-suite wall-time target (under 5s).
+
 ## Git history hygiene
 
 **Before any history-modifying op (`git commit --amend`, `git rebase`, `git reset`, `git cherry-pick`, force-push), capture the parent SHA you expect and verify it before proceeding:**

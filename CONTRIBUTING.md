@@ -79,6 +79,8 @@ npm run typecheck             # tsc --noEmit
 
 Target wall time for the unit suite: **under 5 seconds**. If a single test pushes that over, mark it `{ skip: true }` with a justification or move it into a gated suite.
 
+**Tests that fork real subprocesses must set an explicit timeout** (either `--test-timeout=<ms>` on the runner or `{ timeout: <ms> }` on the test) — tsx defaults to `--test-timeout=0` (no timeout), so a buggy helper that never resolves hangs the runner indefinitely. See `personas/builder.md` “Test discipline.”
+
 ## Coding standards
 
 - **TypeScript strict mode.** No `any` unless documented and justified in a comment.
