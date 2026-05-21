@@ -311,6 +311,16 @@ export interface Run {
    */
   softStallSeconds?: number;
 
+  /**
+   * Process pid for the spawned pi subprocess. Used by post-startup
+   * reconcile (v0.9.x) to liveness-probe orphaned `running` records via
+   * `kill(pid, 0)`. Captured by `recordSpawnedProc` immediately after
+   * `child_process.spawn` returns. May be `undefined` for re-adopted
+   * runs whose original record predates the schema bump, or for runs
+   * whose spawn failed before pid was assigned.
+   */
+  pid?: number;
+
   /** Exit code of the pi subprocess; set on close. */
   exitCode?: number;
   /** Stop reason from the last assistant message: stop | error | aborted | … */
@@ -406,6 +416,13 @@ export interface RunRecord {
   mode: SpawnMode;
   status: RunStatus;
   startTime: number;
+  /**
+   * Process pid for the spawned pi subprocess. Persisted by
+   * `toRunRecord`; consumed by post-startup reconcile (v0.9.x) to
+   * liveness-probe orphaned `running` records via `kill(pid, 0)`.
+   * Optional for back-compat with records written before slice 1.
+   */
+  pid?: number;
   finishedAt?: number;
   pausedAt?: number;
   exitCode?: number;
@@ -437,6 +454,7 @@ export function toRunRecord(r: Run): RunRecord {
     mode: r.mode,
     status: r.status,
     startTime: r.startTime,
+    pid: r.pid,
     finishedAt: r.finishedAt,
     pausedAt: r.pausedAt,
     exitCode: r.exitCode,

@@ -51,9 +51,10 @@ import {
   getFinalText,
   pauseRun,
   planSpawnPiArgs,
+  recordSpawnedProc,
   resumeRun,
 } from "../src/runs.ts";
-import { emptyUsage, type Persona, type Run } from "../src/types.ts";
+import { emptyUsage, toRunRecord, type Persona, type Run } from "../src/types.ts";
 
 function tmpRunPaths(): { dir: string; recordPath: string; transcriptPath: string; finalPath: string } {
   const dir = mkdtempSync(join(tmpdir(), "conductor-runs-"));
@@ -1050,4 +1051,44 @@ test("planSpawnPiArgs: skillPaths threads through to fresh-mode piArgs in caller
   assert.equal(skillIdxs.length, 2);
   assert.equal(plan.piArgs[skillIdxs[0]! + 1], "/u/skills");
   assert.equal(plan.piArgs[skillIdxs[1]! + 1], "/p/skills");
+});
+
+// ── v0.9.x post-startup reconcile (slice 1): pid persistence ─────────
+//
+// W6: spawnRun must capture proc.pid into run.pid so post-startup
+//     reconcile can liveness-probe orphaned `running` records. We test
+//     the pure helper `recordSpawnedProc(run, proc)` directly to avoid
+//     forking a real pi subprocess (slow + AWS-coupled in this repo).
+// W7: toRunRecord must persist pid so the next runtime sees it on disk.
+
+test("W6 recordSpawnedProc captures pid + proc on the Run", () => {
+  const fakeProc = { pid: 123456 } as unknown as Run["proc"];
+  const run = makeRun({ id: "test-w6" });
+  recordSpawnedProc(run, fakeProc!);
+  assert.equal(run.proc, fakeProc);
+  assert.equal(run.pid, 123456);
+});
+
+test("W6b recordSpawnedProc tolerates a proc whose pid is undefined", () => {
+  // child_process.spawn() can return a ChildProcess whose pid is
+  // undefined when spawn fails synchronously between event-loop
+  // ticks (rare). The helper must not throw and must leave
+  // run.pid undefined (explicit "not captured").
+  const fakeProc = { pid: undefined } as unknown as Run["proc"];
+  const run = makeRun({ id: "test-w6b" });
+  recordSpawnedProc(run, fakeProc!);
+  assert.equal(run.proc, fakeProc);
+  assert.equal(run.pid, undefined);
+});
+
+test("W7 toRunRecord persists pid", () => {
+  const run = makeRun({ id: "test-w7", pid: 99999 });
+  const rec = toRunRecord(run);
+  assert.equal(rec.pid, 99999);
+});
+
+test("W7b toRunRecord omits pid when Run has no pid (back-compat)", () => {
+  const run = makeRun({ id: "test-w7b" });
+  const rec = toRunRecord(run);
+  assert.equal(rec.pid, undefined);
 });

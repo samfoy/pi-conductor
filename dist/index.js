@@ -78,6 +78,7 @@ function toRunRecord(r) {
     mode: r.mode,
     status: r.status,
     startTime: r.startTime,
+    pid: r.pid,
     finishedAt: r.finishedAt,
     pausedAt: r.pausedAt,
     exitCode: r.exitCode,
@@ -1300,6 +1301,10 @@ var RunRegistry = class {
     }
   }
 };
+function recordSpawnedProc(run, proc) {
+  run.proc = proc;
+  run.pid = proc.pid;
+}
 function spawnRun(opts) {
   const id = opts.preAllocatedId ?? allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
   const dir = runDir(id);
@@ -1425,7 +1430,7 @@ function runPiSubprocess(run, piArgs, opts) {
     if (opts.onComplete) opts.onComplete(run);
     return Promise.resolve(run);
   }
-  run.proc = proc;
+  recordSpawnedProc(run, proc);
   run.timeoutTimer = setTimeout(() => {
     if (run.status === "running" || run.status === "paused") {
       forceTerminate(run, "timeout", opts.registry, opts.onComplete);

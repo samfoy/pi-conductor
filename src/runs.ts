@@ -680,6 +680,23 @@ export interface SpawnOptions {
 }
 
 /**
+ * Capture a freshly-spawned ChildProcess on the Run, copying both the
+ * proc handle and its pid. The pid is persisted by `toRunRecord` so
+ * post-startup reconcile (v0.9.x) can liveness-probe orphaned `running`
+ * records via `kill(pid, 0)`.
+ *
+ * Pure assignment helper — no I/O. Extracted from `spawnRun` so the
+ * "capture pid" invariant has a unit-test seam without forking a real
+ * pi subprocess. Tolerates `proc.pid === undefined` (rare
+ * sync-spawn-failure path); the caller has already validated the spawn
+ * succeeded by the time it gets here.
+ */
+export function recordSpawnedProc(run: Run, proc: ChildProcess): void {
+  run.proc = proc;
+  run.pid = proc.pid;
+}
+
+/**
  * Spawn a sub-agent. Returns the Run immediately (status="running").
  * Resolves the returned promise when the run reaches a terminal status.
  *
@@ -883,7 +900,7 @@ function runPiSubprocess(
     if (opts.onComplete) opts.onComplete(run);
     return Promise.resolve(run);
   }
-  run.proc = proc;
+  recordSpawnedProc(run, proc);
 
   // Hard timeout.
   run.timeoutTimer = setTimeout(() => {
