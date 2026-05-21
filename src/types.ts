@@ -418,6 +418,13 @@ export interface RunRecord {
   finalPath: string;
   sessionPath?: string;
   systemPrompt?: string;
+  /**
+   * v0.11 on_complete_hook (slice 2): persisted hook outcome on terminal
+   * runs whose close handler invoked a hook. Undefined for runs that did
+   * not invoke a hook. Read by the completion-envelope renderer (slice 5)
+   * and history surfaces.
+   */
+  hookResult?: HookResult;
 }
 
 export function toRunRecord(r: Run): RunRecord {
@@ -442,6 +449,7 @@ export function toRunRecord(r: Run): RunRecord {
     finalPath: r.finalPath,
     sessionPath: r.sessionPath,
     systemPrompt: r.systemPrompt,
+    hookResult: r.hookResult,
   };
 }
 

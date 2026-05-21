@@ -124,6 +124,18 @@ export function evaluateRun(
     return { transition: { kind: "none" }, nextState: current };
   }
 
+  // (2b) v0.11 on_complete_hook (slice 2): while a hook subprocess is
+  // in-flight the pi subprocess has already closed and `lastEventAt` is
+  // frozen at the close time. The hook is a known-finite, parent-owned
+  // step bounded by its own timeout — not a heartbeat-based concern.
+  // Suppress all stall classification while it runs; the hook timeout
+  // (default 300s) is the upper bound here, not the watchdog hard
+  // threshold. State is preserved unchanged so a recovery transition
+  // still fires after the hook exits if the run was previously soft.
+  if (run.hookExecuting === true) {
+    return { transition: { kind: "none" }, nextState: current };
+  }
+
   // (3) Cold-start grace. Suppress all transitions for runs younger than
   // graceSeconds. Subtle: this also suppresses recovery emission while
   // still inside grace; that's fine because we wouldn't have transitioned
@@ -306,6 +318,11 @@ export function classifyStall(
 } | null {
   if (run.status !== "running") return null;
   if (run.pausedAt !== undefined) return null;
+  // v0.11 on_complete_hook (slice 2): hook execution masks classification
+  // for the same reason as `evaluateRun` — the pi subprocess is gone and
+  // `lastEventAt` is frozen, but the run is doing legitimate work owned
+  // by the parent's hook spawn.
+  if (run.hookExecuting === true) return null;
   const eff = effectiveConfig(run, defaults);
   const silentMs = Math.max(0, nowMs - run.lastEventAt);
   const silentSeconds = Math.floor(silentMs / 1000);

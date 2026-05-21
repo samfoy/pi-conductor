@@ -89,7 +89,8 @@ function toRunRecord(r) {
     transcriptPath: r.transcriptPath,
     finalPath: r.finalPath,
     sessionPath: r.sessionPath,
-    systemPrompt: r.systemPrompt
+    systemPrompt: r.systemPrompt,
+    hookResult: r.hookResult
   };
 }
 var TERMINAL_STATUSES = [
@@ -428,15 +429,16 @@ function mergeGcConfig(base, raw) {
   return out;
 }
 function loadConfigWithErrors(cwd) {
-  let cfg = { ...DEFAULT_CONFIG };
   const errors = [];
   const u = safeReadJson(userConfigPath());
   if (u.error) errors.push(u.error);
-  cfg = mergeConfig(cfg, u.value);
+  const userCfg = mergeConfig({ ...DEFAULT_CONFIG }, u.value);
   const p = safeReadJson(projectConfigPath(cwd));
   if (p.error) errors.push(p.error);
-  cfg = mergeConfig(cfg, p.value);
-  return { config: cfg, errors };
+  const projectCfg = mergeConfig({ ...DEFAULT_CONFIG }, p.value);
+  let merged = mergeConfig({ ...DEFAULT_CONFIG }, u.value);
+  merged = mergeConfig(merged, p.value);
+  return { config: merged, user: userCfg, project: projectCfg, errors };
 }
 function loadConfig(cwd) {
   return loadConfigWithErrors(cwd).config;
@@ -444,10 +446,10 @@ function loadConfig(cwd) {
 
 // src/runs.ts
 import { spawn } from "node:child_process";
-import { existsSync as existsSync3, mkdirSync as mkdirSync2, readdirSync, statSync } from "node:fs";
+import { existsSync as existsSync3, mkdirSync as mkdirSync3, readdirSync, statSync } from "node:fs";
 import { mkdir, writeFile, appendFile } from "node:fs/promises";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname3, join as join3 } from "node:path";
+import { dirname as dirname4, join as join3 } from "node:path";
 
 // src/gc/id-reuse.ts
 var recentlyDeletedIds = /* @__PURE__ */ new Set();
@@ -784,6 +786,250 @@ function isNonSubstantiveFinalMessage(messages) {
   };
 }
 
+// src/hook-cascade.ts
+var DEFAULT_HOOK_TIMEOUT_SECONDS = 300;
+function resolveOnCompleteHook(input) {
+  const layers = [
+    { source: "per-call", spec: input.perCall },
+    { source: "project", spec: input.project },
+    { source: "user", spec: input.user },
+    { source: "persona", spec: input.persona }
+  ];
+  for (const { source, spec } of layers) {
+    if (spec === void 0) continue;
+    if (spec.command === void 0) continue;
+    if (spec.command === "") {
+      return void 0;
+    }
+    return {
+      command: spec.command,
+      timeoutSeconds: spec.timeoutSeconds ?? DEFAULT_HOOK_TIMEOUT_SECONDS,
+      source
+    };
+  }
+  return void 0;
+}
+
+// src/hook-runner.ts
+import {
+  spawn as childProcessSpawn
+} from "node:child_process";
+import { mkdirSync as mkdirSync2, createWriteStream } from "node:fs";
+import { dirname as dirname3 } from "node:path";
+var DEFAULT_HOOK_MAX_LOG_BYTES = 10 * 1024 * 1024;
+var SIGKILL_GRACE_MS = 2e3;
+var TAIL_MAX_LINES = 50;
+var TAIL_MAX_BYTES = 4 * 1024;
+function defaultKillGroup(pid, signal) {
+  try {
+    process.kill(-pid, signal);
+  } catch (e) {
+    const code = e.code;
+    if (code === "ESRCH" || code === "EPERM") return;
+    try {
+      console.error(`[hook-runner] unexpected kill error: ${e.message}`);
+    } catch {
+    }
+  }
+}
+function runHook(opts) {
+  const deps = opts.deps ?? {};
+  const spawn2 = deps.spawn ?? childProcessSpawn;
+  const maxLogBytes = deps.maxLogBytes ?? DEFAULT_HOOK_MAX_LOG_BYTES;
+  const killGroup = deps.killGroup ?? defaultKillGroup;
+  const now = deps.now ?? Date.now;
+  const setTimer = deps.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+  const clearTimer = deps.clearTimer ?? ((h) => clearTimeout(h));
+  const startedAt = now();
+  const logPath = `${opts.runDir}/hook.log`;
+  try {
+    mkdirSync2(dirname3(logPath), { recursive: true });
+  } catch {
+  }
+  const env = {
+    ...process.env,
+    CONDUCTOR_RUN_ID: opts.runId,
+    CONDUCTOR_PERSONA: opts.persona,
+    CONDUCTOR_FINAL_TEXT_PATH: opts.finalPath,
+    CONDUCTOR_TRANSCRIPT_PATH: opts.transcriptPath,
+    CONDUCTOR_RUN_DIR: opts.runDir,
+    CONDUCTOR_HOOK_LOG: logPath,
+    CONDUCTOR_PARENT_CWD: opts.parentCwd
+  };
+  const spawnOpts = {
+    shell: true,
+    detached: true,
+    cwd: opts.parentCwd,
+    env,
+    stdio: ["ignore", "pipe", "pipe"]
+  };
+  let proc;
+  try {
+    proc = spawn2(opts.resolved.command, spawnOpts);
+  } catch (e) {
+    return Promise.resolve({
+      passed: false,
+      command: opts.resolved.command,
+      exitCode: null,
+      durationMs: now() - startedAt,
+      logPath,
+      tailText: `(spawn error) ${e.message}`,
+      tailBytes: 0,
+      tailLines: 0,
+      failureKind: "spawn_error"
+    });
+  }
+  if (opts.onProc) {
+    try {
+      opts.onProc(proc);
+    } catch {
+    }
+  }
+  return new Promise((resolve2) => {
+    let resolved = false;
+    let killReason;
+    let timeoutHandle;
+    let killEscalationHandle;
+    let totalBytes = 0;
+    const tailLines = [];
+    let tailLineBuffer = "";
+    let tailByteCount = 0;
+    const logStream = createWriteStream(logPath, { flags: "w" });
+    logStream.on("error", () => {
+    });
+    const finalize = (exitCode, signal) => {
+      if (resolved) return;
+      resolved = true;
+      if (timeoutHandle !== void 0) clearTimer(timeoutHandle);
+      if (killEscalationHandle !== void 0) clearTimer(killEscalationHandle);
+      if (tailLineBuffer.length > 0) {
+        appendTailLine(tailLines, tailLineBuffer);
+        tailLineBuffer = "";
+      }
+      const tailText = renderTail(tailLines);
+      const tailBytes = Buffer.byteLength(tailText, "utf8");
+      const tailLineCount = tailText.length === 0 ? 0 : tailText.split("\n").length;
+      let failureKind;
+      let passed = false;
+      if (killReason === "runaway_output") {
+        failureKind = "runaway_output";
+      } else if (killReason === "timeout") {
+        failureKind = "timeout";
+      } else if (signal !== null) {
+        failureKind = "signal";
+      } else if (exitCode === 0) {
+        passed = true;
+      } else {
+        failureKind = "exited";
+      }
+      const finishStream = new Promise((res) => {
+        logStream.once("finish", () => res());
+        logStream.once("error", () => res());
+        try {
+          logStream.end();
+        } catch {
+          res();
+        }
+      });
+      void finishStream.then(() => {
+        resolve2({
+          passed,
+          command: opts.resolved.command,
+          exitCode,
+          durationMs: now() - startedAt,
+          logPath,
+          tailText,
+          tailBytes,
+          tailLines: tailLineCount,
+          failureKind
+        });
+      });
+    };
+    const escalateToSigkill = () => {
+      if (resolved) return;
+      if (proc.pid === void 0) return;
+      killGroup(proc.pid, "SIGKILL");
+    };
+    const beginGroupKill = (reason) => {
+      if (killReason !== void 0) return;
+      killReason = reason;
+      if (proc.pid === void 0) return;
+      killGroup(proc.pid, "SIGTERM");
+      killEscalationHandle = setTimer(escalateToSigkill, SIGKILL_GRACE_MS);
+    };
+    const onChunk = (chunk) => {
+      const buf = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+      totalBytes += buf.length;
+      try {
+        logStream.write(buf);
+      } catch {
+      }
+      const text = buf.toString("utf8");
+      const merged = tailLineBuffer + text;
+      const lines = merged.split("\n");
+      tailLineBuffer = lines.pop() ?? "";
+      for (const line of lines) appendTailLine(tailLines, line);
+      tailByteCount = capTailBytes(tailLines, tailByteCount, line_length(tailLineBuffer));
+      if (totalBytes >= maxLogBytes && killReason === void 0) {
+        beginGroupKill("runaway_output");
+      }
+    };
+    proc.stdout?.on("data", onChunk);
+    proc.stderr?.on("data", onChunk);
+    proc.on("error", (e) => {
+      if (resolved) return;
+      resolved = true;
+      if (timeoutHandle !== void 0) clearTimer(timeoutHandle);
+      if (killEscalationHandle !== void 0) clearTimer(killEscalationHandle);
+      try {
+        logStream.end();
+      } catch {
+      }
+      resolve2({
+        passed: false,
+        command: opts.resolved.command,
+        exitCode: null,
+        durationMs: now() - startedAt,
+        logPath,
+        tailText: `(spawn error) ${e.message}`,
+        tailBytes: 0,
+        tailLines: 0,
+        failureKind: "spawn_error"
+      });
+    });
+    proc.on("close", (code, signal) => {
+      finalize(code, signal);
+    });
+    timeoutHandle = setTimer(() => {
+      beginGroupKill("timeout");
+    }, opts.resolved.timeoutSeconds * 1e3);
+  });
+}
+function appendTailLine(lines, line) {
+  lines.push(line);
+  if (lines.length > TAIL_MAX_LINES) {
+    lines.splice(0, lines.length - TAIL_MAX_LINES);
+  }
+}
+function capTailBytes(lines, _currentBytes, _pendingBytes) {
+  let total = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    total += Buffer.byteLength(lines[i] ?? "", "utf8") + 1;
+    if (total > TAIL_MAX_BYTES) {
+      lines.splice(0, i + 1);
+      return total - (Buffer.byteLength(lines[0] ?? "", "utf8") + 1);
+    }
+  }
+  return total;
+}
+function line_length(s) {
+  return Buffer.byteLength(s, "utf8");
+}
+function renderTail(lines) {
+  if (lines.length === 0) return "";
+  return lines.join("\n");
+}
+
 // src/runs.ts
 function runsRoot() {
   return join3(homedir3(), ".pi", "agent", "conductor", "runs");
@@ -1057,7 +1303,7 @@ var RunRegistry = class {
 function spawnRun(opts) {
   const id = opts.preAllocatedId ?? allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
   const dir = runDir(id);
-  mkdirSync2(dir, { recursive: true });
+  mkdirSync3(dir, { recursive: true });
   const run = {
     id,
     persona: opts.persona.name,
@@ -1087,7 +1333,7 @@ function spawnRun(opts) {
   void writeRecord(run);
   const prompt = buildSubAgentPrompt(opts.persona, opts.task);
   const sessionDir = join3(dir, "session");
-  mkdirSync2(sessionDir, { recursive: true });
+  mkdirSync3(sessionDir, { recursive: true });
   const plan = planSpawnPiArgs({
     persona: opts.persona,
     parentMessages: opts.parentMessages,
@@ -1113,9 +1359,51 @@ function spawnRun(opts) {
     onComplete: opts.onComplete,
     // Only let the subprocess discover a session file when we didn't pre-seed
     // one — in resume mode the path is fixed.
-    sessionDir: plan.seededSessionPath ? void 0 : sessionDir
+    sessionDir: plan.seededSessionPath ? void 0 : sessionDir,
+    // v0.11 on_complete_hook (slice 2): resolve at spawn time from the
+    // current config layers + persona frontmatter. Per-call args land
+    // in slice 3; for slice 2 the per-call layer is always undefined.
+    // Tests inject `resolvedHook` directly via the spawn-options surface.
+    resolvedHook: resolveCloseHook(
+      opts.cwd,
+      opts.persona.name,
+      void 0,
+      // per-call (slice 3)
+      hookSpecFromPersona(opts.persona)
+    )
   });
   return { run, done };
+}
+function resolveCloseHook(cwd, personaName, perCall, personaFrontmatter) {
+  const layered = loadConfigWithErrors(cwd);
+  const project = hookSpecFromOverride(
+    layered.project.personaOverrides[personaName]
+  );
+  const user = hookSpecFromOverride(
+    layered.user.personaOverrides[personaName]
+  );
+  const input = {
+    perCall,
+    project,
+    user,
+    persona: personaFrontmatter
+  };
+  return resolveOnCompleteHook(input);
+}
+function hookSpecFromOverride(override) {
+  if (!override) return void 0;
+  if (override.onCompleteHook === void 0) return void 0;
+  return {
+    command: override.onCompleteHook,
+    timeoutSeconds: override.onCompleteHookTimeoutSeconds
+  };
+}
+function hookSpecFromPersona(persona) {
+  if (persona.onCompleteHook === void 0) return void 0;
+  return {
+    command: persona.onCompleteHook,
+    timeoutSeconds: persona.onCompleteHookTimeoutSeconds
+  };
 }
 function runPiSubprocess(run, piArgs, opts) {
   const invocation = getPiInvocation(piArgs);
@@ -1150,7 +1438,7 @@ function runPiSubprocess(run, piArgs, opts) {
   const done = new Promise((resolve2) => {
     donePromiseResolve = resolve2;
   });
-  const finalize = (terminal, exitCode) => {
+  const finalize = async (terminal, exitCode) => {
     if (finalized) return;
     finalized = true;
     if (run.timeoutTimer) {
@@ -1158,6 +1446,28 @@ function runPiSubprocess(run, piArgs, opts) {
       run.timeoutTimer = void 0;
     }
     if (buffer.trim()) processLine(buffer);
+    if (terminal === "completed" && exitCode === 0 && opts.resolvedHook && !isTerminal(run.status)) {
+      try {
+        terminal = await applyHookToTerminal(
+          run,
+          opts.resolvedHook,
+          terminal
+        );
+      } catch (e) {
+        run.hookResult = {
+          passed: false,
+          command: opts.resolvedHook.command,
+          exitCode: null,
+          durationMs: 0,
+          logPath: "",
+          tailText: `(applyHookToTerminal threw) ${e.message}`,
+          tailBytes: 0,
+          tailLines: 0,
+          failureKind: "spawn_error"
+        };
+        terminal = "hook_failed";
+      }
+    }
     if (!applyCloseHandlerTerminal(run, terminal, exitCode)) {
       discoverSessionPathIfMissing(run, opts.sessionDir);
       run.proc = void 0;
@@ -1203,7 +1513,7 @@ function runPiSubprocess(run, piArgs, opts) {
     }
     const effect = applyEvent(run, event);
     if (effect.kind === "finalize") {
-      finalize(effect.status, effect.exitCode);
+      void finalize(effect.status, effect.exitCode);
       return;
     }
     if (effect.kind === "updated") {
@@ -1222,12 +1532,12 @@ function runPiSubprocess(run, piArgs, opts) {
   });
   proc.on("close", (code) => {
     if (finalized) return;
-    if ((code ?? 0) === 0) finalize("completed", 0);
-    else finalize("failed", code ?? 0);
+    if ((code ?? 0) === 0) void finalize("completed", 0);
+    else void finalize("failed", code ?? 0);
   });
   proc.on("error", () => {
     run.errorMessage = "failed to spawn pi process";
-    finalize("failed", 1);
+    void finalize("failed", 1);
   });
   proc.unref();
   return done;
@@ -1301,7 +1611,12 @@ function sendToRun(run, message, opts) {
     onComplete: opts.onComplete,
     // Re-discover sessionPath on finalize — the file path is stable but the
     // mtime updates, which lets future sends still find it.
-    sessionDir: dirname3(sessionPath)
+    sessionDir: dirname4(sessionPath),
+    // v0.11 on_complete_hook (slice 2): re-resolve at every terminal
+    // transition so config changes between spawn and re-fire are
+    // honored (§4.6: each terminal is a fresh gate). Per-call layer
+    // wires in slice 3; persona-frontmatter layer in slice 4.
+    resolvedHook: resolveCloseHook(run.cwd, run.persona)
   });
   return { kind: "started", run, done };
 }
@@ -1320,7 +1635,40 @@ function applySubstanceCheck(run, terminal) {
     run.nonSubstantiveFinal = { reason: check.reason, message: check.message };
   }
 }
-function forceTerminate(run, reason, registry, onComplete) {
+async function applyHookToTerminal(run, resolvedHook, terminal, deps = {}) {
+  try {
+    await writeFinal(run);
+  } catch {
+  }
+  const runHookImpl = deps.runHookImpl ?? runHook;
+  run.hookExecuting = true;
+  try {
+    const hookResult = await runHookImpl({
+      resolved: resolvedHook,
+      runId: run.id,
+      persona: run.persona,
+      runDir: dirname4(run.finalPath),
+      finalPath: run.finalPath,
+      transcriptPath: run.transcriptPath,
+      parentCwd: run.cwd,
+      onProc: (proc) => {
+        run.hookProc = proc;
+      }
+    });
+    if (isTerminal(run.status)) {
+      return run.status;
+    }
+    run.hookResult = hookResult;
+    if (!hookResult.passed) {
+      return "hook_failed";
+    }
+    return terminal;
+  } finally {
+    run.hookExecuting = false;
+    run.hookProc = void 0;
+  }
+}
+function forceTerminate(run, reason, registry, onComplete, killGroup = defaultKillGroup) {
   if (isTerminal(run.status)) return;
   if (run.timeoutTimer) {
     clearTimeout(run.timeoutTimer);
@@ -1337,6 +1685,20 @@ function forceTerminate(run, reason, registry, onComplete) {
       } catch {
       }
     }, 2e3).unref();
+  }
+  if (run.hookProc?.pid !== void 0) {
+    const hookPid = run.hookProc.pid;
+    try {
+      killGroup(hookPid, "SIGTERM");
+    } catch {
+    }
+    setTimeout(() => {
+      try {
+        killGroup(hookPid, "SIGKILL");
+      } catch {
+      }
+    }, 2e3).unref();
+    run.hookProc = void 0;
   }
   run.status = reason === "timeout" ? "timeout" : reason === "stalled" ? "killed" : "killed";
   if (reason === "stalled" && !run.errorMessage) {
@@ -1392,14 +1754,14 @@ async function reconcileRecord(run, status, errorMessage, finishedAt) {
 }
 async function writeRecord(run) {
   try {
-    await mkdir(dirname3(run.recordPath), { recursive: true });
+    await mkdir(dirname4(run.recordPath), { recursive: true });
     await writeFile(run.recordPath, JSON.stringify(toRunRecord(run), null, 2));
   } catch {
   }
 }
 async function writeFinal(run) {
   try {
-    await mkdir(dirname3(run.finalPath), { recursive: true });
+    await mkdir(dirname4(run.finalPath), { recursive: true });
     await writeFile(run.finalPath, getFinalText(run.messages) || "(no output)");
   } catch {
   }
@@ -1446,9 +1808,9 @@ import { join as join6 } from "node:path";
 
 // src/gc/last-gc.ts
 import { existsSync as existsSync4, statSync as statSync2, utimesSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { dirname as dirname4, join as join4 } from "node:path";
+import { dirname as dirname5, join as join4 } from "node:path";
 function lastGcMarkerPath(runsRoot2) {
-  return join4(dirname4(runsRoot2), ".last-gc");
+  return join4(dirname5(runsRoot2), ".last-gc");
 }
 function readLastGcMtime(runsRoot2) {
   const path = lastGcMarkerPath(runsRoot2);
@@ -2311,6 +2673,9 @@ function evaluateRun(run, state, config, now) {
   if (run.pausedAt !== void 0) {
     return { transition: { kind: "none" }, nextState: current };
   }
+  if (run.hookExecuting === true) {
+    return { transition: { kind: "none" }, nextState: current };
+  }
   const ageMs = now - run.startTime;
   if (ageMs < config.graceSeconds * 1e3) {
     return { transition: { kind: "none" }, nextState: current };
@@ -2374,6 +2739,7 @@ function resolveKillOnStall(run, defaultKillOnStall) {
 function classifyStall(run, nowMs, defaults) {
   if (run.status !== "running") return null;
   if (run.pausedAt !== void 0) return null;
+  if (run.hookExecuting === true) return null;
   const eff = effectiveConfig(run, defaults);
   const silentMs = Math.max(0, nowMs - run.lastEventAt);
   const silentSeconds = Math.floor(silentMs / 1e3);
@@ -4365,7 +4731,7 @@ function isTerminalStatus(s) {
 }
 
 // src/queue.ts
-import { mkdirSync as mkdirSync3 } from "node:fs";
+import { mkdirSync as mkdirSync4 } from "node:fs";
 import { join as join11 } from "node:path";
 var SpawnQueue = class {
   constructor(registry, maxConcurrent, maxConcurrentWriteCapable = 1) {
@@ -4411,7 +4777,7 @@ var SpawnQueue = class {
     }
     const id = allocateRunId(opts.persona.name, mapFromRegistry2(registry));
     const dir = runDir(id);
-    mkdirSync3(dir, { recursive: true });
+    mkdirSync4(dir, { recursive: true });
     const placeholder = {
       id,
       persona: opts.persona.name,

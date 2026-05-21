@@ -36,6 +36,21 @@ export interface ConfigLoadError {
 
 export interface LoadConfigResult {
   config: ConductorConfig;
+  /**
+   * v0.11 slice 2: user-layer config, merged with defaults but NOT yet
+   * combined with the project layer. Lets layer-aware callers (the
+   * on_complete_hook cascade) introspect a single layer in isolation.
+   *
+   * For backward-compat callers that only want the merged result,
+   * `config` continues to be the merged user+project blob (and
+   * `loadConfig()` returns that directly).
+   */
+  user: ConductorConfig;
+  /**
+   * v0.11 slice 2: project-layer config, merged with defaults but NOT
+   * yet combined with the user layer. See {@link user} for rationale.
+   */
+  project: ConductorConfig;
   errors: ConfigLoadError[];
 }
 
@@ -150,20 +165,31 @@ function mergeGcConfig(
 /**
  * Load config and return both the resolved config and any file-load errors.
  * Use this when surfacing config health to the user (e.g. /conductor doctor).
+ *
+ * v0.11 slice 2: also returns user- and project-layer configs separately
+ * (each merged with defaults but not combined with the other layer). The
+ * on_complete_hook cascade resolver needs to see the layers independently
+ * so a project override can shadow a user override predictably; the
+ * default merge collapses them into a field-level union (see
+ * {@link mergeConfig}). Callers that only need the merged result use
+ * `result.config` exactly as before.
  */
 export function loadConfigWithErrors(cwd: string): LoadConfigResult {
-  let cfg = { ...DEFAULT_CONFIG };
   const errors: ConfigLoadError[] = [];
 
   const u = safeReadJson(userConfigPath());
   if (u.error) errors.push(u.error);
-  cfg = mergeConfig(cfg, u.value);
+  const userCfg = mergeConfig({ ...DEFAULT_CONFIG }, u.value);
 
   const p = safeReadJson(projectConfigPath(cwd));
   if (p.error) errors.push(p.error);
-  cfg = mergeConfig(cfg, p.value);
+  const projectCfg = mergeConfig({ ...DEFAULT_CONFIG }, p.value);
 
-  return { config: cfg, errors };
+  // Combined view: defaults <- user <- project.
+  let merged = mergeConfig({ ...DEFAULT_CONFIG }, u.value);
+  merged = mergeConfig(merged, p.value);
+
+  return { config: merged, user: userCfg, project: projectCfg, errors };
 }
 
 /**

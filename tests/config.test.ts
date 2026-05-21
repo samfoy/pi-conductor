@@ -509,3 +509,56 @@ test("loadConfig: gc.enabled=false is honored as an explicit opt-out", () => {
     teardown(fx);
   }
 });
+
+// ── v0.11 slice 2: layered loadConfigWithErrors ──────────────────
+
+test("loadConfigWithErrors: returns user, project, and merged config separately (v0.11 slice 2)", async () => {
+  const fx = setup();
+  try {
+    writeUserConfig(
+      fx,
+      JSON.stringify({
+        personaOverrides: {
+          builder: { onCompleteHook: "from-user" },
+        },
+      }),
+    );
+    writeProjectConfig(
+      fx,
+      JSON.stringify({
+        personaOverrides: {
+          builder: { onCompleteHook: "from-project" },
+        },
+      }),
+    );
+    const { loadConfigWithErrors } = await import("../src/config.ts");
+    const result = loadConfigWithErrors(fx.projectDir);
+    // Layered access: each layer carries only its own override.
+    assert.equal(result.user.personaOverrides["builder"]?.onCompleteHook, "from-user");
+    assert.equal(result.project.personaOverrides["builder"]?.onCompleteHook, "from-project");
+    // Merged view preserves the existing project-wins semantics.
+    assert.equal(result.config.personaOverrides["builder"]?.onCompleteHook, "from-project");
+    assert.equal(result.errors.length, 0);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfigWithErrors: missing project layer leaves project at defaults (no inherited user fields)", async () => {
+  const fx = setup();
+  try {
+    writeUserConfig(
+      fx,
+      JSON.stringify({
+        personaOverrides: { oracle: { onCompleteHook: "user-only" } },
+      }),
+    );
+    const { loadConfigWithErrors } = await import("../src/config.ts");
+    const result = loadConfigWithErrors(fx.projectDir);
+    assert.equal(result.user.personaOverrides["oracle"]?.onCompleteHook, "user-only");
+    assert.equal(result.project.personaOverrides["oracle"], undefined);
+    assert.equal(result.config.personaOverrides["oracle"]?.onCompleteHook, "user-only");
+  } finally {
+    teardown(fx);
+  }
+});

@@ -28,13 +28,19 @@ import { applyEvent } from "./event-handler.ts";
 import { filterParentContext } from "./context-filter.ts";
 import { seedSessionFile } from "./session-seed.ts";
 import { isNonSubstantiveFinalMessage } from "./substance-check.ts";
+import { resolveOnCompleteHook, type HookCascadeInput } from "./hook-cascade.ts";
+import { runHook, defaultKillGroup } from "./hook-runner.ts";
+import { loadConfigWithErrors } from "./config.ts";
 import {
   emptyUsage,
   isTerminal,
   toRunRecord,
   type ConductorConfig,
+  type HookResult,
+  type HookSpec,
   type Persona,
   type PersonaOverride,
+  type ResolvedHook,
   type Run,
   type RunStatus,
   type SpawnMode,
@@ -750,6 +756,16 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // Only let the subprocess discover a session file when we didn't pre-seed
     // one — in resume mode the path is fixed.
     sessionDir: plan.seededSessionPath ? undefined : sessionDir,
+    // v0.11 on_complete_hook (slice 2): resolve at spawn time from the
+    // current config layers + persona frontmatter. Per-call args land
+    // in slice 3; for slice 2 the per-call layer is always undefined.
+    // Tests inject `resolvedHook` directly via the spawn-options surface.
+    resolvedHook: resolveCloseHook(
+      opts.cwd,
+      opts.persona.name,
+      undefined, // per-call (slice 3)
+      hookSpecFromPersona(opts.persona),
+    ),
   });
   return { run, done };
 }
@@ -764,6 +780,73 @@ interface RunPiSubprocessOpts {
   onComplete?: (run: Run) => void;
   /** When provided, finalize() will populate run.sessionPath from this dir. */
   sessionDir?: string;
+  /**
+   * v0.11 on_complete_hook (slice 2): pre-resolved hook to invoke after
+   * a clean (exit-0) natural close. Undefined skips hook execution. The
+   * caller resolves via {@link resolveCloseHook} (or directly through
+   * {@link resolveOnCompleteHook} for tests). The close handler:
+   *   - skips when undefined OR exit !== 0 OR run already terminal,
+   *   - sets `run.hookExecuting = true` + `run.hookProc` for the
+   *     duration so the watchdog suppresses stall classification and
+   *     `forceTerminate` can SIGTERM the hook's process group,
+   *   - branches the close terminal to `hook_failed` on non-zero exit,
+   *   - uses an idempotency guard so a `forceTerminate`-driven hook
+   *     death does not double-flip `run.status`.
+   */
+  resolvedHook?: ResolvedHook;
+}
+
+/**
+ * Resolve the {@link ResolvedHook} for a sub-agent at terminal-close time
+ * from the four cascade layers documented in `src/hook-cascade.ts`. Slice
+ * 2 supplies project + user from the layered config and persona from the
+ * resolved persona record; slices 3 and 4 add the per-call and frontmatter
+ * layers respectively.
+ *
+ * Pure (depends only on `loadConfigWithErrors` for the disk read); exposed
+ * for tests so they can pin the wiring at the call site without forking
+ * subprocesses. Slice 2's wiring path uses it from {@link spawnRun} and
+ * {@link sendToRun} alike.
+ */
+export function resolveCloseHook(
+  cwd: string,
+  personaName: string,
+  perCall?: HookSpec,
+  personaFrontmatter?: HookSpec,
+): ResolvedHook | undefined {
+  const layered = loadConfigWithErrors(cwd);
+  const project = hookSpecFromOverride(
+    layered.project.personaOverrides[personaName],
+  );
+  const user = hookSpecFromOverride(
+    layered.user.personaOverrides[personaName],
+  );
+  const input: HookCascadeInput = {
+    perCall,
+    project,
+    user,
+    persona: personaFrontmatter,
+  };
+  return resolveOnCompleteHook(input);
+}
+
+function hookSpecFromOverride(
+  override: PersonaOverride | undefined,
+): HookSpec | undefined {
+  if (!override) return undefined;
+  if (override.onCompleteHook === undefined) return undefined;
+  return {
+    command: override.onCompleteHook,
+    timeoutSeconds: override.onCompleteHookTimeoutSeconds,
+  };
+}
+
+function hookSpecFromPersona(persona: Persona): HookSpec | undefined {
+  if (persona.onCompleteHook === undefined) return undefined;
+  return {
+    command: persona.onCompleteHook,
+    timeoutSeconds: persona.onCompleteHookTimeoutSeconds,
+  };
 }
 
 /**
@@ -818,7 +901,7 @@ function runPiSubprocess(
     donePromiseResolve = resolve;
   });
 
-  const finalize = (terminal: RunStatus, exitCode?: number) => {
+  const finalize = async (terminal: RunStatus, exitCode?: number) => {
     if (finalized) return;
     finalized = true;
     if (run.timeoutTimer) {
@@ -826,6 +909,47 @@ function runPiSubprocess(
       run.timeoutTimer = undefined;
     }
     if (buffer.trim()) processLine(buffer);
+    // v0.11 on_complete_hook (slice 2): fire the resolved hook between
+    // stream-drain and `applyCloseHandlerTerminal`. Gates are strict:
+    // only on natural exit-zero close with a resolved hook AND when
+    // forceTerminate hasn't already flipped the run terminal. The
+    // helper writes final.md ahead of the spawn (so the hook can read
+    // it via env), sets run.hookExecuting/hookProc for the duration,
+    // and applies the W7 idempotency guard if forceTerminate fires
+    // mid-flight. On hook failure the helper returns "hook_failed";
+    // we let the existing applyCloseHandlerTerminal path persist that
+    // terminal as the run's official status.
+    if (
+      terminal === "completed" &&
+      exitCode === 0 &&
+      opts.resolvedHook &&
+      !isTerminal(run.status)
+    ) {
+      try {
+        terminal = await applyHookToTerminal(
+          run,
+          opts.resolvedHook,
+          terminal,
+        );
+      } catch (e) {
+        // Defensive: applyHookToTerminal's own try/finally clears the
+        // hook flags even on throw, but a thrown helper means the
+        // hook helper itself blew up unexpectedly. Surface as
+        // hook_failed so the lifecycle terminates cleanly.
+        run.hookResult = {
+          passed: false,
+          command: opts.resolvedHook.command,
+          exitCode: null,
+          durationMs: 0,
+          logPath: "",
+          tailText: `(applyHookToTerminal threw) ${(e as Error).message}`,
+          tailBytes: 0,
+          tailLines: 0,
+          failureKind: "spawn_error",
+        };
+        terminal = "hook_failed";
+      }
+    }
     // Race-fix: if `forceTerminate` already settled the run (e.g. the
     // user pressed Ctrl+C, the timeout timer fired, or session_shutdown
     // ran), `applyCloseHandlerTerminal` returns false. The errorMessage
@@ -896,7 +1020,7 @@ function runPiSubprocess(
     // This wrapper handles I/O (transcript append) and listener notification.
     const effect = applyEvent(run, event);
     if (effect.kind === "finalize") {
-      finalize(effect.status, effect.exitCode);
+      void finalize(effect.status, effect.exitCode);
       return;
     }
     if (effect.kind === "updated") {
@@ -918,13 +1042,13 @@ function runPiSubprocess(
 
   proc.on("close", (code) => {
     if (finalized) return;
-    if ((code ?? 0) === 0) finalize("completed", 0);
-    else finalize("failed", code ?? 0);
+    if ((code ?? 0) === 0) void finalize("completed", 0);
+    else void finalize("failed", code ?? 0);
   });
 
   proc.on("error", () => {
     run.errorMessage = "failed to spawn pi process";
-    finalize("failed", 1);
+    void finalize("failed", 1);
   });
 
   proc.unref();
@@ -1065,6 +1189,11 @@ export function sendToRun(
     // Re-discover sessionPath on finalize — the file path is stable but the
     // mtime updates, which lets future sends still find it.
     sessionDir: dirname(sessionPath),
+    // v0.11 on_complete_hook (slice 2): re-resolve at every terminal
+    // transition so config changes between spawn and re-fire are
+    // honored (§4.6: each terminal is a fresh gate). Per-call layer
+    // wires in slice 3; persona-frontmatter layer in slice 4.
+    resolvedHook: resolveCloseHook(run.cwd, run.persona),
   });
   return { kind: "started", run, done };
 }
@@ -1129,11 +1258,87 @@ export function applySubstanceCheck(run: Run, terminal: RunStatus): void {
   }
 }
 
+/**
+ * v0.11 on_complete_hook (slice 2). Spawn the resolved hook between
+ * stream-drain and `applyCloseHandlerTerminal`, await its exit, and
+ * return the (possibly-overridden) terminal status.
+ *
+ * Lifecycle invariants pinned by `tests/runs-hook-integration.test.ts`:
+ *   - `final.md` is written BEFORE the hook spawn so
+ *     `CONDUCTOR_FINAL_TEXT_PATH` resolves at hook startup.
+ *   - `run.hookExecuting = true` while the hook is in flight; cleared
+ *     in `finally` even on synchronous throw.
+ *   - `run.hookProc` is set (via `runHook`'s `onProc` callback) the
+ *     moment the child process exists; cleared in the same `finally`.
+ *   - **Idempotency guard (W7):** if `forceTerminate` flipped
+ *     `run.status` to a terminal value while the hook was in flight,
+ *     the hook result is dropped — no `run.hookResult` mutation, no
+ *     terminal flip. The forceTerminate-set status wins.
+ *
+ * Pure-ish: mutates the passed-in `Run` (the caller owns the lifecycle)
+ * and writes `final.md` / `hook.log` files. The actual subprocess spawn
+ * is delegated to `runHook` (test-injectable via `deps.runHookImpl`).
+ *
+ * Caller contract — only call when ALL of:
+ *   - `terminal === "completed"` (hooks gate exit-zero only)
+ *   - `exitCode === 0` (natural pi close)
+ *   - `resolvedHook` is non-undefined (the cascade produced a hook)
+ *   - `!isTerminal(run.status)` (forceTerminate hasn't already run)
+ */
+export async function applyHookToTerminal(
+  run: Run,
+  resolvedHook: ResolvedHook,
+  terminal: RunStatus,
+  deps: { runHookImpl?: typeof runHook } = {},
+): Promise<RunStatus> {
+  // Pre-write final.md so CONDUCTOR_FINAL_TEXT_PATH resolves at hook
+  // spawn time. writeFinal is best-effort; a write failure is rare and
+  // the hook can still introspect transcript via
+  // CONDUCTOR_TRANSCRIPT_PATH.
+  try {
+    await writeFinal(run);
+  } catch {
+    // best-effort
+  }
+
+  const runHookImpl = deps.runHookImpl ?? runHook;
+  run.hookExecuting = true;
+  try {
+    const hookResult = await runHookImpl({
+      resolved: resolvedHook,
+      runId: run.id,
+      persona: run.persona,
+      runDir: dirname(run.finalPath),
+      finalPath: run.finalPath,
+      transcriptPath: run.transcriptPath,
+      parentCwd: run.cwd,
+      onProc: (proc) => {
+        run.hookProc = proc;
+      },
+    });
+    // W7 idempotency guard: forceTerminate may have flipped status
+    // during the hook's lifetime. Drop the result; the
+    // forceTerminate-set terminal wins.
+    if (isTerminal(run.status)) {
+      return run.status;
+    }
+    run.hookResult = hookResult;
+    if (!hookResult.passed) {
+      return "hook_failed";
+    }
+    return terminal;
+  } finally {
+    run.hookExecuting = false;
+    run.hookProc = undefined;
+  }
+}
+
 export function forceTerminate(
   run: Run,
   reason: TerminationReason,
   registry: RunRegistry,
   onComplete?: (r: Run) => void,
+  killGroup: (pid: number, signal: NodeJS.Signals) => void = defaultKillGroup,
 ): void {
   if (isTerminal(run.status)) return;
   if (run.timeoutTimer) {
@@ -1154,6 +1359,36 @@ export function forceTerminate(
         // already dead
       }
     }, 2000).unref();
+  }
+  // v0.11 on_complete_hook (slice 2): if a hook subprocess is in-flight
+  // when the parent forceTerminates, SIGTERM its process group so the
+  // hook helper's close listener fires and unwinds cleanly. We negate
+  // the pid in `defaultKillGroup` (uses `process.kill(-pid, sig)`); the
+  // injection seam observes the positive pid so tests can pin the
+  // contract without forking real subprocesses. The hook helper's
+  // close-listener will resolve with whatever exit code the kill
+  // produced, but the close handler's idempotency guard
+  // (`applyHookToTerminal`) drops that result because
+  // `isTerminal(run.status)` is now true. A 2s SIGKILL fallback
+  // mirrors the existing run.proc kill ladder.
+  if (run.hookProc?.pid !== undefined) {
+    const hookPid = run.hookProc.pid;
+    try {
+      killGroup(hookPid, "SIGTERM");
+    } catch {
+      // defaultKillGroup already swallows ESRCH/EPERM; this guards
+      // against test stubs that throw unexpectedly.
+    }
+    setTimeout(() => {
+      try {
+        killGroup(hookPid, "SIGKILL");
+      } catch {
+        // already dead / test stub
+      }
+    }, 2000).unref();
+    // Clear immediately so the close handler's `finally` block in
+    // `applyHookToTerminal` is a no-op and W5's assertion holds.
+    run.hookProc = undefined;
   }
   run.status =
     reason === "timeout" ? "timeout" :
