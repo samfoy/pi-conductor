@@ -834,6 +834,7 @@ export function buildWatchdogStatusReport(args: {
         r.status !== "failed" &&
         r.status !== "killed" &&
         r.status !== "timeout" &&
+        r.status !== "hook_failed" &&
         r.status !== "paused" &&
         r.status !== "queued",
     );

@@ -48,6 +48,7 @@ export function statusColorSlot(status: RunStatus): ThemeColor {
     case "failed":
     case "killed":
     case "timeout":
+    case "hook_failed":
       return "error";
     case "paused":
       return "warning";

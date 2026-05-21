@@ -51,7 +51,7 @@ export function mountEnsembleWidget(
       if (recentlyFinished[i]!.expiresAt <= now) recentlyFinished.splice(i, 1);
     }
 
-    const active = registry.list().filter((r) => r.status !== "completed" && r.status !== "failed" && r.status !== "killed" && r.status !== "timeout");
+    const active = registry.list().filter((r) => r.status !== "completed" && r.status !== "failed" && r.status !== "killed" && r.status !== "timeout" && r.status !== "hook_failed");
     const linger = recentlyFinished.map((e) => e.run);
 
     if (active.length === 0 && linger.length === 0) {
@@ -89,7 +89,8 @@ export function mountEnsembleWidget(
       run.status === "completed" ||
       run.status === "failed" ||
       run.status === "killed" ||
-      run.status === "timeout"
+      run.status === "timeout" ||
+      run.status === "hook_failed"
     ) {
       // De-dup: if already in linger, just refresh expiry.
       const existing = recentlyFinished.find((e) => e.run.id === run.id);
@@ -185,6 +186,7 @@ function statusColorSlot(s: RunStatus): string {
     case "failed":
     case "killed":
     case "timeout":
+    case "hook_failed":
       return "error";
   }
 }

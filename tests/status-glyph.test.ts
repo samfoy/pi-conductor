@@ -35,12 +35,20 @@ test("STATUS_GLYPH: timeout is ⏱", () => {
   assert.equal(STATUS_GLYPH.timeout, "⏱");
 });
 
+test("STATUS_GLYPH: hook_failed entry is ⊗", () => {
+  // v0.11 slice 1a: hook_failed is a new terminal status. Glyph chosen
+  // distinct from `failed`/`killed`/`timeout` so a hook gate failure is
+  // visually distinguishable in the panel and history.
+  assert.equal(STATUS_GLYPH.hook_failed, "⊗");
+});
+
 test("STATUS_GLYPH: covers every RunStatus key (no holes)", () => {
   // Surfaces drift if RunStatus gains a member without STATUS_GLYPH being updated.
   const keys = Object.keys(STATUS_GLYPH).sort();
   assert.deepEqual(keys, [
     "completed",
     "failed",
+    "hook_failed",
     "killed",
     "paused",
     "queued",

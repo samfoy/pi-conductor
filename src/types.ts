@@ -56,6 +56,21 @@ export interface Persona {
   source: PersonaSource;
   /** Absolute path to the source file. */
   sourcePath: string;
+  /**
+   * v0.11 on_complete_hook (slice 1a types): shell command to run after
+   * the sub-agent reaches a `completed` terminal. Empty string means
+   * explicit-disable (short-circuits the cascade). Undefined means
+   * "fall through to next layer". Slice 4 wires the frontmatter parser
+   * that populates this field; slice 1b's resolver reads it.
+   */
+  onCompleteHook?: string;
+  /**
+   * v0.11 on_complete_hook (slice 1a types): timeout in seconds. Default
+   * 300 (resolved by slice 1b's `resolveOnCompleteHook` from the same
+   * cascade layer that produced `onCompleteHook`). Slice 4 wires the
+   * parser.
+   */
+  onCompleteHookTimeoutSeconds?: number;
 }
 
 export interface PersonaResolution {
@@ -158,6 +173,17 @@ export interface PersonaOverride {
   timeoutMinutes?: number;
   inheritContext?: ContextInheritance;
   inheritSkills?: boolean;
+  /**
+   * v0.11 on_complete_hook (slice 1a types): per-persona override of
+   * the hook command. Empty string = explicit-disable. Slice 4 wires
+   * config plumbing; slice 1b's resolver reads it.
+   */
+  onCompleteHook?: string;
+  /**
+   * v0.11 on_complete_hook (slice 1a types): per-persona override of
+   * the hook timeout in seconds.
+   */
+  onCompleteHookTimeoutSeconds?: number;
 }
 
 export const DEFAULT_CONFIG: ConductorConfig = {
@@ -200,7 +226,8 @@ export type RunStatus =
   | "completed"
   | "failed"
   | "killed"
-  | "timeout";
+  | "timeout"
+  | "hook_failed";
 
 export type SpawnMode = "foreground" | "background";
 
@@ -339,6 +366,34 @@ export interface Run {
   timeoutTimer?: NodeJS.Timeout;
   /** Watchers (intervals etc) that need cleanup. */
   watcher?: NodeJS.Timeout;
+
+  // ── v0.11 on_complete_hook (slice 1a types) ────────────────────────
+  // Slice 1a declares these optional fields; slice 2 mutates them from
+  // the hook enforcer in `runs.ts`. They are NOT read by anything in
+  // slice 1a — the coherence claim is that the codebase compiles and
+  // tests stay green while `hook_failed` is unreachable in production.
+
+  /**
+   * The hook subprocess handle when an `on_complete_hook` is currently
+   * executing. Cleared after the hook resolves (success, failure, or
+   * forced kill). Slice 2 sets and clears this; slice 1a only declares
+   * it so `forceTerminate` can dispatch on it without a type widening.
+   */
+  hookProc?: ChildProcess;
+
+  /**
+   * True while the hook subprocess is alive. Read by the watchdog
+   * enforcer (slice 2) to skip stall checks during hook execution — the
+   * pi process is gone but we don't want to flag the run as stalled.
+   */
+  hookExecuting?: boolean;
+
+  /**
+   * Final result of the hook. Persisted to RunRecord (slice 2). Read by
+   * the completion-envelope renderer (slice 5) and history. Undefined
+   * for runs whose terminal close did not invoke a hook.
+   */
+  hookResult?: HookResult;
 }
 
 /** Persisted record.json shape (subset of Run, no proc/timer references). */
@@ -390,7 +445,67 @@ export function toRunRecord(r: Run): RunRecord {
   };
 }
 
-export const TERMINAL_STATUSES: RunStatus[] = ["completed", "failed", "killed", "timeout"];
+// ── v0.11 on_complete_hook types (slice 1a) ─────────────────────
+// Slice 1a declares these types; slice 1b's pure resolver consumes
+// `HookSpec` / `ResolvedHook` / `HookSource`; slice 2's enforcer
+// produces `HookResult`. No production path emits these in slice 1a.
+
+/** Where in the cascade a resolved hook came from. */
+export type HookSource = "per-call" | "project" | "user" | "persona";
+
+/**
+ * A hook input (pre-resolution). The per-call layer of the cascade
+ * carries this shape; project/user config and persona frontmatter
+ * provide the same data via their own typed fields.
+ *
+ * Empty string `command` is the explicit-disable sentinel — short-
+ * circuits the cascade. Undefined `command` means "fall through".
+ */
+export interface HookSpec {
+  command?: string;
+  timeoutSeconds?: number;
+}
+
+/**
+ * A fully-resolved hook ready for execution. Slice 2's enforcer takes
+ * one of these (or `undefined` for "no hook") and spawns the
+ * subprocess.
+ */
+export interface ResolvedHook {
+  /** Non-empty shell command. Empty string never appears here — the cascade short-circuits. */
+  command: string;
+  /** Timeout in seconds (default 300, applied by the resolver). */
+  timeoutSeconds: number;
+  /** Layer the resolved values came from — surfaced in doctor and the `<hook>` envelope. */
+  source: HookSource;
+}
+
+/**
+ * Outcome of a single hook execution. Persisted to `RunRecord` (slice 2)
+ * and rendered into the completion envelope's `<hook>` block (slice 5).
+ */
+export interface HookResult {
+  passed: boolean;
+  command: string;
+  /** Null when the hook was killed by signal or failed to spawn. */
+  exitCode: number | null;
+  durationMs: number;
+  /** Absolute path to runDir(id)/hook.log. */
+  logPath: string;
+  /** Last 50 lines / 4 KB of stdout+stderr, captured for the envelope. */
+  tailText: string;
+  tailBytes: number;
+  tailLines: number;
+  failureKind?: "exited" | "timeout" | "spawn_error" | "signal" | "runaway_output";
+}
+
+export const TERMINAL_STATUSES: RunStatus[] = [
+  "completed",
+  "failed",
+  "killed",
+  "timeout",
+  "hook_failed",
+];
 export function isTerminal(s: RunStatus): boolean {
   return TERMINAL_STATUSES.includes(s);
 }

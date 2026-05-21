@@ -138,6 +138,19 @@ test("buildWatchdogStatusReport: terminal runs are NOT listed", () => {
   assert.match(out, /0 active runs/);
 });
 
+test("/conductor watchdog status: filter excludes hook_failed runs", () => {
+  // v0.11 slice 1a: hook_failed is a new terminal status; the
+  // active-run filter at src/commands.ts:833–839 uses literal-equality
+  // exclusions (it does not call isTerminal). Without an explicit case
+  // it would mis-categorize hook_failed runs as active. Slice 1a adds
+  // the exclusion line; this test pins it.
+  const reg = new RunRegistry();
+  reg.register(runFx({ id: "hf-1", status: "hook_failed" as RunStatus }));
+  const out = buildWatchdogStatusReport(buildArgs(reg));
+  assert.doesNotMatch(out, /hf-1/);
+  assert.match(out, /0 active runs/);
+});
+
 test("buildWatchdogStatusReport: header row contains the documented columns", () => {
   const reg = new RunRegistry();
   reg.register(runFx({}));

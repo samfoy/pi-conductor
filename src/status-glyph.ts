@@ -18,4 +18,5 @@ export const STATUS_GLYPH: Record<RunStatus, string> = {
   failed: "✗",
   killed: "■",
   timeout: "⏱",
+  hook_failed: "⊗",
 };

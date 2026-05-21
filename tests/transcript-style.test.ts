@@ -45,6 +45,13 @@ test("statusColorSlot maps failed/killed/timeout → error", () => {
   assert.equal(statusColorSlot("timeout"), "error");
 });
 
+test("statusColorSlot maps hook_failed → error", () => {
+  // v0.11 slice 1a: hook_failed shares the error slot with
+  // failed/killed/timeout so existing color contracts still hold while
+  // STATUS_GLYPH provides the visual distinction.
+  assert.equal(statusColorSlot("hook_failed"), "error");
+});
+
 test("statusColorSlot maps paused → warning", () => {
   assert.equal(statusColorSlot("paused"), "warning");
 });
@@ -62,6 +69,7 @@ test("statusColorSlot covers every RunStatus (no holes)", () => {
     "failed",
     "killed",
     "timeout",
+    "hook_failed",
   ];
   for (const s of statuses) {
     // Will throw with a TS exhaustiveness check failure if a status is

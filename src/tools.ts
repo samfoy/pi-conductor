@@ -755,7 +755,7 @@ function registerKillTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       }
       // Idempotent: if already-terminal, return current status as success.
       // Matches the brief's "calling on an already-terminated sub-agent is a no-op success".
-      if (run.status === "completed" || run.status === "failed" || run.status === "killed" || run.status === "timeout") {
+      if (run.status === "completed" || run.status === "failed" || run.status === "killed" || run.status === "timeout" || run.status === "hook_failed") {
         return {
           content: [{ type: "text" as const, text: `already ${run.status}: ${run.id} (no-op)` }],
           details: { status: run.status, agent_id: run.id, persona: run.persona } as KillDetails,
@@ -899,6 +899,7 @@ interface StatusGroups {
   failed: Run[];
   killed: Run[];
   timeout: Run[];
+  hook_failed: Run[];
 }
 
 function groupByStatus(runs: Run[]): StatusGroups {
@@ -910,6 +911,7 @@ function groupByStatus(runs: Run[]): StatusGroups {
     failed: [],
     killed: [],
     timeout: [],
+    hook_failed: [],
   };
   for (const r of runs) g[r.status].push(r);
   return g;
@@ -933,7 +935,7 @@ function formatStatusForLLM(g: StatusGroups, queueSize: number): string {
   if (g.running.length) counts.push(`${g.running.length} running`);
   if (g.paused.length) counts.push(`${g.paused.length} paused`);
   if (g.queued.length || queueSize) counts.push(`${g.queued.length} queued`);
-  const finished = g.completed.length + g.failed.length + g.killed.length + g.timeout.length;
+  const finished = g.completed.length + g.failed.length + g.killed.length + g.timeout.length + g.hook_failed.length;
   if (finished) counts.push(`${finished} finished`);
   lines.push(counts.length === 0 ? "No sub-agents." : `Sub-agents: ${counts.join(", ")}.`);
 
@@ -945,6 +947,7 @@ function formatStatusForLLM(g: StatusGroups, queueSize: number): string {
     ["Failed", g.failed],
     ["Killed", g.killed],
     ["Timeout", g.timeout],
+    ["Hook failed", g.hook_failed],
   ];
   for (const [label, list] of groupOrder) {
     if (list.length === 0) continue;
@@ -1025,5 +1028,5 @@ function validateStallThresholdSeconds(s: number | undefined): string | undefine
 }
 
 function isTerminalStatus(s: RunStatus): boolean {
-  return s === "completed" || s === "failed" || s === "killed" || s === "timeout";
+  return s === "completed" || s === "failed" || s === "killed" || s === "timeout" || s === "hook_failed";
 }

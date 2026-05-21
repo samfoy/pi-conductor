@@ -14,7 +14,8 @@ var STATUS_GLYPH = {
   completed: "\u2713",
   failed: "\u2717",
   killed: "\u25A0",
-  timeout: "\u23F1"
+  timeout: "\u23F1",
+  hook_failed: "\u2297"
 };
 
 // src/personas.ts
@@ -91,7 +92,13 @@ function toRunRecord(r) {
     systemPrompt: r.systemPrompt
   };
 }
-var TERMINAL_STATUSES = ["completed", "failed", "killed", "timeout"];
+var TERMINAL_STATUSES = [
+  "completed",
+  "failed",
+  "killed",
+  "timeout",
+  "hook_failed"
+];
 function isTerminal(s) {
   return TERMINAL_STATUSES.includes(s);
 }
@@ -3090,7 +3097,7 @@ function runWatchdogStatus(opts, ctx) {
 function buildWatchdogStatusReport(args) {
   const { registry, watchdogConfig, defaultKillOnStall, enabled, now } = args;
   const active = registry.list().filter(
-    (r) => r.status !== "completed" && r.status !== "failed" && r.status !== "killed" && r.status !== "timeout" && r.status !== "paused" && r.status !== "queued"
+    (r) => r.status !== "completed" && r.status !== "failed" && r.status !== "killed" && r.status !== "timeout" && r.status !== "hook_failed" && r.status !== "paused" && r.status !== "queued"
   );
   const lines = [];
   lines.push("## Watchdog");
@@ -3334,7 +3341,7 @@ function padOrTruncate(left, right, width) {
 }
 
 // src/transcript-classify.ts
-var HEADER_GLYPHS = /* @__PURE__ */ new Set(["\u25CC", "\u25CF", "\u23F8", "\u2713", "\u2717", "\u25A0", "\u23F1"]);
+var HEADER_GLYPHS = /* @__PURE__ */ new Set(["\u25CC", "\u25CF", "\u23F8", "\u2713", "\u2717", "\u25A0", "\u23F1", "\u2297"]);
 function classifyLine(line) {
   if (line.length > 0 && /^─+$/.test(line)) {
     return { kind: "ruler" };
@@ -3379,6 +3386,7 @@ function statusColorSlot(status) {
     case "failed":
     case "killed":
     case "timeout":
+    case "hook_failed":
       return "error";
     case "paused":
       return "warning";
@@ -4138,7 +4146,7 @@ function registerKillTool(pi, opts) {
         );
         return r;
       }
-      if (run.status === "completed" || run.status === "failed" || run.status === "killed" || run.status === "timeout") {
+      if (run.status === "completed" || run.status === "failed" || run.status === "killed" || run.status === "timeout" || run.status === "hook_failed") {
         return {
           content: [{ type: "text", text: `already ${run.status}: ${run.id} (no-op)` }],
           details: { status: run.status, agent_id: run.id, persona: run.persona }
@@ -4254,7 +4262,8 @@ function groupByStatus(runs) {
     completed: [],
     failed: [],
     killed: [],
-    timeout: []
+    timeout: [],
+    hook_failed: []
   };
   for (const r of runs) g[r.status].push(r);
   return g;
@@ -4276,7 +4285,7 @@ function formatStatusForLLM(g, queueSize) {
   if (g.running.length) counts.push(`${g.running.length} running`);
   if (g.paused.length) counts.push(`${g.paused.length} paused`);
   if (g.queued.length || queueSize) counts.push(`${g.queued.length} queued`);
-  const finished = g.completed.length + g.failed.length + g.killed.length + g.timeout.length;
+  const finished = g.completed.length + g.failed.length + g.killed.length + g.timeout.length + g.hook_failed.length;
   if (finished) counts.push(`${finished} finished`);
   lines.push(counts.length === 0 ? "No sub-agents." : `Sub-agents: ${counts.join(", ")}.`);
   const groupOrder = [
@@ -4286,7 +4295,8 @@ function formatStatusForLLM(g, queueSize) {
     ["Completed", g.completed],
     ["Failed", g.failed],
     ["Killed", g.killed],
-    ["Timeout", g.timeout]
+    ["Timeout", g.timeout],
+    ["Hook failed", g.hook_failed]
   ];
   for (const [label, list] of groupOrder) {
     if (list.length === 0) continue;
@@ -4351,7 +4361,7 @@ function validateStallThresholdSeconds(s) {
   return void 0;
 }
 function isTerminalStatus(s) {
-  return s === "completed" || s === "failed" || s === "killed" || s === "timeout";
+  return s === "completed" || s === "failed" || s === "killed" || s === "timeout" || s === "hook_failed";
 }
 
 // src/queue.ts
@@ -4512,7 +4522,7 @@ function mountEnsembleWidget(registry, getCtx, getWatchdogConfig) {
     for (let i = recentlyFinished.length - 1; i >= 0; i--) {
       if (recentlyFinished[i].expiresAt <= now) recentlyFinished.splice(i, 1);
     }
-    const active = registry.list().filter((r) => r.status !== "completed" && r.status !== "failed" && r.status !== "killed" && r.status !== "timeout");
+    const active = registry.list().filter((r) => r.status !== "completed" && r.status !== "failed" && r.status !== "killed" && r.status !== "timeout" && r.status !== "hook_failed");
     const linger = recentlyFinished.map((e) => e.run);
     if (active.length === 0 && linger.length === 0) {
       ctx.ui.setWidget(WIDGET_KEY, void 0);
@@ -4541,7 +4551,7 @@ function mountEnsembleWidget(registry, getCtx, getWatchdogConfig) {
     }
   };
   const unsubscribe = registry.onChange((run) => {
-    if (run.status === "completed" || run.status === "failed" || run.status === "killed" || run.status === "timeout") {
+    if (run.status === "completed" || run.status === "failed" || run.status === "killed" || run.status === "timeout" || run.status === "hook_failed") {
       const existing = recentlyFinished.find((e) => e.run.id === run.id);
       if (existing) existing.expiresAt = Date.now() + FINISHED_LINGER_MS;
       else recentlyFinished.push({ run, expiresAt: Date.now() + FINISHED_LINGER_MS });
@@ -4595,6 +4605,7 @@ function statusColorSlot2(s) {
     case "failed":
     case "killed":
     case "timeout":
+    case "hook_failed":
       return "error";
   }
 }
