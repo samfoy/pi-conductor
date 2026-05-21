@@ -29,6 +29,15 @@ if [[ ! -d node_modules ]]; then
   exit 1
 fi
 
+# Reject residual WDD mutation markers (`// MUTATION:` / `// MUTATE:`) in
+# staged src/*.ts. Cheap to fail fast, before the build/test steps.
+# See scripts/check-no-mutation-markers.sh.
+if ! ./scripts/check-no-mutation-markers.sh; then
+  echo >&2
+  echo "pre-commit: residual mutation markers staged. Commit rejected." >&2
+  exit 1
+fi
+
 # Rebuild dist/ when src/ is touched. dist/index.js is a tracked artifact
 # whose only legitimate state is "matches src/" — staleness has bitten three
 # slices in a row (ff9a40e, cfeffb5, 1c72856), so we automate the rebuild and

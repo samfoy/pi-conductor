@@ -33,7 +33,7 @@ If a bug ships, the regression test for it is part of the fix. The PR descriptio
 
 ## Pre-commit hook
 
-The repo ships a pre-commit hook at `hooks/pre-commit` that runs `npm test` and rejects the commit if any test fails. When the staged change touches `src/`, the hook also runs `npm run build` and auto-stages `dist/index.js` + `dist/index.js.map` — `dist/` is a tracked artifact whose only legitimate state is "matches src/", so the rebuild is automatic and contributors don't need to remember it. Activate the hook once per clone:
+The repo ships a pre-commit hook at `hooks/pre-commit` that runs `npm test` and rejects the commit if any test fails. When the staged change touches `src/`, the hook also runs `npm run build` and auto-stages `dist/index.js` + `dist/index.js.map` — `dist/` is a tracked artifact whose only legitimate state is "matches src/", so the rebuild is automatic and contributors don't need to remember it. The hook also runs `scripts/check-no-mutation-markers.sh`, which rejects commits with residual WDD `// MUTATION:` / `// MUTATE:` comment markers staged in `src/*.ts` (defense against a builder killed mid-verification leaving mutated production code behind). Activate the hook once per clone:
 
 ```bash
 git config core.hooksPath hooks

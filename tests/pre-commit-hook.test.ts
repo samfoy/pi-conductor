@@ -34,6 +34,9 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const HOOK_PATH = fileURLToPath(new URL("../hooks/pre-commit", import.meta.url));
+const MUTATION_CHECK_PATH = fileURLToPath(
+  new URL("../scripts/check-no-mutation-markers.sh", import.meta.url),
+);
 
 interface Fx {
   root: string;
@@ -47,6 +50,13 @@ function setup(opts: { npmExitCode?: number; failOn?: string } = {}): Fx {
   const hook = join(root, "pre-commit");
   copyFileSync(HOOK_PATH, hook);
   chmodSync(hook, 0o755);
+
+  // The hook calls scripts/check-no-mutation-markers.sh; copy it into
+  // the fixture so the relative path resolves.
+  mkdirSync(join(root, "scripts"));
+  const mutationCheck = join(root, "scripts", "check-no-mutation-markers.sh");
+  copyFileSync(MUTATION_CHECK_PATH, mutationCheck);
+  chmodSync(mutationCheck, 0o755);
 
   // Initialize a real git repo so `git diff --cached` and `git add` work.
   execFileSync("git", ["init", "-q"], { cwd: root });
