@@ -5730,6 +5730,194 @@ function installFocusedOverlayShortcut(ctx, options) {
   };
 }
 
+// src/reconcile-startup.ts
+import { readFile as readFile5, readdir as readdir4, stat as stat5, writeFile as writeFile5 } from "node:fs/promises";
+import { join as join12 } from "node:path";
+function classifyRecord(record, isAlive, _now) {
+  const status = record.status;
+  if (TERMINAL_STATUSES.includes(status)) {
+    return "skip-terminal";
+  }
+  if (status === "queued") {
+    return "reclassify-failed-queued";
+  }
+  if (record.pid === void 0) {
+    return "reclassify-pre-schema";
+  }
+  return isAlive(record.pid) ? "readopt" : "reclassify-killed";
+}
+function defaultLivenessProbe(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    const code = e?.code;
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return true;
+    return false;
+  }
+}
+async function reconcileOrphansAtStartup(deps) {
+  const result = {
+    scanned: 0,
+    readopted: [],
+    reclassified: [],
+    preSchema: [],
+    unresumable: [],
+    errors: []
+  };
+  let entries;
+  try {
+    entries = await readdir4(deps.runsRoot);
+  } catch (e) {
+    const code = e?.code;
+    if (code === "ENOENT") return result;
+    result.errors.push({
+      id: "<runsRoot>",
+      message: `readdir failed: ${e?.message ?? String(e)}`
+    });
+    return result;
+  }
+  for (const id of entries) {
+    const recordPath = join12(deps.runsRoot, id, "record.json");
+    try {
+      let raw;
+      try {
+        raw = await readFile5(recordPath, "utf-8");
+      } catch (e) {
+        const code = e?.code;
+        if (code === "ENOENT" || code === "ENOTDIR") {
+          continue;
+        }
+        throw e;
+      }
+      result.scanned++;
+      let record;
+      try {
+        record = JSON.parse(raw);
+      } catch (e) {
+        result.errors.push({
+          id,
+          message: `JSON parse error: ${e?.message ?? String(e)}`
+        });
+        continue;
+      }
+      if (deps.registry.has(record.id ?? id)) {
+        continue;
+      }
+      const verdict = classifyRecord(record, deps.isAlive, deps.now);
+      switch (verdict) {
+        case "skip-terminal":
+          break;
+        case "readopt": {
+          const orphan = buildOrphanRun(record, "running");
+          deps.registry.register(orphan);
+          result.readopted.push(record.id);
+          await checkSessionResumability(record, result);
+          break;
+        }
+        case "reclassify-killed":
+        case "reclassify-pre-schema": {
+          const errorMessage = verdict === "reclassify-pre-schema" ? "orphaned: pre-pid-schema record (post-startup reconcile)" : "orphaned: process gone (post-startup reconcile)";
+          await reclassifyOnDisk({
+            recordPath,
+            record,
+            nextStatus: "killed",
+            errorMessage,
+            now: deps.now
+          });
+          const orphan = buildOrphanRun({
+            ...record,
+            status: "killed",
+            finishedAt: deps.now,
+            errorMessage
+          }, "killed");
+          deps.registry.register(orphan);
+          result.reclassified.push(record.id);
+          if (verdict === "reclassify-pre-schema") {
+            result.preSchema.push(record.id);
+          }
+          await checkSessionResumability(record, result);
+          break;
+        }
+        case "reclassify-failed-queued": {
+          const errorMessage = "orphaned: queue entry abandoned at startup (post-startup reconcile)";
+          await reclassifyOnDisk({
+            recordPath,
+            record,
+            nextStatus: "failed",
+            errorMessage,
+            now: deps.now
+          });
+          const orphan = buildOrphanRun({
+            ...record,
+            status: "failed",
+            finishedAt: deps.now,
+            errorMessage
+          }, "failed");
+          deps.registry.register(orphan);
+          result.reclassified.push(record.id);
+          break;
+        }
+      }
+    } catch (e) {
+      result.errors.push({
+        id,
+        message: e?.message ?? String(e)
+      });
+    }
+  }
+  return result;
+}
+function buildOrphanRun(record, status) {
+  return {
+    id: record.id,
+    persona: record.persona,
+    task: record.task,
+    model: record.model,
+    thinking: record.thinking,
+    mode: record.mode,
+    status,
+    startTime: record.startTime,
+    finishedAt: record.finishedAt,
+    pausedAt: record.pausedAt,
+    pid: record.pid,
+    exitCode: record.exitCode,
+    stopReason: record.stopReason,
+    errorMessage: record.errorMessage,
+    lastEventAt: record.finishedAt ?? record.startTime,
+    messages: [],
+    usage: record.usage ?? emptyUsage(),
+    cwd: record.cwd,
+    recordPath: record.recordPath,
+    transcriptPath: record.transcriptPath,
+    finalPath: record.finalPath,
+    sessionPath: record.sessionPath,
+    systemPrompt: record.systemPrompt,
+    hookResult: record.hookResult
+    // proc intentionally undefined: we have no handle.
+  };
+}
+async function reclassifyOnDisk(opts) {
+  const updated = {
+    ...opts.record,
+    status: opts.nextStatus,
+    finishedAt: opts.now,
+    errorMessage: opts.errorMessage
+  };
+  await writeFile5(opts.recordPath, JSON.stringify(updated, null, 2));
+}
+async function checkSessionResumability(record, result) {
+  if (!record.sessionPath) {
+    return;
+  }
+  try {
+    await stat5(record.sessionPath);
+  } catch {
+    result.unresumable.push(record.id);
+  }
+}
+
 // src/conductor-mode.ts
 var OFF_TOKENS = /* @__PURE__ */ new Set(["0", "false", "off", "no"]);
 var ON_TOKENS = /* @__PURE__ */ new Set(["1", "true", "on", "yes"]);
@@ -5916,6 +6104,7 @@ function index_default(pi) {
   const focusModel = new FocusedStreamModel(registry);
   let overlayOpen = false;
   let unsubFocusedShortcut = null;
+  let lastReconcile;
   let watchdogDispose = null;
   const sanitizerHook = installSanitizerHook(pi, {
     getCtx: () => ctxRef
@@ -6101,6 +6290,20 @@ function index_default(pi) {
       // Lives here (session-scoped) rather than in the overlay factory
       // (per-open) so re-opening the overlay does NOT stack listeners.
       subscribeToRegistry: () => registry.onChange(() => focusModel.refresh())
+    });
+    setImmediate(() => {
+      void reconcileOrphansAtStartup({
+        runsRoot: runsRoot(),
+        registry,
+        isAlive: defaultLivenessProbe,
+        now: Date.now()
+      }).then((result) => {
+        lastReconcile = result;
+      }).catch((err) => {
+        console.error(
+          `reconcile-startup: failed: ${err?.message ?? String(err)}`
+        );
+      });
     });
     setImmediate(() => {
       const cfg = loadConfig(cwd);

@@ -34,6 +34,11 @@ import { createFocusedOverlayComponent } from "./focused-overlay-factory.ts";
 import { installFocusedOverlayShortcut } from "./focused-overlay-shortcut.ts";
 import { forceTerminate, reconcileRecord, resolveTimeoutMs, runsRoot, sendToRun, validateSendable } from "./runs.ts";
 import { maybeAutoRunGc } from "./gc/index.ts";
+import {
+  defaultLivenessProbe,
+  reconcileOrphansAtStartup,
+  type PostStartupReconcileResult,
+} from "./reconcile-startup.ts";
 import type { Run } from "./types.ts";
 import { resolveInitialConductorMode } from "./conductor-mode.ts";
 import { installCompactionHook } from "./compaction-hook.ts";
@@ -56,6 +61,12 @@ export default function (pi: ExtensionAPI): void {
   let overlayOpen = false;
   // Session-scoped unsub for the Ctrl+G focused-overlay shortcut.
   let unsubFocusedShortcut: (() => void) | null = null;
+
+  // v0.9.x post-startup reconcile (slice 3): captured for slice 4's
+  // doctor surface and `/conductor reconcile` slash subcommand to read.
+  // Updated on every `session_start` after reconcile completes (best-
+  // effort — stays `undefined` if reconcile threw).
+  let lastReconcile: PostStartupReconcileResult | undefined;
 
   // v0.10 watchdog: detector + enforcer for sub-agent stalls. Lives
   // here as a session-scoped instance; restarted on session_start,
@@ -308,6 +319,30 @@ export default function (pi: ExtensionAPI): void {
       // Lives here (session-scoped) rather than in the overlay factory
       // (per-open) so re-opening the overlay does NOT stack listeners.
       subscribeToRegistry: () => registry.onChange(() => focusModel.refresh()),
+    });
+
+    // v0.9.x post-startup reconcile (slice 3): walks runs/*\/record.json,
+    // re-adopts live `running` records and reclassifies dead orphans
+    // BEFORE the v0.9 GC pass so reclassified records are visible to
+    // GC's age/budget rules rather than the orphan-TTL fallback.
+    // Per design §4: separate setImmediate, fired ahead of GC's
+    // setImmediate. Failure here MUST NOT block session bootstrap.
+    setImmediate(() => {
+      void reconcileOrphansAtStartup({
+        runsRoot: runsRoot(),
+        registry,
+        isAlive: defaultLivenessProbe,
+        now: Date.now(),
+      })
+        .then((result) => {
+          lastReconcile = result;
+        })
+        .catch((err: unknown) => {
+          // Best-effort: never let reconcile break session bootstrap.
+          console.error(
+            `reconcile-startup: failed: ${(err as Error)?.message ?? String(err)}`,
+          );
+        });
     });
 
     // v0.9 Slice 5: auto-trigger GC on session_start, debounced + fire-
