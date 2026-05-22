@@ -5772,19 +5772,22 @@ var FocusedStreamModel = class {
   _scrollPerAgent = /* @__PURE__ */ new Map();
   /** Re-evaluate focused run against the current registry state. */
   refresh() {
-    const all = this.registry.list();
-    if (all.length === 0) {
+    const locals = this.activeList();
+    if (locals.length === 0) {
       this._focusedId = void 0;
       return;
     }
-    if (this._focusedId && all.some((r) => r.id === this._focusedId)) return;
-    const newest = all.slice().sort((a, b) => b.startTime - a.startTime)[0];
+    if (this._focusedId && locals.some((r) => r.id === this._focusedId)) return;
+    const newest = locals.slice().sort((a, b) => b.startTime - a.startTime)[0];
     this._focusedId = newest.id;
   }
   // ── Read-only accessors ────────────────────────────────────────────
   focused() {
     if (!this._focusedId) return void 0;
-    return this.registry.get(this._focusedId);
+    const run = this.registry.get(this._focusedId);
+    if (!run) return void 0;
+    if (!this.isLocal(run)) return void 0;
+    return run;
   }
   collapseToolCalls() {
     return this._collapseToolCalls;
@@ -5844,12 +5847,30 @@ var FocusedStreamModel = class {
   }
   // ── Internal ───────────────────────────────────────────────────────
   /**
-   * The runs visible for cycling. Today: every run in the registry, sorted
-   * by startTime ascending so cycle order is stable. Future: filter to
-   * non-terminal-only when a setting calls for it.
+   * The runs visible for cycling. Today: every LOCAL run in the registry,
+   * sorted by startTime ascending so cycle order is stable. "Local" =
+   * owned by this conductor host process — see `isLocal`.
    */
   activeList() {
-    return this.registry.list().slice().sort((a, b) => a.startTime - b.startTime);
+    return this.registry.list().filter((r) => this.isLocal(r)).sort((a, b) => a.startTime - b.startTime);
+  }
+  /**
+   * Defence-in-depth gate against foreign-pid runs. The reconcile-startup
+   * ownership filter at `src/reconcile-startup.ts:248` is the primary
+   * guard — no foreign record should reach the local RunRegistry once
+   * that fix is verified end-to-end. We keep this model-level filter as
+   * a belt-and-braces defence: if a foreign run somehow lands in the
+   * registry (race, future refactor, manual injection), the focused-
+   * stream overlay must not surface it for cycling, sending, or killing.
+   *
+   * - `parentPid === undefined` → legacy record predating the field;
+   *   trust as local for back-compat. New spawns always populate the
+   *   field via `src/runs.ts:766`.
+   * - `parentPid === process.pid` → owned by this host. Local.
+   * - anything else → foreign sibling-session run; filter out.
+   */
+  isLocal(run) {
+    return run.parentPid === void 0 || run.parentPid === process.pid;
   }
 };
 

@@ -256,3 +256,95 @@ test("FocusedStreamModel: refresh() handles a focused run that was removed", () 
   // Should fall back to whatever's available.
   assert.equal(model2.focused()?.id, "b-2");
 });
+
+// ── Foreign-pid filter (defence-in-depth pending reconcile-startup fix) ──
+//
+// The reconcile-startup ownership gate (`src/reconcile-startup.ts:248`)
+// already skips foreign-pid records, but the model layer keeps its own
+// filter as a belt-and-braces defence: if a foreign run somehow lands in
+// the local RunRegistry (race, future refactor, manual injection), the
+// overlay must not surface it. See `docs/focused-overlay-redesign-design.md`
+// §15 for context.
+
+test("FocusedStreamModel: activeList() excludes run with foreign parentPid", () => {
+  const reg = new RunRegistry();
+  const local = makeRun("local-1");
+  local.parentPid = process.pid;
+  const foreign = makeRun("foreign-1");
+  foreign.parentPid = 999_999;
+  reg.register(local);
+  reg.register(foreign);
+  const model = new FocusedStreamModel(reg);
+  // agentCount() routes through activeList(); foreign is filtered out.
+  assert.equal(model.agentCount(), 1);
+  // focus(id) consults activeList for membership; foreign is unreachable.
+  assert.equal(model.focus("foreign-1"), false);
+});
+
+test("FocusedStreamModel: activeList() includes run with parentPid===process.pid", () => {
+  const reg = new RunRegistry();
+  const local = makeRun("local-1");
+  local.parentPid = process.pid;
+  reg.register(local);
+  const model = new FocusedStreamModel(reg);
+  assert.equal(model.agentCount(), 1);
+  assert.equal(model.focus("local-1"), true);
+});
+
+test("FocusedStreamModel: activeList() includes run with no parentPid (legacy)", () => {
+  const reg = new RunRegistry();
+  const legacy = makeRun("legacy-1");
+  // parentPid intentionally undefined — represents records spawned before
+  // the parentPid field shipped. Treat as local for back-compat.
+  reg.register(legacy);
+  const model = new FocusedStreamModel(reg);
+  assert.equal(model.agentCount(), 1);
+  assert.equal(model.focus("legacy-1"), true);
+});
+
+test("FocusedStreamModel: refresh() ignores foreign-pid run when picking default focus", () => {
+  const reg = new RunRegistry();
+  const foreign = makeRun("foreign-1");
+  foreign.parentPid = 999_999;
+  foreign.startTime = 5000; // newest by startTime
+  const local = makeRun("local-1");
+  local.parentPid = process.pid;
+  local.startTime = 1000;
+  reg.register(foreign);
+  reg.register(local);
+  const model = new FocusedStreamModel(reg);
+  // Default focus would be the foreign run (newest startTime); the gate
+  // must drop it from consideration and pick the local run instead.
+  assert.equal(model.focused()?.id, "local-1");
+});
+
+test("FocusedStreamModel: refresh() drops _focusedId when current run becomes foreign", () => {
+  const reg = new RunRegistry();
+  const a = makeRun("a-1");
+  a.parentPid = process.pid;
+  const b = makeRun("b-2");
+  b.parentPid = process.pid;
+  reg.register(a);
+  reg.register(b);
+  const model = new FocusedStreamModel(reg);
+  model.focus("a-1");
+  assert.equal(model.focused()?.id, "a-1");
+  // a-1 becomes foreign (e.g. record rewritten by a sibling host); refresh
+  // must re-pick from the local active list, not retain the foreign id.
+  a.parentPid = 999_999;
+  model.refresh();
+  assert.equal(model.focused()?.id, "b-2");
+});
+
+test("FocusedStreamModel: focused() returns undefined when stored _focusedId resolves to a foreign run", () => {
+  const reg = new RunRegistry();
+  const a = makeRun("a-1");
+  a.parentPid = process.pid;
+  reg.register(a);
+  const model = new FocusedStreamModel(reg);
+  model.focus("a-1");
+  // Mutate to foreign without calling refresh — focused() must gate inline
+  // so a stale _focusedId can't surface a foreign run between refreshes.
+  a.parentPid = 999_999;
+  assert.equal(model.focused(), undefined);
+});
