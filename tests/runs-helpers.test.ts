@@ -616,6 +616,48 @@ test("forceTerminate: clears any pending timeoutTimer", () => {
   }
 });
 
+test(
+  "forceTerminate: refuses to mutate foreign run (parentPid !== process.pid)",
+  () => {
+    // Defense-in-depth against the foreign-adoption bug. If reconcile
+    // ever leaks a sibling-pi-session run into the local registry (or
+    // an LLM-tool caller passes its agent_id), forceTerminate must
+    // NOT flip status, NOT writeRecord, NOT notify listeners, and NOT
+    // call onComplete. The owning session is responsible for that run.
+    const paths = tmpRunPaths();
+    try {
+      const reg = new RunRegistry();
+      const run = makeRun({
+        status: "running",
+        parentPid: process.pid + 1,
+        parentStartTime: 12345,
+        ...paths,
+      });
+      reg.register(run);
+
+      let notified = 0;
+      reg.onChange(() => notified++);
+      let completed = 0;
+
+      // Suppress the warn so test output stays clean.
+      const origWarn = console.warn;
+      console.warn = () => {};
+      try {
+        forceTerminate(run, "killed", reg, () => completed++);
+      } finally {
+        console.warn = origWarn;
+      }
+
+      assert.equal(run.status, "running", "status must NOT flip");
+      assert.equal(run.finishedAt, undefined, "finishedAt must NOT be set");
+      assert.equal(notified, 0, "registry listener must NOT fire");
+      assert.equal(completed, 0, "onComplete must NOT fire");
+    } finally {
+      rmSync(paths.dir, { recursive: true, force: true });
+    }
+  },
+);
+
 // ── applyCloseHandlerTerminal (proc.on("close") race-fix) ─────────────
 //
 // `runPiSubprocess` finalizes a run through two paths:

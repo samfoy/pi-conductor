@@ -31,6 +31,7 @@ import { isNonSubstantiveFinalMessage } from "./substance-check.ts";
 import { resolveOnCompleteHook, type HookCascadeInput } from "./hook-cascade.ts";
 import { runHook, defaultKillGroup } from "./hook-runner.ts";
 import { loadConfigWithErrors } from "./config.ts";
+import { readProcessStartTime } from "./reconcile-startup.ts";
 import {
   emptyUsage,
   isTerminal,
@@ -758,6 +759,13 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // back to conductor-wide defaults at watchdog dispatch time.
     killOnStall: opts.killOnStall,
     softStallSeconds: opts.softStallSeconds,
+    // Ownership scoping: persist the conductor host pid (and Linux
+    // start-time fingerprint) so sibling pi sessions reading the
+    // global runs/ root can skip-foreign records they don't own.
+    // Survives /reload (in-process re-import). See
+    // `classifyRecord` `skip-foreign` branch.
+    parentPid: process.pid,
+    parentStartTime: readProcessStartTime(process.pid),
   };
   opts.registry.register(run);
   void writeRecord(run);
@@ -1384,6 +1392,21 @@ export function forceTerminate(
   killGroup: (pid: number, signal: NodeJS.Signals) => void = defaultKillGroup,
 ): void {
   if (isTerminal(run.status)) return;
+  // Defense-in-depth against the post-startup-reconcile foreign-adoption
+  // bug: if this run is owned by a different live conductor host
+  // (parentPid !== process.pid), refuse the entire operation. We have
+  // no proc handle for it anyway (foreign children are spawned in the
+  // sibling session), so SIGTERM/SIGKILL would no-op; the real harm
+  // would be the writeRecord/registry.notify side effects corrupting
+  // the owner's state. Records with `parentPid === undefined` are
+  // legacy/unscoped — fall through to the existing path.
+  if (run.parentPid !== undefined && run.parentPid !== process.pid) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `forceTerminate: refusing to mutate foreign run id=${run.id} ownerPid=${run.parentPid} selfPid=${process.pid}`,
+    );
+    return;
+  }
   if (run.timeoutTimer) {
     clearTimeout(run.timeoutTimer);
     run.timeoutTimer = undefined;

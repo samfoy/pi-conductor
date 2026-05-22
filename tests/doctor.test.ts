@@ -638,6 +638,7 @@ test("buildDoctorReport: post-startup reconcile shows scanned/readopted/reclassi
         reclassified: ["b", "c"],
         preSchema: [],
         unresumable: ["c"],
+        skippedForeign: [],
         errors: [],
       },
     });
@@ -670,6 +671,7 @@ test("buildDoctorReport: post-startup reconcile lists per-record errors and unre
         reclassified: ["builder-aa11"],
         preSchema: [],
         unresumable: ["oracle-bb22"],
+        skippedForeign: [],
         errors: [
           { id: "critic-cc33", message: "JSON parse error: Unexpected token" },
         ],

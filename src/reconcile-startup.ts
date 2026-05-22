@@ -42,6 +42,7 @@
  */
 
 import { readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { Run, RunRecord, RunStatus } from "./types.ts";
@@ -76,7 +77,8 @@ export type ClassifyResult =
   | "reclassify-killed"
   | "reclassify-failed-queued"
   | "reclassify-pre-schema"
-  | "skip-terminal";
+  | "skip-terminal"
+  | "skip-foreign";
 
 /**
  * Decide what post-startup reconcile should do with a record.
@@ -99,16 +101,55 @@ export type ClassifyResult =
  * state only — and the safest resolution is to let the liveness probe
  * make the call.
  */
+/**
+ * Decide what post-startup reconcile should do with a record.
+ *
+ * Pure: no I/O, no clock reads (the `now` parameter is reserved for
+ * future use; slice 1 ignores it). The `isAlive` oracle is
+ * dependency-injected so tests don't need to fork real subprocesses to
+ * make the call.
+ *
+ * Ownership-scoping branch (added later): if `record.parentPid` is set
+ * and points at *another* live process, this record is owned by a
+ * sibling pi session and we must not touch it (`skip-foreign`). When
+ * `parentStartTime` is also set we additionally require it to match
+ * the live process's start time (defends against pid reuse on Linux).
+ * On non-Linux hosts where start-time is unreadable, parentStartTime
+ * falls back to undefined and we degrade to parentPid-only matching.
+ *
+ * Records written before this branch landed have `parentPid ===
+ * undefined` and fall through to the legacy liveness-on-child-pid
+ * logic — the safest available behavior for pre-fix records.
+ */
 export function classifyRecord(
   record: RunRecord,
   isAlive: (pid: number) => boolean,
   _now: number,
+  selfPid: number = process.pid,
+  isParentAlive: (pid: number, startTime: number | undefined) => boolean = (
+    pid,
+    startTime,
+  ) => defaultParentLivenessProbe(pid, startTime),
 ): ClassifyResult {
   const status = record.status;
 
   // Terminal statuses are the GC's territory.
   if ((TERMINAL_STATUSES as readonly string[]).includes(status)) {
     return "skip-terminal";
+  }
+
+  // Ownership scoping: if the record claims a parent pid that is NOT
+  // us AND that parent is still alive (with matching start-time on
+  // Linux), the record is owned by a sibling pi session. Do not adopt;
+  // do not mutate disk. Records with `parentPid === undefined` are
+  // legacy (pre-fix) and fall through to the existing logic—the
+  // pre-fix global readopt is the safest available behavior for them.
+  if (
+    record.parentPid !== undefined &&
+    record.parentPid !== selfPid &&
+    isParentAlive(record.parentPid, record.parentStartTime)
+  ) {
+    return "skip-foreign";
   }
 
   // A queued run never spawned. Status → failed regardless of any
@@ -160,6 +201,57 @@ export function defaultLivenessProbe(pid: number): boolean {
   }
 }
 
+/**
+ * Read `/proc/<pid>/stat` field 22 (process start-time in clock ticks
+ * since boot) on Linux. Returns `undefined` on any other platform, on
+ * a missing/unreadable `/proc` entry, or on a malformed stat line.
+ *
+ * Used as a pid-reuse fingerprint: a freshly-spawned process can
+ * inherit a recently-released pid, but its start-time will differ.
+ * Persisted on `Run.parentStartTime` at spawn so a later reconcile in a
+ * sibling pi session can reject a coincidentally-aliased pid.
+ *
+ * `/proc/<pid>/stat` field 22 layout: the comm field is parenthesised
+ * and may contain spaces, so we slice from the *last* `)` and read
+ * field 22 from there (the closing-paren-relative index is 20).
+ */
+export function readProcessStartTime(pid: number): number | undefined {
+  if (process.platform !== "linux") return undefined;
+  try {
+    const raw = readFileSync(`/proc/${pid}/stat`, "utf-8");
+    const closeParen = raw.lastIndexOf(")");
+    if (closeParen < 0) return undefined;
+    const fields = raw.slice(closeParen + 2).split(" ");
+    // After the closing-paren split, field 3 of the man page (state) is
+    // index 0; starttime is field 22 → index 19.
+    const startTimeStr = fields[19];
+    if (!startTimeStr) return undefined;
+    const n = Number(startTimeStr);
+    return Number.isFinite(n) ? n : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Production parent-liveness probe: pid alive AND (when both sides
+ * have a Linux start-time fingerprint) the start-time matches.
+ *
+ * If either side is `undefined` (non-Linux, or a record written
+ * pre-fingerprint), the comparison degrades to parentPid-only
+ * matching — still strictly better than the pre-fix global readopt.
+ */
+export function defaultParentLivenessProbe(
+  pid: number,
+  expectedStartTime: number | undefined,
+): boolean {
+  if (!defaultLivenessProbe(pid)) return false;
+  if (expectedStartTime === undefined) return true;
+  const observed = readProcessStartTime(pid);
+  if (observed === undefined) return true;
+  return observed === expectedStartTime;
+}
+
 // ── Slice 2: filesystem scanner + integration ───────────────────
 
 /**
@@ -183,6 +275,17 @@ export interface PostStartupReconcileDeps {
   registry: RegistryLike;
   /** Liveness probe; production passes `defaultLivenessProbe`. */
   isAlive: (pid: number) => boolean;
+  /**
+   * Parent liveness probe (pid + start-time). Defaults to
+   * `defaultParentLivenessProbe` in production. Tests inject a stub.
+   */
+  isParentAlive?: (pid: number, startTime: number | undefined) => boolean;
+  /**
+   * Self pid for ownership scoping. Defaults to `process.pid` so
+   * production sites don't have to thread it. Tests can override to
+   * pin both sides of the parentPid comparison.
+   */
+  selfPid?: number;
   /**
    * Epoch ms used for `finishedAt` on reclassified records. Injectable
    * for deterministic tests.
@@ -229,6 +332,12 @@ export interface PostStartupReconcileResult {
    * overlap with `reclassified` or `preSchema`.
    */
   unresumable: string[];
+  /**
+   * Run ids whose `parentPid` belongs to another live host process
+   * (sibling pi session). Reconcile is a strict no-op on these: the
+   * record stays on disk untouched and the registry is not mutated.
+   */
+  skippedForeign: string[];
   /** Per-record errors (parse, ENOENT-on-record-but-not-on-dir, write fails). */
   errors: Array<{ id: string; message: string }>;
 }
@@ -254,6 +363,7 @@ export async function reconcileOrphansAtStartup(
     reclassified: [],
     preSchema: [],
     unresumable: [],
+    skippedForeign: [],
     errors: [],
   };
 
@@ -311,12 +421,24 @@ export async function reconcileOrphansAtStartup(
         continue;
       }
 
-      const verdict = classifyRecord(record, deps.isAlive, deps.now);
+      const verdict = classifyRecord(
+        record,
+        deps.isAlive,
+        deps.now,
+        deps.selfPid ?? process.pid,
+        deps.isParentAlive ?? defaultParentLivenessProbe,
+      );
       const dryRun = deps.dryRun === true;
 
       switch (verdict) {
         case "skip-terminal":
           // GC owns these; reconcile is a no-op.
+          break;
+
+        case "skip-foreign":
+          // Owned by a sibling pi session whose host process is still
+          // alive. Strict no-op: do not register, do not write.
+          result.skippedForeign.push(record.id);
           break;
 
         case "readopt": {

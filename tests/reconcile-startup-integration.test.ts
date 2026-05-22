@@ -425,3 +425,92 @@ test(
     }
   },
 );
+
+// ── Ownership-scoping integration witness ───────────────────
+// A record whose parentPid points at *another* live process must not be
+// adopted, must not be mutated on disk, and must surface in
+// `result.skippedForeign`. This is the core repro of the sibling-pi-
+// session foreign-adoption bug.
+
+test(
+  "skip-foreign: foreign-owned record is not registered and not mutated on disk",
+  async () => {
+    const foreignParent = process.pid + 1;
+    const fx = makeFixture([
+      {
+        id: "builder-foreign",
+        status: "running",
+        pid: 99999,
+        withSessionFile: true,
+        extra: { parentPid: foreignParent, parentStartTime: 4242 },
+      },
+    ]);
+    try {
+      const reg = makeStubRegistry();
+      const before = readRecord(fx.runsRoot, "builder-foreign");
+
+      const result = await reconcileOrphansAtStartup({
+        runsRoot: fx.runsRoot,
+        registry: reg,
+        isAlive: () => true,
+        now: 2_000,
+        selfPid: process.pid,
+        isParentAlive: (pid, startTime) => {
+          assert.equal(pid, foreignParent);
+          assert.equal(startTime, 4242);
+          return true;
+        },
+      });
+
+      assert.deepEqual(result.skippedForeign, ["builder-foreign"]);
+      assert.deepEqual(result.readopted, []);
+      assert.deepEqual(result.reclassified, []);
+      assert.equal(reg.runs.size, 0, "registry must NOT contain foreign run");
+
+      const after = readRecord(fx.runsRoot, "builder-foreign");
+      assert.deepEqual(
+        after,
+        before,
+        "on-disk record must be byte-identical (no mutation)",
+      );
+    } finally {
+      fx.cleanup();
+    }
+  },
+);
+
+test(
+  "skip-foreign: when foreign parent is gone, the record IS adopted (genuine orphan)",
+  async () => {
+    // Mirrors the legitimate post-crash readopt path the whole
+    // reconcile subsystem exists for. Foreign parentPid + dead parent
+    // == nobody owns it any more, current process inherits.
+    const foreignParent = process.pid + 1;
+    const fx = makeFixture([
+      {
+        id: "builder-orphan",
+        status: "running",
+        pid: 99999,
+        withSessionFile: true,
+        extra: { parentPid: foreignParent, parentStartTime: 4242 },
+      },
+    ]);
+    try {
+      const reg = makeStubRegistry();
+      const result = await reconcileOrphansAtStartup({
+        runsRoot: fx.runsRoot,
+        registry: reg,
+        isAlive: () => true,
+        now: 2_000,
+        selfPid: process.pid,
+        isParentAlive: () => false,
+      });
+
+      assert.deepEqual(result.skippedForeign, []);
+      assert.deepEqual(result.readopted, ["builder-orphan"]);
+      assert.equal(reg.runs.size, 1);
+    } finally {
+      fx.cleanup();
+    }
+  },
+);

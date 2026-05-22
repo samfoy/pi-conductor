@@ -321,6 +321,28 @@ export interface Run {
    */
   pid?: number;
 
+  /**
+   * OS pid of the conductor host process (this pi runtime) at spawn
+   * time. Persisted so post-startup reconcile in a *sibling* pi session
+   * can distinguish records owned by another live host (skip-foreign)
+   * from genuine orphans (parent crashed → readopt). Captured at spawn
+   * site as `process.pid`. Survives `pi /reload` because reload is an
+   * in-process module re-import, not an exec. Optional for back-compat
+   * with records written before this slice.
+   */
+  parentPid?: number;
+
+  /**
+   * Linux-only fingerprint defending against pid reuse: `/proc/<pid>/stat`
+   * field 22 (process start time in clock ticks since boot). Compared
+   * against a fresh read at reconcile time; mismatch → original parent
+   * is gone and a new process happens to share its pid. Undefined on
+   * non-Linux (no portable `/proc`); absence degrades to parentPid-only,
+   * which has a tiny pid-reuse race that is still strictly better than
+   * the pre-fix global readopt.
+   */
+  parentStartTime?: number;
+
   /** Exit code of the pi subprocess; set on close. */
   exitCode?: number;
   /** Stop reason from the last assistant message: stop | error | aborted | … */
@@ -423,6 +445,17 @@ export interface RunRecord {
    * Optional for back-compat with records written before slice 1.
    */
   pid?: number;
+  /**
+   * Conductor host pid at spawn time. See `Run.parentPid`. Used by
+   * sibling pi sessions to skip-foreign records owned by a different
+   * live host. Optional for back-compat.
+   */
+  parentPid?: number;
+  /**
+   * Linux-only `/proc/<pid>/stat` start-time fingerprint to defend
+   * against pid reuse. See `Run.parentStartTime`.
+   */
+  parentStartTime?: number;
   finishedAt?: number;
   pausedAt?: number;
   exitCode?: number;
@@ -455,6 +488,8 @@ export function toRunRecord(r: Run): RunRecord {
     status: r.status,
     startTime: r.startTime,
     pid: r.pid,
+    parentPid: r.parentPid,
+    parentStartTime: r.parentStartTime,
     finishedAt: r.finishedAt,
     pausedAt: r.pausedAt,
     exitCode: r.exitCode,

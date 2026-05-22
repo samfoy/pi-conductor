@@ -217,3 +217,83 @@ test("classifyRecord: paused without pid → reclassify-pre-schema", () => {
   const result = classifyRecord(r, () => true, 0);
   assert.equal(result, "reclassify-pre-schema");
 });
+
+// ── Ownership scoping (sibling-pi-session foreign-adoption fix) ───────
+
+test("classifyRecord: parentPid === self with matching startTime → readopt (legitimate /reload survivor)", () => {
+  const r = record({
+    status: "running",
+    pid: 12345,
+    parentPid: process.pid,
+    parentStartTime: 999,
+  });
+  const result = classifyRecord(
+    r,
+    () => true,
+    0,
+    process.pid,
+    () => true,
+  );
+  assert.equal(result, "readopt", "our own /reload survivor must still readopt");
+});
+
+test("classifyRecord: parentPid !== self AND foreign parent alive → skip-foreign", () => {
+  const r = record({
+    status: "running",
+    pid: 12345,
+    parentPid: process.pid + 1, // different host
+    parentStartTime: 7777,
+  });
+  const result = classifyRecord(
+    r,
+    () => true, // child alive
+    0,
+    process.pid,
+    (_pid, _st) => true, // foreign parent alive
+  );
+  assert.equal(result, "skip-foreign");
+});
+
+test("classifyRecord: parentPid !== self but foreign parent gone → falls through to liveness (genuine orphan readopt)", () => {
+  const r = record({
+    status: "running",
+    pid: 12345,
+    parentPid: process.pid + 1,
+    parentStartTime: 7777,
+  });
+  const result = classifyRecord(
+    r,
+    () => true, // child alive
+    0,
+    process.pid,
+    (_pid, _st) => false, // foreign parent gone (genuine orphan)
+  );
+  assert.equal(
+    result,
+    "readopt",
+    "when the original parent is gone, we are responsible for the orphan",
+  );
+});
+
+test("classifyRecord: parentPid undefined (legacy record) → falls through to liveness (back-compat)", () => {
+  // Records written before the ownership-scoping fix have no parentPid.
+  // Migration rule: treat as if the foreign-check did not apply, i.e.
+  // existing readopt-if-alive behavior. They age out as records get
+  // rewritten or GC'd.
+  const r = record({
+    status: "running",
+    pid: 12345,
+    parentPid: undefined,
+    parentStartTime: undefined,
+  });
+  const result = classifyRecord(
+    r,
+    () => true,
+    0,
+    process.pid,
+    () => {
+      throw new Error("parent probe must not be called for legacy records");
+    },
+  );
+  assert.equal(result, "readopt");
+});

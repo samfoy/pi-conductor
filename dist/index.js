@@ -3,7 +3,7 @@ import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
 
 // src/commands.ts
-import { existsSync as existsSync8, readdirSync as readdirSync2, readFileSync as readFileSync2, statSync as statSync3 } from "node:fs";
+import { existsSync as existsSync8, readdirSync as readdirSync2, readFileSync as readFileSync3, statSync as statSync3 } from "node:fs";
 import { join as join11 } from "node:path";
 
 // src/status-glyph.ts
@@ -79,6 +79,8 @@ function toRunRecord(r) {
     status: r.status,
     startTime: r.startTime,
     pid: r.pid,
+    parentPid: r.parentPid,
+    parentStartTime: r.parentStartTime,
     finishedAt: r.finishedAt,
     pausedAt: r.pausedAt,
     exitCode: r.exitCode,
@@ -448,9 +450,9 @@ function loadConfig(cwd) {
 // src/runs.ts
 import { spawn } from "node:child_process";
 import { existsSync as existsSync3, mkdirSync as mkdirSync3, readdirSync, statSync } from "node:fs";
-import { mkdir, writeFile, appendFile } from "node:fs/promises";
+import { mkdir, writeFile as writeFile2, appendFile } from "node:fs/promises";
 import { homedir as homedir3 } from "node:os";
-import { dirname as dirname4, join as join3 } from "node:path";
+import { dirname as dirname4, join as join4 } from "node:path";
 
 // src/gc/id-reuse.ts
 var recentlyDeletedIds = /* @__PURE__ */ new Set();
@@ -1031,19 +1033,248 @@ function renderTail(lines) {
   return lines.join("\n");
 }
 
+// src/reconcile-startup.ts
+import { readFile as readFile2, readdir as readdir2, stat as stat2, writeFile } from "node:fs/promises";
+import { readFileSync as readFileSync2 } from "node:fs";
+import { join as join3 } from "node:path";
+function classifyRecord(record, isAlive, _now, selfPid = process.pid, isParentAlive = (pid, startTime) => defaultParentLivenessProbe(pid, startTime)) {
+  const status = record.status;
+  if (TERMINAL_STATUSES.includes(status)) {
+    return "skip-terminal";
+  }
+  if (record.parentPid !== void 0 && record.parentPid !== selfPid && isParentAlive(record.parentPid, record.parentStartTime)) {
+    return "skip-foreign";
+  }
+  if (status === "queued") {
+    return "reclassify-failed-queued";
+  }
+  if (record.pid === void 0) {
+    return "reclassify-pre-schema";
+  }
+  return isAlive(record.pid) ? "readopt" : "reclassify-killed";
+}
+function defaultLivenessProbe(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    const code = e?.code;
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return true;
+    return false;
+  }
+}
+function readProcessStartTime(pid) {
+  if (process.platform !== "linux") return void 0;
+  try {
+    const raw = readFileSync2(`/proc/${pid}/stat`, "utf-8");
+    const closeParen = raw.lastIndexOf(")");
+    if (closeParen < 0) return void 0;
+    const fields = raw.slice(closeParen + 2).split(" ");
+    const startTimeStr = fields[19];
+    if (!startTimeStr) return void 0;
+    const n = Number(startTimeStr);
+    return Number.isFinite(n) ? n : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function defaultParentLivenessProbe(pid, expectedStartTime) {
+  if (!defaultLivenessProbe(pid)) return false;
+  if (expectedStartTime === void 0) return true;
+  const observed = readProcessStartTime(pid);
+  if (observed === void 0) return true;
+  return observed === expectedStartTime;
+}
+async function reconcileOrphansAtStartup(deps) {
+  const result = {
+    scanned: 0,
+    readopted: [],
+    reclassified: [],
+    preSchema: [],
+    unresumable: [],
+    skippedForeign: [],
+    errors: []
+  };
+  let entries;
+  try {
+    entries = await readdir2(deps.runsRoot);
+  } catch (e) {
+    const code = e?.code;
+    if (code === "ENOENT") return result;
+    result.errors.push({
+      id: "<runsRoot>",
+      message: `readdir failed: ${e?.message ?? String(e)}`
+    });
+    return result;
+  }
+  for (const id of entries) {
+    const recordPath = join3(deps.runsRoot, id, "record.json");
+    try {
+      let raw;
+      try {
+        raw = await readFile2(recordPath, "utf-8");
+      } catch (e) {
+        const code = e?.code;
+        if (code === "ENOENT" || code === "ENOTDIR") {
+          continue;
+        }
+        throw e;
+      }
+      result.scanned++;
+      let record;
+      try {
+        record = JSON.parse(raw);
+      } catch (e) {
+        result.errors.push({
+          id,
+          message: `JSON parse error: ${e?.message ?? String(e)}`
+        });
+        continue;
+      }
+      if (deps.registry.has(record.id ?? id)) {
+        continue;
+      }
+      const verdict = classifyRecord(
+        record,
+        deps.isAlive,
+        deps.now,
+        deps.selfPid ?? process.pid,
+        deps.isParentAlive ?? defaultParentLivenessProbe
+      );
+      const dryRun = deps.dryRun === true;
+      switch (verdict) {
+        case "skip-terminal":
+          break;
+        case "skip-foreign":
+          result.skippedForeign.push(record.id);
+          break;
+        case "readopt": {
+          const orphan = buildOrphanRun(record, "running");
+          if (!dryRun) deps.registry.register(orphan);
+          result.readopted.push(record.id);
+          await checkSessionResumability(record, result);
+          break;
+        }
+        case "reclassify-killed":
+        case "reclassify-pre-schema": {
+          const errorMessage = verdict === "reclassify-pre-schema" ? "orphaned: pre-pid-schema record (post-startup reconcile)" : "orphaned: process gone (post-startup reconcile)";
+          if (!dryRun) {
+            await reclassifyOnDisk({
+              recordPath,
+              record,
+              nextStatus: "killed",
+              errorMessage,
+              now: deps.now
+            });
+          }
+          const orphan = buildOrphanRun({
+            ...record,
+            status: "killed",
+            finishedAt: deps.now,
+            errorMessage
+          }, "killed");
+          if (!dryRun) deps.registry.register(orphan);
+          result.reclassified.push(record.id);
+          if (verdict === "reclassify-pre-schema") {
+            result.preSchema.push(record.id);
+          }
+          await checkSessionResumability(record, result);
+          break;
+        }
+        case "reclassify-failed-queued": {
+          const errorMessage = "orphaned: queue entry abandoned at startup (post-startup reconcile)";
+          if (!dryRun) {
+            await reclassifyOnDisk({
+              recordPath,
+              record,
+              nextStatus: "failed",
+              errorMessage,
+              now: deps.now
+            });
+          }
+          const orphan = buildOrphanRun({
+            ...record,
+            status: "failed",
+            finishedAt: deps.now,
+            errorMessage
+          }, "failed");
+          if (!dryRun) deps.registry.register(orphan);
+          result.reclassified.push(record.id);
+          break;
+        }
+      }
+    } catch (e) {
+      result.errors.push({
+        id,
+        message: e?.message ?? String(e)
+      });
+    }
+  }
+  return result;
+}
+function buildOrphanRun(record, status) {
+  return {
+    id: record.id,
+    persona: record.persona,
+    task: record.task,
+    model: record.model,
+    thinking: record.thinking,
+    mode: record.mode,
+    status,
+    startTime: record.startTime,
+    finishedAt: record.finishedAt,
+    pausedAt: record.pausedAt,
+    pid: record.pid,
+    exitCode: record.exitCode,
+    stopReason: record.stopReason,
+    errorMessage: record.errorMessage,
+    lastEventAt: record.finishedAt ?? record.startTime,
+    messages: [],
+    usage: record.usage ?? emptyUsage(),
+    cwd: record.cwd,
+    recordPath: record.recordPath,
+    transcriptPath: record.transcriptPath,
+    finalPath: record.finalPath,
+    sessionPath: record.sessionPath,
+    systemPrompt: record.systemPrompt,
+    hookResult: record.hookResult
+    // proc intentionally undefined: we have no handle.
+  };
+}
+async function reclassifyOnDisk(opts) {
+  const updated = {
+    ...opts.record,
+    status: opts.nextStatus,
+    finishedAt: opts.now,
+    errorMessage: opts.errorMessage
+  };
+  await writeFile(opts.recordPath, JSON.stringify(updated, null, 2));
+}
+async function checkSessionResumability(record, result) {
+  if (!record.sessionPath) {
+    return;
+  }
+  try {
+    await stat2(record.sessionPath);
+  } catch {
+    result.unresumable.push(record.id);
+  }
+}
+
 // src/runs.ts
 function runsRoot() {
-  return join3(homedir3(), ".pi", "agent", "conductor", "runs");
+  return join4(homedir3(), ".pi", "agent", "conductor", "runs");
 }
 function runDir(id) {
-  return join3(runsRoot(), id);
+  return join4(runsRoot(), id);
 }
 function collectInheritedSkillPaths(opts) {
   const home = opts.homeDir ?? homedir3();
   const exists = opts.existsFn ?? existsSync3;
   const candidates = [
-    join3(home, ".pi", "agent", "skills"),
-    join3(opts.cwd, ".pi", "skills")
+    join4(home, ".pi", "agent", "skills"),
+    join4(opts.cwd, ".pi", "skills")
   ];
   return candidates.filter((p) => exists(p));
 }
@@ -1062,7 +1293,7 @@ function findSessionFile(sessionDir) {
   let bestMtime = -Infinity;
   for (const name of entries) {
     if (!name.endsWith(".jsonl")) continue;
-    const full = join3(sessionDir, name);
+    const full = join4(sessionDir, name);
     let st;
     try {
       st = statSync(full);
@@ -1212,7 +1443,7 @@ function planSpawnPiArgs(opts) {
     seedMessages = [filteredHistorySentinel(), ...seedMessages];
   }
   if (seedMessages) {
-    const seededSessionPath = join3(sessionDir, "seeded.jsonl");
+    const seededSessionPath = join4(sessionDir, "seeded.jsonl");
     seedSessionFile(seededSessionPath, seedMessages, cwd);
     return {
       mode: "resume",
@@ -1326,9 +1557,9 @@ function spawnRun(opts) {
     messages: [],
     usage: emptyUsage(),
     cwd: opts.cwd,
-    recordPath: join3(dir, "record.json"),
-    transcriptPath: join3(dir, "transcript.jsonl"),
-    finalPath: join3(dir, "final.md"),
+    recordPath: join4(dir, "record.json"),
+    transcriptPath: join4(dir, "transcript.jsonl"),
+    finalPath: join4(dir, "final.md"),
     sessionPath: void 0,
     // Capture the persona body now so future ensemble_send calls can
     // re-pass it on resume. Pi doesn't persist system prompts to disk.
@@ -1336,12 +1567,19 @@ function spawnRun(opts) {
     // v0.10 watchdog (Slice 3) per-spawn overrides; undefined falls
     // back to conductor-wide defaults at watchdog dispatch time.
     killOnStall: opts.killOnStall,
-    softStallSeconds: opts.softStallSeconds
+    softStallSeconds: opts.softStallSeconds,
+    // Ownership scoping: persist the conductor host pid (and Linux
+    // start-time fingerprint) so sibling pi sessions reading the
+    // global runs/ root can skip-foreign records they don't own.
+    // Survives /reload (in-process re-import). See
+    // `classifyRecord` `skip-foreign` branch.
+    parentPid: process.pid,
+    parentStartTime: readProcessStartTime(process.pid)
   };
   opts.registry.register(run);
   void writeRecord(run);
   const prompt = buildSubAgentPrompt(opts.persona, opts.task);
-  const sessionDir = join3(dir, "session");
+  const sessionDir = join4(dir, "session");
   mkdirSync3(sessionDir, { recursive: true });
   const plan = planSpawnPiArgs({
     persona: opts.persona,
@@ -1679,6 +1917,12 @@ async function applyHookToTerminal(run, resolvedHook, terminal, deps = {}) {
 }
 function forceTerminate(run, reason, registry, onComplete, killGroup = defaultKillGroup) {
   if (isTerminal(run.status)) return;
+  if (run.parentPid !== void 0 && run.parentPid !== process.pid) {
+    console.warn(
+      `forceTerminate: refusing to mutate foreign run id=${run.id} ownerPid=${run.parentPid} selfPid=${process.pid}`
+    );
+    return;
+  }
   if (run.timeoutTimer) {
     clearTimeout(run.timeoutTimer);
     run.timeoutTimer = void 0;
@@ -1764,14 +2008,14 @@ async function reconcileRecord(run, status, errorMessage, finishedAt) {
 async function writeRecord(run) {
   try {
     await mkdir(dirname4(run.recordPath), { recursive: true });
-    await writeFile(run.recordPath, JSON.stringify(toRunRecord(run), null, 2));
+    await writeFile2(run.recordPath, JSON.stringify(toRunRecord(run), null, 2));
   } catch {
   }
 }
 async function writeFinal(run) {
   try {
     await mkdir(dirname4(run.finalPath), { recursive: true });
-    await writeFile(run.finalPath, getFinalText(run.messages) || "(no output)");
+    await writeFile2(run.finalPath, getFinalText(run.messages) || "(no output)");
   } catch {
   }
 }
@@ -1813,13 +2057,13 @@ function elapsedStr(start, end) {
 // src/doctor.ts
 import { existsSync as existsSync6 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join6 } from "node:path";
+import { join as join7 } from "node:path";
 
 // src/gc/last-gc.ts
 import { existsSync as existsSync4, statSync as statSync2, utimesSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { dirname as dirname5, join as join4 } from "node:path";
+import { dirname as dirname5, join as join5 } from "node:path";
 function lastGcMarkerPath(runsRoot2) {
-  return join4(dirname5(runsRoot2), ".last-gc");
+  return join5(dirname5(runsRoot2), ".last-gc");
 }
 function readLastGcMtime(runsRoot2) {
   const path = lastGcMarkerPath(runsRoot2);
@@ -1841,12 +2085,12 @@ function writeLastGcMtime(runsRoot2, now) {
 }
 
 // src/gc/inventory.ts
-import { readdir as readdir2, readFile as readFile2, stat as stat2 } from "node:fs/promises";
+import { readdir as readdir3, readFile as readFile3, stat as stat3 } from "node:fs/promises";
 import { existsSync as existsSync5 } from "node:fs";
-import { join as join5 } from "node:path";
+import { join as join6 } from "node:path";
 async function safeStat(path) {
   try {
-    const s = await stat2(path);
+    const s = await stat3(path);
     return { size: s.size, mtimeMs: s.mtimeMs };
   } catch {
     return null;
@@ -1854,7 +2098,7 @@ async function safeStat(path) {
 }
 async function readRecord(runDir2) {
   try {
-    const text = await readFile2(join5(runDir2, "record.json"), "utf-8");
+    const text = await readFile3(join6(runDir2, "record.json"), "utf-8");
     const parsed = JSON.parse(text);
     if (typeof parsed.id !== "string" || typeof parsed.persona !== "string") {
       return null;
@@ -1865,10 +2109,10 @@ async function readRecord(runDir2) {
   }
 }
 async function detectSessionPath(runDir2) {
-  const sessionDir = join5(runDir2, "session");
+  const sessionDir = join6(runDir2, "session");
   if (!existsSync5(sessionDir)) return false;
   try {
-    const entries = await readdir2(sessionDir);
+    const entries = await readdir3(sessionDir);
     return entries.some((e) => e.endsWith(".jsonl"));
   } catch {
     return false;
@@ -1878,16 +2122,16 @@ async function walkInventory(runsRoot2, registry) {
   if (!existsSync5(runsRoot2)) return [];
   let entries;
   try {
-    entries = await readdir2(runsRoot2);
+    entries = await readdir3(runsRoot2);
   } catch {
     return [];
   }
   const out = [];
   for (const id of entries) {
-    const runDir2 = join5(runsRoot2, id);
+    const runDir2 = join6(runsRoot2, id);
     let isDir = false;
     try {
-      isDir = (await stat2(runDir2)).isDirectory();
+      isDir = (await stat3(runDir2)).isDirectory();
     } catch {
       continue;
     }
@@ -1898,11 +2142,11 @@ async function walkInventory(runsRoot2, registry) {
 }
 async function buildEntry(id, runDir2, registry) {
   const record = await readRecord(runDir2);
-  const transcriptStat = await safeStat(join5(runDir2, "transcript.jsonl"));
-  const recordStat = await safeStat(join5(runDir2, "record.json"));
-  const finalStat = await safeStat(join5(runDir2, "final.md"));
-  const archivedStat = await safeStat(join5(runDir2, ".archived"));
-  const pinned = existsSync5(join5(runDir2, ".pinned"));
+  const transcriptStat = await safeStat(join6(runDir2, "transcript.jsonl"));
+  const recordStat = await safeStat(join6(runDir2, "record.json"));
+  const finalStat = await safeStat(join6(runDir2, "final.md"));
+  const archivedStat = await safeStat(join6(runDir2, ".archived"));
+  const pinned = existsSync5(join6(runDir2, ".pinned"));
   const sessionPathPresent = await detectSessionPath(runDir2);
   const inMemory = registry.get(id);
   const transcriptSizeBytes = transcriptStat?.size ?? 0;
@@ -2155,9 +2399,9 @@ async function buildDoctorReport(opts) {
   lines.push(`  user:    ${existsSync6(userPath) ? "\u2713" : "\xB7"} ${userPath}`);
   lines.push(`  project: ${existsSync6(projectPath) ? "\u2713" : "\xB7"} ${projectPath}`);
   const home = opts.homeDir ?? homedir4();
-  const legacyDir = join6(home, ".pi", "agent", "extensions", "conductor");
-  const legacyJs = join6(legacyDir, "index.js");
-  const legacyTs = join6(legacyDir, "index.ts");
+  const legacyDir = join7(home, ".pi", "agent", "extensions", "conductor");
+  const legacyJs = join7(legacyDir, "index.js");
+  const legacyTs = join7(legacyDir, "index.ts");
   const legacyEntry = existsSync6(legacyJs) ? legacyJs : existsSync6(legacyTs) ? legacyTs : null;
   if (legacyEntry !== null) {
     lines.push("");
@@ -2209,13 +2453,13 @@ async function buildDoctorReport(opts) {
     );
   }
   {
-    const root = opts.runsRoot ?? join6(opts.homeDir ?? homedir4(), ".pi", "agent", "conductor", "runs");
+    const root = opts.runsRoot ?? join7(opts.homeDir ?? homedir4(), ".pi", "agent", "conductor", "runs");
     const lastMs = readLastGcMtime(root);
     const lastStr = lastMs === null ? "never" : new Date(lastMs).toISOString().replace("T", " ").slice(0, 19) + " UTC";
     lines.push(`  gc last run:           ${lastStr} (${lastGcMarkerPath(root)})`);
   }
   {
-    const runsRoot2 = opts.runsRoot ?? join6(opts.homeDir ?? homedir4(), ".pi", "agent", "conductor", "runs");
+    const runsRoot2 = opts.runsRoot ?? join7(opts.homeDir ?? homedir4(), ".pi", "agent", "conductor", "runs");
     lines.push("");
     lines.push(`## Run records (under ${runsRoot2})`);
     if (!existsSync6(runsRoot2)) {
@@ -2406,24 +2650,24 @@ function collapseWhitespace(s) {
 
 // src/gc/pinning.ts
 import { existsSync as existsSync7 } from "node:fs";
-import { stat as stat3, unlink, writeFile as writeFile2 } from "node:fs/promises";
-import { join as join7 } from "node:path";
+import { stat as stat4, unlink, writeFile as writeFile3 } from "node:fs/promises";
+import { join as join8 } from "node:path";
 var SIDECAR = ".pinned";
 async function pinRun(runsRoot2, agentId) {
-  const dir = join7(runsRoot2, agentId);
+  const dir = join8(runsRoot2, agentId);
   let st;
   try {
-    st = await stat3(dir);
+    st = await stat4(dir);
   } catch {
     throw new Error(`no such run directory: ${dir}`);
   }
   if (!st.isDirectory()) {
     throw new Error(`not a directory: ${dir}`);
   }
-  await writeFile2(join7(dir, SIDECAR), "");
+  await writeFile3(join8(dir, SIDECAR), "");
 }
 async function unpinRun(runsRoot2, agentId) {
-  const path = join7(runsRoot2, agentId, SIDECAR);
+  const path = join8(runsRoot2, agentId, SIDECAR);
   try {
     await unlink(path);
   } catch (e) {
@@ -2433,200 +2677,7 @@ async function unpinRun(runsRoot2, agentId) {
   }
 }
 function isPinned(runsRoot2, agentId) {
-  return existsSync7(join7(runsRoot2, agentId, SIDECAR));
-}
-
-// src/reconcile-startup.ts
-import { readFile as readFile3, readdir as readdir3, stat as stat4, writeFile as writeFile3 } from "node:fs/promises";
-import { join as join8 } from "node:path";
-function classifyRecord(record, isAlive, _now) {
-  const status = record.status;
-  if (TERMINAL_STATUSES.includes(status)) {
-    return "skip-terminal";
-  }
-  if (status === "queued") {
-    return "reclassify-failed-queued";
-  }
-  if (record.pid === void 0) {
-    return "reclassify-pre-schema";
-  }
-  return isAlive(record.pid) ? "readopt" : "reclassify-killed";
-}
-function defaultLivenessProbe(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    const code = e?.code;
-    if (code === "ESRCH") return false;
-    if (code === "EPERM") return true;
-    return false;
-  }
-}
-async function reconcileOrphansAtStartup(deps) {
-  const result = {
-    scanned: 0,
-    readopted: [],
-    reclassified: [],
-    preSchema: [],
-    unresumable: [],
-    errors: []
-  };
-  let entries;
-  try {
-    entries = await readdir3(deps.runsRoot);
-  } catch (e) {
-    const code = e?.code;
-    if (code === "ENOENT") return result;
-    result.errors.push({
-      id: "<runsRoot>",
-      message: `readdir failed: ${e?.message ?? String(e)}`
-    });
-    return result;
-  }
-  for (const id of entries) {
-    const recordPath = join8(deps.runsRoot, id, "record.json");
-    try {
-      let raw;
-      try {
-        raw = await readFile3(recordPath, "utf-8");
-      } catch (e) {
-        const code = e?.code;
-        if (code === "ENOENT" || code === "ENOTDIR") {
-          continue;
-        }
-        throw e;
-      }
-      result.scanned++;
-      let record;
-      try {
-        record = JSON.parse(raw);
-      } catch (e) {
-        result.errors.push({
-          id,
-          message: `JSON parse error: ${e?.message ?? String(e)}`
-        });
-        continue;
-      }
-      if (deps.registry.has(record.id ?? id)) {
-        continue;
-      }
-      const verdict = classifyRecord(record, deps.isAlive, deps.now);
-      const dryRun = deps.dryRun === true;
-      switch (verdict) {
-        case "skip-terminal":
-          break;
-        case "readopt": {
-          const orphan = buildOrphanRun(record, "running");
-          if (!dryRun) deps.registry.register(orphan);
-          result.readopted.push(record.id);
-          await checkSessionResumability(record, result);
-          break;
-        }
-        case "reclassify-killed":
-        case "reclassify-pre-schema": {
-          const errorMessage = verdict === "reclassify-pre-schema" ? "orphaned: pre-pid-schema record (post-startup reconcile)" : "orphaned: process gone (post-startup reconcile)";
-          if (!dryRun) {
-            await reclassifyOnDisk({
-              recordPath,
-              record,
-              nextStatus: "killed",
-              errorMessage,
-              now: deps.now
-            });
-          }
-          const orphan = buildOrphanRun({
-            ...record,
-            status: "killed",
-            finishedAt: deps.now,
-            errorMessage
-          }, "killed");
-          if (!dryRun) deps.registry.register(orphan);
-          result.reclassified.push(record.id);
-          if (verdict === "reclassify-pre-schema") {
-            result.preSchema.push(record.id);
-          }
-          await checkSessionResumability(record, result);
-          break;
-        }
-        case "reclassify-failed-queued": {
-          const errorMessage = "orphaned: queue entry abandoned at startup (post-startup reconcile)";
-          if (!dryRun) {
-            await reclassifyOnDisk({
-              recordPath,
-              record,
-              nextStatus: "failed",
-              errorMessage,
-              now: deps.now
-            });
-          }
-          const orphan = buildOrphanRun({
-            ...record,
-            status: "failed",
-            finishedAt: deps.now,
-            errorMessage
-          }, "failed");
-          if (!dryRun) deps.registry.register(orphan);
-          result.reclassified.push(record.id);
-          break;
-        }
-      }
-    } catch (e) {
-      result.errors.push({
-        id,
-        message: e?.message ?? String(e)
-      });
-    }
-  }
-  return result;
-}
-function buildOrphanRun(record, status) {
-  return {
-    id: record.id,
-    persona: record.persona,
-    task: record.task,
-    model: record.model,
-    thinking: record.thinking,
-    mode: record.mode,
-    status,
-    startTime: record.startTime,
-    finishedAt: record.finishedAt,
-    pausedAt: record.pausedAt,
-    pid: record.pid,
-    exitCode: record.exitCode,
-    stopReason: record.stopReason,
-    errorMessage: record.errorMessage,
-    lastEventAt: record.finishedAt ?? record.startTime,
-    messages: [],
-    usage: record.usage ?? emptyUsage(),
-    cwd: record.cwd,
-    recordPath: record.recordPath,
-    transcriptPath: record.transcriptPath,
-    finalPath: record.finalPath,
-    sessionPath: record.sessionPath,
-    systemPrompt: record.systemPrompt,
-    hookResult: record.hookResult
-    // proc intentionally undefined: we have no handle.
-  };
-}
-async function reclassifyOnDisk(opts) {
-  const updated = {
-    ...opts.record,
-    status: opts.nextStatus,
-    finishedAt: opts.now,
-    errorMessage: opts.errorMessage
-  };
-  await writeFile3(opts.recordPath, JSON.stringify(updated, null, 2));
-}
-async function checkSessionResumability(record, result) {
-  if (!record.sessionPath) {
-    return;
-  }
-  try {
-    await stat4(record.sessionPath);
-  } catch {
-    result.unresumable.push(record.id);
-  }
+  return existsSync7(join8(runsRoot2, agentId, SIDECAR));
 }
 
 // src/gc/reconcile.ts
@@ -3462,7 +3513,7 @@ function runHistory(_opts, ctx, arg) {
       readRecord: (id) => {
         const p = join11(runDir(id), "record.json");
         try {
-          return JSON.parse(readFileSync2(p, "utf8"));
+          return JSON.parse(readFileSync3(p, "utf8"));
         } catch {
           return void 0;
         }
@@ -3470,7 +3521,7 @@ function runHistory(_opts, ctx, arg) {
       readFinalText: (id) => {
         const p = join11(runDir(id), "final.md");
         try {
-          return readFileSync2(p, "utf8");
+          return readFileSync3(p, "utf8");
         } catch {
           return void 0;
         }
