@@ -298,3 +298,69 @@ test("createFocusedOverlayComponent: wires getMetrics closure with live tui.term
     `scrollOffset must be clamped under getMetrics; got ${tighterOffset}`,
   );
 });
+
+// ── Slice 6 critic regression-pin ──────────────────────────────
+//
+// The factory's CHROME_ROWS budget MUST equal the overlay's actual
+// chrome (HEADER_ROWS + FOOTER_ROWS = 4 + 3 = 7). Pre-fix the factory
+// hard-coded `CHROME_ROWS = 5`, leaving the model's stickToTail latch
+// thinking 2 more rows were visible than the overlay actually painted.
+// Result: at the model's "bottom", the last 2 transcript lines were
+// still off-screen — auto-follow lost live tail by 2 lines.
+//
+// This test pins the contract: when the model is scrolled to its
+// configured bottom, the body-row count the model believes in MUST
+// equal the actual painted body-row count. Drift triggers the test.
+
+test("model bodyRows matches overlay's actual painted body row count", () => {
+  const VIEWPORT = 30;
+  const HEADER_ROWS = 4; // hard-coded mirror so test catches drift
+  const FOOTER_ROWS = 3; // on either side of the contract
+  const registry = new RunRegistry();
+  // Build a transcript long enough that scrollDown(huge) lands at a
+  // non-zero bottom (otherwise transcriptLength <= bodyRows and the
+  // bottom is 0, hiding the bug).
+  const messages: any[] = [];
+  for (let i = 0; i < 200; i++) {
+    messages.push({
+      role: "assistant",
+      content: [{ type: "text", text: `body line ${i}` }],
+    });
+  }
+  registry.register(makeRun({ id: "tail-1", messages }));
+  const model = new FocusedStreamModel(registry);
+  const overlay = createFocusedOverlayComponent({
+    model,
+    registry,
+    forceTerminate: () => {},
+    promptAndSendToRun: () => {},
+    done: () => {},
+    getViewportHeight: () => VIEWPORT,
+  });
+  // Render once so the overlay's transcriptLength cache populates.
+  overlay.render(80);
+  const transcriptLength = overlay.getTranscriptLength();
+  assert.ok(
+    transcriptLength > VIEWPORT,
+    `precondition: transcript must outgrow viewport (${transcriptLength} vs ${VIEWPORT})`,
+  );
+  // Scroll to bottom via the model.
+  model.scrollDown(10_000);
+  const offsetAtBottom = model.scrollOffset();
+  // The actual painted body row count: total rendered rows minus
+  // header chrome minus footer chrome.
+  const renderedLines = overlay.render(80);
+  const bodyRowsActual = renderedLines.length - HEADER_ROWS - FOOTER_ROWS;
+  // Contract: every transcript line at-or-after `offsetAtBottom` must
+  // fit in the painted body. I.e. offset + bodyRowsActual covers
+  // through the end of the transcript exactly. Pre-fix this asserted
+  // `offset + (viewport - 5) === transcriptLength` while the overlay
+  // was painting `viewport - 7` rows — off by 2.
+  assert.equal(
+    offsetAtBottom + bodyRowsActual,
+    transcriptLength,
+    `model's bottom (${offsetAtBottom}) + actual body rows (${bodyRowsActual}) must cover the full transcript (${transcriptLength}); drift = ${
+      transcriptLength - offsetAtBottom - bodyRowsActual
+    }`,
+  );
+});

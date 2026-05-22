@@ -14,7 +14,7 @@
  * reasoning.
  */
 
-import { FocusedStreamOverlay } from "./focused-stream-overlay.ts";
+import { FocusedStreamOverlay, HEADER_ROWS, FOOTER_ROWS } from "./focused-stream-overlay.ts";
 import type { FocusedStreamModel } from "./focused-stream-model.ts";
 import type { RunRegistry, TerminationReason } from "./runs.ts";
 import type { Run } from "./types.ts";
@@ -86,17 +86,20 @@ export function createFocusedOverlayComponent(
 
   // Slice 4 (overlay redesign): wire the live viewport-metrics closure
   // onto the model so `scrollDown` clamps at the renderable bottom and
-  // `stickToTail` can latch. We compute `bodyRows` from the host's
-  // injected `getViewportHeight()` (production: `tui.terminal.rows`)
-  // less a CHROME_ROWS budget covering header (2) + footer (2) +
-  // optional scroll hint (1). Slice 6's chrome rewrite will replace
-  // this constant with computed zone heights.
+  // `stickToTail` can latch. Slice 6 chrome geometry: HEADER_ROWS=4
+  // (top border + status + mid-rule + spare) + FOOTER_ROWS=3 (mid-rule
+  // + hint + bottom border) = 7. The constants live in
+  // focused-stream-overlay.ts so the model's clamp and the overlay's
+  // paint cannot drift (slice-6 critic regression: factory's old
+  // CHROME_ROWS=5 placeholder left the model thinking 2 more rows
+  // were visible than the overlay actually painted, costing the
+  // stickToTail latch its last 2 lines of live tail).
   //
   // `transcriptLength` reads the overlay's render-side cache. Pre
   // first render the cache is 0 — which yields `bottom = 0` and the
   // model treats the agent as fully visible (no scroll needed). Once
   // the host renders, the closure picks up the real value.
-  const CHROME_ROWS = 5;
+  const CHROME_ROWS = HEADER_ROWS + FOOTER_ROWS;
   deps.model.setMetricsSource(() => {
     const viewport = deps.getViewportHeight?.() ?? 0;
     return {

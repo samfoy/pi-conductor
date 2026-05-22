@@ -6392,7 +6392,7 @@ function createFocusedOverlayComponent(deps) {
     theme: deps.theme,
     getViewportHeight: deps.getViewportHeight
   });
-  const CHROME_ROWS = 5;
+  const CHROME_ROWS = HEADER_ROWS + FOOTER_ROWS;
   deps.model.setMetricsSource(() => {
     const viewport = deps.getViewportHeight?.() ?? 0;
     return {
