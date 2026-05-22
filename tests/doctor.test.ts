@@ -599,3 +599,89 @@ test("buildDoctorReport: watchdog runtime line counts running + stalled runs (Sl
     teardown(fx);
   }
 });
+
+// ── v0.9.x slice 4 — Post-startup reconcile section ───────────────
+
+test("buildDoctorReport: post-startup reconcile section says 'never' when lastReconcile is undefined", async () => {
+  const fx = setup();
+  try {
+    const reg = new RunRegistry();
+    const q = new SpawnQueue(reg, 4);
+    const out = await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: q,
+      conductorMode: false,
+      homeDir: fx.homeDir,
+    });
+    assert.match(out, /## Post-startup reconcile/);
+    assert.match(out, /never/i);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("buildDoctorReport: post-startup reconcile shows scanned/readopted/reclassified/unresumable counts on success", async () => {
+  const fx = setup();
+  try {
+    const reg = new RunRegistry();
+    const q = new SpawnQueue(reg, 4);
+    const out = await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: q,
+      conductorMode: false,
+      homeDir: fx.homeDir,
+      lastReconcile: {
+        scanned: 5,
+        readopted: ["a"],
+        reclassified: ["b", "c"],
+        preSchema: [],
+        unresumable: ["c"],
+        errors: [],
+      },
+    });
+    assert.match(out, /## Post-startup reconcile/);
+    assert.match(out, /scanned\s*[:=]?\s*5/);
+    assert.match(out, /readopted\s*[:=]?\s*1/);
+    assert.match(out, /reclassified\s*[:=]?\s*2/);
+    assert.match(out, /unresumable\s*[:=]?\s*1/);
+    // No errors → no errors line listing them.
+    assert.ok(!/errors:\s*[1-9]/.test(out));
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("buildDoctorReport: post-startup reconcile lists per-record errors and unresumable ids", async () => {
+  const fx = setup();
+  try {
+    const reg = new RunRegistry();
+    const q = new SpawnQueue(reg, 4);
+    const out = await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: q,
+      conductorMode: false,
+      homeDir: fx.homeDir,
+      lastReconcile: {
+        scanned: 3,
+        readopted: [],
+        reclassified: ["builder-aa11"],
+        preSchema: [],
+        unresumable: ["oracle-bb22"],
+        errors: [
+          { id: "critic-cc33", message: "JSON parse error: Unexpected token" },
+        ],
+      },
+    });
+    assert.match(out, /## Post-startup reconcile/);
+    assert.match(out, /errors\s*[:=]?\s*1/);
+    assert.match(out, /critic-cc33/);
+    assert.match(out, /JSON parse error/);
+    // unresumable id is surfaced (so user knows resume will fail).
+    assert.match(out, /oracle-bb22/);
+  } finally {
+    teardown(fx);
+  }
+});

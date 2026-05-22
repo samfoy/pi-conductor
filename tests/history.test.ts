@@ -286,3 +286,43 @@ test("buildHistoryReport: each RunStatus surfaces the shared STATUS_GLYPH char",
     );
   }
 });
+
+// ── v0.9.x slice 4 — orphan errorMessage prefix indicator ────────────
+
+test("buildHistoryReport: killed run with errorMessage 'orphaned: ...' renders distinct ⎘ prefix indicator", () => {
+  const deps = makeDeps([
+    {
+      id: "critic-orph",
+      record: rec({
+        id: "critic-orph",
+        persona: "critic",
+        status: "killed",
+        errorMessage: "orphaned: process gone (post-startup reconcile)",
+      }),
+    },
+  ]);
+  const out = buildHistoryReport(deps, { limit: 5 });
+  // Indicator glyph and label appear; the original message is still
+  // rendered so the user can see the cause.
+  assert.match(out, /⎘/);
+  assert.match(out, /orphaned/);
+  assert.match(out, /process gone/);
+});
+
+test("buildHistoryReport: killed run with non-orphan errorMessage does NOT render the orphan indicator", () => {
+  const deps = makeDeps([
+    {
+      id: "builder-norm",
+      record: rec({
+        id: "builder-norm",
+        persona: "builder",
+        status: "killed",
+        errorMessage: "forceTerminate: user requested",
+      }),
+    },
+  ]);
+  const out = buildHistoryReport(deps, { limit: 5 });
+  // No orphan glyph for non-orphan kills.
+  assert.ok(!out.includes("⎘"), `did not expect orphan glyph in:\n${out}`);
+  assert.match(out, /user requested/);
+});

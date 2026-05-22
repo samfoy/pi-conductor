@@ -188,6 +188,14 @@ export interface PostStartupReconcileDeps {
    * for deterministic tests.
    */
   now: number;
+  /**
+   * v0.9.x Slice 4: when true, the scanner walks + classifies + reports
+   * but does NOT mutate disk and does NOT register orphans. The result
+   * envelope is identical to a real run, so the same renderer can drive
+   * both the doctor surface and the `/conductor reconcile --dry-run`
+   * preview. Defaults to false (real reconcile) when omitted.
+   */
+  dryRun?: boolean;
 }
 
 /**
@@ -304,6 +312,7 @@ export async function reconcileOrphansAtStartup(
       }
 
       const verdict = classifyRecord(record, deps.isAlive, deps.now);
+      const dryRun = deps.dryRun === true;
 
       switch (verdict) {
         case "skip-terminal":
@@ -314,7 +323,7 @@ export async function reconcileOrphansAtStartup(
           // Live `/reload` survivor. Register a partial Run; do NOT
           // mutate disk — the original pi process owns the file.
           const orphan = buildOrphanRun(record, "running");
-          deps.registry.register(orphan);
+          if (!dryRun) deps.registry.register(orphan);
           result.readopted.push(record.id);
           await checkSessionResumability(record, result);
           break;
@@ -326,20 +335,22 @@ export async function reconcileOrphansAtStartup(
             verdict === "reclassify-pre-schema"
               ? "orphaned: pre-pid-schema record (post-startup reconcile)"
               : "orphaned: process gone (post-startup reconcile)";
-          await reclassifyOnDisk({
-            recordPath,
-            record,
-            nextStatus: "killed",
-            errorMessage,
-            now: deps.now,
-          });
+          if (!dryRun) {
+            await reclassifyOnDisk({
+              recordPath,
+              record,
+              nextStatus: "killed",
+              errorMessage,
+              now: deps.now,
+            });
+          }
           const orphan = buildOrphanRun({
             ...record,
             status: "killed",
             finishedAt: deps.now,
             errorMessage,
           }, "killed");
-          deps.registry.register(orphan);
+          if (!dryRun) deps.registry.register(orphan);
           result.reclassified.push(record.id);
           if (verdict === "reclassify-pre-schema") {
             result.preSchema.push(record.id);
@@ -351,20 +362,22 @@ export async function reconcileOrphansAtStartup(
         case "reclassify-failed-queued": {
           const errorMessage =
             "orphaned: queue entry abandoned at startup (post-startup reconcile)";
-          await reclassifyOnDisk({
-            recordPath,
-            record,
-            nextStatus: "failed",
-            errorMessage,
-            now: deps.now,
-          });
+          if (!dryRun) {
+            await reclassifyOnDisk({
+              recordPath,
+              record,
+              nextStatus: "failed",
+              errorMessage,
+              now: deps.now,
+            });
+          }
           const orphan = buildOrphanRun({
             ...record,
             status: "failed",
             finishedAt: deps.now,
             errorMessage,
           }, "failed");
-          deps.registry.register(orphan);
+          if (!dryRun) deps.registry.register(orphan);
           result.reclassified.push(record.id);
           // Queued orphans never had a session, so unresumable check is
           // moot — sessionPath is undefined either way.

@@ -203,6 +203,13 @@ export default function (pi: ExtensionAPI): void {
     getQueue: () => queue,
     getModel: () => focusModel,
     /**
+     * v0.9.x Slice 4: expose the most-recent post-startup reconcile
+     * result so /conductor doctor surfaces it under "## Post-startup
+     * reconcile". Stays undefined until session_start finishes its
+     * reconcile pass.
+     */
+    getLastReconcile: () => lastReconcile,
+    /**
      * Snapshot the parent conductor's conversation for inherit_context.
      * Walks the current session's tree from leaf to root via
      * buildSessionContext (handles compaction + branch summaries) and

@@ -95,8 +95,14 @@ export function buildHistoryReport(deps: HistoryDeps, opts: HistoryOpts): string
         lines.push(`      → "${excerpt}"`);
       }
     } else if (r.errorMessage) {
-      const excerpt = truncate(collapseWhitespace(r.errorMessage), EXCERPT_MAX_CHARS);
-      lines.push(`      → ${excerpt}`);
+      const msg = r.errorMessage;
+      // v0.9.x Slice 4: orphaned: prefix gets a distinct glyph so users
+      // see at a glance that this kill came from post-startup reconcile,
+      // not from forceTerminate / user kill / watchdog. The full message
+      // is preserved on the same line.
+      const isOrphan = msg.startsWith("orphaned:");
+      const excerpt = truncate(collapseWhitespace(msg), EXCERPT_MAX_CHARS);
+      lines.push(`      → ${isOrphan ? "⎘ " : ""}${excerpt}`);
     }
   }
 

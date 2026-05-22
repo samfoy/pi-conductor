@@ -4,7 +4,7 @@ import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
 
 // src/commands.ts
 import { existsSync as existsSync8, readdirSync as readdirSync2, readFileSync as readFileSync2, statSync as statSync3 } from "node:fs";
-import { join as join10 } from "node:path";
+import { join as join11 } from "node:path";
 
 // src/status-glyph.ts
 var STATUS_GLYPH = {
@@ -2273,11 +2273,56 @@ async function buildDoctorReport(opts) {
     }
   }
   lines.push("");
+  lines.push("## Post-startup reconcile");
+  if (opts.lastReconcile === void 0) {
+    lines.push("  last run:              never (no reconcile this session)");
+  } else {
+    for (const ln of renderReconcileSummary(opts.lastReconcile, { dryRun: false, includeHeader: false })) {
+      lines.push(`  ${ln}`);
+    }
+  }
+  lines.push("");
   lines.push("## Runtime");
   lines.push(`  active:        ${opts.registry.countActive()}`);
   lines.push(`  queued:        ${opts.queue.size()}`);
   lines.push(`  total tracked: ${opts.registry.list().length}`);
   return lines.join("\n");
+}
+function renderReconcileSummary(result, opts) {
+  const lines = [];
+  if (opts.includeHeader) {
+    lines.push("## Post-startup reconcile");
+    if (opts.dryRun) lines.push("(dry-run \u2014 no disk writes, no registry mutation)");
+  } else if (opts.dryRun) {
+    lines.push("(dry-run \u2014 no disk writes)");
+  }
+  lines.push(`scanned:      ${result.scanned}`);
+  lines.push(`readopted:    ${result.readopted.length}${listSample(result.readopted)}`);
+  lines.push(`reclassified: ${result.reclassified.length}${listSample(result.reclassified)}`);
+  if (result.preSchema.length > 0) {
+    lines.push(
+      `pre-pid-schema: ${result.preSchema.length}${listSample(result.preSchema)}`
+    );
+  }
+  lines.push(`unresumable:  ${result.unresumable.length}${listSample(result.unresumable)}`);
+  lines.push(`errors:       ${result.errors.length}`);
+  if (result.errors.length > 0) {
+    const cap = 8;
+    for (const e of result.errors.slice(0, cap)) {
+      lines.push(`  ${e.id}: ${e.message}`);
+    }
+    if (result.errors.length > cap) {
+      lines.push(`  (${result.errors.length - cap} more)`);
+    }
+  }
+  return lines;
+}
+function listSample(ids) {
+  if (ids.length === 0) return "";
+  const cap = 8;
+  const shown = ids.slice(0, cap);
+  const more = ids.length > cap ? ` \u2026 (+${ids.length - cap} more)` : "";
+  return ` (${shown.join(", ")}${more})`;
 }
 function countBySource(resolved) {
   const counts = { builtin: 0, user: 0, project: 0 };
@@ -2339,8 +2384,10 @@ function buildHistoryReport(deps, opts) {
         lines.push(`      \u2192 "${excerpt}"`);
       }
     } else if (r.errorMessage) {
-      const excerpt = truncate(collapseWhitespace(r.errorMessage), EXCERPT_MAX_CHARS);
-      lines.push(`      \u2192 ${excerpt}`);
+      const msg = r.errorMessage;
+      const isOrphan = msg.startsWith("orphaned:");
+      const excerpt = truncate(collapseWhitespace(msg), EXCERPT_MAX_CHARS);
+      lines.push(`      \u2192 ${isOrphan ? "\u2398 " : ""}${excerpt}`);
     }
   }
   return lines.join("\n");
@@ -2385,19 +2432,212 @@ function isPinned(runsRoot2, agentId) {
   return existsSync7(join7(runsRoot2, agentId, SIDECAR));
 }
 
-// src/gc/reconcile.ts
-import { readFile as readFile3, writeFile as writeFile3 } from "node:fs/promises";
+// src/reconcile-startup.ts
+import { readFile as readFile3, readdir as readdir3, stat as stat4, writeFile as writeFile3 } from "node:fs/promises";
 import { join as join8 } from "node:path";
+function classifyRecord(record, isAlive, _now) {
+  const status = record.status;
+  if (TERMINAL_STATUSES.includes(status)) {
+    return "skip-terminal";
+  }
+  if (status === "queued") {
+    return "reclassify-failed-queued";
+  }
+  if (record.pid === void 0) {
+    return "reclassify-pre-schema";
+  }
+  return isAlive(record.pid) ? "readopt" : "reclassify-killed";
+}
+function defaultLivenessProbe(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    const code = e?.code;
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return true;
+    return false;
+  }
+}
+async function reconcileOrphansAtStartup(deps) {
+  const result = {
+    scanned: 0,
+    readopted: [],
+    reclassified: [],
+    preSchema: [],
+    unresumable: [],
+    errors: []
+  };
+  let entries;
+  try {
+    entries = await readdir3(deps.runsRoot);
+  } catch (e) {
+    const code = e?.code;
+    if (code === "ENOENT") return result;
+    result.errors.push({
+      id: "<runsRoot>",
+      message: `readdir failed: ${e?.message ?? String(e)}`
+    });
+    return result;
+  }
+  for (const id of entries) {
+    const recordPath = join8(deps.runsRoot, id, "record.json");
+    try {
+      let raw;
+      try {
+        raw = await readFile3(recordPath, "utf-8");
+      } catch (e) {
+        const code = e?.code;
+        if (code === "ENOENT" || code === "ENOTDIR") {
+          continue;
+        }
+        throw e;
+      }
+      result.scanned++;
+      let record;
+      try {
+        record = JSON.parse(raw);
+      } catch (e) {
+        result.errors.push({
+          id,
+          message: `JSON parse error: ${e?.message ?? String(e)}`
+        });
+        continue;
+      }
+      if (deps.registry.has(record.id ?? id)) {
+        continue;
+      }
+      const verdict = classifyRecord(record, deps.isAlive, deps.now);
+      const dryRun = deps.dryRun === true;
+      switch (verdict) {
+        case "skip-terminal":
+          break;
+        case "readopt": {
+          const orphan = buildOrphanRun(record, "running");
+          if (!dryRun) deps.registry.register(orphan);
+          result.readopted.push(record.id);
+          await checkSessionResumability(record, result);
+          break;
+        }
+        case "reclassify-killed":
+        case "reclassify-pre-schema": {
+          const errorMessage = verdict === "reclassify-pre-schema" ? "orphaned: pre-pid-schema record (post-startup reconcile)" : "orphaned: process gone (post-startup reconcile)";
+          if (!dryRun) {
+            await reclassifyOnDisk({
+              recordPath,
+              record,
+              nextStatus: "killed",
+              errorMessage,
+              now: deps.now
+            });
+          }
+          const orphan = buildOrphanRun({
+            ...record,
+            status: "killed",
+            finishedAt: deps.now,
+            errorMessage
+          }, "killed");
+          if (!dryRun) deps.registry.register(orphan);
+          result.reclassified.push(record.id);
+          if (verdict === "reclassify-pre-schema") {
+            result.preSchema.push(record.id);
+          }
+          await checkSessionResumability(record, result);
+          break;
+        }
+        case "reclassify-failed-queued": {
+          const errorMessage = "orphaned: queue entry abandoned at startup (post-startup reconcile)";
+          if (!dryRun) {
+            await reclassifyOnDisk({
+              recordPath,
+              record,
+              nextStatus: "failed",
+              errorMessage,
+              now: deps.now
+            });
+          }
+          const orphan = buildOrphanRun({
+            ...record,
+            status: "failed",
+            finishedAt: deps.now,
+            errorMessage
+          }, "failed");
+          if (!dryRun) deps.registry.register(orphan);
+          result.reclassified.push(record.id);
+          break;
+        }
+      }
+    } catch (e) {
+      result.errors.push({
+        id,
+        message: e?.message ?? String(e)
+      });
+    }
+  }
+  return result;
+}
+function buildOrphanRun(record, status) {
+  return {
+    id: record.id,
+    persona: record.persona,
+    task: record.task,
+    model: record.model,
+    thinking: record.thinking,
+    mode: record.mode,
+    status,
+    startTime: record.startTime,
+    finishedAt: record.finishedAt,
+    pausedAt: record.pausedAt,
+    pid: record.pid,
+    exitCode: record.exitCode,
+    stopReason: record.stopReason,
+    errorMessage: record.errorMessage,
+    lastEventAt: record.finishedAt ?? record.startTime,
+    messages: [],
+    usage: record.usage ?? emptyUsage(),
+    cwd: record.cwd,
+    recordPath: record.recordPath,
+    transcriptPath: record.transcriptPath,
+    finalPath: record.finalPath,
+    sessionPath: record.sessionPath,
+    systemPrompt: record.systemPrompt,
+    hookResult: record.hookResult
+    // proc intentionally undefined: we have no handle.
+  };
+}
+async function reclassifyOnDisk(opts) {
+  const updated = {
+    ...opts.record,
+    status: opts.nextStatus,
+    finishedAt: opts.now,
+    errorMessage: opts.errorMessage
+  };
+  await writeFile3(opts.recordPath, JSON.stringify(updated, null, 2));
+}
+async function checkSessionResumability(record, result) {
+  if (!record.sessionPath) {
+    return;
+  }
+  try {
+    await stat4(record.sessionPath);
+  } catch {
+    result.unresumable.push(record.id);
+  }
+}
+
+// src/gc/reconcile.ts
+import { readFile as readFile4, writeFile as writeFile4 } from "node:fs/promises";
+import { join as join9 } from "node:path";
 async function reconcileOrphans(actions, runsRoot2, now) {
   const reconciled = [];
   const failed = [];
   for (const action of actions) {
     if (action.kind !== "reconcile-orphan") continue;
     const agentId = action.id;
-    const recordPath = join8(runsRoot2, agentId, "record.json");
+    const recordPath = join9(runsRoot2, agentId, "record.json");
     let raw;
     try {
-      raw = await readFile3(recordPath, "utf-8");
+      raw = await readFile4(recordPath, "utf-8");
     } catch (e) {
       const err = e;
       if (err && err.code === "ENOENT") {
@@ -2423,7 +2663,7 @@ async function reconcileOrphans(actions, runsRoot2, now) {
       errorMessage: `${action.reason} (reconciled by GC)`
     };
     try {
-      await writeFile3(recordPath, JSON.stringify(updated, null, 2));
+      await writeFile4(recordPath, JSON.stringify(updated, null, 2));
       reconciled.push(agentId);
     } catch (e) {
       failed.push({ agentId, error: String(e?.message ?? e) });
@@ -2433,8 +2673,8 @@ async function reconcileOrphans(actions, runsRoot2, now) {
 }
 
 // src/gc/executor.ts
-import { readFile as readFile4, rm, stat as stat4, unlink as unlink2, utimes, writeFile as writeFile4, readdir as readdir3 } from "node:fs/promises";
-import { join as join9 } from "node:path";
+import { readFile as readFile5, rm, stat as stat5, unlink as unlink2, utimes, writeFile as writeFile5, readdir as readdir4 } from "node:fs/promises";
+import { join as join10 } from "node:path";
 async function executeReclaim(actions, runsRoot2, registryActive, now) {
   const archived = [];
   const deleted = [];
@@ -2442,7 +2682,7 @@ async function executeReclaim(actions, runsRoot2, registryActive, now) {
   for (const action of actions) {
     if (action.kind !== "cold-archive" && action.kind !== "delete") continue;
     const agentId = action.id;
-    const runDir2 = join9(runsRoot2, agentId);
+    const runDir2 = join10(runsRoot2, agentId);
     const actionKind = action.kind;
     if (registryActive.has(agentId)) {
       failed.push({
@@ -2452,10 +2692,10 @@ async function executeReclaim(actions, runsRoot2, registryActive, now) {
       });
       continue;
     }
-    const recordPath = join9(runDir2, "record.json");
+    const recordPath = join10(runDir2, "record.json");
     let record;
     try {
-      const raw = await readFile4(recordPath, "utf-8");
+      const raw = await readFile5(recordPath, "utf-8");
       record = JSON.parse(raw);
     } catch (e) {
       const err = e;
@@ -2513,10 +2753,10 @@ async function executeReclaim(actions, runsRoot2, registryActive, now) {
   return { archived, deleted, failed };
 }
 async function coldArchive(runDir2, now) {
-  const transcriptPath = join9(runDir2, "transcript.jsonl");
+  const transcriptPath = join10(runDir2, "transcript.jsonl");
   let bytes = 0;
   try {
-    const s = await stat4(transcriptPath);
+    const s = await stat5(transcriptPath);
     bytes = s.size;
   } catch {
   }
@@ -2529,8 +2769,8 @@ async function coldArchive(runDir2, now) {
       bytes = 0;
     }
   }
-  const sidecarPath = join9(runDir2, ".archived");
-  await writeFile4(sidecarPath, "");
+  const sidecarPath = join10(runDir2, ".archived");
+  await writeFile5(sidecarPath, "");
   const nowSec = now / 1e3;
   await utimes(sidecarPath, nowSec, nowSec);
   return bytes;
@@ -2549,14 +2789,14 @@ async function fullDelete(runDir2) {
 }
 async function walkSize(path) {
   let total = 0;
-  const entries = await readdir3(path, { withFileTypes: true });
+  const entries = await readdir4(path, { withFileTypes: true });
   for (const entry of entries) {
-    const child = join9(path, entry.name);
+    const child = join10(path, entry.name);
     if (entry.isDirectory()) {
       total += await walkSize(child);
     } else if (entry.isFile()) {
       try {
-        const s = await stat4(child);
+        const s = await stat5(child);
         total += s.size;
       } catch {
       }
@@ -2934,6 +3174,7 @@ var SUBCOMMANDS = [
   "pin",
   "unpin",
   "gc",
+  "reconcile",
   "watchdog"
 ];
 function registerCommands(pi, opts) {
@@ -3000,6 +3241,9 @@ function registerCommands(pi, opts) {
           return;
         case "gc":
           await runGcCmd(opts, ctx, subRest);
+          return;
+        case "reconcile":
+          await runReconcileCmd(opts, ctx, subRest);
           return;
         case "watchdog":
           runWatchdog(opts, ctx, subRest);
@@ -3083,7 +3327,8 @@ async function runDoctor(opts, ctx) {
     cwd: opts.getCwd(),
     registry: opts.getRegistry(),
     queue: opts.getQueue(),
-    conductorMode: opts.getConductorMode()
+    conductorMode: opts.getConductorMode(),
+    lastReconcile: opts.getLastReconcile?.()
   });
   ctx.ui.notify(report, "info");
 }
@@ -3211,7 +3456,7 @@ function runHistory(_opts, ctx, arg) {
         }
       },
       readRecord: (id) => {
-        const p = join10(runDir(id), "record.json");
+        const p = join11(runDir(id), "record.json");
         try {
           return JSON.parse(readFileSync2(p, "utf8"));
         } catch {
@@ -3219,7 +3464,7 @@ function runHistory(_opts, ctx, arg) {
         }
       },
       readFinalText: (id) => {
-        const p = join10(runDir(id), "final.md");
+        const p = join11(runDir(id), "final.md");
         try {
           return readFileSync2(p, "utf8");
         } catch {
@@ -3228,7 +3473,7 @@ function runHistory(_opts, ctx, arg) {
       },
       statMtime: (id) => {
         try {
-          return statSync3(join10(runDir(id), "record.json")).mtimeMs;
+          return statSync3(join11(runDir(id), "record.json")).mtimeMs;
         } catch {
           try {
             return statSync3(runDir(id)).mtimeMs;
@@ -3237,8 +3482,8 @@ function runHistory(_opts, ctx, arg) {
           }
         }
       },
-      isPinned: (id) => existsSync8(join10(runDir(id), ".pinned")),
-      isArchived: (id) => existsSync8(join10(runDir(id), ".archived"))
+      isPinned: (id) => existsSync8(join11(runDir(id), ".pinned")),
+      isArchived: (id) => existsSync8(join11(runDir(id), ".archived"))
     },
     { limit }
   );
@@ -3256,7 +3501,7 @@ async function runPin(ctx, arg) {
     return;
   }
   const root = runsRoot();
-  if (!existsSync8(join10(root, id))) {
+  if (!existsSync8(join11(root, id))) {
     ctx.ui.notify(`No such run: ${id}`, "warning");
     return;
   }
@@ -3282,7 +3527,7 @@ async function runUnpin(ctx, arg) {
     return;
   }
   const root = runsRoot();
-  if (!existsSync8(join10(root, id))) {
+  if (!existsSync8(join11(root, id))) {
     ctx.ui.notify(`No such run: ${id}`, "warning");
     return;
   }
@@ -3435,6 +3680,57 @@ ${GC_HELP_TEXT}`, "warning");
   }
   const out = formatGcResult(result, plan.actions, flags);
   ctx.ui.notify(out, "info");
+}
+var RECONCILE_HELP_TEXT = [
+  "/conductor reconcile [--dry-run]  \u2014 re-run post-startup orphan reconcile.",
+  "",
+  "  --dry-run           classify + report; do NOT mutate disk or registry.",
+  "  --help              print this listing."
+].join("\n");
+function parseReconcileFlags(arg) {
+  const out = { dryRun: false, help: false };
+  const tokens = arg.split(/\s+/).filter((t) => t.length > 0);
+  for (const tok of tokens) {
+    if (tok === "--dry-run") out.dryRun = true;
+    else if (tok === "--help" || tok === "-h") out.help = true;
+    else return { ok: false, error: `unknown flag: ${tok}` };
+  }
+  return { ok: true, flags: out };
+}
+async function runReconcileCmd(opts, ctx, arg) {
+  const parsed = parseReconcileFlags(arg);
+  if (!parsed.ok) {
+    ctx.ui.notify(`${parsed.error}
+
+${RECONCILE_HELP_TEXT}`, "warning");
+    return;
+  }
+  const flags = parsed.flags;
+  if (flags.help) {
+    ctx.ui.notify(RECONCILE_HELP_TEXT, "info");
+    return;
+  }
+  const registry = opts.getRegistry();
+  const root = runsRoot();
+  try {
+    const result = await reconcileOrphansAtStartup({
+      runsRoot: root,
+      registry,
+      isAlive: defaultLivenessProbe,
+      now: Date.now(),
+      dryRun: flags.dryRun
+    });
+    const out = renderReconcileSummary(result, {
+      dryRun: flags.dryRun,
+      includeHeader: true
+    }).join("\n");
+    ctx.ui.notify(out, "info");
+  } catch (e) {
+    ctx.ui.notify(
+      `reconcile failed: ${e?.message ?? String(e)}`,
+      "warning"
+    );
+  }
 }
 function runWatchdog(opts, ctx, subRest) {
   const [sub] = subRest.split(/\s+/);
@@ -4737,7 +5033,7 @@ function isTerminalStatus(s) {
 
 // src/queue.ts
 import { mkdirSync as mkdirSync4 } from "node:fs";
-import { join as join11 } from "node:path";
+import { join as join12 } from "node:path";
 var SpawnQueue = class {
   constructor(registry, maxConcurrent, maxConcurrentWriteCapable = 1) {
     this.registry = registry;
@@ -4797,9 +5093,9 @@ var SpawnQueue = class {
       messages: [],
       usage: emptyUsage(),
       cwd: opts.cwd,
-      recordPath: join11(dir, "record.json"),
-      transcriptPath: join11(dir, "transcript.jsonl"),
-      finalPath: join11(dir, "final.md")
+      recordPath: join12(dir, "record.json"),
+      transcriptPath: join12(dir, "transcript.jsonl"),
+      finalPath: join12(dir, "final.md")
     };
     registry.register(placeholder);
     const pending = {
@@ -5730,194 +6026,6 @@ function installFocusedOverlayShortcut(ctx, options) {
   };
 }
 
-// src/reconcile-startup.ts
-import { readFile as readFile5, readdir as readdir4, stat as stat5, writeFile as writeFile5 } from "node:fs/promises";
-import { join as join12 } from "node:path";
-function classifyRecord(record, isAlive, _now) {
-  const status = record.status;
-  if (TERMINAL_STATUSES.includes(status)) {
-    return "skip-terminal";
-  }
-  if (status === "queued") {
-    return "reclassify-failed-queued";
-  }
-  if (record.pid === void 0) {
-    return "reclassify-pre-schema";
-  }
-  return isAlive(record.pid) ? "readopt" : "reclassify-killed";
-}
-function defaultLivenessProbe(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    const code = e?.code;
-    if (code === "ESRCH") return false;
-    if (code === "EPERM") return true;
-    return false;
-  }
-}
-async function reconcileOrphansAtStartup(deps) {
-  const result = {
-    scanned: 0,
-    readopted: [],
-    reclassified: [],
-    preSchema: [],
-    unresumable: [],
-    errors: []
-  };
-  let entries;
-  try {
-    entries = await readdir4(deps.runsRoot);
-  } catch (e) {
-    const code = e?.code;
-    if (code === "ENOENT") return result;
-    result.errors.push({
-      id: "<runsRoot>",
-      message: `readdir failed: ${e?.message ?? String(e)}`
-    });
-    return result;
-  }
-  for (const id of entries) {
-    const recordPath = join12(deps.runsRoot, id, "record.json");
-    try {
-      let raw;
-      try {
-        raw = await readFile5(recordPath, "utf-8");
-      } catch (e) {
-        const code = e?.code;
-        if (code === "ENOENT" || code === "ENOTDIR") {
-          continue;
-        }
-        throw e;
-      }
-      result.scanned++;
-      let record;
-      try {
-        record = JSON.parse(raw);
-      } catch (e) {
-        result.errors.push({
-          id,
-          message: `JSON parse error: ${e?.message ?? String(e)}`
-        });
-        continue;
-      }
-      if (deps.registry.has(record.id ?? id)) {
-        continue;
-      }
-      const verdict = classifyRecord(record, deps.isAlive, deps.now);
-      switch (verdict) {
-        case "skip-terminal":
-          break;
-        case "readopt": {
-          const orphan = buildOrphanRun(record, "running");
-          deps.registry.register(orphan);
-          result.readopted.push(record.id);
-          await checkSessionResumability(record, result);
-          break;
-        }
-        case "reclassify-killed":
-        case "reclassify-pre-schema": {
-          const errorMessage = verdict === "reclassify-pre-schema" ? "orphaned: pre-pid-schema record (post-startup reconcile)" : "orphaned: process gone (post-startup reconcile)";
-          await reclassifyOnDisk({
-            recordPath,
-            record,
-            nextStatus: "killed",
-            errorMessage,
-            now: deps.now
-          });
-          const orphan = buildOrphanRun({
-            ...record,
-            status: "killed",
-            finishedAt: deps.now,
-            errorMessage
-          }, "killed");
-          deps.registry.register(orphan);
-          result.reclassified.push(record.id);
-          if (verdict === "reclassify-pre-schema") {
-            result.preSchema.push(record.id);
-          }
-          await checkSessionResumability(record, result);
-          break;
-        }
-        case "reclassify-failed-queued": {
-          const errorMessage = "orphaned: queue entry abandoned at startup (post-startup reconcile)";
-          await reclassifyOnDisk({
-            recordPath,
-            record,
-            nextStatus: "failed",
-            errorMessage,
-            now: deps.now
-          });
-          const orphan = buildOrphanRun({
-            ...record,
-            status: "failed",
-            finishedAt: deps.now,
-            errorMessage
-          }, "failed");
-          deps.registry.register(orphan);
-          result.reclassified.push(record.id);
-          break;
-        }
-      }
-    } catch (e) {
-      result.errors.push({
-        id,
-        message: e?.message ?? String(e)
-      });
-    }
-  }
-  return result;
-}
-function buildOrphanRun(record, status) {
-  return {
-    id: record.id,
-    persona: record.persona,
-    task: record.task,
-    model: record.model,
-    thinking: record.thinking,
-    mode: record.mode,
-    status,
-    startTime: record.startTime,
-    finishedAt: record.finishedAt,
-    pausedAt: record.pausedAt,
-    pid: record.pid,
-    exitCode: record.exitCode,
-    stopReason: record.stopReason,
-    errorMessage: record.errorMessage,
-    lastEventAt: record.finishedAt ?? record.startTime,
-    messages: [],
-    usage: record.usage ?? emptyUsage(),
-    cwd: record.cwd,
-    recordPath: record.recordPath,
-    transcriptPath: record.transcriptPath,
-    finalPath: record.finalPath,
-    sessionPath: record.sessionPath,
-    systemPrompt: record.systemPrompt,
-    hookResult: record.hookResult
-    // proc intentionally undefined: we have no handle.
-  };
-}
-async function reclassifyOnDisk(opts) {
-  const updated = {
-    ...opts.record,
-    status: opts.nextStatus,
-    finishedAt: opts.now,
-    errorMessage: opts.errorMessage
-  };
-  await writeFile5(opts.recordPath, JSON.stringify(updated, null, 2));
-}
-async function checkSessionResumability(record, result) {
-  if (!record.sessionPath) {
-    return;
-  }
-  try {
-    await stat5(record.sessionPath);
-  } catch {
-    result.unresumable.push(record.id);
-  }
-}
-
 // src/conductor-mode.ts
 var OFF_TOKENS = /* @__PURE__ */ new Set(["0", "false", "off", "no"]);
 var ON_TOKENS = /* @__PURE__ */ new Set(["1", "true", "on", "yes"]);
@@ -6186,6 +6294,13 @@ function index_default(pi) {
     getRegistry: () => registry,
     getQueue: () => queue,
     getModel: () => focusModel,
+    /**
+     * v0.9.x Slice 4: expose the most-recent post-startup reconcile
+     * result so /conductor doctor surfaces it under "## Post-startup
+     * reconcile". Stays undefined until session_start finishes its
+     * reconcile pass.
+     */
+    getLastReconcile: () => lastReconcile,
     /**
      * Snapshot the parent conductor's conversation for inherit_context.
      * Walks the current session's tree from leaf to root via

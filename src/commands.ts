@@ -35,9 +35,13 @@ import {
   type RunRegistry,
 } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
-import { buildDoctorReport } from "./doctor.ts";
+import { buildDoctorReport, renderReconcileSummary } from "./doctor.ts";
 import { buildHistoryReport } from "./history.ts";
 import { isPinned, pinRun, unpinRun } from "./gc/pinning.ts";
+import {
+  defaultLivenessProbe,
+  reconcileOrphansAtStartup,
+} from "./reconcile-startup.ts";
 import { runGc, type RunGcResult } from "./gc/index.ts";
 import { walkInventory } from "./gc/inventory.ts";
 import { planReclaim, type ReclaimAction } from "./gc/policy.ts";
@@ -52,6 +56,14 @@ interface RegisterCommandsOpts {
   setConductorMode: (on: boolean) => void;
   /** Open the focused-stream overlay (no-op when no UI ctx). */
   openFocusedOverlay: (id?: string) => void;
+  /**
+   * v0.9.x Slice 4: most recent post-startup reconcile result captured
+   * by `src/index.ts:session_start`. Optional so existing callers
+   * (tests, edge cases) keep compiling without forcing the lastReconcile
+   * dep through every entry point. The doctor surface treats undefined
+   * as "never run."
+   */
+  getLastReconcile?: () => import("./reconcile-startup.ts").PostStartupReconcileResult | undefined;
 }
 
 const SUBCOMMANDS = [
@@ -70,6 +82,7 @@ const SUBCOMMANDS = [
   "pin",
   "unpin",
   "gc",
+  "reconcile",
   "watchdog",
 ];
 
@@ -138,6 +151,9 @@ export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): 
           return;
         case "gc":
           await runGcCmd(opts, ctx, subRest);
+          return;
+        case "reconcile":
+          await runReconcileCmd(opts, ctx, subRest);
           return;
         case "watchdog":
           runWatchdog(opts, ctx, subRest);
@@ -236,6 +252,7 @@ async function runDoctor(
     registry: opts.getRegistry(),
     queue: opts.getQueue(),
     conductorMode: opts.getConductorMode(),
+    lastReconcile: opts.getLastReconcile?.(),
   });
   ctx.ui.notify(report, "info");
 }
@@ -738,6 +755,95 @@ export async function runGcCmd(
 
   const out = formatGcResult(result, plan.actions, flags);
   ctx.ui.notify(out, "info");
+}
+
+// ── /conductor reconcile ────────────────────────────────────────────────────
+//
+// v0.9.x Slice 4. Manual re-trigger of the post-startup orphan reconcile
+// pass. Mirrors `/conductor gc` shape: arg-parser, deps wiring, pure
+// renderer (`renderReconcileSummary` from doctor.ts) for output.
+//
+// `--dry-run` threads `dryRun: true` into `reconcileOrphansAtStartup`
+// (single-deps-flag option per design §6 + slice-4 builder note). The
+// scanner walks + classifies + reports identically; the dryRun branch
+// short-circuits writeFile + registry.register so disk and registry
+// stay untouched. Drives the same renderer as the doctor section.
+
+const RECONCILE_HELP_TEXT = [
+  "/conductor reconcile [--dry-run]  — re-run post-startup orphan reconcile.",
+  "",
+  "  --dry-run           classify + report; do NOT mutate disk or registry.",
+  "  --help              print this listing.",
+].join("\n");
+
+interface ParsedReconcileFlags {
+  dryRun: boolean;
+  help: boolean;
+}
+
+function parseReconcileFlags(
+  arg: string,
+): { ok: true; flags: ParsedReconcileFlags } | { ok: false; error: string } {
+  const out: ParsedReconcileFlags = { dryRun: false, help: false };
+  const tokens = arg.split(/\s+/).filter((t) => t.length > 0);
+  for (const tok of tokens) {
+    if (tok === "--dry-run") out.dryRun = true;
+    else if (tok === "--help" || tok === "-h") out.help = true;
+    else return { ok: false, error: `unknown flag: ${tok}` };
+  }
+  return { ok: true, flags: out };
+}
+
+/** Structural dependencies; mirrors GcCmdOpts so tests can pass a minimal shape. */
+export interface ReconcileCmdOpts {
+  getCwd: () => string;
+  getRegistry: () => RunRegistry;
+}
+
+/**
+ * `/conductor reconcile` slash subcommand. Re-fires
+ * `reconcileOrphansAtStartup` against the live registry; with
+ * `--dry-run`, classifies + reports without mutating disk or registry.
+ *
+ * Spec: docs/v0.9.x-post-startup-reconcile-design.md §6.
+ */
+export async function runReconcileCmd(
+  opts: ReconcileCmdOpts,
+  ctx: ExtensionCommandContext,
+  arg: string,
+): Promise<void> {
+  const parsed = parseReconcileFlags(arg);
+  if (!parsed.ok) {
+    ctx.ui.notify(`${parsed.error}\n\n${RECONCILE_HELP_TEXT}`, "warning");
+    return;
+  }
+  const flags = parsed.flags;
+  if (flags.help) {
+    ctx.ui.notify(RECONCILE_HELP_TEXT, "info");
+    return;
+  }
+
+  const registry = opts.getRegistry();
+  const root = runsRoot();
+  try {
+    const result = await reconcileOrphansAtStartup({
+      runsRoot: root,
+      registry,
+      isAlive: defaultLivenessProbe,
+      now: Date.now(),
+      dryRun: flags.dryRun,
+    });
+    const out = renderReconcileSummary(result, {
+      dryRun: flags.dryRun,
+      includeHeader: true,
+    }).join("\n");
+    ctx.ui.notify(out, "info");
+  } catch (e: unknown) {
+    ctx.ui.notify(
+      `reconcile failed: ${(e as Error)?.message ?? String(e)}`,
+      "warning",
+    );
+  }
 }
 
 // ── /conductor watchdog ─────────────────────────────────────────────────

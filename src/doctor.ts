@@ -20,6 +20,7 @@ import type { PersonaResolution } from "./types.ts";
 import { lastGcMarkerPath, readLastGcMtime } from "./gc/last-gc.ts";
 import { walkInventory } from "./gc/inventory.ts";
 import { planReclaim } from "./gc/policy.ts";
+import type { PostStartupReconcileResult } from "./reconcile-startup.ts";
 
 export interface DoctorReportOptions {
   cwd: string;
@@ -43,6 +44,12 @@ export interface DoctorReportOptions {
    * eviction candidates without touching the real wall-clock.
    */
   now?: number;
+  /**
+   * v0.9.x Slice 4: most recent post-startup reconcile result captured
+   * by the session-start handler in src/index.ts. Undefined before the
+   * first reconcile fires; doctor renders "never" in that case.
+   */
+  lastReconcile?: PostStartupReconcileResult;
 }
 
 export async function buildDoctorReport(opts: DoctorReportOptions): Promise<string> {
@@ -282,6 +289,17 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
     }
   }
 
+  // v0.9.x Slice 4: post-startup reconcile section.
+  lines.push("");
+  lines.push("## Post-startup reconcile");
+  if (opts.lastReconcile === undefined) {
+    lines.push("  last run:              never (no reconcile this session)");
+  } else {
+    for (const ln of renderReconcileSummary(opts.lastReconcile, { dryRun: false, includeHeader: false })) {
+      lines.push(`  ${ln}`);
+    }
+  }
+
   lines.push("");
   lines.push("## Runtime");
   lines.push(`  active:        ${opts.registry.countActive()}`);
@@ -289,6 +307,65 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
   lines.push(`  total tracked: ${opts.registry.list().length}`);
 
   return lines.join("\n");
+}
+
+/**
+ * Pure renderer for the v0.9.x post-startup reconcile result. Returns
+ * one line per body row — callers prepend the section header (`##
+ * Post-startup reconcile`) themselves so the same body fits both the
+ * doctor surface (indented under the section) and the slash-command
+ * surface (top-level).
+ *
+ * Lists at most 8 ids per category to keep the output bounded; we
+ * append a `(N more)` hint when truncated. Errors are listed with
+ * their messages so operators can investigate without grepping logs.
+ *
+ * @param opts.dryRun — if true, prefix the leading line with a
+ *   `(dry-run — no disk writes)` banner so the slash command's preview
+ *   mode is unmistakable.
+ * @param opts.includeHeader — if true, prepend a `## Post-startup
+ *   reconcile` heading; doctor sets false (it owns the heading) and
+ *   the slash command sets true (it doesn't).
+ */
+export function renderReconcileSummary(
+  result: PostStartupReconcileResult,
+  opts: { dryRun: boolean; includeHeader: boolean },
+): string[] {
+  const lines: string[] = [];
+  if (opts.includeHeader) {
+    lines.push("## Post-startup reconcile");
+    if (opts.dryRun) lines.push("(dry-run — no disk writes, no registry mutation)");
+  } else if (opts.dryRun) {
+    lines.push("(dry-run — no disk writes)");
+  }
+  lines.push(`scanned:      ${result.scanned}`);
+  lines.push(`readopted:    ${result.readopted.length}${listSample(result.readopted)}`);
+  lines.push(`reclassified: ${result.reclassified.length}${listSample(result.reclassified)}`);
+  if (result.preSchema.length > 0) {
+    lines.push(
+      `pre-pid-schema: ${result.preSchema.length}${listSample(result.preSchema)}`,
+    );
+  }
+  lines.push(`unresumable:  ${result.unresumable.length}${listSample(result.unresumable)}`);
+  lines.push(`errors:       ${result.errors.length}`);
+  if (result.errors.length > 0) {
+    const cap = 8;
+    for (const e of result.errors.slice(0, cap)) {
+      lines.push(`  ${e.id}: ${e.message}`);
+    }
+    if (result.errors.length > cap) {
+      lines.push(`  (${result.errors.length - cap} more)`);
+    }
+  }
+  return lines;
+}
+
+function listSample(ids: readonly string[]): string {
+  if (ids.length === 0) return "";
+  const cap = 8;
+  const shown = ids.slice(0, cap);
+  const more = ids.length > cap ? ` … (+${ids.length - cap} more)` : "";
+  return ` (${shown.join(", ")}${more})`;
 }
 
 function countBySource(resolved: PersonaResolution): Record<string, number> {
