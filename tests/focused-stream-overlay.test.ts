@@ -307,7 +307,7 @@ test("FocusedStreamOverlay.handleInput: arrow-down / arrow-up scroll the transcr
   assert.ok(model.scrollOffset() < 2);
 });
 
-test("FocusedStreamOverlay.handleInput: 'k' fires onKill with focused agent id", () => {
+test("FocusedStreamOverlay.handleInput: 'k' begins kill-confirmation (does not fire onKill directly)", () => {
   const reg = new RunRegistry();
   reg.register(makeRun("a-1"));
   const model = new FocusedStreamModel(reg);
@@ -319,7 +319,8 @@ test("FocusedStreamOverlay.handleInput: 'k' fires onKill with focused agent id",
   });
   model.focus("a-1");
   overlay.handleInput("k");
-  assert.deepEqual(killed, ["a-1"]);
+  assert.deepEqual(killed, [], "slice 8: k must NOT fire onKill directly");
+  assert.equal(model.pendingKillConfirm(), "a-1");
 });
 
 test("FocusedStreamOverlay.handleInput: 's' fires onSend with focused agent id", () => {
@@ -686,4 +687,116 @@ test("FocusedStreamOverlay: stickToTail re-anchors to new bottom on pane open", 
   // After open, effective bodyRows shrinks → bottom moves to 86 → stickToTail re-snaps.
   assert.equal(model.scrollOffset(), 86, "re-anchored to new bottom");
   assert.equal(model.stickToTail(), true, "sticky preserved");
+});
+
+// ── Slice 8: kill-confirmation flow ─────────────────────────────────
+
+function setupKillConfirm(): {
+  model: FocusedStreamModel;
+  overlay: FocusedStreamOverlay;
+  killed: string[];
+  closed: { count: number };
+} {
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  reg.register(makeRun("b-2"));
+  const model = new FocusedStreamModel(reg);
+  const killed: string[] = [];
+  const closed = { count: 0 };
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {
+      closed.count += 1;
+    },
+    onKill: (id: string) => killed.push(id),
+  });
+  model.focus("a-1");
+  return { model, overlay, killed, closed };
+}
+
+test("FocusedStreamOverlay: k sets pendingKillConfirm", () => {
+  const { model, overlay, killed } = setupKillConfirm();
+  overlay.handleInput("k");
+  assert.equal(model.pendingKillConfirm(), "a-1");
+  assert.deepEqual(killed, []);
+});
+
+test("FocusedStreamOverlay: y while pending fires onKill and clears", () => {
+  const { model, overlay, killed } = setupKillConfirm();
+  overlay.handleInput("k");
+  overlay.handleInput("y");
+  assert.deepEqual(killed, ["a-1"], "y is the ONLY path that calls onKill");
+  assert.equal(model.pendingKillConfirm(), null);
+  // Capital Y also works.
+  overlay.handleInput("k");
+  overlay.handleInput("Y");
+  assert.deepEqual(killed, ["a-1", "a-1"]);
+});
+
+test("FocusedStreamOverlay: n clears without firing onKill", () => {
+  const { model, overlay, killed } = setupKillConfirm();
+  overlay.handleInput("k");
+  overlay.handleInput("n");
+  assert.deepEqual(killed, []);
+  assert.equal(model.pendingKillConfirm(), null);
+  // Capital N too.
+  overlay.handleInput("k");
+  overlay.handleInput("N");
+  assert.deepEqual(killed, []);
+  assert.equal(model.pendingKillConfirm(), null);
+});
+
+test("FocusedStreamOverlay: Esc while pending clears (does not close overlay)", () => {
+  const { model, overlay, killed, closed } = setupKillConfirm();
+  overlay.handleInput("k");
+  overlay.handleInput("\x1b");
+  assert.equal(
+    model.pendingKillConfirm(),
+    null,
+    "Esc must clear pendingKillConfirm",
+  );
+  assert.equal(closed.count, 0, "Esc while pending must NOT close overlay");
+  assert.deepEqual(killed, []);
+  // After clearing, a subsequent Esc closes as normal.
+  overlay.handleInput("\x1b");
+  assert.equal(closed.count, 1, "Esc with no pending closes as usual");
+});
+
+test("FocusedStreamOverlay: Tab while pending clears then cycles", () => {
+  const { model, overlay } = setupKillConfirm();
+  assert.equal(model.focused()?.id, "a-1");
+  overlay.handleInput("k");
+  assert.equal(model.pendingKillConfirm(), "a-1");
+  overlay.handleInput("\t");
+  assert.equal(model.pendingKillConfirm(), null, "Tab must clear pending");
+  assert.equal(model.focused()?.id, "b-2", "Tab must still cycle");
+});
+
+test("FocusedStreamOverlay: arbitrary key while pending cancels and passes through to its binding", () => {
+  const { model, overlay } = setupKillConfirm();
+  // 's' opens the input pane (no InputPane wired here → onSend path,
+  // which is also unwired → no-op). Use 'c' instead: it toggles
+  // collapse-tool-calls, an observable model mutation.
+  const before = model.collapseToolCalls();
+  overlay.handleInput("k");
+  assert.equal(model.pendingKillConfirm(), "a-1");
+  overlay.handleInput("c");
+  assert.equal(model.pendingKillConfirm(), null, "arbitrary key cancels");
+  assert.equal(
+    model.collapseToolCalls(),
+    !before,
+    "arbitrary key must pass through to its normal binding",
+  );
+});
+
+test('FocusedStreamOverlay: footer line shows "Kill <agentId>? [y/N]" while pending', () => {
+  const { model, overlay } = setupKillConfirm();
+  overlay.handleInput("k");
+  const lines = overlay.render(80);
+  const joined = lines.join("\n");
+  assert.match(joined, /Kill a-1\? \[y\/N\]/);
+  // Normal Esc/Tab/etc hint should NOT appear in the footer while pending.
+  // (They will reappear after cancel.)
+  const hintRow = lines.find((l) => /Kill a-1\? \[y\/N\]/.test(l))!;
+  assert.ok(!/Tab\/Sh-Tab/.test(hintRow), "normal binding hint must not coexist on the confirm row");
 });

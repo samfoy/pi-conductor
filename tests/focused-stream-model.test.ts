@@ -588,3 +588,35 @@ test("FocusedStreamModel: body height arithmetic excludes INPUT_PANE_ROWS when c
   model.scrollDown(10_000);
   assert.equal(model.scrollOffset(), 86, "open pane: bodyRows shrinks by INPUT_PANE_ROWS");
 });
+
+// ── Slice 8: kill-confirmation latch ─────────────────────────────────
+
+test("FocusedStreamModel: beginKillConfirm sets pendingKillConfirm to focused id", () => {
+  const { model } = setup();
+  assert.equal(model.pendingKillConfirm(), null, "initial null");
+  const id = model.focused()!.id;
+  model.beginKillConfirm(id);
+  assert.equal(model.pendingKillConfirm(), id);
+});
+
+test("FocusedStreamModel: cancelKillConfirm clears", () => {
+  const { model } = setup();
+  model.beginKillConfirm("a-1");
+  assert.equal(model.pendingKillConfirm(), "a-1");
+  model.cancelKillConfirm();
+  assert.equal(model.pendingKillConfirm(), null);
+  // Idempotent: clearing when already null is a no-op.
+  model.cancelKillConfirm();
+  assert.equal(model.pendingKillConfirm(), null);
+});
+
+test("FocusedStreamModel: pendingKillConfirm cleared on Tab cycle", () => {
+  const { model } = setup();
+  model.beginKillConfirm("a-1");
+  assert.equal(model.pendingKillConfirm(), "a-1");
+  model.cycleNext();
+  assert.equal(model.pendingKillConfirm(), null, "cycleNext must clear");
+  model.beginKillConfirm("b-2");
+  model.cyclePrev();
+  assert.equal(model.pendingKillConfirm(), null, "cyclePrev must clear");
+});

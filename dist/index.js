@@ -5833,6 +5833,15 @@ var FocusedStreamModel = class {
    */
   _inputPaneOpen = false;
   /**
+   * Slice 8 (overlay redesign): kill-confirmation latch. When non-null,
+   * holds the agent id that is awaiting a `y/N` confirmation from the
+   * footer-row prompt. The overlay is responsible for rendering the
+   * confirm row when this is set, and for routing `y/Y` → fire onKill
+   * + clear, `n/N`/`Esc` → clear, Tab → clear-then-cycle, any other
+   * key → clear-then-pass-through. Pure state; no I/O. See design §11.
+   */
+  _pendingKillConfirm = null;
+  /**
    * Slice 4: late-bind the metrics source after construction. The
    * overlay component must exist before its `getTranscriptLength()` is
    * reachable, so the factory constructs the overlay first and then
@@ -5902,16 +5911,25 @@ var FocusedStreamModel = class {
     this._focusedId = id;
     return true;
   }
-  /** Cycle to the next run in the list (wraps). */
+  /**
+   * Cycle to the next run in the list (wraps).
+   *
+   * Slice 8: also clears any pending kill-confirmation. If the user
+   * cycled mid-decision, the next `y` would otherwise fire onKill
+   * against whatever id was latched at `k`-press time — which is
+   * almost certainly NOT what they meant after a Tab.
+   */
   cycleNext() {
+    this.cancelKillConfirm();
     const list = this.activeList();
     if (list.length === 0) return;
     const idx = list.findIndex((r) => r.id === this._focusedId);
     const next = list[(idx + 1) % list.length] ?? list[0];
     this._focusedId = next.id;
   }
-  /** Cycle to the previous run in the list (wraps). */
+  /** Cycle to the previous run in the list (wraps). Slice 8: also clears pendingKillConfirm. */
   cyclePrev() {
+    this.cancelKillConfirm();
     const list = this.activeList();
     if (list.length === 0) return;
     const idx = list.findIndex((r) => r.id === this._focusedId);
@@ -6023,6 +6041,24 @@ var FocusedStreamModel = class {
   closeInputPane() {
     if (!this._inputPaneOpen) return;
     this._inputPaneOpen = false;
+  }
+  // ── Slice 8: kill-confirmation latch ──────────────────────────────
+  /** Returns the agent id awaiting kill confirmation, or null. */
+  pendingKillConfirm() {
+    return this._pendingKillConfirm;
+  }
+  /**
+   * Begin a kill confirmation against `id`. The overlay calls this
+   * from the `k` binding with the focused agent's id. Idempotent —
+   * re-arming on the same id (or a new one after a Tab cycle) just
+   * overwrites.
+   */
+  beginKillConfirm(id) {
+    this._pendingKillConfirm = id;
+  }
+  /** Clear any pending kill confirmation. Idempotent. */
+  cancelKillConfirm() {
+    this._pendingKillConfirm = null;
   }
   // ── Internal ───────────────────────────────────────────────────────
   /**
@@ -6198,7 +6234,9 @@ var FOOTER_BINDINGS = [
     matches: ["k"],
     action: (o) => {
       const focused = o.opts.model.focused();
-      if (focused) o.opts.onKill(focused.id);
+      if (!focused) return;
+      o.opts.model.beginKillConfirm(focused.id);
+      o.opts.onChange?.();
     }
   }
 ];
@@ -6363,7 +6401,16 @@ var FocusedStreamOverlay = class {
       const styled = applyThemeToLines([statusInner], classifyLine, theme, { status });
       themedStatusInner = styled[0] ?? statusInner;
     }
-    const footerHint = paneOpen ? theme ? theme.fg("dim", PANE_HINT_TEXT) : PANE_HINT_TEXT : renderFooterHintLine(FOOTER_BINDINGS, innerWidth, theme);
+    const pendingKill = model.pendingKillConfirm();
+    let footerHint;
+    if (pendingKill !== null) {
+      const killLine = `Kill ${pendingKill}? [y/N]`;
+      footerHint = theme ? theme.fg("warning", killLine) : killLine;
+    } else if (paneOpen) {
+      footerHint = theme ? theme.fg("dim", PANE_HINT_TEXT) : PANE_HINT_TEXT;
+    } else {
+      footerHint = renderFooterHintLine(FOOTER_BINDINGS, innerWidth, theme);
+    }
     const headerLines = [
       topBorder(width, theme),
       sideRow(themedStatusInner, width, theme),
@@ -6415,6 +6462,21 @@ var FocusedStreamOverlay = class {
     if (this.opts.model.inputPaneOpen() && this.opts.inputPane) {
       this.opts.inputPane.handleInput(data);
       return;
+    }
+    const pendingKill = this.opts.model.pendingKillConfirm();
+    if (pendingKill !== null) {
+      if (data === "y" || data === "Y") {
+        this.opts.onKill(pendingKill);
+        this.opts.model.cancelKillConfirm();
+        this.opts.onChange?.();
+        return;
+      }
+      if (data === "n" || data === "N" || data === "\x1B" || data === "\x1B") {
+        this.opts.model.cancelKillConfirm();
+        this.opts.onChange?.();
+        return;
+      }
+      this.opts.model.cancelKillConfirm();
     }
     for (const binding of FOOTER_BINDINGS) {
       if (binding.matches.includes(data)) {

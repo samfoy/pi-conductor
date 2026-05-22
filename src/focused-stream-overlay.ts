@@ -287,8 +287,13 @@ export const FOOTER_BINDINGS: FooterBinding[] = [
     label: "kill",
     matches: ["k"],
     action: (o) => {
+      // Slice 8: `k` no longer kills directly. It begins a footer-row
+      // confirmation; `y`/`Y` is the only path that actually fires
+      // onKill (handled in handleInput before the binding loop).
       const focused = o.opts.model.focused();
-      if (focused) o.opts.onKill(focused.id);
+      if (!focused) return;
+      o.opts.model.beginKillConfirm(focused.id);
+      o.opts.onChange?.();
     },
   },
 ];
@@ -586,9 +591,17 @@ export class FocusedStreamOverlay implements Component {
 
     // Footer hint (themed inline by renderFooterHintLine).
     // Slice 7: pane-open swaps in the contextual hint.
-    const footerHint = paneOpen
-      ? (theme ? theme.fg("dim", PANE_HINT_TEXT) : PANE_HINT_TEXT)
-      : renderFooterHintLine(FOOTER_BINDINGS, innerWidth, theme);
+    // Slice 8: kill-confirm pending swaps in the `Kill <id>? [y/N]` row.
+    const pendingKill = model.pendingKillConfirm();
+    let footerHint: string;
+    if (pendingKill !== null) {
+      const killLine = `Kill ${pendingKill}? [y/N]`;
+      footerHint = theme ? theme.fg("warning", killLine) : killLine;
+    } else if (paneOpen) {
+      footerHint = theme ? theme.fg("dim", PANE_HINT_TEXT) : PANE_HINT_TEXT;
+    } else {
+      footerHint = renderFooterHintLine(FOOTER_BINDINGS, innerWidth, theme);
+    }
 
     // Compose zones.
     const headerLines: string[] = [
@@ -660,6 +673,31 @@ export class FocusedStreamOverlay implements Component {
     if (this.opts.model.inputPaneOpen() && this.opts.inputPane) {
       this.opts.inputPane.handleInput(data);
       return;
+    }
+    // Slice 8: kill-confirmation latch intercepts before the normal
+    // FOOTER_BINDINGS dispatch. See design §11.
+    //   y/Y           → fire onKill, clear, consume
+    //   n/N           → clear, consume
+    //   Esc           → clear, consume (must NOT close overlay)
+    //   Tab/Sh-Tab    → clear, then fall through to cycle binding
+    //   anything else → clear, then fall through to its binding
+    const pendingKill = this.opts.model.pendingKillConfirm();
+    if (pendingKill !== null) {
+      if (data === "y" || data === "Y") {
+        this.opts.onKill(pendingKill);
+        this.opts.model.cancelKillConfirm();
+        this.opts.onChange?.();
+        return;
+      }
+      if (data === "n" || data === "N" || data === "\x1b" || data === "\u001b") {
+        this.opts.model.cancelKillConfirm();
+        this.opts.onChange?.();
+        return;
+      }
+      // Tab and any other key: clear pending and pass through to the
+      // normal binding loop below.
+      this.opts.model.cancelKillConfirm();
+      // (no early return — fall through)
     }
     for (const binding of FOOTER_BINDINGS) {
       if (binding.matches.includes(data)) {

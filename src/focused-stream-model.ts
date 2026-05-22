@@ -83,6 +83,16 @@ export class FocusedStreamModel {
    */
   private _inputPaneOpen = false;
 
+  /**
+   * Slice 8 (overlay redesign): kill-confirmation latch. When non-null,
+   * holds the agent id that is awaiting a `y/N` confirmation from the
+   * footer-row prompt. The overlay is responsible for rendering the
+   * confirm row when this is set, and for routing `y/Y` → fire onKill
+   * + clear, `n/N`/`Esc` → clear, Tab → clear-then-cycle, any other
+   * key → clear-then-pass-through. Pure state; no I/O. See design §11.
+   */
+  private _pendingKillConfirm: string | null = null;
+
   constructor(
     private registry: RunRegistry,
     opts: FocusedStreamModelOptions = {},
@@ -175,8 +185,16 @@ export class FocusedStreamModel {
     return true;
   }
 
-  /** Cycle to the next run in the list (wraps). */
+  /**
+   * Cycle to the next run in the list (wraps).
+   *
+   * Slice 8: also clears any pending kill-confirmation. If the user
+   * cycled mid-decision, the next `y` would otherwise fire onKill
+   * against whatever id was latched at `k`-press time — which is
+   * almost certainly NOT what they meant after a Tab.
+   */
   cycleNext(): void {
+    this.cancelKillConfirm();
     const list = this.activeList();
     if (list.length === 0) return;
     const idx = list.findIndex((r) => r.id === this._focusedId);
@@ -184,8 +202,9 @@ export class FocusedStreamModel {
     this._focusedId = next.id;
   }
 
-  /** Cycle to the previous run in the list (wraps). */
+  /** Cycle to the previous run in the list (wraps). Slice 8: also clears pendingKillConfirm. */
   cyclePrev(): void {
+    this.cancelKillConfirm();
     const list = this.activeList();
     if (list.length === 0) return;
     const idx = list.findIndex((r) => r.id === this._focusedId);
@@ -318,6 +337,28 @@ export class FocusedStreamModel {
   closeInputPane(): void {
     if (!this._inputPaneOpen) return;
     this._inputPaneOpen = false;
+  }
+
+  // ── Slice 8: kill-confirmation latch ──────────────────────────────
+
+  /** Returns the agent id awaiting kill confirmation, or null. */
+  pendingKillConfirm(): string | null {
+    return this._pendingKillConfirm;
+  }
+
+  /**
+   * Begin a kill confirmation against `id`. The overlay calls this
+   * from the `k` binding with the focused agent's id. Idempotent —
+   * re-arming on the same id (or a new one after a Tab cycle) just
+   * overwrites.
+   */
+  beginKillConfirm(id: string): void {
+    this._pendingKillConfirm = id;
+  }
+
+  /** Clear any pending kill confirmation. Idempotent. */
+  cancelKillConfirm(): void {
+    this._pendingKillConfirm = null;
   }
 
   // ── Internal ───────────────────────────────────────────────────────

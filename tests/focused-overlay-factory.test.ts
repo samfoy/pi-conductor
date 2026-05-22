@@ -100,7 +100,7 @@ test("createFocusedOverlayComponent: onClose wires `done(undefined)`", () => {
   assert.equal(closeArg, undefined, "onClose forwards `undefined` to done");
 });
 
-test("createFocusedOverlayComponent: onKill calls forceTerminate(run, 'killed', registry) for the focused run", () => {
+test("createFocusedOverlayComponent: onKill calls forceTerminate(run, 'killed', registry) for the focused run after y confirmation", () => {
   const registry = new RunRegistry();
   const run = makeRun();
   registry.register(run);
@@ -115,8 +115,10 @@ test("createFocusedOverlayComponent: onKill calls forceTerminate(run, 'killed', 
     promptAndSendToRun: () => {},
     done: () => {},
   });
-  // 'k' triggers onKill.
+  // Slice 8: 'k' begins confirmation; 'y' fires onKill.
   overlay.handleInput("k");
+  assert.equal(killArgs, null, "k alone must not fire forceTerminate");
+  overlay.handleInput("y");
   assert.deepEqual(killArgs, { runId: run.id, reason: "killed" });
 });
 

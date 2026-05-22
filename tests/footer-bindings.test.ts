@@ -115,6 +115,8 @@ test("FOOTER_BINDINGS: dispatching each binding's primary input invokes its acti
       // so the dispatch-effect test observes the mutation.
       expandAllMode: (model as any)._expandAllMode as boolean,
       foldMapSize: ((model as any)._foldExpanded as Map<string, boolean>).size,
+      // Slice 8: `k` now sets pendingKillConfirm rather than firing onKill.
+      pendingKill: model.pendingKillConfirm(),
     };
     overlay.handleInput(binding.matches[0]!);
     const after = {
@@ -127,6 +129,7 @@ test("FOOTER_BINDINGS: dispatching each binding's primary input invokes its acti
       focused: model.focused()?.id,
       expandAllMode: (model as any)._expandAllMode as boolean,
       foldMapSize: ((model as any)._foldExpanded as Map<string, boolean>).size,
+      pendingKill: model.pendingKillConfirm(),
     };
     // Pre-seed for the next iteration: the `E` (collapse) binding
     // tests that we observe a *delta*, but a fresh model has
