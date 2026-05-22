@@ -59,6 +59,14 @@ export default function (pi: ExtensionAPI): void {
 
   // Track whether an overlay is already open so multiple opens don't stack.
   let overlayOpen = false;
+  // Slice 3 (overlay redesign): captured TUI ref so the registry
+  // coalescer can call `tui.requestRender()`. `TUI` is reachable only
+  // inside `custom`/`setWidget`/`setFooter` factory bodies; we stash
+  // it the first time the overlay factory runs. Before the first
+  // capture, `requestRender` is a no-op — which is correct, because
+  // nothing is rendered yet either. The TUI instance is a
+  // process-level singleton so capturing once is sufficient.
+  let tuiRef: { requestRender: (force?: boolean) => void } | null = null;
   // Session-scoped unsub for the Ctrl+G focused-overlay shortcut.
   let unsubFocusedShortcut: (() => void) | null = null;
 
@@ -111,8 +119,9 @@ export default function (pi: ExtensionAPI): void {
     overlayOpen = true;
     void ctxRef.ui
       .custom(
-        (tui, theme, _kb, done) =>
-          createFocusedOverlayComponent({
+        (tui, theme, _kb, done) => {
+          tuiRef = tui;
+          return createFocusedOverlayComponent({
             model: focusModel,
             registry,
             forceTerminate,
@@ -129,7 +138,8 @@ export default function (pi: ExtensionAPI): void {
             // doc §3 fallback chain.
             getViewportHeight: () =>
               tui.terminal.rows ?? process.stdout.rows ?? 24,
-          }),
+          });
+        },
         {
           overlay: true,
           // Slice 1 (overlay redesign): anchored modal. Without these
@@ -349,10 +359,24 @@ export default function (pi: ExtensionAPI): void {
     unsubFocusedShortcut = installFocusedOverlayShortcut(ctx, {
       openFocusedOverlay: () => openFocusedOverlay(),
       isOverlayOpen: () => overlayOpen,
-      // Slice 11: keep the focus model fresh as the registry mutates.
-      // Lives here (session-scoped) rather than in the overlay factory
-      // (per-open) so re-opening the overlay does NOT stack listeners.
-      subscribeToRegistry: () => registry.onChange(() => focusModel.refresh()),
+      // Slice 11 + Slice 3: keep the focus model fresh as the registry
+      // mutates AND coalesce the resulting render requests through the
+      // shortcut-owned RerenderCoalescer. The `scheduleRender` arg is
+      // the coalescer's `schedule()`; production calls it after
+      // `focusModel.refresh()` so the model is up to date when the
+      // (coalesced) `tui.requestRender()` lands. Lives here
+      // (session-scoped) rather than in the overlay factory (per-open)
+      // so re-opening the overlay does NOT stack listeners.
+      subscribeToRegistry: (scheduleRender) =>
+        registry.onChange(() => {
+          focusModel.refresh();
+          scheduleRender();
+        }),
+      // Slice 3 (overlay redesign): trigger pi-tui's render scheduler
+      // when the coalescer's leading/trailing edges fire. Before the
+      // overlay has ever opened (and thus before `tuiRef` is captured)
+      // this is a no-op, which is correct — nothing is rendered yet.
+      requestRender: () => tuiRef?.requestRender(),
       // Slice 1 (overlay redesign): terminal-size source for the
       // too-small guard. `ExtensionUIContext` does not expose a TUI
       // ref outside `custom`/`setWidget` factory bodies, so we read

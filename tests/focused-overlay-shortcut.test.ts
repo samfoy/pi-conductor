@@ -362,3 +362,96 @@ test(
     assert.deepEqual(result, { consume: true });
   },
 );
+
+// ── Slice 3 (overlay redesign): registry → coalescer → tui.requestRender ──
+
+test(
+  "installFocusedOverlayShortcut: registry onChange triggers tui.requestRender exactly once on leading edge",
+  () => {
+    const fake = makeFakeCtx({ hasUI: true });
+    const holder: { fn: (() => void) | null } = { fn: null };
+    let renderCalls = 0;
+    installFocusedOverlayShortcut(fake.ctx, {
+      openFocusedOverlay: () => {},
+      isOverlayOpen: () => false,
+      requestRender: () => {
+        renderCalls += 1;
+      },
+      // Production passes (scheduleRender) => registry.onChange(() => {
+      //   focusModel.refresh(); scheduleRender();
+      // }). The shortcut owns the coalescer and exposes scheduleRender.
+      subscribeToRegistry: (scheduleRender) => {
+        holder.fn = () => scheduleRender();
+        return () => {};
+      },
+    });
+    const listener = holder.fn;
+    assert.ok(listener, "subscribeToRegistry was called and captured a listener");
+    listener();
+    assert.equal(
+      renderCalls,
+      1,
+      "first registry event must trigger tui.requestRender synchronously (leading edge)",
+    );
+  },
+);
+
+test(
+  "installFocusedOverlayShortcut: multiple onChange in 50ms window produce one trailing tui.requestRender",
+  () => {
+    const fake = makeFakeCtx({ hasUI: true });
+    const holder: { fn: (() => void) | null } = { fn: null };
+    let renderCalls = 0;
+    // Use injected fake clock + setTimeout so the trailing-edge timer
+    // is deterministic — no real timers, no flake.
+    let fakeNow = 5000;
+    const timers: { fireAt: number; cb: () => void; cancelled: boolean }[] = [];
+    installFocusedOverlayShortcut(fake.ctx, {
+      openFocusedOverlay: () => {},
+      isOverlayOpen: () => false,
+      requestRender: () => {
+        renderCalls += 1;
+      },
+      rerenderWindowMs: 50,
+      coalescerDeps: {
+        now: () => fakeNow,
+        setTimeout: (cb, ms) => {
+          const t = { fireAt: fakeNow + ms, cb, cancelled: false };
+          timers.push(t);
+          return t;
+        },
+        clearTimeout: (h) => {
+          (h as { cancelled: boolean }).cancelled = true;
+        },
+      },
+      subscribeToRegistry: (scheduleRender) => {
+        holder.fn = () => scheduleRender();
+        return () => {};
+      },
+    });
+    const listener = holder.fn;
+    assert.ok(listener);
+    // Burst of 5 events 1ms apart.
+    for (let i = 0; i < 5; i++) {
+      listener();
+      fakeNow += 1;
+    }
+    assert.equal(
+      renderCalls,
+      1,
+      "only the leading edge fired during the burst",
+    );
+    // Advance past the 50ms window — trailing should fire.
+    fakeNow += 100;
+    const due = timers.filter((t) => !t.cancelled && t.fireAt <= fakeNow);
+    for (const t of due) {
+      t.cancelled = true;
+      t.cb();
+    }
+    assert.equal(
+      renderCalls,
+      2,
+      "trailing-edge produced exactly one additional tui.requestRender (total = 2)",
+    );
+  },
+);

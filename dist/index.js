@@ -6077,6 +6077,60 @@ function createFocusedOverlayComponent(deps) {
 
 // src/focused-overlay-shortcut.ts
 import { Key, matchesKey } from "@earendil-works/pi-tui";
+
+// src/rerender-coalescer.ts
+var DEFAULT_DEPS = {
+  now: () => Date.now(),
+  setTimeout: (cb, ms) => globalThis.setTimeout(cb, ms),
+  clearTimeout: (handle) => globalThis.clearTimeout(handle)
+};
+var DEFAULT_RERENDER_WINDOW_MS = 50;
+var RerenderCoalescer = class {
+  cb;
+  windowMs;
+  deps;
+  lastFiredAt = null;
+  trailingHandle = null;
+  constructor(cb, windowMs = DEFAULT_RERENDER_WINDOW_MS, deps = DEFAULT_DEPS) {
+    this.cb = cb;
+    this.windowMs = windowMs;
+    this.deps = deps;
+  }
+  /**
+   * Record an event. Fires the callback immediately if outside the
+   * cooldown window (leading edge), otherwise arms a single trailing
+   * fire for when the window quiesces. Repeated calls inside the
+   * window collapse into the same trailing fire — at most 2 fires
+   * per burst.
+   */
+  schedule() {
+    const now = this.deps.now();
+    if (this.lastFiredAt === null || now - this.lastFiredAt >= this.windowMs) {
+      this.lastFiredAt = now;
+      this.cb();
+      return;
+    }
+    if (this.trailingHandle !== null) return;
+    const remaining = this.windowMs - (now - this.lastFiredAt);
+    this.trailingHandle = this.deps.setTimeout(() => {
+      this.trailingHandle = null;
+      this.lastFiredAt = this.deps.now();
+      this.cb();
+    }, remaining);
+  }
+  /**
+   * Cancel any pending trailing-edge fire. Called from teardown to
+   * avoid lingering timers / a post-shutdown stray render. Idempotent.
+   */
+  cancel() {
+    if (this.trailingHandle !== null) {
+      this.deps.clearTimeout(this.trailingHandle);
+      this.trailingHandle = null;
+    }
+  }
+};
+
+// src/focused-overlay-shortcut.ts
 var MIN_COLUMNS = 80;
 var MIN_ROWS = 20;
 var TOO_SMALL_MESSAGE = `Focused overlay needs \u2265${MIN_COLUMNS}\xD7${MIN_ROWS} terminal`;
@@ -6085,6 +6139,13 @@ function installFocusedOverlayShortcut(ctx, options) {
     return () => {
     };
   }
+  const coalescer = options.requestRender ? new RerenderCoalescer(
+    options.requestRender,
+    options.rerenderWindowMs ?? DEFAULT_RERENDER_WINDOW_MS,
+    options.coalescerDeps
+  ) : null;
+  const scheduleRender = coalescer ? () => coalescer.schedule() : () => {
+  };
   let unsubInput = ctx.ui.onTerminalInput((data) => {
     if (options.isOverlayOpen()) return void 0;
     if (matchesKey(data, Key.ctrl("g"))) {
@@ -6098,7 +6159,7 @@ function installFocusedOverlayShortcut(ctx, options) {
     }
     return void 0;
   });
-  let unsubRegistry = options.subscribeToRegistry ? options.subscribeToRegistry() : null;
+  let unsubRegistry = options.subscribeToRegistry ? options.subscribeToRegistry(scheduleRender) : null;
   return () => {
     if (unsubInput) {
       unsubInput();
@@ -6108,6 +6169,7 @@ function installFocusedOverlayShortcut(ctx, options) {
       unsubRegistry();
       unsubRegistry = null;
     }
+    if (coalescer) coalescer.cancel();
   };
 }
 
@@ -6296,6 +6358,7 @@ function index_default(pi) {
   const queue = new SpawnQueue(registry, 4, 1);
   const focusModel = new FocusedStreamModel(registry);
   let overlayOpen = false;
+  let tuiRef = null;
   let unsubFocusedShortcut = null;
   let lastReconcile;
   let watchdogDispose = null;
@@ -6312,23 +6375,26 @@ function index_default(pi) {
     if (agentId) focusModel.focus(agentId);
     overlayOpen = true;
     void ctxRef.ui.custom(
-      (tui, theme, _kb, done) => createFocusedOverlayComponent({
-        model: focusModel,
-        registry,
-        forceTerminate,
-        promptAndSendToRun: (id) => {
-          void promptAndSendToRun(id);
-        },
-        done,
-        theme,
-        // Slice 1 (overlay redesign): viewport-height source. `tui`
-        // is in scope inside the factory body, so we use its
-        // canonical `terminal.rows`. `process.stdout.rows` is the
-        // non-TTY fallback. Constant 24 is the last-ditch default
-        // matching the historical xterm row count and the design
-        // doc §3 fallback chain.
-        getViewportHeight: () => tui.terminal.rows ?? process.stdout.rows ?? 24
-      }),
+      (tui, theme, _kb, done) => {
+        tuiRef = tui;
+        return createFocusedOverlayComponent({
+          model: focusModel,
+          registry,
+          forceTerminate,
+          promptAndSendToRun: (id) => {
+            void promptAndSendToRun(id);
+          },
+          done,
+          theme,
+          // Slice 1 (overlay redesign): viewport-height source. `tui`
+          // is in scope inside the factory body, so we use its
+          // canonical `terminal.rows`. `process.stdout.rows` is the
+          // non-TTY fallback. Constant 24 is the last-ditch default
+          // matching the historical xterm row count and the design
+          // doc §3 fallback chain.
+          getViewportHeight: () => tui.terminal.rows ?? process.stdout.rows ?? 24
+        });
+      },
       {
         overlay: true,
         // Slice 1 (overlay redesign): anchored modal. Without these
@@ -6512,10 +6578,23 @@ function index_default(pi) {
     unsubFocusedShortcut = installFocusedOverlayShortcut(ctx, {
       openFocusedOverlay: () => openFocusedOverlay(),
       isOverlayOpen: () => overlayOpen,
-      // Slice 11: keep the focus model fresh as the registry mutates.
-      // Lives here (session-scoped) rather than in the overlay factory
-      // (per-open) so re-opening the overlay does NOT stack listeners.
-      subscribeToRegistry: () => registry.onChange(() => focusModel.refresh()),
+      // Slice 11 + Slice 3: keep the focus model fresh as the registry
+      // mutates AND coalesce the resulting render requests through the
+      // shortcut-owned RerenderCoalescer. The `scheduleRender` arg is
+      // the coalescer's `schedule()`; production calls it after
+      // `focusModel.refresh()` so the model is up to date when the
+      // (coalesced) `tui.requestRender()` lands. Lives here
+      // (session-scoped) rather than in the overlay factory (per-open)
+      // so re-opening the overlay does NOT stack listeners.
+      subscribeToRegistry: (scheduleRender) => registry.onChange(() => {
+        focusModel.refresh();
+        scheduleRender();
+      }),
+      // Slice 3 (overlay redesign): trigger pi-tui's render scheduler
+      // when the coalescer's leading/trailing edges fire. Before the
+      // overlay has ever opened (and thus before `tuiRef` is captured)
+      // this is a no-op, which is correct — nothing is rendered yet.
+      requestRender: () => tuiRef?.requestRender(),
       // Slice 1 (overlay redesign): terminal-size source for the
       // too-small guard. `ExtensionUIContext` does not expose a TUI
       // ref outside `custom`/`setWidget` factory bodies, so we read

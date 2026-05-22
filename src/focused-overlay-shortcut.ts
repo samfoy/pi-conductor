@@ -20,6 +20,11 @@
  */
 
 import { Key, matchesKey } from "@earendil-works/pi-tui";
+import {
+  RerenderCoalescer,
+  DEFAULT_RERENDER_WINDOW_MS,
+  type CoalescerDeps,
+} from "./rerender-coalescer.ts";
 
 /** Raw terminal input handler shape (same as pi's TerminalInputHandler). */
 export type TerminalInputHandler = (
@@ -53,7 +58,48 @@ export interface FocusedOverlayShortcutOptions {
    * Headless contexts (hasUI=false) skip this entirely — there's no
    * overlay to render so nothing to keep fresh.
    */
-  readonly subscribeToRegistry?: () => () => void;
+  /**
+   * Slice 11 + Slice 3 (overlay redesign): the shortcut owns a
+   * RerenderCoalescer whose `schedule()` is exposed to this callback
+   * as `scheduleRender`. Production wires this to:
+   *
+   *   subscribeToRegistry: (scheduleRender) =>
+   *     registry.onChange(() => {
+   *       focusModel.refresh();
+   *       scheduleRender();
+   *     });
+   *
+   * Owning the coalescer here (not at the callsite) means re-opening
+   * the overlay does NOT stack coalescers, mirroring the rule that
+   * the overlay factory MUST NOT register listeners (see
+   * focused-overlay-factory.ts invariant comment).
+   *
+   * The `scheduleRender` parameter is optional from the consumer's
+   * point of view — older zero-arg implementations remain compatible
+   * via TypeScript's contravariant function parameter rule.
+   */
+  readonly subscribeToRegistry?: (scheduleRender: () => void) => () => void;
+  /**
+   * Slice 3 (overlay redesign): render trigger called by the
+   * coalescer. Production: `() => tui.requestRender()`. When omitted
+   * (e.g. headless tests, or the slice 11 baseline before slice 3),
+   * `scheduleRender` becomes a no-op so existing wiring keeps
+   * working.
+   */
+  readonly requestRender?: () => void;
+  /**
+   * Slice 3 (overlay redesign): coalescer window in milliseconds.
+   * Defaults to {@link DEFAULT_RERENDER_WINDOW_MS} (50ms) — the
+   * design-locked window. Tests inject smaller/larger values via
+   * this knob; production accepts the default.
+   */
+  readonly rerenderWindowMs?: number;
+  /**
+   * Slice 3 (overlay redesign): test-only injection point for the
+   * coalescer's clock + timer primitives. Production omits this and
+   * the coalescer falls back to `Date.now`/`globalThis.setTimeout`.
+   */
+  readonly coalescerDeps?: CoalescerDeps;
   /**
    * Slice 1 (overlay redesign): terminal-size source consulted at
    * keystroke time to decide whether the terminal is large enough to
@@ -104,6 +150,23 @@ export function installFocusedOverlayShortcut(
   if (!ctx.hasUI) {
     return () => {};
   }
+  // Slice 3 (overlay redesign): own a single coalescer for the
+  // session. The shortcut hands its `schedule()` to subscribeToRegistry
+  // so the consumer can fire it from the registry change callback
+  // without each callsite needing to know about coalescing.
+  // Component.invalidate() in src/focused-stream-overlay.ts remains a
+  // no-op for now (no per-component cache yet) — slice 6's chrome
+  // rewrite is where invalidate() must clear caches per design §10.
+  const coalescer: RerenderCoalescer | null = options.requestRender
+    ? new RerenderCoalescer(
+        options.requestRender,
+        options.rerenderWindowMs ?? DEFAULT_RERENDER_WINDOW_MS,
+        options.coalescerDeps,
+      )
+    : null;
+  const scheduleRender: () => void = coalescer
+    ? () => coalescer.schedule()
+    : () => {};
   let unsubInput: (() => void) | null = ctx.ui.onTerminalInput((data) => {
     // Don't hijack Ctrl+G when an overlay is already open — let the
     // overlay's own bindings see the keystroke.
@@ -136,7 +199,7 @@ export function installFocusedOverlayShortcut(
   // focused-overlay-factory.ts) means re-opening the overlay does NOT
   // stack listeners on the registry. See docs/v0.8.3-item3-plan.md §A8.
   let unsubRegistry: (() => void) | null = options.subscribeToRegistry
-    ? options.subscribeToRegistry()
+    ? options.subscribeToRegistry(scheduleRender)
     : null;
   return () => {
     if (unsubInput) {
@@ -147,5 +210,8 @@ export function installFocusedOverlayShortcut(
       unsubRegistry();
       unsubRegistry = null;
     }
+    // Cancel any pending trailing-edge render so a post-shutdown
+    // stray fire can't land on a torn-down TUI.
+    if (coalescer) coalescer.cancel();
   };
 }
