@@ -162,6 +162,26 @@ test("classifyLine: thinking — expanded body `  ┃ <text>` continuation", () 
   assert.equal(r.glyph, "┃");
 });
 
+// ── fold marker (Slice 5) ─────────────────────────────────────────────
+
+test("classifies ⋯-prefixed line as fold", () => {
+  // Slice 5 fold marker: two leading spaces, ⋯ glyph, count, parenthetical.
+  const line = "  ⋯ 188 more lines  (e expand all · E collapse all)";
+  const r = classifyLine(line);
+  assert.equal(r.kind, "fold");
+});
+
+test("classifyLine: fold marker count varies but shape is fixed", () => {
+  const r = classifyLine("  ⋯ 4 more lines  (e expand all · E collapse all)");
+  assert.equal(r.kind, "fold");
+});
+
+test("classifyLine: ⋯-led line WITHOUT the parenthetical hint is text", () => {
+  // Defensive — only the exact fold marker shape gets the slot. Body
+  // text that happens to lead with ⋯ should not be styled as fold.
+  assert.equal(classifyLine("  ⋯ truncated").kind, "text");
+});
+
 // ── text fallback + edge cases ────────────────────────────────────────
 
 test("classifyLine: text — empty string", () => {

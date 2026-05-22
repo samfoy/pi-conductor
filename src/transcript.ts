@@ -22,6 +22,48 @@ export interface TranscriptOptions {
   collapseToolCalls: boolean;
   /** When true, thinking parts are shown; otherwise hidden. */
   showThinking: boolean;
+  /**
+   * Slice 5: optional fold-expansion query. When provided, the
+   * renderer asks `isExpanded(key, defaultFalse)` per block and
+   * bypasses the fold cap when the answer is true. When omitted,
+   * fold caps always apply with the standard limits.
+   *
+   * Block key shapes:
+   *   - tool call with `id`: `tool:<id>`
+   *   - tool call without id: `tool:<msgIdx>:<partIdx>`
+   *   - thinking part: `thinking:<msgIdx>:<partIdx>`
+   */
+  isExpanded?: (key: string, defaultExpanded: boolean) => boolean;
+}
+
+// Slice 5 fold limits. These are total emitted-line counts for the
+// block (renderToolCall expanded / renderThinking output): when the
+// block produces strictly more lines than the limit, the renderer
+// keeps the first `LIMIT` lines and replaces the tail with a single
+// fold marker.
+const TOOL_CALL_FOLD_LIMIT = 12;
+const THINKING_FOLD_LIMIT = 20;
+
+/**
+ * Build the canonical fold-marker line. Two leading spaces, U+22EF
+ * ("midline horizontal ellipsis"), positive count, two-space gap
+ * before the parenthetical hint.
+ *
+ * Width-clip handled by the caller via `truncateOrPad`.
+ */
+function foldMarker(hidden: number): string {
+  return `  ⋯ ${hidden} more lines  (e expand all · E collapse all)`;
+}
+
+/**
+ * Cap a rendered block at `limit` lines. When `block.length > limit`,
+ * returns the first `limit` lines with a fold marker appended
+ * (`limit + 1` lines total). Otherwise returns the input untouched.
+ */
+function capBlock(block: string[], limit: number, width: number): string[] {
+  if (block.length <= limit) return block;
+  const hidden = block.length - limit;
+  return [...block.slice(0, limit), truncateOrPad(foldMarker(hidden), width)];
 }
 
 // ── Header ────────────────────────────────────────────────────────────
@@ -130,6 +172,7 @@ export function deriveActivity(run: Run, nowMs: number): string | undefined {
 export function renderTranscript(run: Run, opts: TranscriptOptions): string[] {
   const out: string[] = [];
   let assistantTurnIndex = 0;
+  let msgIdx = -1;
 
   // Build a quick lookup: toolCall id → toolResult message (the toolResult
   // following an assistant message is the response to it).
@@ -146,6 +189,7 @@ export function renderTranscript(run: Run, opts: TranscriptOptions): string[] {
   }
 
   for (const msg of run.messages) {
+    msgIdx += 1;
     const role = (msg as any).role;
     if (role === "user" || role === "toolResult") {
       // toolResult is rendered inline with its toolCall, not as a top-level message.
@@ -164,7 +208,9 @@ export function renderTranscript(run: Run, opts: TranscriptOptions): string[] {
 
       const content = (msg as any).content;
       if (!Array.isArray(content)) continue;
+      let partIdx = -1;
       for (const part of content) {
+        partIdx += 1;
         switch (part?.type) {
           case "text":
             for (const line of wrap(String(part.text ?? ""), opts.width)) {
@@ -173,14 +219,32 @@ export function renderTranscript(run: Run, opts: TranscriptOptions): string[] {
             break;
           case "thinking":
             if (opts.showThinking) {
-              out.push(...renderThinking(String(part.thinking ?? ""), opts.width));
+              const tkey = `thinking:${msgIdx}:${partIdx}`;
+              const expanded = opts.isExpanded?.(tkey, false) ?? false;
+              const block = renderThinking(String(part.thinking ?? ""), opts.width);
+              const capped = expanded
+                ? block
+                : capBlock(block, THINKING_FOLD_LIMIT, opts.width);
+              out.push(...capped);
             } else {
               out.push(renderThinkingSummary(String(part.thinking ?? "")));
             }
             break;
-          case "toolCall":
-            out.push(...renderToolCall(part, resultsByCallId, opts));
+          case "toolCall": {
+            const tkey = part.id
+              ? `tool:${part.id}`
+              : `tool:${msgIdx}:${partIdx}`;
+            const expanded = opts.isExpanded?.(tkey, false) ?? false;
+            const block = renderToolCall(part, resultsByCallId, opts);
+            // Fold cap only applies in expanded mode — collapsed mode
+            // is already a single chevron line + outcome (≤3 lines).
+            const capped =
+              opts.collapseToolCalls || expanded
+                ? block
+                : capBlock(block, TOOL_CALL_FOLD_LIMIT, opts.width);
+            out.push(...capped);
             break;
+          }
           default:
             // Unknown part types are skipped (forward-compat).
             break;

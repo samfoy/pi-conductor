@@ -3858,6 +3858,16 @@ import { Type } from "@sinclair/typebox";
 
 // src/transcript.ts
 import { truncateToWidth, visibleWidth as visibleWidth2, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+var TOOL_CALL_FOLD_LIMIT = 12;
+var THINKING_FOLD_LIMIT = 20;
+function foldMarker(hidden) {
+  return `  \u22EF ${hidden} more lines  (e expand all \xB7 E collapse all)`;
+}
+function capBlock(block, limit, width) {
+  if (block.length <= limit) return block;
+  const hidden = block.length - limit;
+  return [...block.slice(0, limit), truncateOrPad(foldMarker(hidden), width)];
+}
 function renderHeader(run, width) {
   const elapsed = elapsedStr(run.startTime, run.finishedAt);
   const usage = formatUsage(run.usage);
@@ -3914,6 +3924,7 @@ function deriveActivity(run, nowMs) {
 function renderTranscript(run, opts) {
   const out = [];
   let assistantTurnIndex = 0;
+  let msgIdx = -1;
   const resultsByCallId = /* @__PURE__ */ new Map();
   for (const msg of run.messages) {
     if (msg.role !== "toolResult") continue;
@@ -3926,6 +3937,7 @@ function renderTranscript(run, opts) {
     }
   }
   for (const msg of run.messages) {
+    msgIdx += 1;
     const role = msg.role;
     if (role === "user" || role === "toolResult") {
       continue;
@@ -3937,7 +3949,9 @@ function renderTranscript(run, opts) {
       }
       const content = msg.content;
       if (!Array.isArray(content)) continue;
+      let partIdx = -1;
       for (const part of content) {
+        partIdx += 1;
         switch (part?.type) {
           case "text":
             for (const line of wrap(String(part.text ?? ""), opts.width)) {
@@ -3946,14 +3960,23 @@ function renderTranscript(run, opts) {
             break;
           case "thinking":
             if (opts.showThinking) {
-              out.push(...renderThinking(String(part.thinking ?? ""), opts.width));
+              const tkey = `thinking:${msgIdx}:${partIdx}`;
+              const expanded = opts.isExpanded?.(tkey, false) ?? false;
+              const block = renderThinking(String(part.thinking ?? ""), opts.width);
+              const capped = expanded ? block : capBlock(block, THINKING_FOLD_LIMIT, opts.width);
+              out.push(...capped);
             } else {
               out.push(renderThinkingSummary(String(part.thinking ?? "")));
             }
             break;
-          case "toolCall":
-            out.push(...renderToolCall(part, resultsByCallId, opts));
+          case "toolCall": {
+            const tkey = part.id ? `tool:${part.id}` : `tool:${msgIdx}:${partIdx}`;
+            const expanded = opts.isExpanded?.(tkey, false) ?? false;
+            const block = renderToolCall(part, resultsByCallId, opts);
+            const capped = opts.collapseToolCalls || expanded ? block : capBlock(block, TOOL_CALL_FOLD_LIMIT, opts.width);
+            out.push(...capped);
             break;
+          }
           default:
             break;
         }
@@ -4092,6 +4115,9 @@ function classifyLine(line) {
   if (/^[↑↓] \d+ hidden/.test(line) || /^[A-Za-z][A-Za-z0-9_-]* \(line \d+\/\d+\)$/.test(line)) {
     return { kind: "scrollHint", glyph: line[0] };
   }
+  if (/^ {2}⋯ \d+ more lines {2}\(e expand all · E collapse all\)$/.test(line)) {
+    return { kind: "fold", glyph: "\u22EF" };
+  }
   if (line.startsWith("Esc ")) {
     return { kind: "footer" };
   }
@@ -4138,6 +4164,8 @@ function applyTheme(line, classified, theme, opts = {}) {
     case "thinking":
       return theme.fg("dim", line);
     case "scrollHint":
+      return theme.fg("dim", line);
+    case "fold":
       return theme.fg("dim", line);
     case "turnSep":
       return theme.fg("dim", line);
@@ -5778,6 +5806,21 @@ var FocusedStreamModel = class {
   _stickToTailPerAgent = /* @__PURE__ */ new Map();
   _getMetrics;
   /**
+   * Slice 5: per-block fold expansion overrides. Today only mutated
+   * by `collapseAll()` (which clears it) and `expandAll()` (which
+   * also clears it because the global override below supersedes any
+   * per-key entry). Reserved for future per-block toggle UX (design
+   * §6 — per-block Enter is explicitly out of scope v1).
+   */
+  _foldExpanded = /* @__PURE__ */ new Map();
+  /**
+   * Slice 5: global expand-all override. When true, every
+   * `isExpanded(_, default)` returns true regardless of `default` and
+   * the per-key map. `expandAll()` sets it true; `collapseAll()`
+   * clears it.
+   */
+  _expandAllMode = false;
+  /**
    * Slice 4: late-bind the metrics source after construction. The
    * overlay component must exist before its `getTranscriptLength()` is
    * reachable, so the factory constructs the overlay first and then
@@ -5909,6 +5952,43 @@ var FocusedStreamModel = class {
   toggleShowThinking() {
     this._showThinking = !this._showThinking;
   }
+  /**
+   * Slice 5: query whether a transcript block is in expanded mode.
+   *
+   * Resolution order:
+   *   1. global `_expandAllMode` (set by `e` / cleared by `E` and
+   *      `collapseAll()`) — wins outright
+   *   2. per-key `_foldExpanded` entry — currently never written by
+   *      any production callsite, but reserved for future per-block
+   *      Enter UX (design §6)
+   *   3. fallback to caller-supplied `defaultExpanded`
+   *
+   * Pure: read-only; no mutation, safe to call from `render()`.
+   */
+  isExpanded(key, defaultExpanded) {
+    if (this._expandAllMode) return true;
+    const entry = this._foldExpanded.get(key);
+    return entry ?? defaultExpanded;
+  }
+  /**
+   * Slice 5: bound to `e` in the overlay. Turns on the global
+   * expand-all override so every fold cap is bypassed. The per-key
+   * map is cleared because the global override supersedes any
+   * lingering per-block entry.
+   */
+  expandAll() {
+    this._expandAllMode = true;
+    this._foldExpanded.clear();
+  }
+  /**
+   * Slice 5: bound to `E` in the overlay. Resets fold state to the
+   * default (caps re-applied). Drops the global override AND the
+   * per-key map.
+   */
+  collapseAll() {
+    this._expandAllMode = false;
+    this._foldExpanded.clear();
+  }
   // ── Internal ───────────────────────────────────────────────────────
   /**
    * The runs visible for cycling. Today: every LOCAL run in the registry,
@@ -6034,6 +6114,21 @@ var FOOTER_BINDINGS = [
     }
   },
   {
+    // Slice 5 (overlay redesign): fold expand/collapse for tool-call
+    // JSON walls and thinking bodies. Lowercase = additive (expand);
+    // uppercase = destructive (collapse). This is OPPOSITE to the
+    // vim/less convention; design §11 chose lowercase=expand because
+    // the more aggressive action gets the shifted key.
+    keyDisplay: "e/E",
+    label: "expand/collapse",
+    matches: ["e", "E"],
+    action: (o, data) => {
+      if (data === "e") o.opts.model.expandAll();
+      else o.opts.model.collapseAll();
+      o.opts.onChange?.();
+    }
+  },
+  {
     keyDisplay: "k",
     label: "kill",
     matches: ["k"],
@@ -6094,7 +6189,11 @@ var FocusedStreamOverlay = class {
       const transcript = renderTranscript(focused, {
         width,
         collapseToolCalls: model.collapseToolCalls(),
-        showThinking: model.showThinking()
+        showThinking: model.showThinking(),
+        // Slice 5: bind the model's per-block expand state to the
+        // pure renderer. Read-only — the renderer never writes to
+        // the model (preserves O6 render-purity invariant).
+        isExpanded: (key, def) => model.isExpanded(key, def)
       });
       this._lastTranscriptLength = transcript.length;
       const offset = Math.min(model.scrollOffset(), Math.max(0, transcript.length - 1));

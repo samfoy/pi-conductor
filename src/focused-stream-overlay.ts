@@ -208,6 +208,21 @@ export const FOOTER_BINDINGS: FooterBinding[] = [
     },
   },
   {
+    // Slice 5 (overlay redesign): fold expand/collapse for tool-call
+    // JSON walls and thinking bodies. Lowercase = additive (expand);
+    // uppercase = destructive (collapse). This is OPPOSITE to the
+    // vim/less convention; design §11 chose lowercase=expand because
+    // the more aggressive action gets the shifted key.
+    keyDisplay: "e/E",
+    label: "expand/collapse",
+    matches: ["e", "E"],
+    action: (o, data) => {
+      if (data === "e") o.opts.model.expandAll();
+      else o.opts.model.collapseAll();
+      o.opts.onChange?.();
+    },
+  },
+  {
     keyDisplay: "k",
     label: "kill",
     matches: ["k"],
@@ -304,6 +319,10 @@ export class FocusedStreamOverlay implements Component {
         width,
         collapseToolCalls: model.collapseToolCalls(),
         showThinking: model.showThinking(),
+        // Slice 5: bind the model's per-block expand state to the
+        // pure renderer. Read-only — the renderer never writes to
+        // the model (preserves O6 render-purity invariant).
+        isExpanded: (key, def) => model.isExpanded(key, def),
       });
       // Slice 4: cache transcript length so the model's getMetrics
       // closure can clamp scrollDown / drive stickToTail without

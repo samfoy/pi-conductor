@@ -111,6 +111,10 @@ test("FOOTER_BINDINGS: dispatching each binding's primary input invokes its acti
       thinking: model.showThinking(),
       scroll: model.scrollOffset(),
       focused: model.focused()?.id,
+      // Slice 5: e/E mutate fold-expansion state. Capture both flags
+      // so the dispatch-effect test observes the mutation.
+      expandAllMode: (model as any)._expandAllMode as boolean,
+      foldMapSize: ((model as any)._foldExpanded as Map<string, boolean>).size,
     };
     overlay.handleInput(binding.matches[0]!);
     const after = {
@@ -121,7 +125,19 @@ test("FOOTER_BINDINGS: dispatching each binding's primary input invokes its acti
       thinking: model.showThinking(),
       scroll: model.scrollOffset(),
       focused: model.focused()?.id,
+      expandAllMode: (model as any)._expandAllMode as boolean,
+      foldMapSize: ((model as any)._foldExpanded as Map<string, boolean>).size,
     };
+    // Pre-seed for the next iteration: the `E` (collapse) binding
+    // tests that we observe a *delta*, but a fresh model has
+    // `_expandAllMode=false` already. Seed a stale per-key entry so
+    // collapseAll's clear is observable.
+    if (binding.keyDisplay === "e/E") {
+      ((model as any)._foldExpanded as Map<string, boolean>).set(
+        "tool:seed",
+        true,
+      );
+    }
     assert.notDeepEqual(
       after,
       before,

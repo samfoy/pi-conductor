@@ -189,6 +189,14 @@ test("applyTheme: text kind passes through unchanged", () => {
   assert.equal(out, line, "text kind must NOT acquire any styling");
 });
 
+test("fold slot themed with dim", () => {
+  // Slice 5: fold marker reads as a low-intensity continuation cue,
+  // matching scrollHint / footer / thinking treatment.
+  const line = "  ⋯ 188 more lines  (e expand all · E collapse all)";
+  const out = applyTheme(line, classifyLine(line), stub);
+  assert.equal(out, `[dim]${line}[/]`);
+});
+
 test("applyTheme: empty/blank text passes through unchanged", () => {
   const out = applyTheme("", classifyLine(""), stub);
   assert.equal(out, "");

@@ -49,6 +49,8 @@ export type LineKind =
   | "thinking"
   /** Overlay scroll-position hint: `↑ N hidden  ·  ↓ M hidden`. */
   | "scrollHint"
+  /** Slice 5 fold marker: `  ⋯ N more lines  (e expand all · E collapse all)`. */
+  | "fold"
   /** Fallback: wrapped assistant body, expanded JSON args, blanks, etc. */
   | "text";
 
@@ -127,6 +129,14 @@ export function classifyLine(line: string): ClassifiedLine {
   // transcript body and footer; styling layer dims it.
   if (/^[↑↓] \d+ hidden/.test(line) || /^[A-Za-z][A-Za-z0-9_-]* \(line \d+\/\d+\)$/.test(line)) {
     return { kind: "scrollHint", glyph: line[0]! };
+  }
+
+  // Slice 5 fold marker. Exact shape only — anything matching the
+  // sniff but missing the parenthetical hint stays as `text`. Two
+  // leading spaces, U+22EF ("midline horizontal ellipsis"), positive
+  // count, two-space gap before the parenthetical.
+  if (/^ {2}⋯ \d+ more lines {2}\(e expand all · E collapse all\)$/.test(line)) {
+    return { kind: "fold", glyph: "⋯" };
   }
 
   // Footer hint line. The first hint in `FOOTER_HINTS` is "Esc close"; if

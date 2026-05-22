@@ -56,6 +56,21 @@ export class FocusedStreamModel {
   private _scrollPerAgent = new Map<string, number>();
   private _stickToTailPerAgent = new Map<string, boolean>();
   private _getMetrics: () => FocusedStreamMetrics;
+  /**
+   * Slice 5: per-block fold expansion overrides. Today only mutated
+   * by `collapseAll()` (which clears it) and `expandAll()` (which
+   * also clears it because the global override below supersedes any
+   * per-key entry). Reserved for future per-block toggle UX (design
+   * §6 — per-block Enter is explicitly out of scope v1).
+   */
+  private _foldExpanded = new Map<string, boolean>();
+  /**
+   * Slice 5: global expand-all override. When true, every
+   * `isExpanded(_, default)` returns true regardless of `default` and
+   * the per-key map. `expandAll()` sets it true; `collapseAll()`
+   * clears it.
+   */
+  private _expandAllMode = false;
 
   constructor(
     private registry: RunRegistry,
@@ -225,6 +240,46 @@ export class FocusedStreamModel {
 
   toggleShowThinking(): void {
     this._showThinking = !this._showThinking;
+  }
+
+  /**
+   * Slice 5: query whether a transcript block is in expanded mode.
+   *
+   * Resolution order:
+   *   1. global `_expandAllMode` (set by `e` / cleared by `E` and
+   *      `collapseAll()`) — wins outright
+   *   2. per-key `_foldExpanded` entry — currently never written by
+   *      any production callsite, but reserved for future per-block
+   *      Enter UX (design §6)
+   *   3. fallback to caller-supplied `defaultExpanded`
+   *
+   * Pure: read-only; no mutation, safe to call from `render()`.
+   */
+  isExpanded(key: string, defaultExpanded: boolean): boolean {
+    if (this._expandAllMode) return true;
+    const entry = this._foldExpanded.get(key);
+    return entry ?? defaultExpanded;
+  }
+
+  /**
+   * Slice 5: bound to `e` in the overlay. Turns on the global
+   * expand-all override so every fold cap is bypassed. The per-key
+   * map is cleared because the global override supersedes any
+   * lingering per-block entry.
+   */
+  expandAll(): void {
+    this._expandAllMode = true;
+    this._foldExpanded.clear();
+  }
+
+  /**
+   * Slice 5: bound to `E` in the overlay. Resets fold state to the
+   * default (caps re-applied). Drops the global override AND the
+   * per-key map.
+   */
+  collapseAll(): void {
+    this._expandAllMode = false;
+    this._foldExpanded.clear();
   }
 
   // ── Internal ───────────────────────────────────────────────────────

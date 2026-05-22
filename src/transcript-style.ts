@@ -123,6 +123,8 @@ export function applyTheme(
       return theme.fg("dim", line);
     case "scrollHint":
       return theme.fg("dim", line);
+    case "fold":
+      return theme.fg("dim", line);
     case "turnSep":
       return theme.fg("dim", line);
     case "footer":

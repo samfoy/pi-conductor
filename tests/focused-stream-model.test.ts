@@ -508,3 +508,47 @@ test("FocusedStreamModel: resize (getMetrics returns new bodyRows) re-clamps off
   model.scrollDown(1);
   assert.equal(model.scrollOffset(), 20, "next mutation re-clamps under new bodyRows");
 });
+
+// ── Slice 5: fold expansion state ────────────────────────────────
+
+test("isExpanded falls back to default when key absent", () => {
+  const { model } = setup();
+  // No prior expand/collapse → key not in map. The default arg wins.
+  assert.equal(model.isExpanded("tool:none", false), false);
+  assert.equal(model.isExpanded("tool:none", true), true);
+});
+
+test("expandAll/collapseAll mutate _foldExpanded", () => {
+  const { model } = setup();
+  // Pre-populate with a stale per-key entry to verify clears.
+  (model as any)._foldExpanded.set("tool:legacy", true);
+  assert.equal((model as any)._foldExpanded.size, 1);
+
+  // expandAll resets the per-key map and turns global override on.
+  model.expandAll();
+  assert.equal(
+    (model as any)._foldExpanded.size,
+    0,
+    "expandAll clears per-key overrides (global mode supersedes)",
+  );
+  // Any default-false key now reads as expanded.
+  assert.equal(model.isExpanded("tool:any", false), true);
+  assert.equal(model.isExpanded("thinking:0:0", false), true);
+
+  // collapseAll clears the map AND drops global mode.
+  model.collapseAll();
+  assert.equal((model as any)._foldExpanded.size, 0);
+  assert.equal(
+    model.isExpanded("tool:any", false),
+    false,
+    "collapseAll restores default-false behaviour",
+  );
+});
+
+test("FocusedStreamModel: collapseAll after expandAll un-latches global override", () => {
+  const { model } = setup();
+  model.expandAll();
+  assert.equal(model.isExpanded("k1", false), true);
+  model.collapseAll();
+  assert.equal(model.isExpanded("k1", false), false);
+});
