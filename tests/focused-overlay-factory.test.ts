@@ -244,3 +244,56 @@ test("createFocusedOverlayComponent: viewport rows propagate to renderScrollHint
     `expected scroll hint with 'hidden' in output (today suppressed because factory passes viewportHeight=0); got:\n${joined}`,
   );
 });
+
+// ── Slice 4: factory wires getMetrics closure ───────────────────
+//
+// The model needs `getMetrics: () => { bodyRows; transcriptLength }`
+// to clamp scroll + drive stickToTail. The factory builds it from
+// (a) the injected `getViewportHeight` (which production wires to
+// `tui.terminal.rows`) and (b) the overlay component's own
+// `getTranscriptLength()`. The factory MUST register the closure
+// with the model after constructing the overlay so the transcript-
+// length getter is reachable.
+
+test("createFocusedOverlayComponent: wires getMetrics closure with live tui.terminal.rows", () => {
+  const registry = new RunRegistry();
+  registry.register(makeRun({ id: "a-1" }));
+  let viewportRows = 30;
+  const model = new FocusedStreamModel(registry);
+  const overlay = createFocusedOverlayComponent({
+    model,
+    registry,
+    forceTerminate: () => {},
+    promptAndSendToRun: () => {},
+    done: () => {},
+    getViewportHeight: () => viewportRows,
+  });
+  // After construction the overlay’s `getTranscriptLength()` is 0 until
+  // the first render(); we render once at width 80 to populate it.
+  overlay.render(80);
+  // Probe via the model: scrollDown(huge) clamps at the bottom, which
+  // is `max(0, transcriptLength - bodyRows)`. Picking a known transcript
+  // size requires rendering with content; the simplest behavioural probe
+  // is just that scrolling is clamped at SOME finite value derived from
+  // the live closure (i.e. NOT unbounded — which is the pre-fix bug).
+  model.scrollDown(10_000);
+  const offset = model.scrollOffset();
+  // Live: changing the viewport rows must change the clamp on the next
+  // mutation — i.e. the closure is not captured-by-value at construction.
+  viewportRows = 5;
+  // Bigger viewport in the original probe (rows=30) means a smaller
+  // clamp (bottom = transcriptLength - 30); shrinking to rows=5 must
+  // raise the bottom on the next mutation.
+  overlay.render(80);
+  model.scrollDown(10_000);
+  const tighterOffset = model.scrollOffset();
+  assert.ok(
+    tighterOffset >= offset,
+    `expected smaller viewport (5 rows) to allow at-least-as-deep scroll bottom as 30 rows; got first=${offset}, second=${tighterOffset}`,
+  );
+  // Strong invariant: scrolling must be clamped, not unbounded.
+  assert.ok(
+    Number.isFinite(tighterOffset) && tighterOffset < 10_000,
+    `scrollOffset must be clamped under getMetrics; got ${tighterOffset}`,
+  );
+});

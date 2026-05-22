@@ -166,6 +166,19 @@ export const FOOTER_BINDINGS: FooterBinding[] = [
     },
   },
   {
+    // Slice 4 (overlay redesign): Home/End jump-to-extremes.
+    // `g`/`G` mirror the keys for less/vim-style users. The label keeps
+    // the footer compact — a single hint slot covers both ends.
+    keyDisplay: "Home/End",
+    label: "top/tail",
+    matches: ["\x1b[H", "\x1b[F", "g", "G"],
+    action: (o, data) => {
+      if (data === "\x1b[H" || data === "g") o.opts.model.jumpToHome();
+      else o.opts.model.jumpToTail();
+      o.opts.onChange?.();
+    },
+  },
+  {
     keyDisplay: "s",
     label: "send",
     matches: ["s"],
@@ -242,6 +255,20 @@ export function renderFooterLine(
 }
 
 export class FocusedStreamOverlay implements Component {
+  /**
+   * Slice 4: cached transcript line count from the most recent
+   * `render()` call. Read by the model's `getMetrics` closure (wired
+   * by the factory) to clamp `scrollDown` and drive `stickToTail`.
+   *
+   * This IS a render-side mutation, but it's idempotent memoization —
+   * a pure side-output of `render()` that any caller could re-derive
+   * by re-running `renderTranscript` with the same inputs. Slice 6's
+   * three-zone chrome rewrite will introduce a true render cache and
+   * make `invalidate()` clear it; until then this single counter is
+   * the entire "cache".
+   */
+  private _lastTranscriptLength = 0;
+
   constructor(private readonly _opts: FocusedStreamOverlayOptions) {}
 
   render(width: number): string[] {
@@ -278,6 +305,10 @@ export class FocusedStreamOverlay implements Component {
         collapseToolCalls: model.collapseToolCalls(),
         showThinking: model.showThinking(),
       });
+      // Slice 4: cache transcript length so the model's getMetrics
+      // closure can clamp scrollDown / drive stickToTail without
+      // re-rendering. Pure memoization (see field comment).
+      this._lastTranscriptLength = transcript.length;
 
       // Apply scroll offset to the transcript only — header and footer stay pinned.
       const offset = Math.min(model.scrollOffset(), Math.max(0, transcript.length - 1));
@@ -304,8 +335,19 @@ export class FocusedStreamOverlay implements Component {
     // (Empty-state branch returned earlier — see Slice 10 comment above.)
   }
 
+  /**
+   * Slice 4: transcript line count from the most recent render(). Used
+   * by the model's getMetrics closure. Returns 0 before the first
+   * render() or when the focused branch did not run (empty state).
+   */
+  getTranscriptLength(): number {
+    return this._lastTranscriptLength;
+  }
+
   invalidate(): void {
     // Stateless beyond what the model holds. Nothing to clear.
+    // Slice 6 will introduce a render cache; per design §10 invalidate
+    // MUST clear that cache when it lands.
   }
 
   /**

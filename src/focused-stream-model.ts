@@ -5,34 +5,99 @@
  * here, and asks for the current view (focused run, scroll offset, fold
  * flags, etc.) when re-rendering. No TUI imports — this is the model layer.
  *
- * State per agent: scroll offset.
+ * State per agent: scroll offset, stickToTail latch.
  * State global: collapseToolCalls, showThinking, focused id.
  */
 
 import type { RunRegistry } from "./runs.ts";
 import type { Run } from "./types.ts";
 
+/**
+ * Slice 4: viewport metrics injection. The model needs to know the
+ * renderable body height (`bodyRows`) and the total transcript line
+ * count (`transcriptLength`) to clamp `scrollDown` at the bottom and
+ * to drive `stickToTail` auto-follow.
+ *
+ * `Component.handleInput(data)` has NO width/height parameter, so we
+ * cannot pass these as args at keystroke time. The agreed data path
+ * (oracle gate fix, plan §Slice 4) is a closure injected at model
+ * construction. The factory builds it from `tui.terminal.rows`
+ * (live, less chrome) and the overlay's `getTranscriptLength()`
+ * (populated as a side-output of render — pure memoization, see
+ * design §10).
+ */
+export interface FocusedStreamMetrics {
+  /** Renderable body height in lines (chrome already subtracted). */
+  readonly bodyRows: number;
+  /** Total transcript line count for the focused run. */
+  readonly transcriptLength: number;
+}
+
+export interface FocusedStreamModelOptions {
+  /**
+   * Optional viewport-metrics provider. When omitted, the model
+   * defaults to a "do not clamp" behaviour (`bodyRows: 0`,
+   * `transcriptLength: Infinity` → bottom = +∞), which preserves the
+   * pre-slice unbounded-scroll semantics for tests/callsites that
+   * don't care about clamping.
+   */
+  readonly getMetrics?: () => FocusedStreamMetrics;
+}
+
+const NO_CLAMP_METRICS: FocusedStreamMetrics = {
+  bodyRows: 0,
+  transcriptLength: Number.POSITIVE_INFINITY,
+};
+
 export class FocusedStreamModel {
   private _focusedId: string | undefined;
   private _collapseToolCalls = true;
   private _showThinking = false;
   private _scrollPerAgent = new Map<string, number>();
+  private _stickToTailPerAgent = new Map<string, boolean>();
+  private _getMetrics: () => FocusedStreamMetrics;
 
-  constructor(private registry: RunRegistry) {
+  constructor(
+    private registry: RunRegistry,
+    opts: FocusedStreamModelOptions = {},
+  ) {
+    this._getMetrics = opts.getMetrics ?? (() => NO_CLAMP_METRICS);
     this.refresh();
   }
 
-  /** Re-evaluate focused run against the current registry state. */
+  /**
+   * Slice 4: late-bind the metrics source after construction. The
+   * overlay component must exist before its `getTranscriptLength()` is
+   * reachable, so the factory constructs the overlay first and then
+   * wires this closure. Tests that construct the model with a fully
+   * formed metrics provider can pass it via `opts.getMetrics` instead.
+   */
+  setMetricsSource(getMetrics: () => FocusedStreamMetrics): void {
+    this._getMetrics = getMetrics;
+  }
+
+  /**
+   * Re-evaluate focused run against the current registry state. When
+   * the focused agent has `stickToTail=true` latched, also re-snap the
+   * scroll offset to the new bottom (the transcript may have grown
+   * since the previous refresh).
+   */
   refresh(): void {
     const locals = this.activeList();
     if (locals.length === 0) {
       this._focusedId = undefined;
       return;
     }
-    if (this._focusedId && locals.some((r) => r.id === this._focusedId)) return;
-    // Default focus = most recently started LOCAL run.
-    const newest = locals.slice().sort((a, b) => b.startTime - a.startTime)[0]!;
-    this._focusedId = newest.id;
+    if (!this._focusedId || !locals.some((r) => r.id === this._focusedId)) {
+      // Default focus = most recently started LOCAL run.
+      const newest = locals.slice().sort((a, b) => b.startTime - a.startTime)[0]!;
+      this._focusedId = newest.id;
+    }
+    // Auto-follow: if the focused agent is latched at tail, re-snap the
+    // offset to the new bottom (transcript may have grown).
+    if (this._focusedId && this._stickToTailPerAgent.get(this._focusedId) === true) {
+      this._scrollPerAgent.set(this._focusedId, this.bottom());
+    }
   }
 
   // ── Read-only accessors ────────────────────────────────────────────
@@ -41,8 +106,6 @@ export class FocusedStreamModel {
     if (!this._focusedId) return undefined;
     const run = this.registry.get(this._focusedId);
     if (!run) return undefined;
-    // Defence-in-depth: gate inline so a stale _focusedId from before a
-    // run was rewritten as foreign cannot surface between refreshes.
     if (!this.isLocal(run)) return undefined;
     return run;
   }
@@ -58,6 +121,17 @@ export class FocusedStreamModel {
   scrollOffset(): number {
     if (!this._focusedId) return 0;
     return this._scrollPerAgent.get(this._focusedId) ?? 0;
+  }
+
+  /**
+   * Slice 4: read-only access to the per-agent stickToTail latch. When
+   * `id` is omitted, returns the focused agent's flag (or `false` when
+   * nothing is focused).
+   */
+  stickToTail(id?: string): boolean {
+    const key = id ?? this._focusedId;
+    if (!key) return false;
+    return this._stickToTailPerAgent.get(key) === true;
   }
 
   /** Number of runs the model knows about (visible to cycle). */
@@ -97,7 +171,21 @@ export class FocusedStreamModel {
     if (!Number.isFinite(n) || n <= 0) return;
     if (!this._focusedId) return;
     const cur = this._scrollPerAgent.get(this._focusedId) ?? 0;
-    this._scrollPerAgent.set(this._focusedId, cur + Math.floor(n));
+    const bottom = this.bottom();
+    // Re-clamp the existing offset under the current metrics first
+    // (handles the resize case where bodyRows shrunk between mutations
+    // and the cached offset is now past the new bottom), then apply n,
+    // then clamp the result.
+    const clampedCur = Math.min(cur, bottom);
+    const next = Math.min(clampedCur + Math.floor(n), bottom);
+    this._scrollPerAgent.set(this._focusedId, next);
+    // Latch stickToTail when the user organically reaches the bottom.
+    if (next >= bottom && bottom > 0) {
+      this._stickToTailPerAgent.set(this._focusedId, true);
+    } else if (next < bottom) {
+      // If we land short of bottom (clamped n smaller than the gap),
+      // do NOT latch — current latch state is preserved.
+    }
   }
 
   scrollUp(n: number): void {
@@ -105,6 +193,30 @@ export class FocusedStreamModel {
     if (!this._focusedId) return;
     const cur = this._scrollPerAgent.get(this._focusedId) ?? 0;
     this._scrollPerAgent.set(this._focusedId, Math.max(0, cur - Math.floor(n)));
+    // User-up always un-latches.
+    this._stickToTailPerAgent.set(this._focusedId, false);
+  }
+
+  /**
+   * Slice 4: snap to the bottom of the focused agent's transcript and
+   * latch `stickToTail=true`. Bound to `End`/`G` by the overlay
+   * Component.
+   */
+  jumpToTail(): void {
+    if (!this._focusedId) return;
+    this._scrollPerAgent.set(this._focusedId, this.bottom());
+    this._stickToTailPerAgent.set(this._focusedId, true);
+  }
+
+  /**
+   * Slice 4: snap to the top of the focused agent's transcript and
+   * un-latch `stickToTail`. Bound to `Home`/`g` by the overlay
+   * Component.
+   */
+  jumpToHome(): void {
+    if (!this._focusedId) return;
+    this._scrollPerAgent.set(this._focusedId, 0);
+    this._stickToTailPerAgent.set(this._focusedId, false);
   }
 
   toggleCollapseToolCalls(): void {
@@ -146,5 +258,14 @@ export class FocusedStreamModel {
    */
   private isLocal(run: Run): boolean {
     return run.parentPid === undefined || run.parentPid === process.pid;
+  }
+
+  /**
+   * Slice 4: compute the renderable bottom for the focused agent based
+   * on the injected `getMetrics` closure. `bottom = max(0, transcriptLength - bodyRows)`.
+   */
+  private bottom(): number {
+    const m = this._getMetrics();
+    return Math.max(0, m.transcriptLength - m.bodyRows);
   }
 }

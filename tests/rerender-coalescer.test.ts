@@ -16,60 +16,16 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
-  RerenderCoalescer,
-  type CoalescerDeps,
-} from "../src/rerender-coalescer.ts";
+import { RerenderCoalescer } from "../src/rerender-coalescer.ts";
+import { makeFakeClock } from "./helpers/fake-clock.ts";
 
-interface ScheduledTimer {
-  readonly fireAt: number;
-  readonly cb: () => void;
-  cancelled: boolean;
-}
-
-function makeFakeDeps(initialNow = 1000): {
-  deps: CoalescerDeps;
-  setNow: (n: number) => void;
-  advance: (ms: number) => void;
-  pendingCount: () => number;
-} {
-  let now = initialNow;
-  const timers: ScheduledTimer[] = [];
-  const deps: CoalescerDeps = {
-    now: () => now,
-    setTimeout: (cb: () => void, ms: number) => {
-      const t: ScheduledTimer = { fireAt: now + ms, cb, cancelled: false };
-      timers.push(t);
-      return t;
-    },
-    clearTimeout: (handle: unknown) => {
-      const t = handle as ScheduledTimer;
-      t.cancelled = true;
-    },
-  };
-  return {
-    deps,
-    setNow: (n) => {
-      now = n;
-    },
-    advance: (ms) => {
-      const target = now + ms;
-      // Walk timers in fire order; advance now to each fire and run cb.
-      // Re-entrant scheduling is not supported by the test harness; the
-      // class never reschedules from inside its own cb in production.
-      while (true) {
-        const due = timers
-          .filter((t) => !t.cancelled && t.fireAt <= target)
-          .sort((a, b) => a.fireAt - b.fireAt)[0];
-        if (!due) break;
-        now = due.fireAt;
-        due.cancelled = true;
-        due.cb();
-      }
-      now = target;
-    },
-    pendingCount: () => timers.filter((t) => !t.cancelled).length,
-  };
+// Slice 4 fold-in: shared fake-clock harness now lives in
+// `tests/helpers/fake-clock.ts` (extracted from this file's original
+// `makeFakeDeps` + the inline copy in `tests/focused-overlay-shortcut.test.ts`).
+// `makeFakeDeps` here remains as a thin shim so the existing test
+// bodies don't churn.
+function makeFakeDeps(initialNow = 1000) {
+  return makeFakeClock(initialNow);
 }
 
 test("RerenderCoalescer: fires leading-edge synchronously", () => {

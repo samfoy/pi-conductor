@@ -15,6 +15,7 @@ import {
   installFocusedOverlayShortcut,
   type FocusedOverlayShortcutCtx,
 } from "../src/focused-overlay-shortcut.ts";
+import { makeFakeClock } from "./helpers/fake-clock.ts";
 
 type Handler = (data: string) => { consume?: boolean; data?: string } | undefined;
 
@@ -402,10 +403,9 @@ test(
     const fake = makeFakeCtx({ hasUI: true });
     const holder: { fn: (() => void) | null } = { fn: null };
     let renderCalls = 0;
-    // Use injected fake clock + setTimeout so the trailing-edge timer
-    // is deterministic — no real timers, no flake.
-    let fakeNow = 5000;
-    const timers: { fireAt: number; cb: () => void; cancelled: boolean }[] = [];
+    // Slice 4 fold-in: shared fake-clock harness from
+    // `tests/helpers/fake-clock.ts`.
+    const clock = makeFakeClock(5000);
     installFocusedOverlayShortcut(fake.ctx, {
       openFocusedOverlay: () => {},
       isOverlayOpen: () => false,
@@ -413,17 +413,7 @@ test(
         renderCalls += 1;
       },
       rerenderWindowMs: 50,
-      coalescerDeps: {
-        now: () => fakeNow,
-        setTimeout: (cb, ms) => {
-          const t = { fireAt: fakeNow + ms, cb, cancelled: false };
-          timers.push(t);
-          return t;
-        },
-        clearTimeout: (h) => {
-          (h as { cancelled: boolean }).cancelled = true;
-        },
-      },
+      coalescerDeps: clock.deps,
       subscribeToRegistry: (scheduleRender) => {
         holder.fn = () => scheduleRender();
         return () => {};
@@ -434,20 +424,15 @@ test(
     // Burst of 5 events 1ms apart.
     for (let i = 0; i < 5; i++) {
       listener();
-      fakeNow += 1;
+      clock.advance(1);
     }
     assert.equal(
       renderCalls,
       1,
       "only the leading edge fired during the burst",
     );
-    // Advance past the 50ms window — trailing should fire.
-    fakeNow += 100;
-    const due = timers.filter((t) => !t.cancelled && t.fireAt <= fakeNow);
-    for (const t of due) {
-      t.cancelled = true;
-      t.cb();
-    }
+    // Advance past the 50ms window — trailing should fire automatically.
+    clock.advance(100);
     assert.equal(
       renderCalls,
       2,

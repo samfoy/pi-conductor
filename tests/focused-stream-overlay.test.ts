@@ -469,3 +469,55 @@ test(
     assert.equal(refreshCalls, 2);
   },
 );
+
+// ── Slice 4: Home/End/g/G key bindings ─────────────────────────
+//
+// `Home`/`g` jumps the offset to 0 and un-latches stickToTail.
+// `End`/`G` snaps the offset to the renderable bottom and latches
+// stickToTail. `Component.handleInput`'s signature is unchanged — the
+// model reads the viewport via its injected `getMetrics` closure.
+
+function setupWithMetrics(
+  metrics: () => { bodyRows: number; transcriptLength: number },
+): { reg: RunRegistry; model: FocusedStreamModel; overlay: FocusedStreamOverlay } {
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  const model = new FocusedStreamModel(reg, { getMetrics: metrics });
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {},
+    onKill: () => {},
+  });
+  return { reg, model, overlay };
+}
+
+test("FocusedStreamOverlay.handleInput: Home key dispatches model.scrollUp to top", () => {
+  const { model, overlay } = setupWithMetrics(() => ({ bodyRows: 10, transcriptLength: 50 }));
+  model.jumpToTail();
+  assert.equal(model.scrollOffset(), 40);
+  // xterm Home: ESC [ H
+  overlay.handleInput("\x1b[H");
+  assert.equal(model.scrollOffset(), 0, "Home resets offset to 0");
+  assert.equal(model.stickToTail(), false, "Home un-latches");
+});
+
+test("FocusedStreamOverlay.handleInput: End key dispatches model.jumpToTail", () => {
+  const { model, overlay } = setupWithMetrics(() => ({ bodyRows: 10, transcriptLength: 50 }));
+  assert.equal(model.scrollOffset(), 0);
+  // xterm End: ESC [ F
+  overlay.handleInput("\x1b[F");
+  assert.equal(model.scrollOffset(), 40, "End snaps to bottom");
+  assert.equal(model.stickToTail(), true, "End latches stickToTail");
+});
+
+test("FocusedStreamOverlay.handleInput: g/G shortcuts mirror Home/End", () => {
+  const a = setupWithMetrics(() => ({ bodyRows: 10, transcriptLength: 50 }));
+  a.model.jumpToTail();
+  a.overlay.handleInput("g");
+  assert.equal(a.model.scrollOffset(), 0, "g mirrors Home");
+  assert.equal(a.model.stickToTail(), false);
+  const b = setupWithMetrics(() => ({ bodyRows: 10, transcriptLength: 50 }));
+  b.overlay.handleInput("G");
+  assert.equal(b.model.scrollOffset(), 40, "G mirrors End");
+  assert.equal(b.model.stickToTail(), true);
+});

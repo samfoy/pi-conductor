@@ -348,3 +348,163 @@ test("FocusedStreamModel: focused() returns undefined when stored _focusedId res
   a.parentPid = 999_999;
   assert.equal(model.focused(), undefined);
 });
+
+// ── Slice 4: bounded scroll + stickToTail (auto-follow-tail) ─────────
+//
+// The model now accepts a `getMetrics: () => { bodyRows; transcriptLength }`
+// closure at construction. It uses this to (a) clamp `scrollDown` at
+// the renderable bottom, (b) latch a per-agent `stickToTail` flag when
+// the user reaches the bottom, and (c) re-snap the offset to the new
+// bottom on `refresh()` while latched. `Component.handleInput`'s
+// signature is unchanged — the closure is the data path.
+
+interface MetricsHandle {
+  get: () => { bodyRows: number; transcriptLength: number };
+  set: (next: Partial<{ bodyRows: number; transcriptLength: number }>) => void;
+}
+
+function makeMetrics(bodyRows = 10, transcriptLength = 0): MetricsHandle {
+  let m = { bodyRows, transcriptLength };
+  return {
+    get: () => m,
+    set: (next) => {
+      m = { ...m, ...next };
+    },
+  };
+}
+
+test("FocusedStreamModel: model takes getMetrics injection", () => {
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  const metrics = makeMetrics(10, 0);
+  const model = new FocusedStreamModel(reg, { getMetrics: metrics.get });
+  // Construction with an injected getMetrics is enough to satisfy the
+  // contract — the offset stays at 0 with no transcript, and scrolling
+  // is clamped (covered by the next test).
+  assert.equal(model.scrollOffset(), 0);
+});
+
+test("FocusedStreamModel: scrollDown clamps at bottom (per getMetrics)", () => {
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  const metrics = makeMetrics(10, 20); // bottom = max(0, 20 - 10) = 10
+  const model = new FocusedStreamModel(reg, { getMetrics: metrics.get });
+  model.scrollDown(50);
+  assert.equal(model.scrollOffset(), 10, "scrollDown clamps at bottom");
+});
+
+test("FocusedStreamModel: stickToTail latches on at bottom", () => {
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  const metrics = makeMetrics(10, 20); // bottom = 10
+  const model = new FocusedStreamModel(reg, { getMetrics: metrics.get });
+  assert.equal(model.stickToTail(), false, "starts unlatched");
+  model.scrollDown(50); // organically reaches bottom
+  assert.equal(model.stickToTail(), true, "latches on after reaching bottom");
+});
+
+test("FocusedStreamModel: stickToTail latches off on user-up", () => {
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  const metrics = makeMetrics(10, 20);
+  const model = new FocusedStreamModel(reg, { getMetrics: metrics.get });
+  model.jumpToTail();
+  assert.equal(model.stickToTail(), true);
+  model.scrollUp(1);
+  assert.equal(model.stickToTail(), false, "user-up un-latches");
+});
+
+test("FocusedStreamModel: End/G resets stickToTail=true and snaps to bottom", () => {
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  const metrics = makeMetrics(10, 50); // bottom = 40
+  const model = new FocusedStreamModel(reg, { getMetrics: metrics.get });
+  model.scrollDown(5); // offset=5, not latched
+  assert.equal(model.stickToTail(), false);
+  model.jumpToTail();
+  assert.equal(model.scrollOffset(), 40, "snaps to bottom");
+  assert.equal(model.stickToTail(), true, "End/G latches on");
+});
+
+test("FocusedStreamModel: Home/g sets stickToTail=false and offset=0", () => {
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  const metrics = makeMetrics(10, 50);
+  const model = new FocusedStreamModel(reg, { getMetrics: metrics.get });
+  model.jumpToTail();
+  assert.equal(model.stickToTail(), true);
+  model.jumpToHome();
+  assert.equal(model.scrollOffset(), 0, "Home/g resets offset");
+  assert.equal(model.stickToTail(), false, "Home/g un-latches");
+});
+
+test("FocusedStreamModel: refresh while stickToTail keeps offset at new bottom (re-reads getMetrics)", () => {
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  const metrics = makeMetrics(10, 20); // bottom = 10
+  const model = new FocusedStreamModel(reg, { getMetrics: metrics.get });
+  model.jumpToTail();
+  assert.equal(model.scrollOffset(), 10);
+  // Transcript grows — bottom moves.
+  metrics.set({ transcriptLength: 30 }); // new bottom = 20
+  model.refresh();
+  assert.equal(model.scrollOffset(), 20, "re-snaps to new bottom while latched");
+});
+
+test("FocusedStreamModel: refresh without stickToTail leaves offset alone", () => {
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  const metrics = makeMetrics(10, 50);
+  const model = new FocusedStreamModel(reg, { getMetrics: metrics.get });
+  model.scrollDown(5); // offset=5, not latched (didn't reach bottom)
+  assert.equal(model.stickToTail(), false);
+  metrics.set({ transcriptLength: 100 });
+  model.refresh();
+  assert.equal(model.scrollOffset(), 5, "offset unchanged while unlatched");
+});
+
+test("FocusedStreamModel: Tab cycle restores per-agent (offset, stickToTail) pair", () => {
+  const reg = new RunRegistry();
+  const a = { ...makeRun("a-1"), startTime: 1000 };
+  const b = { ...makeRun("b-2"), startTime: 2000 };
+  reg.register(a);
+  reg.register(b);
+  const metrics = makeMetrics(10, 50); // bottom = 40
+  const model = new FocusedStreamModel(reg, { getMetrics: metrics.get });
+  // refresh() picked b-2 (most recent). Latch on b.
+  assert.equal(model.focused()?.id, "b-2");
+  model.jumpToTail();
+  assert.equal(model.scrollOffset(), 40);
+  assert.equal(model.stickToTail(), true);
+  // Cycle to a; mutate state.
+  model.cyclePrev();
+  assert.equal(model.focused()?.id, "a-1");
+  model.scrollDown(7);
+  assert.equal(model.scrollOffset(), 7);
+  assert.equal(model.stickToTail(), false, "a-1 not latched");
+  // Cycle back to b — offset=40, latched should restore.
+  model.cycleNext();
+  assert.equal(model.focused()?.id, "b-2");
+  assert.equal(model.scrollOffset(), 40, "b-2 offset restored");
+  assert.equal(model.stickToTail(), true, "b-2 latched state restored");
+  // And back to a.
+  model.cyclePrev();
+  assert.equal(model.scrollOffset(), 7, "a-1 offset restored");
+  assert.equal(model.stickToTail(), false);
+});
+
+test("FocusedStreamModel: resize (getMetrics returns new bodyRows) re-clamps offset on next mutation", () => {
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  const metrics = makeMetrics(10, 50); // bottom = 40
+  const model = new FocusedStreamModel(reg, { getMetrics: metrics.get });
+  model.scrollDown(35); // offset=35, valid for bodyRows=10
+  assert.equal(model.scrollOffset(), 35);
+  // Terminal grew — bodyRows=30 → new bottom = max(0, 50-30) = 20.
+  metrics.set({ bodyRows: 30 });
+  // Next mutation MUST observe the new clamp. Use scrollDown(1) — the
+  // model clamps to 20 (new bottom) before the +1, then clamps the
+  // result again → final offset = 20.
+  model.scrollDown(1);
+  assert.equal(model.scrollOffset(), 20, "next mutation re-clamps under new bodyRows");
+});

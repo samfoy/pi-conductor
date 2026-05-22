@@ -68,7 +68,7 @@ export interface FocusedOverlayFactoryDeps {
 export function createFocusedOverlayComponent(
   deps: FocusedOverlayFactoryDeps,
 ): FocusedStreamOverlay {
-  return new FocusedStreamOverlay({
+  const overlay = new FocusedStreamOverlay({
     model: deps.model,
     onClose: () => deps.done(undefined),
     onKill: (id: string) => {
@@ -83,4 +83,27 @@ export function createFocusedOverlayComponent(
     theme: deps.theme,
     getViewportHeight: deps.getViewportHeight,
   });
+
+  // Slice 4 (overlay redesign): wire the live viewport-metrics closure
+  // onto the model so `scrollDown` clamps at the renderable bottom and
+  // `stickToTail` can latch. We compute `bodyRows` from the host's
+  // injected `getViewportHeight()` (production: `tui.terminal.rows`)
+  // less a CHROME_ROWS budget covering header (2) + footer (2) +
+  // optional scroll hint (1). Slice 6's chrome rewrite will replace
+  // this constant with computed zone heights.
+  //
+  // `transcriptLength` reads the overlay's render-side cache. Pre
+  // first render the cache is 0 — which yields `bottom = 0` and the
+  // model treats the agent as fully visible (no scroll needed). Once
+  // the host renders, the closure picks up the real value.
+  const CHROME_ROWS = 5;
+  deps.model.setMetricsSource(() => {
+    const viewport = deps.getViewportHeight?.() ?? 0;
+    return {
+      bodyRows: Math.max(0, viewport - CHROME_ROWS),
+      transcriptLength: overlay.getTranscriptLength(),
+    };
+  });
+
+  return overlay;
 }

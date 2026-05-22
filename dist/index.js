@@ -5760,9 +5760,14 @@ If your reason isn't on this list, default back to the canonical chain. "I think
 }
 
 // src/focused-stream-model.ts
+var NO_CLAMP_METRICS = {
+  bodyRows: 0,
+  transcriptLength: Number.POSITIVE_INFINITY
+};
 var FocusedStreamModel = class {
-  constructor(registry) {
+  constructor(registry, opts = {}) {
     this.registry = registry;
+    this._getMetrics = opts.getMetrics ?? (() => NO_CLAMP_METRICS);
     this.refresh();
   }
   registry;
@@ -5770,16 +5775,37 @@ var FocusedStreamModel = class {
   _collapseToolCalls = true;
   _showThinking = false;
   _scrollPerAgent = /* @__PURE__ */ new Map();
-  /** Re-evaluate focused run against the current registry state. */
+  _stickToTailPerAgent = /* @__PURE__ */ new Map();
+  _getMetrics;
+  /**
+   * Slice 4: late-bind the metrics source after construction. The
+   * overlay component must exist before its `getTranscriptLength()` is
+   * reachable, so the factory constructs the overlay first and then
+   * wires this closure. Tests that construct the model with a fully
+   * formed metrics provider can pass it via `opts.getMetrics` instead.
+   */
+  setMetricsSource(getMetrics) {
+    this._getMetrics = getMetrics;
+  }
+  /**
+   * Re-evaluate focused run against the current registry state. When
+   * the focused agent has `stickToTail=true` latched, also re-snap the
+   * scroll offset to the new bottom (the transcript may have grown
+   * since the previous refresh).
+   */
   refresh() {
     const locals = this.activeList();
     if (locals.length === 0) {
       this._focusedId = void 0;
       return;
     }
-    if (this._focusedId && locals.some((r) => r.id === this._focusedId)) return;
-    const newest = locals.slice().sort((a, b) => b.startTime - a.startTime)[0];
-    this._focusedId = newest.id;
+    if (!this._focusedId || !locals.some((r) => r.id === this._focusedId)) {
+      const newest = locals.slice().sort((a, b) => b.startTime - a.startTime)[0];
+      this._focusedId = newest.id;
+    }
+    if (this._focusedId && this._stickToTailPerAgent.get(this._focusedId) === true) {
+      this._scrollPerAgent.set(this._focusedId, this.bottom());
+    }
   }
   // ── Read-only accessors ────────────────────────────────────────────
   focused() {
@@ -5798,6 +5824,16 @@ var FocusedStreamModel = class {
   scrollOffset() {
     if (!this._focusedId) return 0;
     return this._scrollPerAgent.get(this._focusedId) ?? 0;
+  }
+  /**
+   * Slice 4: read-only access to the per-agent stickToTail latch. When
+   * `id` is omitted, returns the focused agent's flag (or `false` when
+   * nothing is focused).
+   */
+  stickToTail(id) {
+    const key = id ?? this._focusedId;
+    if (!key) return false;
+    return this._stickToTailPerAgent.get(key) === true;
   }
   /** Number of runs the model knows about (visible to cycle). */
   agentCount() {
@@ -5831,13 +5867,41 @@ var FocusedStreamModel = class {
     if (!Number.isFinite(n) || n <= 0) return;
     if (!this._focusedId) return;
     const cur = this._scrollPerAgent.get(this._focusedId) ?? 0;
-    this._scrollPerAgent.set(this._focusedId, cur + Math.floor(n));
+    const bottom = this.bottom();
+    const clampedCur = Math.min(cur, bottom);
+    const next = Math.min(clampedCur + Math.floor(n), bottom);
+    this._scrollPerAgent.set(this._focusedId, next);
+    if (next >= bottom && bottom > 0) {
+      this._stickToTailPerAgent.set(this._focusedId, true);
+    } else if (next < bottom) {
+    }
   }
   scrollUp(n) {
     if (!Number.isFinite(n) || n <= 0) return;
     if (!this._focusedId) return;
     const cur = this._scrollPerAgent.get(this._focusedId) ?? 0;
     this._scrollPerAgent.set(this._focusedId, Math.max(0, cur - Math.floor(n)));
+    this._stickToTailPerAgent.set(this._focusedId, false);
+  }
+  /**
+   * Slice 4: snap to the bottom of the focused agent's transcript and
+   * latch `stickToTail=true`. Bound to `End`/`G` by the overlay
+   * Component.
+   */
+  jumpToTail() {
+    if (!this._focusedId) return;
+    this._scrollPerAgent.set(this._focusedId, this.bottom());
+    this._stickToTailPerAgent.set(this._focusedId, true);
+  }
+  /**
+   * Slice 4: snap to the top of the focused agent's transcript and
+   * un-latch `stickToTail`. Bound to `Home`/`g` by the overlay
+   * Component.
+   */
+  jumpToHome() {
+    if (!this._focusedId) return;
+    this._scrollPerAgent.set(this._focusedId, 0);
+    this._stickToTailPerAgent.set(this._focusedId, false);
   }
   toggleCollapseToolCalls() {
     this._collapseToolCalls = !this._collapseToolCalls;
@@ -5871,6 +5935,14 @@ var FocusedStreamModel = class {
    */
   isLocal(run) {
     return run.parentPid === void 0 || run.parentPid === process.pid;
+  }
+  /**
+   * Slice 4: compute the renderable bottom for the focused agent based
+   * on the injected `getMetrics` closure. `bottom = max(0, transcriptLength - bodyRows)`.
+   */
+  bottom() {
+    const m = this._getMetrics();
+    return Math.max(0, m.transcriptLength - m.bodyRows);
   }
 };
 
@@ -5916,6 +5988,19 @@ var FOOTER_BINDINGS = [
       else if (data === "\x1B[B") o.opts.model.scrollDown(1);
       else if (data === "\x1B[5~") o.opts.model.scrollUp(10);
       else if (data === "\x1B[6~") o.opts.model.scrollDown(10);
+      o.opts.onChange?.();
+    }
+  },
+  {
+    // Slice 4 (overlay redesign): Home/End jump-to-extremes.
+    // `g`/`G` mirror the keys for less/vim-style users. The label keeps
+    // the footer compact — a single hint slot covers both ends.
+    keyDisplay: "Home/End",
+    label: "top/tail",
+    matches: ["\x1B[H", "\x1B[F", "g", "G"],
+    action: (o, data) => {
+      if (data === "\x1B[H" || data === "g") o.opts.model.jumpToHome();
+      else o.opts.model.jumpToTail();
       o.opts.onChange?.();
     }
   },
@@ -5981,6 +6066,19 @@ var FocusedStreamOverlay = class {
     this._opts = _opts;
   }
   _opts;
+  /**
+   * Slice 4: cached transcript line count from the most recent
+   * `render()` call. Read by the model's `getMetrics` closure (wired
+   * by the factory) to clamp `scrollDown` and drive `stickToTail`.
+   *
+   * This IS a render-side mutation, but it's idempotent memoization —
+   * a pure side-output of `render()` that any caller could re-derive
+   * by re-running `renderTranscript` with the same inputs. Slice 6's
+   * three-zone chrome rewrite will introduce a true render cache and
+   * make `invalidate()` clear it; until then this single counter is
+   * the entire "cache".
+   */
+  _lastTranscriptLength = 0;
   render(width) {
     const { model, theme } = this.opts;
     const focused = model.focused();
@@ -5998,6 +6096,7 @@ var FocusedStreamOverlay = class {
         collapseToolCalls: model.collapseToolCalls(),
         showThinking: model.showThinking()
       });
+      this._lastTranscriptLength = transcript.length;
       const offset = Math.min(model.scrollOffset(), Math.max(0, transcript.length - 1));
       const visibleTranscript = transcript.slice(offset);
       const viewportHeight = this.opts.getViewportHeight?.() ?? 0;
@@ -6012,6 +6111,14 @@ var FocusedStreamOverlay = class {
     if (!theme) return [...bodyLines, ...footerLines];
     const themedBody = applyThemeToLines(bodyLines, classifyLine, theme, { status });
     return [...themedBody, ...footerLines];
+  }
+  /**
+   * Slice 4: transcript line count from the most recent render(). Used
+   * by the model's getMetrics closure. Returns 0 before the first
+   * render() or when the focused branch did not run (empty state).
+   */
+  getTranscriptLength() {
+    return this._lastTranscriptLength;
   }
   invalidate() {
   }
@@ -6059,7 +6166,7 @@ function renderScrollHint(scrollOffset, transcriptLineCount, viewportHeight, age
 
 // src/focused-overlay-factory.ts
 function createFocusedOverlayComponent(deps) {
-  return new FocusedStreamOverlay({
+  const overlay = new FocusedStreamOverlay({
     model: deps.model,
     onClose: () => deps.done(void 0),
     onKill: (id) => {
@@ -6073,6 +6180,15 @@ function createFocusedOverlayComponent(deps) {
     theme: deps.theme,
     getViewportHeight: deps.getViewportHeight
   });
+  const CHROME_ROWS = 5;
+  deps.model.setMetricsSource(() => {
+    const viewport = deps.getViewportHeight?.() ?? 0;
+    return {
+      bodyRows: Math.max(0, viewport - CHROME_ROWS),
+      transcriptLength: overlay.getTranscriptLength()
+    };
+  });
+  return overlay;
 }
 
 // src/focused-overlay-shortcut.ts
