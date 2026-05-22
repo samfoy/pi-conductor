@@ -5787,6 +5787,9 @@ If your reason isn't on this list, default back to the canonical chain. "I think
 `;
 }
 
+// src/input-pane.ts
+var INPUT_PANE_ROWS = 6;
+
 // src/focused-stream-model.ts
 var NO_CLAMP_METRICS = {
   bodyRows: 0,
@@ -5820,6 +5823,15 @@ var FocusedStreamModel = class {
    * clears it.
    */
   _expandAllMode = false;
+  /**
+   * Slice 7 (overlay redesign): split-pane input flag. When true, the
+   * overlay shrinks its body region by `INPUT_PANE_ROWS` and routes
+   * keystrokes to the InputPane. State is global (not per-agent) —
+   * cycling agents while open keeps the pane up. Idempotent open /
+   * close so the same `s` keystroke can be handled twice without
+   * mis-stacking.
+   */
+  _inputPaneOpen = false;
   /**
    * Slice 4: late-bind the metrics source after construction. The
    * overlay component must exist before its `getTranscriptLength()` is
@@ -5989,6 +6001,29 @@ var FocusedStreamModel = class {
     this._expandAllMode = false;
     this._foldExpanded.clear();
   }
+  // ── Slice 7: split-pane input ─────────────────────────────────────
+  inputPaneOpen() {
+    return this._inputPaneOpen;
+  }
+  /**
+   * Idempotent open. When the focused agent is currently latched to
+   * tail (`stickToTail==true`) the model re-snaps to the new bottom
+   * so the live tail remains visible above the input pane. Without
+   * this re-anchor, the bottom shifts up by INPUT_PANE_ROWS as soon
+   * as the pane opens and the user loses sight of the latest output.
+   */
+  openInputPane() {
+    if (this._inputPaneOpen) return;
+    this._inputPaneOpen = true;
+    if (this._focusedId && this._stickToTailPerAgent.get(this._focusedId) === true) {
+      this._scrollPerAgent.set(this._focusedId, this.bottom());
+    }
+  }
+  /** Idempotent close. */
+  closeInputPane() {
+    if (!this._inputPaneOpen) return;
+    this._inputPaneOpen = false;
+  }
   // ── Internal ───────────────────────────────────────────────────────
   /**
    * The runs visible for cycling. Today: every LOCAL run in the registry,
@@ -6022,7 +6057,11 @@ var FocusedStreamModel = class {
    */
   bottom() {
     const m = this._getMetrics();
-    return Math.max(0, m.transcriptLength - m.bodyRows);
+    const effectiveBody = Math.max(
+      0,
+      m.bodyRows - (this._inputPaneOpen ? INPUT_PANE_ROWS : 0)
+    );
+    return Math.max(0, m.transcriptLength - effectiveBody);
   }
 };
 
@@ -6036,6 +6075,7 @@ var HEADER_ROWS = 4;
 var FOOTER_ROWS = 3;
 var BORDER_INSET = 4;
 var DEFAULT_VIEWPORT_ROWS = 24;
+var PANE_HINT_TEXT = "Esc:cancel \xB7 Enter:send \xB7 Ctrl-Enter:newline";
 var TL = "\u256D";
 var TR = "\u256E";
 var BL = "\u2570";
@@ -6103,10 +6143,15 @@ var FOOTER_BINDINGS = [
     label: "send",
     matches: ["s"],
     action: (o) => {
-      const onSend = o.opts.onSend;
-      if (!onSend) return;
       const focused = o.opts.model.focused();
-      if (focused) onSend(focused.id);
+      if (!focused) return;
+      if (o.opts.inputPane) {
+        o.opts.model.openInputPane();
+        o.opts.onChange?.();
+        return;
+      }
+      const onSend = o.opts.onSend;
+      if (onSend) onSend(focused.id);
     }
   },
   {
@@ -6277,13 +6322,15 @@ var FocusedStreamOverlay = class {
     const viewport = viewportRaw && viewportRaw > 0 ? viewportRaw : DEFAULT_VIEWPORT_ROWS;
     const bodyRows = Math.max(1, viewport - HEADER_ROWS - FOOTER_ROWS);
     const innerWidth = Math.max(0, width - BORDER_INSET);
+    const paneOpen = model.inputPaneOpen() && this.opts.inputPane !== void 0;
+    const transcriptRows = paneOpen ? Math.max(1, bodyRows - INPUT_PANE_ROWS) : bodyRows;
     let transcriptLength = 0;
     let bodyInnerLines;
     let statusInner = "";
     let status;
     if (!focused) {
-      bodyInnerLines = renderEmpty(innerWidth, bodyRows, theme);
-      bodyInnerLines = fitToHeight(bodyInnerLines, bodyRows);
+      bodyInnerLines = renderEmpty(innerWidth, transcriptRows, theme);
+      bodyInnerLines = fitToHeight(bodyInnerLines, transcriptRows);
     } else {
       const hdr = renderHeader(focused, innerWidth);
       statusInner = hdr[1] ?? "";
@@ -6298,12 +6345,12 @@ var FocusedStreamOverlay = class {
         model.scrollOffset(),
         Math.max(0, transcript.length - 1)
       );
-      let bodyContent = transcript.slice(offset, offset + bodyRows);
-      const hint = renderScrollHint(offset, transcript.length, bodyRows, {
+      let bodyContent = transcript.slice(offset, offset + transcriptRows);
+      const hint = renderScrollHint(offset, transcript.length, transcriptRows, {
         id: focused.id,
         agentCount: model.agentCount()
       });
-      bodyContent = fitToHeight(bodyContent, bodyRows);
+      bodyContent = fitToHeight(bodyContent, transcriptRows);
       if (hint !== null) {
         bodyContent[bodyContent.length - 1] = hint;
       }
@@ -6316,7 +6363,7 @@ var FocusedStreamOverlay = class {
       const styled = applyThemeToLines([statusInner], classifyLine, theme, { status });
       themedStatusInner = styled[0] ?? statusInner;
     }
-    const footerHint = renderFooterHintLine(FOOTER_BINDINGS, innerWidth, theme);
+    const footerHint = paneOpen ? theme ? theme.fg("dim", PANE_HINT_TEXT) : PANE_HINT_TEXT : renderFooterHintLine(FOOTER_BINDINGS, innerWidth, theme);
     const headerLines = [
       topBorder(width, theme),
       sideRow(themedStatusInner, width, theme),
@@ -6324,8 +6371,14 @@ var FocusedStreamOverlay = class {
       sideRow("", width, theme)
     ];
     const bodyLines = themedBodyInner.map((l) => sideRow(l, width, theme));
-    while (bodyLines.length < bodyRows) bodyLines.push(sideRow("", width, theme));
-    if (bodyLines.length > bodyRows) bodyLines.length = bodyRows;
+    while (bodyLines.length < transcriptRows) bodyLines.push(sideRow("", width, theme));
+    if (bodyLines.length > transcriptRows) bodyLines.length = transcriptRows;
+    if (paneOpen && this.opts.inputPane) {
+      const paneLines = this.opts.inputPane.render(innerWidth);
+      for (let i = 0; i < INPUT_PANE_ROWS; i++) {
+        bodyLines.push(sideRow(paneLines[i] ?? "", width, theme));
+      }
+    }
     const footerLines = [
       midBorder(width, theme),
       sideRow(footerHint, width, theme),
@@ -6359,12 +6412,24 @@ var FocusedStreamOverlay = class {
   }
   handleInput(data) {
     this.opts.model.refresh();
+    if (this.opts.model.inputPaneOpen() && this.opts.inputPane) {
+      this.opts.inputPane.handleInput(data);
+      return;
+    }
     for (const binding of FOOTER_BINDINGS) {
       if (binding.matches.includes(data)) {
         binding.action(this, data);
         return;
       }
     }
+  }
+  /**
+   * Slice 7: explicit teardown for resources owned by the overlay.
+   * Today only the InputPane needs to be disposed (so its Editor
+   * releases focus and any debounce state). Idempotent.
+   */
+  dispose() {
+    this.opts.inputPane?.dispose();
   }
 };
 function fitToHeight(lines, rows) {
@@ -6677,6 +6742,61 @@ function handleSessionShutdown(event, deps) {
   deps.resetSanitizer();
 }
 
+// src/prompt-and-send.ts
+async function executePromptAndSend(deps, agentId, presuppliedText) {
+  const ctx = deps.getCtx();
+  if (!ctx) return;
+  const run = deps.registry.get(agentId);
+  if (!run) {
+    ctx.ui.notify(`agent_id "${agentId}" not found.`, "warning");
+    return;
+  }
+  const check = deps.validateSendable(run);
+  if (!check.ok) {
+    try {
+      ctx.ui.notify(check.reason, "warning");
+    } catch {
+    }
+    return;
+  }
+  let message;
+  if (presuppliedText !== void 0) {
+    const trimmed = presuppliedText.trim();
+    if (trimmed.length === 0) return;
+    message = trimmed;
+  } else {
+    try {
+      message = await ctx.ui.input(
+        `Send to ${agentId}`,
+        "Type a follow-up message; Esc to cancel."
+      );
+    } catch {
+      return;
+    }
+    if (!message || !message.trim()) return;
+    message = message.trim();
+  }
+  const cfg = deps.loadConfig(deps.cwd);
+  const ov = cfg.personaOverrides[run.persona] ?? {};
+  const resolved = await deps.resolvePersonas({
+    cwd: deps.cwd,
+    personaOverrides: cfg.personaOverrides
+  });
+  const persona = resolved.personas.get(run.persona);
+  const timeoutMs = deps.resolveTimeoutMs(persona, ov, cfg);
+  const result = deps.sendToRun(run, message, {
+    registry: deps.registry,
+    timeoutMs,
+    onComplete: (r) => deps.pushCompletionNotification(r)
+  });
+  if (result.kind === "rejected") {
+    try {
+      ctx.ui.notify(result.reason, "warning");
+    } catch {
+    }
+  }
+}
+
 // src/index.ts
 function index_default(pi) {
   let cwd = process.cwd();
@@ -6747,48 +6867,22 @@ function index_default(pi) {
       overlayOpen = false;
     });
   }
-  async function promptAndSendToRun(agentId) {
-    const ctx = ctxRef;
-    if (!ctx) return;
-    const run = registry.get(agentId);
-    if (!run) {
-      ctx.ui.notify(`agent_id "${agentId}" not found.`, "warning");
-      return;
-    }
-    const check = validateSendable(run);
-    if (!check.ok) {
-      try {
-        ctx.ui.notify(check.reason, "warning");
-      } catch {
-      }
-      return;
-    }
-    let message;
-    try {
-      message = await ctx.ui.input(
-        `Send to ${agentId}`,
-        "Type a follow-up message; Esc to cancel."
-      );
-    } catch {
-      return;
-    }
-    if (!message || !message.trim()) return;
-    const cfg = loadConfig(cwd);
-    const ov = cfg.personaOverrides[run.persona] ?? {};
-    const resolved = await resolvePersonas({ cwd, personaOverrides: cfg.personaOverrides });
-    const persona = resolved.personas.get(run.persona);
-    const timeoutMs = resolveTimeoutMs(persona, ov, cfg);
-    const result = sendToRun(run, message, {
-      registry,
-      timeoutMs,
-      onComplete: (r) => opts.pushCompletionNotification(r)
-    });
-    if (result.kind === "rejected") {
-      try {
-        ctx.ui.notify(result.reason, "warning");
-      } catch {
-      }
-    }
+  async function promptAndSendToRun(agentId, presuppliedText) {
+    await executePromptAndSend(
+      {
+        getCtx: () => ctxRef,
+        registry,
+        cwd,
+        validateSendable,
+        loadConfig,
+        resolvePersonas: (args) => resolvePersonas(args),
+        resolveTimeoutMs: (p, ov, cfg) => resolveTimeoutMs(p, ov, cfg),
+        sendToRun: (run, message, sendOpts) => sendToRun(run, message, sendOpts),
+        pushCompletionNotification: (r) => opts.pushCompletionNotification(r)
+      },
+      agentId,
+      presuppliedText
+    );
   }
   const initialCfg = loadConfig(cwd);
   let conductorModeOn = resolveInitialConductorMode(process.env, {

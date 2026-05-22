@@ -552,3 +552,39 @@ test("FocusedStreamModel: collapseAll after expandAll un-latches global override
   model.collapseAll();
   assert.equal(model.isExpanded("k1", false), false);
 });
+
+// ── Slice 7: input pane state + body-height arithmetic ──────────────
+
+test("FocusedStreamModel: openInputPane is idempotent", () => {
+  const { model } = setup();
+  assert.equal(model.inputPaneOpen(), false);
+  model.openInputPane();
+  assert.equal(model.inputPaneOpen(), true);
+  model.openInputPane();
+  assert.equal(model.inputPaneOpen(), true, "second open is a no-op");
+});
+
+test("FocusedStreamModel: closeInputPane is idempotent", () => {
+  const { model } = setup();
+  model.closeInputPane();
+  assert.equal(model.inputPaneOpen(), false, "close on already-closed is a no-op");
+  model.openInputPane();
+  model.closeInputPane();
+  assert.equal(model.inputPaneOpen(), false);
+  model.closeInputPane();
+  assert.equal(model.inputPaneOpen(), false);
+});
+
+test("FocusedStreamModel: body height arithmetic excludes INPUT_PANE_ROWS when closed and includes when open", () => {
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  const metrics = makeMetrics(20, 100);
+  const model = new FocusedStreamModel(reg, { getMetrics: metrics.get });
+  // Closed: bottom = 100 - 20 = 80.
+  model.scrollDown(10_000);
+  assert.equal(model.scrollOffset(), 80, "closed pane: full bodyRows");
+  // Open: effective bodyRows = 20 - 6 = 14, bottom = 86.
+  model.openInputPane();
+  model.scrollDown(10_000);
+  assert.equal(model.scrollOffset(), 86, "open pane: bodyRows shrinks by INPUT_PANE_ROWS");
+});

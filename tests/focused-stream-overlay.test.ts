@@ -596,3 +596,94 @@ test("FocusedStreamOverlay.handleInput: g/G shortcuts mirror Home/End", () => {
   assert.equal(b.model.scrollOffset(), 40, "G mirrors End");
   assert.equal(b.model.stickToTail(), true);
 });
+
+// ── Slice 7: input pane wiring ─────────────────────────────────
+
+import { InputPane, type EditorLike } from "../src/input-pane.ts";
+
+function makeFakeEditor(initial = ""): EditorLike & { inputs: string[] } {
+  let text = initial;
+  const inputs: string[] = [];
+  let _focused = false;
+  return {
+    get focused() { return _focused; },
+    set focused(v: boolean) { _focused = v; },
+    inputs,
+    getText(): string { return text; },
+    setText(t: string): void { text = t; },
+    invalidate(): void {},
+    handleInput(d: string): void { inputs.push(d); },
+    render(_w: number): string[] { return [`<editor:${text}>`]; },
+  };
+}
+
+function setupWithInputPane(): {
+  reg: RunRegistry;
+  model: FocusedStreamModel;
+  overlay: FocusedStreamOverlay;
+  editor: ReturnType<typeof makeFakeEditor>;
+  inputPane: InputPane;
+  submitted: { id: string | null; text: string | null };
+} {
+  const reg = new RunRegistry();
+  reg.register(makeRun("a-1"));
+  const model = new FocusedStreamModel(reg, {
+    getMetrics: () => ({ bodyRows: 20, transcriptLength: 100 }),
+  });
+  const editor = makeFakeEditor();
+  const submitted: { id: string | null; text: string | null } = { id: null, text: null };
+  const inputPane = new InputPane({
+    editor,
+    onSubmit: (t) => {
+      const f = model.focused();
+      submitted.id = f?.id ?? null;
+      submitted.text = t;
+    },
+    onClose: () => model.closeInputPane(),
+  });
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {},
+    onKill: () => {},
+    inputPane,
+  });
+  return { reg, model, overlay, editor, inputPane, submitted };
+}
+
+test("FocusedStreamOverlay: s key opens pane in default mode", () => {
+  const { model, overlay } = setupWithInputPane();
+  assert.equal(model.inputPaneOpen(), false);
+  overlay.handleInput("s");
+  assert.equal(model.inputPaneOpen(), true);
+});
+
+test("FocusedStreamOverlay: s key is consumed by Editor when pane open (no second open)", () => {
+  const { model, overlay, editor } = setupWithInputPane();
+  model.openInputPane();
+  overlay.handleInput("s");
+  // Routed to editor as a literal 's' keystroke.
+  assert.deepEqual(editor.inputs, ["s"]);
+  // Still open (idempotent open already covered by model test).
+  assert.equal(model.inputPaneOpen(), true);
+});
+
+test("FocusedStreamOverlay: pane open keys (↑↓ etc) passthrough to Editor", () => {
+  const { model, overlay, editor } = setupWithInputPane();
+  model.openInputPane();
+  overlay.handleInput("\x1b[A"); // up
+  overlay.handleInput("\x1b[B"); // down
+  overlay.handleInput("x");
+  assert.deepEqual(editor.inputs, ["\x1b[A", "\x1b[B", "x"]);
+});
+
+test("FocusedStreamOverlay: stickToTail re-anchors to new bottom on pane open", () => {
+  const { model } = setupWithInputPane();
+  // Get to bottom and latch.
+  model.scrollDown(10_000);
+  assert.equal(model.scrollOffset(), 80, "closed bottom");
+  assert.equal(model.stickToTail(), true);
+  model.openInputPane();
+  // After open, effective bodyRows shrinks → bottom moves to 86 → stickToTail re-snaps.
+  assert.equal(model.scrollOffset(), 86, "re-anchored to new bottom");
+  assert.equal(model.stickToTail(), true, "sticky preserved");
+});

@@ -46,6 +46,7 @@ import { installSanitizerHook } from "./sanitizer-hook.ts";
 import { handleSessionShutdown } from "./shutdown.ts";
 import { Watchdog, resolveKillOnStall } from "./watchdog.ts";
 import { formatStallNotification } from "./notifications.ts";
+import { executePromptAndSend } from "./prompt-and-send.ts";
 
 export default function (pi: ExtensionAPI): void {
   // ── Mutable session-scoped state ─────────────────────────────────────
@@ -172,56 +173,35 @@ export default function (pi: ExtensionAPI): void {
    * the LLM-callable ensemble_send tool but driven by a TUI keybinding.
    * Result is delivered via a `<sub-agent-completed>` notification card so
    * the conductor (LLM) sees the reply too.
+   *
+   * Slice 7 (overlay redesign): accepts an optional `presuppliedText`.
+   * When the focused-stream overlay's split-pane Editor submits, the
+   * trimmed buffer is forwarded here and the `ctx.ui.input` modal is
+   * skipped. All other steps (validateSendable, persona resolution,
+   * resolveTimeoutMs, sendToRun + pushCompletionNotification,
+   * rejection notify) are preserved verbatim.
    */
-  async function promptAndSendToRun(agentId: string): Promise<void> {
-    const ctx = ctxRef;
-    if (!ctx) return;
-    const run = registry.get(agentId);
-    if (!run) {
-      ctx.ui.notify(`agent_id "${agentId}" not found.`, "warning");
-      return;
-    }
-    // Pre-check sendability BEFORE opening the input modal so the user
-    // doesn't waste typing a message that will be rejected anyway.
-    const check = validateSendable(run);
-    if (!check.ok) {
-      try {
-        ctx.ui.notify(check.reason, "warning");
-      } catch {
-        // ctx may have gone stale
-      }
-      return;
-    }
-    let message: string | undefined;
-    try {
-      message = await ctx.ui.input(
-        `Send to ${agentId}`,
-        "Type a follow-up message; Esc to cancel.",
-      );
-    } catch {
-      // Stale ctx or user dismissed — silently abort.
-      return;
-    }
-    if (!message || !message.trim()) return;
-    const cfg = loadConfig(cwd);
-    const ov = cfg.personaOverrides[run.persona] ?? {};
-    // Re-resolve the persona registry so a user-configured
-    // `timeout_minutes` on the persona is honored.
-    const resolved = await resolvePersonas({ cwd, personaOverrides: cfg.personaOverrides });
-    const persona = resolved.personas.get(run.persona);
-    const timeoutMs = resolveTimeoutMs(persona, ov, cfg);
-    const result = sendToRun(run, message, {
-      registry,
-      timeoutMs,
-      onComplete: (r) => opts.pushCompletionNotification(r),
-    });
-    if (result.kind === "rejected") {
-      try {
-        ctx.ui.notify(result.reason, "warning");
-      } catch {
-        // ctx may have gone stale
-      }
-    }
+  async function promptAndSendToRun(
+    agentId: string,
+    presuppliedText?: string,
+  ): Promise<void> {
+    await executePromptAndSend(
+      {
+        getCtx: () => ctxRef,
+        registry,
+        cwd,
+        validateSendable,
+        loadConfig,
+        resolvePersonas: (args) => resolvePersonas(args as any) as any,
+        resolveTimeoutMs: (p, ov, cfg) =>
+          resolveTimeoutMs(p as any, ov as any, cfg as any),
+        sendToRun: (run, message, sendOpts) =>
+          sendToRun(run, message, sendOpts) as any,
+        pushCompletionNotification: (r: Run) => opts.pushCompletionNotification(r),
+      },
+      agentId,
+      presuppliedText,
+    );
   }
 
   // v0.8: conductor mode defaults to OFF; users opt in via

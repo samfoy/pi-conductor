@@ -44,6 +44,7 @@ import { renderHeader, renderTranscript } from "./transcript.ts";
 import { classifyLine } from "./transcript-classify.ts";
 import { applyThemeToLines, type ThemeFg } from "./transcript-style.ts";
 import type { RunStatus } from "./types.ts";
+import { INPUT_PANE_ROWS } from "./input-pane.ts";
 
 export interface FocusedStreamOverlayOptions {
   model: FocusedStreamModel;
@@ -75,6 +76,28 @@ export interface FocusedStreamOverlayOptions {
    * (HEADER + body + FOOTER = viewport).
    */
   getViewportHeight?: () => number;
+  /**
+   * Slice 7: split-pane input. When the model's `inputPaneOpen()`
+   * latches true, the overlay shrinks its body by `INPUT_PANE_ROWS`,
+   * routes keystrokes to the pane, and swaps the footer hint to the
+   * contextual `Esc:cancel · Enter:send · Ctrl-Enter:newline` line.
+   * When omitted, `s` falls back to the legacy `onSend` modal flow
+   * for back-compat with callers that haven't wired an Editor yet.
+   */
+  inputPane?: InputPaneLike;
+}
+
+/**
+ * Structural slice of `InputPane` the overlay actually uses. Real
+ * production type lives in `./input-pane.ts`; this shape lets unit
+ * tests inject a fake pane without depending on pi-tui's `Editor`.
+ */
+export interface InputPaneLike {
+  render(width: number): string[];
+  handleInput(data: string): void;
+  invalidate(): void;
+  dispose(): void;
+  focused: boolean;
 }
 
 // ── Chrome geometry ──────────────────────────────────────────────────
@@ -91,6 +114,9 @@ export const FOOTER_ROWS = 3;
 const BORDER_INSET = 4;
 /** Default viewport (rows) when `getViewportHeight` is unset. */
 const DEFAULT_VIEWPORT_ROWS = 24;
+
+/** Slice 7: footer hint shown while the input pane is open. */
+const PANE_HINT_TEXT = "Esc:cancel · Enter:send · Ctrl-Enter:newline";
 
 // Box-drawing glyphs.
 const TL = "╭";
@@ -203,10 +229,19 @@ export const FOOTER_BINDINGS: FooterBinding[] = [
     label: "send",
     matches: ["s"],
     action: (o) => {
-      const onSend = o.opts.onSend;
-      if (!onSend) return;
+      // Slice 7: when an InputPane is wired, `s` opens the split-pane
+      // editor (the actual send happens via the pane's onSubmit).
+      // Without an InputPane, fall back to the legacy modal-driven
+      // `onSend(agentId)` so callers that haven't migrated still work.
       const focused = o.opts.model.focused();
-      if (focused) onSend(focused.id);
+      if (!focused) return;
+      if (o.opts.inputPane) {
+        o.opts.model.openInputPane();
+        o.opts.onChange?.();
+        return;
+      }
+      const onSend = o.opts.onSend;
+      if (onSend) onSend(focused.id);
     },
   },
   {
@@ -474,6 +509,13 @@ export class FocusedStreamOverlay implements Component {
       viewportRaw && viewportRaw > 0 ? viewportRaw : DEFAULT_VIEWPORT_ROWS;
     const bodyRows = Math.max(1, viewport - HEADER_ROWS - FOOTER_ROWS);
     const innerWidth = Math.max(0, width - BORDER_INSET);
+    // Slice 7: when the input pane is open, the body splits into
+    // (transcript area) + (input pane). The pane owns the bottom 6
+    // rows; transcript gets whatever's left, with a 1-row floor.
+    const paneOpen = model.inputPaneOpen() && this.opts.inputPane !== undefined;
+    const transcriptRows = paneOpen
+      ? Math.max(1, bodyRows - INPUT_PANE_ROWS)
+      : bodyRows;
 
     let transcriptLength = 0;
     let bodyInnerLines: string[];
@@ -482,9 +524,9 @@ export class FocusedStreamOverlay implements Component {
 
     if (!focused) {
       // Empty state body (themed inline).
-      bodyInnerLines = renderEmpty(innerWidth, bodyRows, theme);
-      // Truncate / pad body to bodyRows.
-      bodyInnerLines = fitToHeight(bodyInnerLines, bodyRows);
+      bodyInnerLines = renderEmpty(innerWidth, transcriptRows, theme);
+      // Truncate / pad body to transcriptRows.
+      bodyInnerLines = fitToHeight(bodyInnerLines, transcriptRows);
       // No status line.
     } else {
       // Status line — reuse renderHeader (returns [topRuler, statusLine])
@@ -506,16 +548,16 @@ export class FocusedStreamOverlay implements Component {
         model.scrollOffset(),
         Math.max(0, transcript.length - 1),
       );
-      let bodyContent = transcript.slice(offset, offset + bodyRows);
+      let bodyContent = transcript.slice(offset, offset + transcriptRows);
 
-      const hint = renderScrollHint(offset, transcript.length, bodyRows, {
+      const hint = renderScrollHint(offset, transcript.length, transcriptRows, {
         id: focused.id,
         agentCount: model.agentCount(),
       });
-      // Pad to bodyRows so chrome geometry is stable regardless of
-      // transcript length. When clipped, the breadcrumb takes the
+      // Pad to transcriptRows so chrome geometry is stable regardless
+      // of transcript length. When clipped, the breadcrumb takes the
       // bottom row.
-      bodyContent = fitToHeight(bodyContent, bodyRows);
+      bodyContent = fitToHeight(bodyContent, transcriptRows);
       if (hint !== null) {
         bodyContent[bodyContent.length - 1] = hint;
       }
@@ -543,7 +585,10 @@ export class FocusedStreamOverlay implements Component {
     }
 
     // Footer hint (themed inline by renderFooterHintLine).
-    const footerHint = renderFooterHintLine(FOOTER_BINDINGS, innerWidth, theme);
+    // Slice 7: pane-open swaps in the contextual hint.
+    const footerHint = paneOpen
+      ? (theme ? theme.fg("dim", PANE_HINT_TEXT) : PANE_HINT_TEXT)
+      : renderFooterHintLine(FOOTER_BINDINGS, innerWidth, theme);
 
     // Compose zones.
     const headerLines: string[] = [
@@ -553,10 +598,19 @@ export class FocusedStreamOverlay implements Component {
       sideRow("", width, theme),
     ];
     const bodyLines: string[] = themedBodyInner.map((l) => sideRow(l, width, theme));
-    // Body might still be < bodyRows if fitToHeight produced a short
-    // list (only happens at viewport=0); guarantee exact height.
-    while (bodyLines.length < bodyRows) bodyLines.push(sideRow("", width, theme));
-    if (bodyLines.length > bodyRows) bodyLines.length = bodyRows;
+    // Body might still be < transcriptRows if fitToHeight produced a
+    // short list (only happens at viewport=0); guarantee exact height.
+    while (bodyLines.length < transcriptRows) bodyLines.push(sideRow("", width, theme));
+    if (bodyLines.length > transcriptRows) bodyLines.length = transcriptRows;
+    // Slice 7: append input-pane rows (separator + editor + hint),
+    // each wrapped in side walls. The pane owns its own internal
+    // theming so we pass them through verbatim.
+    if (paneOpen && this.opts.inputPane) {
+      const paneLines = this.opts.inputPane.render(innerWidth);
+      for (let i = 0; i < INPUT_PANE_ROWS; i++) {
+        bodyLines.push(sideRow(paneLines[i] ?? "", width, theme));
+      }
+    }
     const footerLines: string[] = [
       midBorder(width, theme),
       sideRow(footerHint, width, theme),
@@ -598,12 +652,30 @@ export class FocusedStreamOverlay implements Component {
   handleInput(data: string): void {
     // Slice 11: refresh model on every keystroke before dispatch.
     this.opts.model.refresh();
+    // Slice 7: when the input pane is open, every keystroke goes to
+    // the pane (Esc closes it, Enter submits + closes, Ctrl-Enter etc.
+    // pass through to the Editor as literal text). The overlay's
+    // FOOTER_BINDINGS dispatch is bypassed entirely so `s`, `g`, `k`,
+    // etc. do not double-fire while the user is typing a message.
+    if (this.opts.model.inputPaneOpen() && this.opts.inputPane) {
+      this.opts.inputPane.handleInput(data);
+      return;
+    }
     for (const binding of FOOTER_BINDINGS) {
       if (binding.matches.includes(data)) {
         binding.action(this, data);
         return;
       }
     }
+  }
+
+  /**
+   * Slice 7: explicit teardown for resources owned by the overlay.
+   * Today only the InputPane needs to be disposed (so its Editor
+   * releases focus and any debounce state). Idempotent.
+   */
+  dispose(): void {
+    this.opts.inputPane?.dispose();
   }
 }
 

@@ -35,11 +35,12 @@ export interface FocusedOverlayFactoryDeps {
     registry: RunRegistry,
   ) => void;
   /**
-   * Callback fired by the 's' send-keybinding. Mirrors the LLM-callable
-   * ensemble_send tool but driven from the TUI. Wired to
-   * `promptAndSendToRun` in index.ts.
+   * Callback fired by the InputPane / 's' send-keybinding. Slice 7
+   * extends the signature with an optional `presuppliedText` so the
+   * pane's onSubmit can forward the Editor buffer verbatim. Pre-Slice 7
+   * callers (no InputPane) still pass just the agentId.
    */
-  readonly promptAndSendToRun: (agentId: string) => void;
+  readonly promptAndSendToRun: (agentId: string, presuppliedText?: string) => void;
   /**
    * The `done(value)` callback from `ctx.ui.custom(...)`. Calling it
    * tears down the overlay; the resulting promise from `custom()`

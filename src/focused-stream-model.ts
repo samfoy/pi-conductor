@@ -11,6 +11,7 @@
 
 import type { RunRegistry } from "./runs.ts";
 import type { Run } from "./types.ts";
+import { INPUT_PANE_ROWS } from "./input-pane.ts";
 
 /**
  * Slice 4: viewport metrics injection. The model needs to know the
@@ -71,6 +72,16 @@ export class FocusedStreamModel {
    * clears it.
    */
   private _expandAllMode = false;
+
+  /**
+   * Slice 7 (overlay redesign): split-pane input flag. When true, the
+   * overlay shrinks its body region by `INPUT_PANE_ROWS` and routes
+   * keystrokes to the InputPane. State is global (not per-agent) —
+   * cycling agents while open keeps the pane up. Idempotent open /
+   * close so the same `s` keystroke can be handled twice without
+   * mis-stacking.
+   */
+  private _inputPaneOpen = false;
 
   constructor(
     private registry: RunRegistry,
@@ -282,6 +293,33 @@ export class FocusedStreamModel {
     this._foldExpanded.clear();
   }
 
+  // ── Slice 7: split-pane input ─────────────────────────────────────
+
+  inputPaneOpen(): boolean {
+    return this._inputPaneOpen;
+  }
+
+  /**
+   * Idempotent open. When the focused agent is currently latched to
+   * tail (`stickToTail==true`) the model re-snaps to the new bottom
+   * so the live tail remains visible above the input pane. Without
+   * this re-anchor, the bottom shifts up by INPUT_PANE_ROWS as soon
+   * as the pane opens and the user loses sight of the latest output.
+   */
+  openInputPane(): void {
+    if (this._inputPaneOpen) return;
+    this._inputPaneOpen = true;
+    if (this._focusedId && this._stickToTailPerAgent.get(this._focusedId) === true) {
+      this._scrollPerAgent.set(this._focusedId, this.bottom());
+    }
+  }
+
+  /** Idempotent close. */
+  closeInputPane(): void {
+    if (!this._inputPaneOpen) return;
+    this._inputPaneOpen = false;
+  }
+
   // ── Internal ───────────────────────────────────────────────────────
 
   /**
@@ -321,6 +359,10 @@ export class FocusedStreamModel {
    */
   private bottom(): number {
     const m = this._getMetrics();
-    return Math.max(0, m.transcriptLength - m.bodyRows);
+    const effectiveBody = Math.max(
+      0,
+      m.bodyRows - (this._inputPaneOpen ? INPUT_PANE_ROWS : 0),
+    );
+    return Math.max(0, m.transcriptLength - effectiveBody);
   }
 }
