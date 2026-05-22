@@ -29,7 +29,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -51,6 +51,7 @@ import {
   getFinalText,
   pauseRun,
   planSpawnPiArgs,
+  attachSpawnedProc,
   recordSpawnedProc,
   resumeRun,
 } from "../src/runs.ts";
@@ -1091,4 +1092,36 @@ test("W7b toRunRecord omits pid when Run has no pid (back-compat)", () => {
   const run = makeRun({ id: "test-w7b" });
   const rec = toRunRecord(run);
   assert.equal(rec.pid, undefined);
+});
+
+// W7c: regression test for the orphaned-record bug. spawnRun's initial
+//      writeRecord runs before child_process.spawn() returns a pid, so
+//      the on-disk record is briefly `running` with no pid. If a
+//      concurrent pi process starts up during that window, its
+//      reconcileOrphansAtStartup classifies the record as
+//      `reclassify-pre-schema` and flips it to `killed`. Fix: persist
+//      the record again right after recordSpawnedProc captures the
+//      pid. The witness is `attachSpawnedProc` — a thin helper that
+//      does both steps and is the single call site spawnRun uses.
+test("W7c attachSpawnedProc persists pid to disk so reconcile sees a live pid", async () => {
+  const paths = tmpRunPaths();
+  try {
+    const run = makeRun({
+      id: "test-w7c",
+      recordPath: paths.recordPath,
+      transcriptPath: paths.transcriptPath,
+      finalPath: paths.finalPath,
+    });
+    const fakeProc = { pid: 4242 } as unknown as Run["proc"];
+    await attachSpawnedProc(run, fakeProc!);
+    assert.equal(run.pid, 4242);
+    const onDisk = JSON.parse(readFileSync(paths.recordPath, "utf8"));
+    assert.equal(
+      onDisk.pid,
+      4242,
+      "on-disk record must carry the spawned pid so concurrent pi startups don't reclassify-pre-schema this run",
+    );
+  } finally {
+    rmSync(paths.dir, { recursive: true, force: true });
+  }
 });

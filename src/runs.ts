@@ -697,6 +697,32 @@ export function recordSpawnedProc(run: Run, proc: ChildProcess): void {
 }
 
 /**
+ * Capture a freshly-spawned ChildProcess on the Run AND flush the
+ * updated record to disk so the pid is visible to any concurrent pi
+ * runtime starting up at the same moment.
+ *
+ * The initial `writeRecord` in `spawnRun` runs before `child_process.spawn()`
+ * returns, so without this second flush the on-disk record is briefly
+ * `running` with no `pid`. A concurrent pi runtime running
+ * `reconcileOrphansAtStartup` during that window would classify the
+ * record as `reclassify-pre-schema` (no pid → can't liveness-probe →
+ * conservative `killed`) and reclassify a still-live sub-agent. See
+ * `src/reconcile-startup.ts` `classifyRecord` and the `"orphaned:
+ * pre-pid-schema…"` errorMessage path.
+ *
+ * Thin helper so the spawn path has one named call site instead of two
+ * coupled lines, and so the regression test can pin disk state without
+ * forking a real pi subprocess.
+ */
+export async function attachSpawnedProc(
+  run: Run,
+  proc: ChildProcess,
+): Promise<void> {
+  recordSpawnedProc(run, proc);
+  await writeRecord(run);
+}
+
+/**
  * Spawn a sub-agent. Returns the Run immediately (status="running").
  * Resolves the returned promise when the run reaches a terminal status.
  *
@@ -900,7 +926,7 @@ function runPiSubprocess(
     if (opts.onComplete) opts.onComplete(run);
     return Promise.resolve(run);
   }
-  recordSpawnedProc(run, proc);
+  void attachSpawnedProc(run, proc);
 
   // Hard timeout.
   run.timeoutTimer = setTimeout(() => {

@@ -1305,6 +1305,10 @@ function recordSpawnedProc(run, proc) {
   run.proc = proc;
   run.pid = proc.pid;
 }
+async function attachSpawnedProc(run, proc) {
+  recordSpawnedProc(run, proc);
+  await writeRecord(run);
+}
 function spawnRun(opts) {
   const id = opts.preAllocatedId ?? allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
   const dir = runDir(id);
@@ -1430,7 +1434,7 @@ function runPiSubprocess(run, piArgs, opts) {
     if (opts.onComplete) opts.onComplete(run);
     return Promise.resolve(run);
   }
-  recordSpawnedProc(run, proc);
+  void attachSpawnedProc(run, proc);
   run.timeoutTimer = setTimeout(() => {
     if (run.status === "running" || run.status === "paused") {
       forceTerminate(run, "timeout", opts.registry, opts.onComplete);
