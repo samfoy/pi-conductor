@@ -38,7 +38,6 @@ function makeFakeCtx(opts: { hasUI: boolean }) {
     getUnsubCalls: () => unsubCalls,
   };
 }
-
 test("installFocusedOverlayShortcut: headless ctx (hasUI=false) returns a no-op unsub and never subscribes", () => {
   const fake = makeFakeCtx({ hasUI: false });
   let opens = 0;
@@ -252,5 +251,114 @@ test(
     // overlay to render.
     assert.equal(installs, 0, "headless context skips registry subscription");
     assert.doesNotThrow(() => unsub());
+  },
+);
+
+// ── Slice 1: too-small terminal guard ─────────────────────────────
+//
+// Pi-tui can clip an oversized overlay, but tmux + small terminals
+// were producing scroll-off-page renders. Slice 1 declines to open
+// the overlay below 80×20 and notifies the user instead. The
+// threshold lives inside the helper so callers cannot drift.
+
+test(
+  "installFocusedOverlayShortcut: declines to open when terminal columns<80",
+  () => {
+    const fake = makeFakeCtx({ hasUI: true });
+    let opens = 0;
+    const notifies: { msg: string; level: string }[] = [];
+    installFocusedOverlayShortcut(fake.ctx, {
+      openFocusedOverlay: () => {
+        opens += 1;
+      },
+      isOverlayOpen: () => false,
+      getTerminalSize: () => ({ columns: 79, rows: 50 }),
+      notify: (msg, level) => {
+        notifies.push({ msg, level });
+      },
+    });
+    const handler = fake.getHandler();
+    assert.ok(handler);
+    const result = handler!("\x07");
+    assert.equal(opens, 0, "must not open when columns < 80");
+    assert.deepEqual(
+      result,
+      { consume: true },
+      "Ctrl+G is still consumed when declined (don't fall through to pi's reserved binding)",
+    );
+    assert.equal(notifies.length, 1, "must notify exactly once when declining");
+  },
+);
+
+test(
+  "installFocusedOverlayShortcut: declines to open when rows<20",
+  () => {
+    const fake = makeFakeCtx({ hasUI: true });
+    let opens = 0;
+    const notifies: { msg: string; level: string }[] = [];
+    installFocusedOverlayShortcut(fake.ctx, {
+      openFocusedOverlay: () => {
+        opens += 1;
+      },
+      isOverlayOpen: () => false,
+      getTerminalSize: () => ({ columns: 200, rows: 19 }),
+      notify: (msg, level) => {
+        notifies.push({ msg, level });
+      },
+    });
+    const handler = fake.getHandler();
+    assert.ok(handler);
+    handler!("\x07");
+    assert.equal(opens, 0, "must not open when rows < 20");
+    assert.equal(notifies.length, 1);
+  },
+);
+
+test(
+  "installFocusedOverlayShortcut: notify called with warning level when below threshold",
+  () => {
+    const fake = makeFakeCtx({ hasUI: true });
+    const notifies: { msg: string; level: string }[] = [];
+    installFocusedOverlayShortcut(fake.ctx, {
+      openFocusedOverlay: () => {},
+      isOverlayOpen: () => false,
+      getTerminalSize: () => ({ columns: 50, rows: 10 }),
+      notify: (msg, level) => {
+        notifies.push({ msg, level });
+      },
+    });
+    fake.getHandler()!("\x07");
+    assert.equal(notifies.length, 1);
+    assert.equal(notifies[0].level, "warning");
+    assert.match(
+      notifies[0].msg,
+      /80.*20/,
+      `notify message should mention the 80×20 threshold; got: ${notifies[0].msg}`,
+    );
+  },
+);
+
+test(
+  "installFocusedOverlayShortcut: opens normally at 80×20",
+  () => {
+    const fake = makeFakeCtx({ hasUI: true });
+    let opens = 0;
+    const notifies: { msg: string; level: string }[] = [];
+    installFocusedOverlayShortcut(fake.ctx, {
+      openFocusedOverlay: () => {
+        opens += 1;
+      },
+      isOverlayOpen: () => false,
+      getTerminalSize: () => ({ columns: 80, rows: 20 }),
+      notify: (msg, level) => {
+        notifies.push({ msg, level });
+      },
+    });
+    const handler = fake.getHandler();
+    assert.ok(handler);
+    const result = handler!("\x07");
+    assert.equal(opens, 1, "must open at exactly 80×20 (boundary inclusive)");
+    assert.equal(notifies.length, 0, "no warning at the boundary");
+    assert.deepEqual(result, { consume: true });
   },
 );

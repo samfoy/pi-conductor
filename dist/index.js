@@ -6049,12 +6049,16 @@ function createFocusedOverlayComponent(deps) {
     onSend: (id) => {
       deps.promptAndSendToRun(id);
     },
-    theme: deps.theme
+    theme: deps.theme,
+    getViewportHeight: deps.getViewportHeight
   });
 }
 
 // src/focused-overlay-shortcut.ts
 import { Key, matchesKey } from "@earendil-works/pi-tui";
+var MIN_COLUMNS = 80;
+var MIN_ROWS = 20;
+var TOO_SMALL_MESSAGE = `Focused overlay needs \u2265${MIN_COLUMNS}\xD7${MIN_ROWS} terminal`;
 function installFocusedOverlayShortcut(ctx, options) {
   if (!ctx.hasUI) {
     return () => {
@@ -6063,6 +6067,11 @@ function installFocusedOverlayShortcut(ctx, options) {
   let unsubInput = ctx.ui.onTerminalInput((data) => {
     if (options.isOverlayOpen()) return void 0;
     if (matchesKey(data, Key.ctrl("g"))) {
+      const size = options.getTerminalSize?.();
+      if (size && options.notify && (size.columns < MIN_COLUMNS || size.rows < MIN_ROWS)) {
+        options.notify(TOO_SMALL_MESSAGE, "warning");
+        return { consume: true };
+      }
       options.openFocusedOverlay();
       return { consume: true };
     }
@@ -6282,7 +6291,7 @@ function index_default(pi) {
     if (agentId) focusModel.focus(agentId);
     overlayOpen = true;
     void ctxRef.ui.custom(
-      (_tui, theme, _kb, done) => createFocusedOverlayComponent({
+      (tui, theme, _kb, done) => createFocusedOverlayComponent({
         model: focusModel,
         registry,
         forceTerminate,
@@ -6290,9 +6299,35 @@ function index_default(pi) {
           void promptAndSendToRun(id);
         },
         done,
-        theme
+        theme,
+        // Slice 1 (overlay redesign): viewport-height source. `tui`
+        // is in scope inside the factory body, so we use its
+        // canonical `terminal.rows`. `process.stdout.rows` is the
+        // non-TTY fallback. Constant 24 is the last-ditch default
+        // matching the historical xterm row count and the design
+        // doc §3 fallback chain.
+        getViewportHeight: () => tui.terminal.rows ?? process.stdout.rows ?? 24
       }),
-      { overlay: true }
+      {
+        overlay: true,
+        // Slice 1 (overlay redesign): anchored modal. Without these
+        // options pi-tui sizes the overlay to the full terminal, and
+        // tmux + small windows produced scroll-off-page renders.
+        // 95×90 with a 1-cell margin gives the eye an obvious
+        // "overlay" affordance; minWidth 60 prevents pathological
+        // collapse if the user resizes mid-render. NO `visible:`
+        // predicate — a `visible:false` would open then suppress and
+        // swallow the shortcut-side notify; the threshold guard in
+        // `installFocusedOverlayShortcut` is the single source of
+        // truth for the 80×20 minimum.
+        overlayOptions: {
+          width: "95%",
+          maxHeight: "90%",
+          minWidth: 60,
+          anchor: "center",
+          margin: 1
+        }
+      }
     ).finally(() => {
       overlayOpen = false;
     });
@@ -6459,7 +6494,17 @@ function index_default(pi) {
       // Slice 11: keep the focus model fresh as the registry mutates.
       // Lives here (session-scoped) rather than in the overlay factory
       // (per-open) so re-opening the overlay does NOT stack listeners.
-      subscribeToRegistry: () => registry.onChange(() => focusModel.refresh())
+      subscribeToRegistry: () => registry.onChange(() => focusModel.refresh()),
+      // Slice 1 (overlay redesign): terminal-size source for the
+      // too-small guard. `ExtensionUIContext` does not expose a TUI
+      // ref outside `custom`/`setWidget` factory bodies, so we read
+      // `process.stdout` here. The threshold (80×20) and notify text
+      // live inside the helper.
+      getTerminalSize: () => ({
+        columns: process.stdout.columns ?? 80,
+        rows: process.stdout.rows ?? 24
+      }),
+      notify: (message, level) => ctx.ui.notify(message, level)
     });
     setImmediate(() => {
       void reconcileOrphansAtStartup({

@@ -54,7 +54,39 @@ export interface FocusedOverlayShortcutOptions {
    * overlay to render so nothing to keep fresh.
    */
   readonly subscribeToRegistry?: () => () => void;
+  /**
+   * Slice 1 (overlay redesign): terminal-size source consulted at
+   * keystroke time to decide whether the terminal is large enough to
+   * host the overlay. When omitted, the threshold is skipped (overlay
+   * always opens). When supplied AND `notify` is supplied, the helper
+   * declines to open the overlay (and notifies the user) when the
+   * terminal is below the locked 80×20 minimum.
+   *
+   * Production wires this to `process.stdout.columns/rows` (the TUI
+   * instance is not exposed on `ExtensionAPI`/`ExtensionUIContext`
+   * outside `custom`/`setWidget` factory bodies). The threshold is
+   * encoded inside this helper so callers cannot drift.
+   */
+  readonly getTerminalSize?: () => { columns: number; rows: number };
+  /**
+   * Slice 1 (overlay redesign): notify callback used when declining
+   * the overlay due to insufficient terminal size. Wired to
+   * `ctx.ui.notify` in production.
+   */
+  readonly notify?: (
+    message: string,
+    level: "info" | "warning" | "error",
+  ) => void;
 }
+
+// Slice 1 (overlay redesign): minimum terminal size for the focused
+// overlay. Locked to 80×20 by user decision (oracle review of design
+// preferred this over the designer's 70×18 proposal as it matches the
+// Brazil terminal default and the chrome math: header 4 + footer 3 +
+// min body 6 + margin 2 = 15 rows, leaving 5 rows of slack at 20).
+const MIN_COLUMNS = 80;
+const MIN_ROWS = 20;
+const TOO_SMALL_MESSAGE = `Focused overlay needs ≥${MIN_COLUMNS}×${MIN_ROWS} terminal`;
 
 /**
  * Wire a session-scoped Ctrl+G handler. Returns an idempotent unsub
@@ -77,6 +109,21 @@ export function installFocusedOverlayShortcut(
     // overlay's own bindings see the keystroke.
     if (options.isOverlayOpen()) return undefined;
     if (matchesKey(data, Key.ctrl("g"))) {
+      // Slice 1 (overlay redesign): too-small-terminal guard. When the
+      // caller supplied both `getTerminalSize` and `notify`, refuse to
+      // open the overlay below the locked 80×20 minimum and notify
+      // the user instead. We still consume the keystroke so pi's
+      // built-in Ctrl+G handler doesn't also fire — the user already
+      // got an explanation.
+      const size = options.getTerminalSize?.();
+      if (
+        size &&
+        options.notify &&
+        (size.columns < MIN_COLUMNS || size.rows < MIN_ROWS)
+      ) {
+        options.notify(TOO_SMALL_MESSAGE, "warning");
+        return { consume: true };
+      }
       options.openFocusedOverlay();
       return { consume: true };
     }

@@ -53,6 +53,16 @@ export interface FocusedOverlayFactoryDeps {
    * lines.
    */
   readonly theme?: ThemeFg;
+  /**
+   * Slice 1 (overlay redesign): viewport-height source forwarded to
+   * the overlay's existing `getViewportHeight` slot. Production wires
+   * this to `tui.terminal.rows` (TUI instance is in scope inside
+   * `ctx.ui.custom`'s factory body) with `process.stdout.rows` as a
+   * non-TTY fallback. Pre-slice the factory dropped this on the floor,
+   * making `renderScrollHint` and `renderEmpty` centring dead code in
+   * production. See docs/focused-overlay-redesign-plan.md §Slice 1.
+   */
+  readonly getViewportHeight?: () => number;
 }
 
 export function createFocusedOverlayComponent(
@@ -71,5 +81,6 @@ export function createFocusedOverlayComponent(
       deps.promptAndSendToRun(id);
     },
     theme: deps.theme,
+    getViewportHeight: deps.getViewportHeight,
   });
 }

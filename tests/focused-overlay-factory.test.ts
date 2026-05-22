@@ -138,3 +138,109 @@ test("createFocusedOverlayComponent: onSend invokes promptAndSendToRun with the 
   overlay.handleInput("s");
   assert.equal(sentTo, run.id);
 });
+
+// ── Slice 1: getViewportHeight wiring ────────────────────────────────
+//
+// FocusedStreamOverlay already declares an optional
+// `getViewportHeight: () => number` slot in its options (used by
+// renderEmpty centring and renderScrollHint). Today the factory does
+// NOT pass it through, so production reads `viewportHeight = 0`,
+// which silently suppresses the scroll hint and collapses the
+// empty-state padding. Slice 1 wires it through the factory.
+
+test("createFocusedOverlayComponent: wires getViewportHeight from injected source", () => {
+  const registry = new RunRegistry();
+  const model = new FocusedStreamModel(registry);
+  let probeCalls = 0;
+  const overlay = createFocusedOverlayComponent({
+    model,
+    registry,
+    forceTerminate: () => {},
+    promptAndSendToRun: () => {},
+    done: () => {},
+    getViewportHeight: () => {
+      probeCalls += 1;
+      return 42;
+    },
+  });
+  // Render the empty state so renderEmpty consumes the viewport height.
+  // We don't assert layout here — the dedicated centring test below does.
+  // We only assert the probe is invoked, i.e. the slot is wired.
+  void overlay.render(80);
+  assert.ok(probeCalls >= 1, `getViewportHeight should be probed by render(); was ${probeCalls}`);
+});
+
+test("createFocusedOverlayComponent: viewport rows propagate to renderEmpty centring", () => {
+  const registry = new RunRegistry();
+  const model = new FocusedStreamModel(registry);
+  // No runs registered → empty-state branch.
+  const tall = createFocusedOverlayComponent({
+    model,
+    registry,
+    forceTerminate: () => {},
+    promptAndSendToRun: () => {},
+    done: () => {},
+    getViewportHeight: () => 30,
+  });
+  const small = createFocusedOverlayComponent({
+    model,
+    registry,
+    forceTerminate: () => {},
+    promptAndSendToRun: () => {},
+    done: () => {},
+    // Default (no viewport) → topPad collapses to 1
+  });
+  const tallLines = tall.render(80);
+  const smallLines = small.render(80);
+  // renderEmpty pads top with Math.max(1, floor((viewport - 5) / 2)).
+  // viewport=30 → topPad=12 spacers; viewport=0 → topPad=1 spacer.
+  // Counting leading blank lines is the cheapest stable assertion.
+  const leadingBlanks = (lines: readonly string[]): number => {
+    let i = 0;
+    while (i < lines.length && lines[i] === "") i += 1;
+    return i;
+  };
+  const tallTop = leadingBlanks(tallLines);
+  const smallTop = leadingBlanks(smallLines);
+  assert.ok(
+    tallTop > smallTop,
+    `taller viewport must yield more top padding (got tall=${tallTop}, small=${smallTop})`,
+  );
+});
+
+test("createFocusedOverlayComponent: viewport rows propagate to renderScrollHint", () => {
+  // renderScrollHint suppresses output entirely when viewportHeight<=0.
+  // With the factory wiring fixed, a non-zero viewport must let the
+  // hint through when the transcript is long enough to produce hidden
+  // lines below the fold. Today this is dead code in production
+  // (focused-stream-overlay.ts:372).
+  const registry = new RunRegistry();
+  // Build a run with enough message history that renderTranscript
+  // produces > viewportHeight body lines.
+  const longRun = makeRun({
+    messages: Array.from({ length: 80 }, (_, i) => ({
+      role: "assistant" as const,
+      content: [{ type: "text" as const, text: `line ${i}` }],
+    })) as any,
+  });
+  registry.register(longRun);
+  const model = new FocusedStreamModel(registry);
+  model.refresh();
+  const overlay = createFocusedOverlayComponent({
+    model,
+    registry,
+    forceTerminate: () => {},
+    promptAndSendToRun: () => {},
+    done: () => {},
+    getViewportHeight: () => 20,
+  });
+  const lines = overlay.render(80);
+  const joined = lines.join("\n");
+  // The hint contains the literal phrase "hidden" when at least one
+  // direction is clipped. With offset=0 + 80 messages of body content +
+  // viewport=20, the below-clip is non-zero, so the hint must appear.
+  assert.ok(
+    joined.includes("hidden"),
+    `expected scroll hint with 'hidden' in output (today suppressed because factory passes viewportHeight=0); got:\n${joined}`,
+  );
+});
