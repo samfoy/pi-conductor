@@ -85,29 +85,34 @@ test("FocusedStreamOverlay.render: empty registry shows a placeholder", () => {
 });
 
 // ── Slice 10: empty-state polish (O4) ───────────────────────────────────
+// Slice 6 (overlay redesign) updated this to expect bordered chrome:
+// the footer row sequence is now mid-rule + hint + bottom-border, and
+// the body content sits inside side-walled rows. Pure `─{3,}` rulers
+// no longer appear in the rendered output — they were replaced by
+// `─`-with-corner glyphs (╭───╮ / ├───┤ / ╰───╯).
 
-test("empty state: no flanking rulers in the body (only the footer ruler remains)", () => {
+test("empty state: bottom border on last line + no pure rulers in body (chrome supplies all rules)", () => {
   const reg = new RunRegistry();
   const model = new FocusedStreamModel(reg);
   const overlay = new FocusedStreamOverlay({
     model,
     onClose: () => {},
     onKill: () => {},
+    getViewportHeight: () => 30,
   });
   const lines = overlay.render(80);
-  // Footer is the last 2 lines: [ruler, hintLine]. Anything before that
-  // is the empty-state body — no ─-only lines should appear there.
-  assert.ok(lines.length >= 2, "expected at least footer");
-  const body = lines.slice(0, lines.length - 2);
+  // Last line is the bottom border.
+  assert.match(lines[lines.length - 1]!, /^╰─+╯$/);
+  // Body slice (between header and footer chrome): no pure `─+` line.
+  const HEADER_ROWS = 4, FOOTER_ROWS = 3;
+  const body = lines.slice(HEADER_ROWS, lines.length - FOOTER_ROWS);
   for (const line of body) {
     assert.equal(
       /^─{3,}$/.test(line),
       false,
-      `unexpected ruler in empty-state body: ${JSON.stringify(line)}`,
+      `unexpected pure ruler in empty-state body: ${JSON.stringify(line)}`,
     );
   }
-  // Footer ruler still present at index length-2.
-  assert.match(lines[lines.length - 2]!, /^─+$/);
 });
 
 test("empty state: heading styled muted, prose styled dim when theme is set", () => {
@@ -133,7 +138,7 @@ test("empty state: heading styled muted, prose styled dim when theme is set", ()
   assert.equal(joined.includes("[dim](no sub-agents"), false);
 });
 
-test("empty state: at viewport=20, heading lands ~mid (loose: index 5..12)", () => {
+test("empty state: at viewport=20, heading lands inside body zone (loose: not in header chrome)", () => {
   const reg = new RunRegistry();
   const model = new FocusedStreamModel(reg);
   const overlay = new FocusedStreamOverlay({
@@ -144,12 +149,21 @@ test("empty state: at viewport=20, heading lands ~mid (loose: index 5..12)", () 
   });
   const lines = overlay.render(80);
   const headingIdx = lines.findIndex((l) => l.includes("(no sub-agents running)"));
-  assert.ok(headingIdx >= 5 && headingIdx <= 12, `headingIdx=${headingIdx}`);
+  // With viewport=20 and chrome HEADER=4, FOOTER=3, body occupies
+  // rows 4..16 (13 rows). The heading must land inside that band
+  // and roughly mid-body — budget = 13-3=10, topPad = max(1, 5) = 5,
+  // absolute idx = 4 + 5 = 9.
+  assert.ok(headingIdx >= 4 && headingIdx <= 16, `headingIdx=${headingIdx}`);
+  assert.ok(headingIdx >= 7 && headingIdx <= 12, `expected near-mid body, got ${headingIdx}`);
 });
 
-test("empty state: body line count reduced vs pre-slice (default viewport)", () => {
-  // Pre-slice: 1 leading ruler + 5 placeholder rows = 6 body lines.
-  // Post-slice (default viewport=0): 1 spacer + heading + spacer + prose = 4.
+test("empty state: total chrome rows == viewport (default fallback DEFAULT_VIEWPORT_ROWS=24)", () => {
+  // Slice 6 (overlay redesign): with no `getViewportHeight` wired the
+  // overlay falls back to a 24-row default and produces exactly that
+  // many rows of bordered chrome — 4 header + 17 body + 3 footer.
+  // Replaces the prior "body line count reduced vs pre-slice" sanity
+  // check, which was a slice-10 artefact: body geometry is now driven
+  // by the chrome budget rather than by the empty-state renderer.
   const reg = new RunRegistry();
   const model = new FocusedStreamModel(reg);
   const overlay = new FocusedStreamOverlay({
@@ -158,8 +172,9 @@ test("empty state: body line count reduced vs pre-slice (default viewport)", () 
     onKill: () => {},
   });
   const lines = overlay.render(80);
-  const body = lines.slice(0, lines.length - 2);
-  assert.ok(body.length < 6, `expected body < 6, got ${body.length}`);
+  assert.equal(lines.length, 24);
+  assert.match(lines[0]!, /^╭─+╮$/);
+  assert.match(lines[lines.length - 1]!, /^╰─+╯$/);
 });
 
 test("FocusedStreamOverlay.render: lines never exceed the requested width", () => {
@@ -195,14 +210,13 @@ test("FocusedStreamOverlay.render: applies theme via classify+applyTheme when pr
   });
   const lines = overlay.render(80);
   const joined = lines.join("\n");
-  // Header line carries the running-status accent slot.
+  // Header status row carries the running-status accent slot.
   assert.match(joined, /\[accent\][^[]*a-1[^[]*\[\/\]/);
-  // The header's top ruler is borderMuted.
-  assert.match(joined, /\[borderMuted\]─+\[\/\]/);
-  // Footer hint line: Slice 9 styles each binding's key glyph with the
-  // accent slot (label is plain). Earlier slices had the whole footer
-  // dimmed via classifyLine; that's gone — the overlay now owns its
-  // footer entirely and styles it itself.
+  // Slice 6: chrome borders are themed via the `border` slot (not the
+  // older `borderMuted` ruler slot which only applied to in-body rules).
+  // Top border line goes through that slot.
+  assert.match(joined, /\[border\]╭─+╮\[\/\]/);
+  // Footer hint row styles each binding's key glyph with the accent slot.
   assert.match(joined, /\[accent\]Esc\[\/\] close/);
 });
 
@@ -469,6 +483,67 @@ test(
     assert.equal(refreshCalls, 2);
   },
 );
+
+// ── Slice 6: invalidate() clears the render cache ───────────────────────
+//
+// Per design §10, the overlay's render cache is the single mutation
+// surface introduced by the chrome rewrite. The cache is written
+// inside `render()` only and cleared inside `invalidate()` only.
+// `getTranscriptLength()` reads from the cache; tests for the
+// model's `getMetrics` closure (factory tests) depend on this
+// contract.
+
+test("invalidate() clears the slice cache (transcriptLength resets to 0)", () => {
+  const reg = new RunRegistry();
+  const longMessages: any[] = [];
+  for (let i = 0; i < 50; i++) {
+    longMessages.push({
+      role: "assistant",
+      content: [{ type: "text", text: `body line ${i}` }],
+    });
+  }
+  reg.register({
+    ...makeRun("a-1"),
+    messages: longMessages,
+  });
+  const model = new FocusedStreamModel(reg);
+  const overlay = new FocusedStreamOverlay({
+    model,
+    onClose: () => {},
+    onKill: () => {},
+  });
+
+  // Pre-render: cache empty, transcriptLength reports 0.
+  assert.equal(overlay.getTranscriptLength(), 0, "pre-render cache is empty");
+
+  // Render once — cache populates with the actual transcript line
+  // count.
+  overlay.render(80);
+  const firstLength = overlay.getTranscriptLength();
+  assert.ok(firstLength > 0, `expected populated cache after first render, got ${firstLength}`);
+
+  // Invalidate — cache must be cleared back to its empty state. Read
+  // the getter again WITHOUT re-rendering; the value must be 0 again.
+  overlay.invalidate();
+  assert.equal(
+    overlay.getTranscriptLength(),
+    0,
+    "invalidate() must clear the slice cache so getTranscriptLength reports 0",
+  );
+
+  // Sanity: after a second render the cache rehydrates.
+  overlay.render(80);
+  assert.equal(
+    overlay.getTranscriptLength(),
+    firstLength,
+    "cache rehydrates on the next render",
+  );
+
+  // Idempotent across consecutive invalidate calls.
+  overlay.invalidate();
+  overlay.invalidate();
+  assert.equal(overlay.getTranscriptLength(), 0);
+});
 
 // ── Slice 4: Home/End/g/G key bindings ─────────────────────────
 //

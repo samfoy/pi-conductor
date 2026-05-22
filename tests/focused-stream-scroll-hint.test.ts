@@ -189,11 +189,15 @@ test("overlay.render: scroll hint appears between transcript body and footer whe
     getViewportHeight: () => 10,
   });
   const lines = overlay.render(80);
-  // Find the hint line index and verify it sits before the footer.
-  const hintIdx = lines.findIndex((l) => /^↓ \d+ hidden/.test(l) || /^↑ \d+ hidden/.test(l));
+  // Slice 6 chrome wraps each content row in `│ … │`, so the hint
+  // glyph is no longer at column 0. The hint still appears uniquely
+  // inside one body row — search for the substring instead of
+  // anchoring at line start.
+  const hintIdx = lines.findIndex((l) => /↓ \d+ hidden/.test(l) || /↑ \d+ hidden/.test(l));
   assert.ok(hintIdx >= 0, "expected a scroll hint line in overlay output");
-  // Footer (`Esc …`) should follow the hint.
-  const footerIdx = lines.findIndex((l) => l.startsWith("Esc "));
+  // Footer hint row contains `Esc close …`. With chrome it's wrapped
+  // in side walls, so use `includes`.
+  const footerIdx = lines.findIndex((l) => l.includes("Esc "));
   assert.ok(footerIdx > hintIdx, "scroll hint must appear before the footer");
 });
 
@@ -208,9 +212,10 @@ test("overlay.render: scroll hint suppressed when transcript fits and offset=0",
     getViewportHeight: () => 100,
   });
   const lines = overlay.render(80);
-  // No hint line shape anywhere.
+  // No hint shape anywhere (matched without leading-anchor since slice 6
+  // chrome wraps each row).
   assert.equal(
-    lines.findIndex((l) => /^↑ \d+ hidden/.test(l) || /^↓ \d+ hidden/.test(l)),
+    lines.findIndex((l) => /↑ \d+ hidden/.test(l) || /↓ \d+ hidden/.test(l)),
     -1,
     "expected no scroll hint when transcript fits",
   );
@@ -251,7 +256,7 @@ test("overlay.render: single-agent overlay shows NO breadcrumb (avoids redundant
     getViewportHeight: () => 100,
   });
   const lines = overlay.render(80);
-  const breadcrumb = lines.find((l) => /\(line \d+\/\d+\)$/.test(l));
+  const breadcrumb = lines.find((l) => /\(line \d+\/\d+\)/.test(l));
   assert.equal(
     breadcrumb,
     undefined,

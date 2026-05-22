@@ -6027,17 +6027,37 @@ var FocusedStreamModel = class {
 };
 
 // src/focused-stream-overlay.ts
-import { truncateToWidth as truncateToWidth2, visibleWidth as visibleWidth3 } from "@earendil-works/pi-tui";
+import {
+  Container,
+  truncateToWidth as truncateToWidth2,
+  visibleWidth as visibleWidth3
+} from "@earendil-works/pi-tui";
+var HEADER_ROWS = 4;
+var FOOTER_ROWS = 3;
+var BORDER_INSET = 4;
+var DEFAULT_VIEWPORT_ROWS = 24;
+var TL = "\u256D";
+var TR = "\u256E";
+var BL = "\u2570";
+var BR = "\u256F";
+var ML = "\u251C";
+var MR = "\u2524";
+var HORIZ = "\u2500";
+var VERT = "\u2502";
 var EMPTY_HEADING = "(no sub-agents running)";
 var EMPTY_PROSE = "Spawn one via ensemble_spawn or /conductor spawn.";
 function renderEmpty(width, viewportHeight, theme) {
-  const slack = Math.max(0, viewportHeight - 5);
-  const topPad = Math.max(1, Math.floor(slack / 2));
-  const indent = "  ";
-  const headingLine = theme ? indent + theme.fg("muted", EMPTY_HEADING) : indent + EMPTY_HEADING;
-  const proseLine = theme ? indent + theme.fg("dim", clip(EMPTY_PROSE, Math.max(0, width - visibleWidth3(indent)))) : indent + clip(EMPTY_PROSE, Math.max(0, width - visibleWidth3(indent)));
-  const top = Array(topPad).fill("");
-  return [...top, headingLine, "", proseLine];
+  const heading = theme ? theme.fg("muted", clip(EMPTY_HEADING, width)) : clip(EMPTY_HEADING, width);
+  const prose = theme ? theme.fg("dim", clip(EMPTY_PROSE, width)) : clip(EMPTY_PROSE, width);
+  const contentRows = 3;
+  const extraSlack = Math.max(0, viewportHeight - contentRows);
+  const topPad = viewportHeight > 0 ? Math.max(1, Math.floor(extraSlack / 2)) : 1;
+  const out = [];
+  for (let i = 0; i < topPad; i++) out.push("");
+  out.push(heading);
+  out.push("");
+  out.push(prose);
+  return out;
 }
 var FOOTER_BINDINGS = [
   {
@@ -6059,9 +6079,6 @@ var FOOTER_BINDINGS = [
   {
     keyDisplay: "\u2191\u2193",
     label: "scroll",
-    // Order matters for tests that dispatch the *first* match — down
-    // arrow is observable from a fresh (offset=0) model, where up
-    // would clamp to a no-op.
     matches: ["\x1B[B", "\x1B[A", "\x1B[6~", "\x1B[5~"],
     action: (o, data) => {
       if (data === "\x1B[A") o.opts.model.scrollUp(1);
@@ -6072,9 +6089,6 @@ var FOOTER_BINDINGS = [
     }
   },
   {
-    // Slice 4 (overlay redesign): Home/End jump-to-extremes.
-    // `g`/`G` mirror the keys for less/vim-style users. The label keeps
-    // the footer compact — a single hint slot covers both ends.
     keyDisplay: "Home/End",
     label: "top/tail",
     matches: ["\x1B[H", "\x1B[F", "g", "G"],
@@ -6116,11 +6130,16 @@ var FOOTER_BINDINGS = [
   {
     // Slice 5 (overlay redesign): fold expand/collapse for tool-call
     // JSON walls and thinking bodies. Lowercase = additive (expand);
-    // uppercase = destructive (collapse). This is OPPOSITE to the
-    // vim/less convention; design §11 chose lowercase=expand because
-    // the more aggressive action gets the shifted key.
+    // uppercase = destructive (collapse). OPPOSITE to vim/less
+    // convention; design §11 chose lowercase=expand because the more
+    // aggressive action gets the shifted key.
+    //
+    // Slice 6 fold-in: footer hint label restored to the plan's
+    // verbatim wording (`e:expand all  E:collapse all`) so the
+    // fold-marker line's `(e expand all · E collapse all)` hint
+    // matches the footer hint.
     keyDisplay: "e/E",
-    label: "expand/collapse",
+    label: "expand all/collapse all",
     matches: ["e", "E"],
     action: (o, data) => {
       if (data === "e") o.opts.model.expandAll();
@@ -6138,8 +6157,7 @@ var FOOTER_BINDINGS = [
     }
   }
 ];
-function renderFooterLine(bindings, width, theme) {
-  const ruler = "\u2500".repeat(Math.max(0, width));
+function renderFooterHintLine(bindings, width, theme) {
   const sep = "  ";
   let plain = "";
   let styled = "";
@@ -6153,95 +6171,7 @@ function renderFooterLine(bindings, width, theme) {
       styled = styled ? styled + sep + stylePiece : stylePiece;
     }
   }
-  const hintLine = theme ? styled : plain;
-  return [ruler, hintLine];
-}
-var FocusedStreamOverlay = class {
-  constructor(_opts) {
-    this._opts = _opts;
-  }
-  _opts;
-  /**
-   * Slice 4: cached transcript line count from the most recent
-   * `render()` call. Read by the model's `getMetrics` closure (wired
-   * by the factory) to clamp `scrollDown` and drive `stickToTail`.
-   *
-   * This IS a render-side mutation, but it's idempotent memoization —
-   * a pure side-output of `render()` that any caller could re-derive
-   * by re-running `renderTranscript` with the same inputs. Slice 6's
-   * three-zone chrome rewrite will introduce a true render cache and
-   * make `invalidate()` clear it; until then this single counter is
-   * the entire "cache".
-   */
-  _lastTranscriptLength = 0;
-  render(width) {
-    const { model, theme } = this.opts;
-    const focused = model.focused();
-    const footerLines = renderFooterLine(FOOTER_BINDINGS, width, theme);
-    let bodyLines;
-    let status;
-    if (!focused) {
-      const viewportHeight = this.opts.getViewportHeight?.() ?? 0;
-      const empty = renderEmpty(width, viewportHeight, theme);
-      return [...empty, ...footerLines];
-    } else {
-      const header = renderHeader(focused, width);
-      const transcript = renderTranscript(focused, {
-        width,
-        collapseToolCalls: model.collapseToolCalls(),
-        showThinking: model.showThinking(),
-        // Slice 5: bind the model's per-block expand state to the
-        // pure renderer. Read-only — the renderer never writes to
-        // the model (preserves O6 render-purity invariant).
-        isExpanded: (key, def) => model.isExpanded(key, def)
-      });
-      this._lastTranscriptLength = transcript.length;
-      const offset = Math.min(model.scrollOffset(), Math.max(0, transcript.length - 1));
-      const visibleTranscript = transcript.slice(offset);
-      const viewportHeight = this.opts.getViewportHeight?.() ?? 0;
-      const hint = renderScrollHint(offset, transcript.length, viewportHeight, {
-        id: focused.id,
-        agentCount: model.agentCount()
-      });
-      const hintLines = hint === null ? [] : [hint];
-      bodyLines = [...header, ...visibleTranscript, ...hintLines];
-      status = focused.status;
-    }
-    if (!theme) return [...bodyLines, ...footerLines];
-    const themedBody = applyThemeToLines(bodyLines, classifyLine, theme, { status });
-    return [...themedBody, ...footerLines];
-  }
-  /**
-   * Slice 4: transcript line count from the most recent render(). Used
-   * by the model's getMetrics closure. Returns 0 before the first
-   * render() or when the focused branch did not run (empty state).
-   */
-  getTranscriptLength() {
-    return this._lastTranscriptLength;
-  }
-  invalidate() {
-  }
-  /**
-   * Public access to the construction options. Used by `FOOTER_BINDINGS`
-   * action callbacks so they can dispatch through the same opts the
-   * Component was wired with.
-   */
-  get opts() {
-    return this._opts;
-  }
-  handleInput(data) {
-    this.opts.model.refresh();
-    for (const binding of FOOTER_BINDINGS) {
-      if (binding.matches.includes(data)) {
-        binding.action(this, data);
-        return;
-      }
-    }
-  }
-};
-function clip(s, width) {
-  if (visibleWidth3(s) <= width) return s;
-  return truncateToWidth2(s, width, "\u2026", false);
+  return theme ? styled : plain;
 }
 function renderScrollHint(scrollOffset, transcriptLineCount, viewportHeight, agentContext) {
   if (viewportHeight <= 0) return null;
@@ -6261,6 +6191,189 @@ function renderScrollHint(scrollOffset, transcriptLineCount, viewportHeight, age
   if (scrollPart) return scrollPart;
   if (agentPart) return agentPart;
   return null;
+}
+function clip(s, width) {
+  if (visibleWidth3(s) <= width) return s;
+  return truncateToWidth2(s, width, "\u2026", false);
+}
+function padInner(content, innerWidth) {
+  if (innerWidth <= 0) return "";
+  const w = visibleWidth3(content);
+  if (w >= innerWidth) return content;
+  return content + " ".repeat(innerWidth - w);
+}
+function topBorder(width, theme) {
+  if (width < 2) return HORIZ.repeat(width);
+  const s = TL + HORIZ.repeat(width - 2) + TR;
+  return theme ? theme.fg("border", s) : s;
+}
+function midBorder(width, theme) {
+  if (width < 2) return HORIZ.repeat(width);
+  const s = ML + HORIZ.repeat(width - 2) + MR;
+  return theme ? theme.fg("border", s) : s;
+}
+function bottomBorder(width, theme) {
+  if (width < 2) return HORIZ.repeat(width);
+  const s = BL + HORIZ.repeat(width - 2) + BR;
+  return theme ? theme.fg("border", s) : s;
+}
+function sideRow(inner, width, theme) {
+  if (width < BORDER_INSET) {
+    return padInner(inner, Math.max(0, width));
+  }
+  const innerWidth = width - BORDER_INSET;
+  const left = theme ? theme.fg("border", `${VERT} `) : `${VERT} `;
+  const right = theme ? theme.fg("border", ` ${VERT}`) : ` ${VERT}`;
+  return left + padInner(inner, innerWidth) + right;
+}
+var StaticLinesZone = class {
+  _lines = [];
+  setLines(lines) {
+    this._lines = lines;
+  }
+  render(_width) {
+    return this._lines;
+  }
+  invalidate() {
+    this._lines = [];
+  }
+};
+var FocusedStreamOverlay = class {
+  constructor(_opts) {
+    this._opts = _opts;
+    this._root = new Container();
+    this._headerZone = new StaticLinesZone();
+    this._bodyZone = new StaticLinesZone();
+    this._footerZone = new StaticLinesZone();
+    this._root.addChild(this._headerZone);
+    this._root.addChild(this._bodyZone);
+    this._root.addChild(this._footerZone);
+  }
+  _opts;
+  _root;
+  _headerZone;
+  _bodyZone;
+  _footerZone;
+  /**
+   * Slice 6 render cache. Single mutation surface: written ONLY
+   * inside `render()`, cleared ONLY inside `invalidate()`. Subsumes
+   * the slice-4 grandfathered `_lastTranscriptLength` mutation.
+   * `getTranscriptLength()` reads from this field; the model's
+   * `getMetrics` closure (wired by the factory) calls that getter.
+   */
+  _renderCache = null;
+  /**
+   * Public access to the construction options. Used by `FOOTER_BINDINGS`
+   * action callbacks so they can dispatch through the same opts the
+   * Component was wired with.
+   */
+  get opts() {
+    return this._opts;
+  }
+  render(width) {
+    const { model, theme } = this.opts;
+    const focused = model.focused();
+    const viewportRaw = this.opts.getViewportHeight?.();
+    const viewport = viewportRaw && viewportRaw > 0 ? viewportRaw : DEFAULT_VIEWPORT_ROWS;
+    const bodyRows = Math.max(1, viewport - HEADER_ROWS - FOOTER_ROWS);
+    const innerWidth = Math.max(0, width - BORDER_INSET);
+    let transcriptLength = 0;
+    let bodyInnerLines;
+    let statusInner = "";
+    let status;
+    if (!focused) {
+      bodyInnerLines = renderEmpty(innerWidth, bodyRows, theme);
+      bodyInnerLines = fitToHeight(bodyInnerLines, bodyRows);
+    } else {
+      const hdr = renderHeader(focused, innerWidth);
+      statusInner = hdr[1] ?? "";
+      const transcript = renderTranscript(focused, {
+        width: innerWidth,
+        collapseToolCalls: model.collapseToolCalls(),
+        showThinking: model.showThinking(),
+        isExpanded: (key, def) => model.isExpanded(key, def)
+      });
+      transcriptLength = transcript.length;
+      const offset = Math.min(
+        model.scrollOffset(),
+        Math.max(0, transcript.length - 1)
+      );
+      let bodyContent = transcript.slice(offset, offset + bodyRows);
+      const hint = renderScrollHint(offset, transcript.length, bodyRows, {
+        id: focused.id,
+        agentCount: model.agentCount()
+      });
+      bodyContent = fitToHeight(bodyContent, bodyRows);
+      if (hint !== null) {
+        bodyContent[bodyContent.length - 1] = hint;
+      }
+      bodyInnerLines = bodyContent;
+      status = focused.status;
+    }
+    const themedBodyInner = theme ? applyThemeToLines(bodyInnerLines, classifyLine, theme, { status }) : bodyInnerLines;
+    let themedStatusInner = statusInner;
+    if (focused && theme) {
+      const styled = applyThemeToLines([statusInner], classifyLine, theme, { status });
+      themedStatusInner = styled[0] ?? statusInner;
+    }
+    const footerHint = renderFooterHintLine(FOOTER_BINDINGS, innerWidth, theme);
+    const headerLines = [
+      topBorder(width, theme),
+      sideRow(themedStatusInner, width, theme),
+      midBorder(width, theme),
+      sideRow("", width, theme)
+    ];
+    const bodyLines = themedBodyInner.map((l) => sideRow(l, width, theme));
+    while (bodyLines.length < bodyRows) bodyLines.push(sideRow("", width, theme));
+    if (bodyLines.length > bodyRows) bodyLines.length = bodyRows;
+    const footerLines = [
+      midBorder(width, theme),
+      sideRow(footerHint, width, theme),
+      bottomBorder(width, theme)
+    ];
+    this._headerZone.setLines(headerLines);
+    this._bodyZone.setLines(bodyLines);
+    this._footerZone.setLines(footerLines);
+    this._renderCache = { transcriptLength };
+    return this._root.render(width);
+  }
+  /**
+   * Slice 4 plumbing. Returns the transcript line count from the most
+   * recent `render()`. Sourced from the slice-6 `_renderCache`. Pre
+   * first render returns 0 — callers (the model's getMetrics closure)
+   * treat 0 as "no transcript yet, no scroll needed".
+   */
+  getTranscriptLength() {
+    return this._renderCache?.transcriptLength ?? 0;
+  }
+  /**
+   * Slice 6 contract: invalidate clears the render cache. Must be
+   * called from outside `render()` only — render owns the write
+   * surface, invalidate owns the clear. The Container.invalidate()
+   * cascade also empties each zone's stored lines so a stale frame
+   * cannot survive a registry change.
+   */
+  invalidate() {
+    this._root.invalidate();
+    this._renderCache = null;
+  }
+  handleInput(data) {
+    this.opts.model.refresh();
+    for (const binding of FOOTER_BINDINGS) {
+      if (binding.matches.includes(data)) {
+        binding.action(this, data);
+        return;
+      }
+    }
+  }
+};
+function fitToHeight(lines, rows) {
+  if (rows <= 0) return [];
+  if (lines.length === rows) return lines.slice();
+  if (lines.length > rows) return lines.slice(0, rows);
+  const out = lines.slice();
+  while (out.length < rows) out.push("");
+  return out;
 }
 
 // src/focused-overlay-factory.ts

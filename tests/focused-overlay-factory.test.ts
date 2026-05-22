@@ -188,23 +188,24 @@ test("createFocusedOverlayComponent: viewport rows propagate to renderEmpty cent
     forceTerminate: () => {},
     promptAndSendToRun: () => {},
     done: () => {},
-    // Default (no viewport) → topPad collapses to 1
+    getViewportHeight: () => 12,
   });
   const tallLines = tall.render(80);
   const smallLines = small.render(80);
-  // renderEmpty pads top with Math.max(1, floor((viewport - 5) / 2)).
-  // viewport=30 → topPad=12 spacers; viewport=0 → topPad=1 spacer.
-  // Counting leading blank lines is the cheapest stable assertion.
-  const leadingBlanks = (lines: readonly string[]): number => {
-    let i = 0;
-    while (i < lines.length && lines[i] === "") i += 1;
-    return i;
-  };
-  const tallTop = leadingBlanks(tallLines);
-  const smallTop = leadingBlanks(smallLines);
+  // Slice 6 chrome wraps every row in side walls, so leading-blank
+  // counting no longer works. The heading lives inside the body zone
+  // (rows 4..viewport-3); a taller viewport gives renderEmpty a bigger
+  // budget for its top padding, so the heading lands later in the
+  // overall line array.
+  const headingIdx = (lines: readonly string[]): number =>
+    lines.findIndex((l) => l.includes("(no sub-agents running)"));
+  const tallHead = headingIdx(tallLines);
+  const smallHead = headingIdx(smallLines);
+  assert.ok(tallHead > 0, `tall heading not found, got ${tallHead}`);
+  assert.ok(smallHead > 0, `small heading not found, got ${smallHead}`);
   assert.ok(
-    tallTop > smallTop,
-    `taller viewport must yield more top padding (got tall=${tallTop}, small=${smallTop})`,
+    tallHead > smallHead,
+    `taller viewport must yield deeper heading row (got tall=${tallHead}, small=${smallHead})`,
   );
 });
 
