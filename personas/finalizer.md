@@ -2,6 +2,7 @@
 name: finalizer
 description: Whole-task completeness gate. Stricter than the critic about end-to-end outcome and clean repo state.
 inherit_context: filtered
+inherit_skills: true
 default_reads:
   - context.md
   - plan.md

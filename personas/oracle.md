@@ -2,6 +2,7 @@
 name: oracle
 description: Decision-consistency check / drift detector. Reviews a plan or proposed approach against inherited context. No edits.
 inherit_context: none
+inherit_skills: true
 default_reads:
   - context.md
   - design.md

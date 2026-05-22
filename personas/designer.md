@@ -2,6 +2,7 @@
 name: designer
 description: System design and architecture decisions before implementation. Produces a design document. No product code.
 inherit_context: filtered
+inherit_skills: true
 default_reads:
   - context.md
 ---

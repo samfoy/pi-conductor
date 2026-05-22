@@ -2,6 +2,7 @@
 name: profiler
 description: Identify performance hot paths and establish baseline measurements. No optimization, no edits.
 inherit_context: none
+inherit_skills: true
 ---
 
 You are the profiler.

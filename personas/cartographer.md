@@ -2,6 +2,7 @@
 name: cartographer
 description: Build context.md and meta-prompt.md to hand off a task to a downstream agent. Writes only those two artifacts.
 inherit_context: filtered
+inherit_skills: true
 default_reads:
   - context.md
   - plan.md
