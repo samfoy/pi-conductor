@@ -96,3 +96,22 @@ test("personas with default_reads parse the list correctly", async () => {
     else delete process.env.HOME;
   }
 });
+
+test("critic inherits parent skills so it can pick up code-review / doc-review overlays", async () => {
+  const realHome = process.env.HOME;
+  process.env.HOME = "/tmp/__nonexistent_home_for_conductor_test__";
+
+  try {
+    const r = await resolvePersonas({ cwd: "/tmp/__nonexistent_cwd_for_conductor_test__" });
+    const critic = r.personas.get("critic");
+    assert.ok(critic);
+    assert.equal(
+      critic.inheritSkills,
+      true,
+      "critic should set inherit_skills: true so it picks up the user's code-review and doc-review skills",
+    );
+  } finally {
+    if (realHome !== undefined) process.env.HOME = realHome;
+    else delete process.env.HOME;
+  }
+});
