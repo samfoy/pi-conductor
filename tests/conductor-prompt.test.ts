@@ -459,3 +459,46 @@ test("buildConductorSystemPrompt: §11 — verifier briefs must be self-containe
     `verifier-brief rule must be co-located with inherit_context (got ${Math.abs(verifierIdx - inheritIdx)} chars apart)`,
   );
 });
+
+// ── §1.5 / §11: tiny-direct-action exception (v0.10.x) ─────────────
+
+test("buildConductorSystemPrompt: §1.5 — tiny direct actions sub-block landed", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  assert.match(out, /Tiny direct actions \(explicit-opt-in only\)/);
+  assert.match(out, /Tiny direct action:/);
+  assert.match(out, /Commit-message-only amends/);
+  assert.match(out, /At most one tiny direct action per turn/);
+  assert.match(
+    out,
+    /without requiring you to read additional files to compute the change/,
+  );
+});
+
+test("buildConductorSystemPrompt: §1.5 — tiny-action anti-list present", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  assert.match(out, /[Nn]ot tiny, even if they feel tiny/);
+});
+
+test("buildConductorSystemPrompt: §1.5 — forensic git plumbing demoted to orientation", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  assert.match(out, /git reflog/);
+  const idx = out.search(/git reflog/);
+  const window = out.slice(Math.max(0, idx - 200), idx + 200);
+  assert.match(window, /orientation/i);
+});
+
+test("buildConductorSystemPrompt: §11 — Tiny dictated fix bullet still names the categorized exception", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  assert.match(out, /Tiny dictated fix/);
+  const idx11 = out.indexOf("## 11.");
+  assert.match(out.slice(idx11), /§1\.5/);
+});
+
+test("buildConductorSystemPrompt: §1 — forward references the §1.5 tiny-action exception", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  // §1 must signal the exception's existence so a future reader doesn't treat
+  // 'You are not the implementer' as flatly absolute.
+  const beforeS15 = out.slice(0, out.indexOf("## 1.5"));
+  assert.match(beforeS15, /§1\.5/);
+  assert.match(beforeS15, /tiny.action/i);
+});
