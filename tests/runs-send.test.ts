@@ -251,3 +251,39 @@ test("buildResumePiArgs: omits --append-system-prompt when run.systemPrompt is u
   assert.ok(args.includes("--session"));
   assert.equal(args[args.length - 1], "hi");
 });
+
+test("sendToRun reseeds lastEventAt to now", () => {
+  // Regression: sendToRun did not reset lastEventAt, so the watchdog's
+  // next tick would compute silentMs against the *previous turn's*
+  // lastEventAt and fire spurious stall alerts on resumed runs.
+  const dir = tmpDir();
+  try {
+    const sessionFile = join(dir, "abc.jsonl");
+    writeFileSync(sessionFile, "{}\n");
+    const reg = new RunRegistry();
+    const run = makeRun({
+      status: "completed",
+      sessionPath: sessionFile,
+      lastEventAt: 1_700_000_000_000, // far in the past
+      stalledSince: 1_700_000_000_500, // leftover from previous turn
+    });
+    reg.register(run);
+
+    const before = Date.now();
+    const result = sendToRun(run, "continue", { registry: reg, timeoutMs: 60_000 });
+    assert.equal(result.kind, "started");
+
+    // lastEventAt must be reseeded to approximately now.
+    assert.ok(
+      Math.abs(run.lastEventAt - Date.now()) < 2000,
+      `lastEventAt should be ~now but was ${run.lastEventAt} (delta: ${Date.now() - run.lastEventAt}ms)`,
+    );
+    // stalledSince must be cleared — no stale advisory state.
+    assert.equal(run.stalledSince, undefined);
+
+    // Cleanup: kill the spawned subprocess.
+    try { run.proc?.kill("SIGKILL"); } catch { /* already gone */ }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

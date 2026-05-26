@@ -1219,6 +1219,10 @@ export function sendToRun(
   run.errorMessage = undefined;
   run.stopReason = undefined;
   run.lastToolCall = undefined;
+  // Reseed watchdog timing so the next tick doesn't compute silentMs
+  // against the *previous turn's* lastEventAt (resume-race bug fix).
+  run.lastEventAt = Date.now();
+  run.stalledSince = undefined;
   // v0.10 watchdog (Slice 3) per-send overrides. Replace prior values
   // when provided; leave the spawn-time values alone otherwise.
   if (opts.killOnStall !== undefined) run.killOnStall = opts.killOnStall;

@@ -1845,6 +1845,8 @@ function sendToRun(run, message, opts) {
   run.errorMessage = void 0;
   run.stopReason = void 0;
   run.lastToolCall = void 0;
+  run.lastEventAt = Date.now();
+  run.stalledSince = void 0;
   if (opts.killOnStall !== void 0) run.killOnStall = opts.killOnStall;
   if (opts.softStallSeconds !== void 0) run.softStallSeconds = opts.softStallSeconds;
   opts.registry.notify(run);

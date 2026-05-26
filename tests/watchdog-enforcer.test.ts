@@ -497,3 +497,42 @@ test("resolveKillOnStall: per-run override wins; falls through to cfg default (L
   );
 });
 
+// ── Resume race bug (v0.10 regression) ───────────────────────────────
+
+test("Watchdog.tick: resumed run with stale lastEventAt does not soft-stall on next tick", () => {
+  // Simulates the resume-race: a run was completed 24h ago, then
+  // ensemble_send resumes it. If sendToRun reseeds lastEventAt to now,
+  // the very next tick must NOT detect a stall.
+  const now = Date.now();
+  const run = runFx({
+    status: "running", // post-resume status
+    startTime: T0,
+    lastEventAt: now, // simulates the fix: reseeded by sendToRun
+    stalledSince: undefined, // cleared by sendToRun
+  });
+  const nowRef = { value: now + 1000 }; // 1s after resume — well within grace
+  const { deps, log } = makeDeps({ runs: [run], nowRef });
+  const wd = new Watchdog(deps);
+  wd.tick();
+  assert.equal(log.warns.length, 0, "no stall advisory on freshly-resumed run");
+  assert.equal(run.stalledSince, undefined, "stalledSince stays clear");
+});
+
+test("Watchdog.tick: resumed run WITHOUT lastEventAt reseed triggers spurious soft-stall (bug witness)", () => {
+  // This test witnesses the bug: if lastEventAt is NOT reseeded (left at
+  // 24h ago), the watchdog fires a soft-stall on the next tick. This test
+  // verifies the bug IS real — it should pass both before and after the
+  // fix (it documents the failure mode, not the fix).
+  const now = Date.now();
+  const run = runFx({
+    status: "running",
+    startTime: T0,
+    lastEventAt: now - 86_400_000, // 24h ago — NOT reseeded
+  });
+  const nowRef = { value: now };
+  const { deps, log } = makeDeps({ runs: [run], nowRef });
+  const wd = new Watchdog(deps);
+  wd.tick();
+  assert.equal(log.warns.length, 1, "stale lastEventAt causes spurious soft-stall");
+});
+
