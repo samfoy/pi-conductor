@@ -448,6 +448,24 @@ export interface Run {
   /** Watchers (intervals etc) that need cleanup. */
   watcher?: NodeJS.Timeout;
 
+  /**
+   * v0.12 slice 3 — single-writer JSON-line queue for the sub-agent's
+   * stdin under `--mode rpc`. Set by `runPiSubprocess` immediately
+   * after `spawn()` returns when `Run.steerable === true`; left
+   * undefined for print-mode runs. Slice 5's `forceTerminate` calls
+   * `destroy("force-terminate")` on this before SIGTERM so any
+   * pending stdin writes (steers in flight) reject cleanly.
+   *
+   * Consumed by `handleExtensionUiRequest` (`src/event-handler.ts`)
+   * to enqueue the auto-cancel envelope, and by slice 4's
+   * `sendToRun` rewrite to enqueue `prompt` / `steer` / `follow_up`
+   * commands. Typed as `unknown`-shaped on Run to avoid the
+   * `RpcStdinQueue` import in this file leaking the
+   * `node:stream` dep upstream; consumers cast at the use site.
+   * In-memory only — NOT persisted to `RunRecord`.
+   */
+  rpcStdinQueue?: import("./rpc-stdin.ts").RpcStdinQueue;
+
   // ── v0.11 on_complete_hook (slice 1a types) ────────────────────────
   // Slice 1a declares these optional fields; slice 2 mutates them from
   // the hook enforcer in `runs.ts`. They are NOT read by anything in

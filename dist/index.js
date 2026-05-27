@@ -466,6 +466,159 @@ import { spawn } from "node:child_process";
 import { existsSync as existsSync3, mkdirSync as mkdirSync3, readdirSync, statSync } from "node:fs";
 import { mkdir, writeFile as writeFile2, appendFile } from "node:fs/promises";
 import { homedir as homedir3 } from "node:os";
+
+// src/rpc-stdin.ts
+function findRawLineSeparator(value, depth = 0) {
+  if (depth > 16) return null;
+  if (typeof value === "string") {
+    if (value.includes("\n")) return "\n";
+    if (value.includes("\r")) return "\r";
+    return null;
+  }
+  if (value === null || typeof value !== "object") return null;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const r = findRawLineSeparator(item, depth + 1);
+      if (r) return r;
+    }
+    return null;
+  }
+  for (const key of Object.keys(value)) {
+    const r = findRawLineSeparator(value[key], depth + 1);
+    if (r) return r;
+  }
+  return null;
+}
+var RpcStdinQueue = class {
+  stream;
+  queue = [];
+  /** The entry currently awaiting its write callback, if any. */
+  inFlightEntry = null;
+  /** True after destroy(); subsequent enqueues reject immediately. */
+  destroyed = false;
+  constructor(stream) {
+    this.stream = stream;
+  }
+  /**
+   * Enqueue a command for sequenced JSON-line write. Resolves when
+   * the kernel acknowledges the write; rejects on EPIPE / ECANCELED
+   * (with `cause` set to the underlying `Error`) or if the queue has
+   * been destroyed.
+   *
+   * Embedded LF / CR characters in the stringified payload are
+   * rejected synchronously (LF-only framing invariant).
+   */
+  enqueue(cmd) {
+    return new Promise((resolve2, reject) => {
+      if (this.destroyed) {
+        reject(new Error("RpcStdinQueue is destroyed; cannot enqueue"));
+        return;
+      }
+      const violation = findRawLineSeparator(cmd);
+      if (violation === "\n") {
+        reject(
+          new Error(
+            "embedded newline in command payload string field; LF-only framing forbids raw \\n"
+          )
+        );
+        return;
+      }
+      if (violation === "\r") {
+        reject(
+          new Error(
+            "embedded carriage return in command payload string field; LF-only framing forbids raw CR"
+          )
+        );
+        return;
+      }
+      let json;
+      try {
+        json = JSON.stringify(cmd);
+      } catch (e) {
+        reject(new Error(`failed to JSON.stringify command: ${e.message}`));
+        return;
+      }
+      const entry = {
+        json,
+        resolve: () => {
+          if (entry.settled) return;
+          entry.settled = true;
+          resolve2();
+        },
+        reject: (err) => {
+          if (entry.settled) return;
+          entry.settled = true;
+          reject(err);
+        },
+        settled: false
+      };
+      this.queue.push(entry);
+      this.pump();
+    });
+  }
+  /**
+   * Synchronously reject every pending entry (in-flight + queued)
+   * with an Error whose message embeds the supplied reason. Idempotent:
+   * a second destroy() call is a no-op.
+   */
+  destroy(reason) {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    const err = new Error(`RpcStdinQueue destroyed: ${reason}`);
+    if (this.inFlightEntry) {
+      const e = this.inFlightEntry;
+      this.inFlightEntry = null;
+      e.reject(err);
+    }
+    const drained = this.queue.splice(0, this.queue.length);
+    for (const entry of drained) {
+      entry.reject(err);
+    }
+  }
+  // ── Internals ───────────────────────────────────────────────────
+  /**
+   * Pump the next queued entry into the stream, one at a time.
+   * Callback-based so we observe back-pressure correctly: the
+   * Writable's _write callback fires only after the chunk is
+   * accepted into the internal buffer (or rejected).
+   */
+  pump() {
+    if (this.inFlightEntry !== null || this.destroyed) return;
+    const entry = this.queue.shift();
+    if (!entry) return;
+    this.inFlightEntry = entry;
+    const line = entry.json + "\n";
+    if (!this.stream || this.stream.writableEnded || this.stream.destroyed) {
+      this.inFlightEntry = null;
+      const err = new Error("RpcStdinQueue: underlying stream is not writable");
+      entry.reject(err);
+      this.pump();
+      return;
+    }
+    const onWriteSettled = (err) => {
+      if (this.inFlightEntry === entry) {
+        this.inFlightEntry = null;
+      }
+      if (err) {
+        const wrapped = new Error(
+          `RpcStdinQueue write failed: ${err.message}`
+        );
+        wrapped.cause = err;
+        entry.reject(wrapped);
+      } else {
+        entry.resolve();
+      }
+      if (!this.destroyed) this.pump();
+    };
+    try {
+      this.stream.write(line, "utf8", onWriteSettled);
+    } catch (e) {
+      onWriteSettled(e);
+    }
+  }
+};
+
+// src/runs.ts
 import { dirname as dirname4, join as join4 } from "node:path";
 
 // src/gc/id-reuse.ts
@@ -529,6 +682,13 @@ function applyEvent(run, event) {
   if (!event || typeof event !== "object") return NONE;
   const e = event;
   if (typeof e.type !== "string") return NONE;
+  if (e.type === "response") {
+    routeRpcResponse(run, e);
+    return UPDATED;
+  }
+  if (e.type === "extension_ui_request") {
+    return handleExtensionUiRequest(run, e);
+  }
   if (e.type === "agent_end") {
     return { kind: "finalize", status: "completed", exitCode: 0 };
   }
@@ -583,6 +743,20 @@ function applyEvent(run, event) {
     return UPDATED;
   }
   return NONE;
+}
+function routeRpcResponse(_run, _evt) {
+  return UPDATED;
+}
+function handleExtensionUiRequest(run, evt) {
+  const id = evt.id;
+  const method = evt.method ?? "unknown";
+  console.warn(
+    `sub-agent ${run.id} emitted ${method} request under steerable=true; auto-cancelled`
+  );
+  if (!run.rpcStdinQueue || typeof id !== "string") return UPDATED;
+  void run.rpcStdinQueue.enqueue({ type: "extension_ui_response", id, cancelled: true }).catch(() => {
+  });
+  return UPDATED;
 }
 function shortenPath(p) {
   const home = process.env.HOME || "";
@@ -1617,6 +1791,10 @@ function recordSpawnedProc(run, proc) {
   run.proc = proc;
   run.pid = proc.pid;
 }
+function stampSpawnStreamingMode(run, steerable) {
+  run.steerable = steerable;
+  run.streamingMode = steerable ? "rpc" : "print";
+}
 async function attachSpawnedProc(run, proc) {
   recordSpawnedProc(run, proc);
   await writeRecord(run);
@@ -1688,6 +1866,18 @@ function spawnRun(opts) {
     // Only let the subprocess discover a session file when we didn't pre-seed
     // one — in resume mode the path is fixed.
     sessionDir: plan.seededSessionPath ? void 0 : sessionDir,
+    // v0.12 slice 3 — spawn-pipeline plumbing for steerable runs.
+    // Slice 4 will derive `steerable` from the per-call cascade and
+    // thread it through `planSpawnPiArgs` so `plan.piArgs` matches the
+    // mode declared here. Slice 3 hard-codes `false` so production
+    // remains print-mode; the test seam to verify steerable wiring is
+    // `stampSpawnStreamingMode` (pinned in
+    // tests/runs-streaming-strategy.test.ts).
+    steerable: false,
+    // initialPrompt is unused in print mode (`-p` consumes the
+    // trailing argv positional). Slice 4 sets this from `prompt` when
+    // `steerable: true`.
+    initialPrompt: void 0,
     // v0.11 on_complete_hook (slice 2): resolve at spawn time from the
     // current config layers + persona frontmatter. Per-call args land
     // in slice 3; for slice 2 the per-call layer is always undefined.
@@ -1735,12 +1925,13 @@ function hookSpecFromPersona(persona) {
 }
 function runPiSubprocess(run, piArgs, opts) {
   const invocation = getPiInvocation(piArgs);
+  const stdinKind = opts.steerable ? "pipe" : "ignore";
   let proc;
   try {
     proc = spawn(invocation.command, invocation.args, {
       cwd: opts.cwd,
       shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [stdinKind, "pipe", "pipe"],
       env: buildSubagentEnv()
     });
   } catch (e) {
@@ -1754,6 +1945,19 @@ function runPiSubprocess(run, piArgs, opts) {
     return Promise.resolve(run);
   }
   void attachSpawnedProc(run, proc);
+  stampSpawnStreamingMode(run, opts.steerable === true);
+  if (opts.steerable === true && proc.stdin) {
+    const queue = new RpcStdinQueue(proc.stdin);
+    run.rpcStdinQueue = queue;
+    if (typeof opts.initialPrompt === "string" && opts.initialPrompt.length > 0) {
+      void queue.enqueue({
+        id: `init-${run.id}`,
+        type: "prompt",
+        message: opts.initialPrompt
+      }).catch(() => {
+      });
+    }
+  }
   run.timeoutTimer = setTimeout(() => {
     if (run.status === "running" || run.status === "paused") {
       forceTerminate(run, "timeout", opts.registry, opts.onComplete);
@@ -1986,6 +2190,14 @@ function sendToRun(run, message, opts) {
     // Re-discover sessionPath on finalize — the file path is stable but the
     // mtime updates, which lets future sends still find it.
     sessionDir: dirname4(sessionPath),
+    // v0.12 slice 3 — sendToRun is print-mode-only today
+    // (`buildResumePiArgs` hard-codes `steerable: false`). Slice 4's
+    // `sendToRun` rewrite branches on `Run.streamingMode` and routes
+    // RPC-shaped sends through `Run.rpcStdinQueue` instead of
+    // spawning a fresh subprocess; this argument stays `false` for
+    // print-mode resume spawns.
+    steerable: false,
+    initialPrompt: void 0,
     // v0.11 on_complete_hook (slice 2): re-resolve at every terminal
     // transition so config changes between spawn and re-fire are
     // honored (§4.6: each terminal is a fresh gate). Per-call layer

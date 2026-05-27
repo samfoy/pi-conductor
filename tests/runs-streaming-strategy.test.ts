@@ -21,7 +21,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { resolveSendStrategy } from "../src/runs.ts";
+import { resolveSendStrategy, stampSpawnStreamingMode } from "../src/runs.ts";
 import {
   emptyUsage,
   type ResolvedSendStrategy,
@@ -267,5 +267,49 @@ test("resolveSendStrategy: rejection reasons are character-pinned (W3 string wit
         "sub-agent tester-aaaa has no resumable session on disk (sessionPath unset).",
       );
     }
+  }
+});
+
+// ── Slice 3 smoke: spawn-time streaming-mode stamp ────────────────────
+//
+// `stampSpawnStreamingMode(run, steerable)` is the pure helper
+// `runPiSubprocess` calls immediately after `spawn()` returns to set
+// `run.steerable` and `run.streamingMode`. We test it directly so the
+// smoke does NOT have to fork a real `pi --mode rpc` subprocess (slice
+// 6 owns the live integration test). Pinning the helper output here
+// guarantees `resolveSendStrategy` sees the same shape the production
+// spawn pipeline will produce once slice 4 wires the per-call
+// `steerable` cascade.
+
+test("slice 3 smoke: stampSpawnStreamingMode(true) + resolveSendStrategy(\"auto\") → rpc-follow-up using actual run.streamingMode set by spawnRun", () => {
+  const run = runFx({ status: "running" });
+  // streamingMode + steerable both unset coming out of runFx
+  // (mirrors a fresh run before runPiSubprocess attaches).
+  assert.equal(run.streamingMode, undefined);
+  assert.equal(run.steerable, undefined);
+
+  // Same call runPiSubprocess will make in slice 3's stdio-pipe branch.
+  stampSpawnStreamingMode(run, true);
+
+  assert.equal(run.streamingMode, "rpc", "steerable=true → streamingMode=rpc");
+  assert.equal(run.steerable, true, "steerable=true → run.steerable=true");
+
+  // Resolver routes a steerable, RPC-mode running run + auto to
+  // rpc-follow-up. Pin the full integration: helper-output → resolver.
+  expectKind(resolveSendStrategy(run, "auto"), "rpc-follow-up");
+});
+
+test("slice 3 smoke: stampSpawnStreamingMode(false) preserves print-mode contract", () => {
+  // Regression pin: the print-mode default produces streamingMode="print"
+  // and steerable=false. resolveSendStrategy then rejects with the
+  // not-steerable reason.
+  const run = runFx({ status: "running" });
+  stampSpawnStreamingMode(run, false);
+  assert.equal(run.streamingMode, "print");
+  assert.equal(run.steerable, false);
+  const r = resolveSendStrategy(run, "auto");
+  assert.equal(r.strategy.kind, "rejected");
+  if (r.strategy.kind === "rejected") {
+    assert.match(r.strategy.reason, /is not steerable; mark steerable: true at spawn/);
   }
 });

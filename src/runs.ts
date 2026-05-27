@@ -21,6 +21,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { mkdir, writeFile, appendFile } from "node:fs/promises";
 import { homedir } from "node:os";
+import { RpcStdinQueue } from "./rpc-stdin.ts";
 import { dirname, join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { noteAllocatedId } from "./gc/id-reuse.ts";
@@ -760,6 +761,28 @@ export function recordSpawnedProc(run: Run, proc: ChildProcess): void {
 }
 
 /**
+ * v0.12 slice 3 — stamp `Run.steerable` and `Run.streamingMode`
+ * immediately after the subprocess spawn returns. Pure helper extracted
+ * from `runPiSubprocess` so the smoke pin in
+ * `tests/runs-streaming-strategy.test.ts` can verify the post-spawn
+ * shape without forking a real `pi --mode rpc` subprocess (slice 6 owns
+ * the live integration).
+ *
+ * Contract:
+ *   - `steerable === true`  → `run.steerable = true; run.streamingMode = "rpc"`.
+ *   - `steerable === false` → `run.steerable = false; run.streamingMode = "print"`.
+ *
+ * `Run.streamingMode` is captured here (not derived from `Run.steerable`
+ * at read time) because slice 5's reconcile-orphan branch + slice 4's
+ * `resolveSendStrategy` both need a frozen post-spawn snapshot
+ * unaffected by any later mutation of `Run.steerable`.
+ */
+export function stampSpawnStreamingMode(run: Run, steerable: boolean): void {
+  run.steerable = steerable;
+  run.streamingMode = steerable ? "rpc" : "print";
+}
+
+/**
  * Capture a freshly-spawned ChildProcess on the Run AND flush the
  * updated record to disk so the pid is visible to any concurrent pi
  * runtime starting up at the same moment.
@@ -869,6 +892,18 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // Only let the subprocess discover a session file when we didn't pre-seed
     // one — in resume mode the path is fixed.
     sessionDir: plan.seededSessionPath ? undefined : sessionDir,
+    // v0.12 slice 3 — spawn-pipeline plumbing for steerable runs.
+    // Slice 4 will derive `steerable` from the per-call cascade and
+    // thread it through `planSpawnPiArgs` so `plan.piArgs` matches the
+    // mode declared here. Slice 3 hard-codes `false` so production
+    // remains print-mode; the test seam to verify steerable wiring is
+    // `stampSpawnStreamingMode` (pinned in
+    // tests/runs-streaming-strategy.test.ts).
+    steerable: false,
+    // initialPrompt is unused in print mode (`-p` consumes the
+    // trailing argv positional). Slice 4 sets this from `prompt` when
+    // `steerable: true`.
+    initialPrompt: undefined,
     // v0.11 on_complete_hook (slice 2): resolve at spawn time from the
     // current config layers + persona frontmatter. Per-call args land
     // in slice 3; for slice 2 the per-call layer is always undefined.
@@ -893,6 +928,29 @@ interface RunPiSubprocessOpts {
   onComplete?: (run: Run) => void;
   /** When provided, finalize() will populate run.sessionPath from this dir. */
   sessionDir?: string;
+  /**
+   * v0.12 slice 3 — declare the spawn's mode explicitly. Required
+   * (not optional) so the argv shape and stdio shape can never
+   * diverge: every caller declares its mode and `runPiSubprocess`
+   * threads it into both the subprocess `stdio[0]` branch and the
+   * post-spawn `Run.streamingMode` stamp.
+   *
+   * `steerable: false` is today's print-mode default (`--mode json -p`,
+   * stdin = "ignore", trailing positional prompt). `steerable: true`
+   * is the new RPC path (`--mode rpc`, stdin = "pipe", queue attached,
+   * initial prompt injected over stdin).
+   *
+   * No production caller passes `true` until slice 4's per-call
+   * cascade lands on `ensemble_spawn`; slice 3 wires the plumbing.
+   */
+  steerable: boolean;
+  /**
+   * v0.12 slice 3 — prompt body to inject as the first RPC `prompt`
+   * command on stdin. Required when `steerable: true`; ignored when
+   * `steerable: false` (print mode passes the prompt as the trailing
+   * argv positional inside `piArgs`).
+   */
+  initialPrompt?: string;
   /**
    * v0.11 on_complete_hook (slice 2): pre-resolved hook to invoke after
    * a clean (exit-0) natural close. Undefined skips hook execution. The
@@ -978,12 +1036,19 @@ function runPiSubprocess(
 ): Promise<Run> {
   const invocation = getPiInvocation(piArgs);
 
+  // v0.12 slice 3 — stdio[0] branches on steerable. Print mode keeps
+  // the pre-v0.12 "ignore" shape; RPC mode opens a writable pipe so
+  // the conductor can send commands (initial prompt, steers,
+  // follow-ups, ext-ui-cancel envelopes) over stdin via the
+  // `RpcStdinQueue`. See `docs/v0.12-steering-design.md` §4.2.
+  const stdinKind: "ignore" | "pipe" = opts.steerable ? "pipe" : "ignore";
+
   let proc: ChildProcess;
   try {
     proc = spawn(invocation.command, invocation.args, {
       cwd: opts.cwd,
       shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [stdinKind, "pipe", "pipe"],
       env: buildSubagentEnv(),
     });
   } catch (e) {
@@ -997,6 +1062,37 @@ function runPiSubprocess(
     return Promise.resolve(run);
   }
   void attachSpawnedProc(run, proc);
+
+  // v0.12 slice 3 — stamp streamingMode + steerable on the Run
+  // immediately so the resolver and watchdog see a stable post-spawn
+  // shape. Slice 4's per-call cascade will set Run.steerable upstream
+  // before this point too; stamping again is idempotent.
+  stampSpawnStreamingMode(run, opts.steerable === true);
+
+  // v0.12 slice 3 — attach the single-writer stdin queue and inject
+  // the initial `prompt` command per design §4.2 "Initial prompt
+  // injection" + plan §5 Q1 resolution (immediate write; trust the
+  // kernel pipe buffer; v0.5 `sendToRun` precedent at runs.ts:1210).
+  // Fire-and-forget enqueue: the response arrives later as a
+  // `response` line (slice 4 wires the ack).
+  if (opts.steerable === true && proc.stdin) {
+    const queue = new RpcStdinQueue(proc.stdin);
+    run.rpcStdinQueue = queue;
+    if (typeof opts.initialPrompt === "string" && opts.initialPrompt.length > 0) {
+      void queue
+        .enqueue({
+          id: `init-${run.id}`,
+          type: "prompt",
+          message: opts.initialPrompt,
+        })
+        .catch(() => {
+          // EPIPE / ECANCELED here means the subprocess exited
+          // before we delivered the initial prompt. Nothing to
+          // recover — the close handler will finalize the run as
+          // failed when the subprocess emits its exit code.
+        });
+    }
+  }
 
   // Hard timeout.
   run.timeoutTimer = setTimeout(() => {
@@ -1423,6 +1519,14 @@ export function sendToRun(
     // Re-discover sessionPath on finalize — the file path is stable but the
     // mtime updates, which lets future sends still find it.
     sessionDir: dirname(sessionPath),
+    // v0.12 slice 3 — sendToRun is print-mode-only today
+    // (`buildResumePiArgs` hard-codes `steerable: false`). Slice 4's
+    // `sendToRun` rewrite branches on `Run.streamingMode` and routes
+    // RPC-shaped sends through `Run.rpcStdinQueue` instead of
+    // spawning a fresh subprocess; this argument stays `false` for
+    // print-mode resume spawns.
+    steerable: false,
+    initialPrompt: undefined,
     // v0.11 on_complete_hook (slice 2): re-resolve at every terminal
     // transition so config changes between spawn and re-fire are
     // honored (§4.6: each terminal is a fresh gate). Per-call layer
