@@ -2,7 +2,9 @@
 
 A pi extension that turns the parent pi session into an **orchestrator** driving a roster of **persona-based sub-agents** with first-class TUI visibility.
 
-> **Current state: v0.7 shipped; v0.8 in progress.** Conductor mode is OFF by default in v0.8 (was ON in v0.7); foreground sub-agents stream their transcript inline in the parent's tool-call card; Esc detaches a foreground spawn into the background; `/conductor history` browses past runs; sub-agents can inherit a filtered slice of the conductor's conversation; the focused-stream overlay (Ctrl+G) drills into any sub-agent's live transcript.
+> **Current state: v0.10 shipped.** All milestones v0.1–v0.10 are live: conductor mode (OFF by default in v0.8+), foreground sub-agents that stream their transcript inline in the parent's tool-call card, Esc-to-detach into the background, the focused-stream overlay (Ctrl+G) for live drilldown, filtered context inheritance, `ensemble_send`/`pause`/`resume`/`kill`/`focus`, `/conductor history`, run-record GC capstone (auto + manual + cold-archive + delete + user-pinning), post-startup reconcile of orphaned runs, and the sub-agent watchdog (soft/hard stall thresholds + per-spawn `kill_on_stall`).
+>
+> **v0.11 in progress:** `on_complete_hook` quality gates per persona — design at [`docs/v0.11-on-complete-hook-design.md`](./docs/v0.11-on-complete-hook-design.md).
 
 See [`PRD.md`](./PRD.md) for the full design and decision log.
 
@@ -23,8 +25,8 @@ pi-conductor closes that gap. The parent pi session is the conductor, sub-agents
   - **Review / verification:** `critic`, `redteam`, `finalizer`, `verifier`
   - **Debugging:** `investigator`
   - **Other:** `profiler`, `scribe`
-- **LLM tools:** `ensemble_list`, `ensemble_status`, `ensemble_spawn`, `ensemble_send`, `ensemble_pause`, `ensemble_resume`, `ensemble_focus`.
-- **Slash commands:** `/conductor list | show | doctor | on | off | status | stop | pause | resume | queue | focus | history`.
+- **LLM tools:** `ensemble_list`, `ensemble_status`, `ensemble_spawn`, `ensemble_send`, `ensemble_pause`, `ensemble_resume`, `ensemble_kill`, `ensemble_focus`.
+- **Slash commands:** `/conductor list | show | doctor | on | off | status | stop | pause | resume | queue | focus | history | pin | unpin | gc | reconcile | watchdog`.
 
 ### Spawning + lifecycle
 
@@ -48,10 +50,13 @@ pi-conductor closes that gap. The parent pi session is the conductor, sub-agents
 - **Conductor system prompt addendum** — auto-injected at every turn when conductor mode is ON. Documents the persona roster, the `ensemble_*` tools, parallelism rules, the queue auto-downgrade contract, parent-snapshot semantics, and **§10 — the delegation playbook** so the LLM acts as a strict overseer (v0.8: addendum §1 declares "you are not the implementer"; banned-tools list in §1.5).
 - **`/conductor history [N]`** — browses past runs from `~/.pi/agent/conductor/runs/`, sorted by mtime DESC, default 20.
 
-### Persistence
+### Persistence + reliability (v0.9 / v0.9.x / v0.10)
 
 - Every spawn writes its session JSONL into `<runDir>/session/`; `Run.sessionPath` is populated up-front when seeded or on finalize for fresh spawns.
 - `ensemble_send` resumes any finished sub-agent's session via `pi --session <path>`. Reuse a sub-agent's loaded context instead of re-spawning when you want a follow-up.
+- **Run-record GC (v0.9).** Two-tier reclaim — cold-archive (`unlink transcript.jsonl`, keep `record.json` / `final.md` / `session/`) preserves `ensemble_send` resumability for the configured TTL (default 30 days); full-delete frees `runs/<id>/` once the run is already archived AND past the second TTL AND unpinned. Triggers: auto on `session_start` (debounced 6h), manual `/conductor gc [--dry-run] [--force] [--persona=<name>] [--verbose]`. User-pinning sidecar (`.pinned` via `/conductor pin`/`unpin`) opts a run out of both tiers. Doctor surface lists disk usage; `/conductor history` annotates with `pinned` / `archived`.
+- **Post-startup reconcile (v0.9.x).** On `session_start`, any `running` records orphaned by a previous crash (parent pi died, pid no longer alive) are reclassified to `killed` with `errorMessage: "orphaned: ..."`. Liveness via `kill(pid, 0)`; EPERM treated as alive. Reconcile runs ahead of GC. Manual re-run: `/conductor reconcile [--dry-run]`.
+- **Sub-agent watchdog (v0.10).** Pure tick-based detector. Soft threshold (default 120s) emits a `<sub-agent-stalled>` advisory; hard threshold (default 600s) escalates to `forceTerminate` only when `kill_on_stall: true` was set on the spawn (default OFF). Tick interval 30s; ignores paused / terminal / queued runs and respects an initial grace window. Per-spawn args `kill_on_stall: bool` and `stall_threshold_seconds: int` on `ensemble_spawn` and `ensemble_send` (cascade: per-call > project > user > built-in default). UX: ensemble-panel `· STALLED Ns` glyph, `/conductor watchdog status`, doctor surface.
 
 ## Install
 
@@ -171,7 +176,13 @@ pi-conductor does **not** replace `pi-essentials/subagent`. Different tools (`en
 - [x] v0.5 — `ensemble_send` + `ensemble_pause` / `ensemble_resume` + overlay `s` keybinding
 - [x] v0.6 — Filtered context inheritance (`inherit_context: filtered` / `full`)
 - [x] v0.7 — Esc-to-detach + `/conductor history` + live terminal width + conductor mode on by default + §10 delegation triggers
-- [ ] v0.8 — Run-record GC, worktree per persona, `inherit_skills: true`
+- [x] v0.8 — Strict-overseer mode + conductor-mode default OFF + `defaultMode` config
+- [x] v0.8.1 — `inherit_context` per-persona audit (7 read-only specialists flipped to `none`)
+- [x] v0.9 — Run-record GC capstone (cold-archive then delete, auto + manual triggers, user-pinning)
+- [x] v0.9.x — Post-startup reconcile of orphaned `running` records
+- [x] v0.10 — Sub-agent watchdog (soft + hard stall thresholds, per-spawn `kill_on_stall`, UX surfaces)
+- [ ] v0.11 — `on_complete_hook` quality gates per persona _(in progress)_
+- [ ] v0.10+ planned — worktree per persona, `inherit_skills: true`, transient runtime for read-only personas, project-shareable persona library, sub-agent → conductor mid-run messaging
 
 ## License
 
