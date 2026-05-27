@@ -25,7 +25,7 @@ import { dirname, join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { noteAllocatedId } from "./gc/id-reuse.ts";
 import { applyEvent } from "./event-handler.ts";
-import { filterParentContext } from "./context-filter.ts";
+import { filterParentContext, filterParentContextCompact } from "./context-filter.ts";
 import { seedSessionFile } from "./session-seed.ts";
 import { isNonSubstantiveFinalMessage } from "./substance-check.ts";
 import { resolveOnCompleteHook, type HookCascadeInput } from "./hook-cascade.ts";
@@ -488,6 +488,11 @@ function filteredHistorySentinel(): AgentMessage {
  *   inherit_context: "filtered" → seed a session file with parent prose +
  *                                 file ops (filterParentContext). Falls back
  *                                 to fresh if the filter result is empty.
+ *   inherit_context: "filtered_compact" → like filtered, but assistant TEXT
+ *                                 blocks are stripped (tool calls/results +
+ *                                 user msgs preserved). Use for builder-shaped
+ *                                 personas vulnerable to the conductor-prose
+ *                                 cascade. See src/context-filter.ts.
  *   inherit_context: "full"     → seed a session file with every parent
  *                                 message verbatim. Falls back to fresh
  *                                 when there are no parent messages.
@@ -503,8 +508,15 @@ export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
   // so the sub-agent knows its transcript is filtered and doesn't trust
   // dangling assistant references to dropped orchestration.
   let dropped = false;
-  if (persona.inheritContext === "filtered" && parentMessages.length > 0) {
-    const filtered = filterParentContext(parentMessages);
+  if (
+    (persona.inheritContext === "filtered" || persona.inheritContext === "filtered_compact") &&
+    parentMessages.length > 0
+  ) {
+    const filterFn =
+      persona.inheritContext === "filtered_compact"
+        ? filterParentContextCompact
+        : filterParentContext;
+    const filtered = filterFn(parentMessages);
     dropped = filtered.length !== parentMessages.length;
     // Also detect block-level filtering on assistant messages even when
     // the message count matches (e.g. a thinking block was dropped but

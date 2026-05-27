@@ -15,7 +15,10 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
-import { filterParentContext } from "../src/context-filter.ts";
+import {
+  filterParentContext,
+  filterParentContextCompact,
+} from "../src/context-filter.ts";
 
 // ── Builders ──────────────────────────────────────────────────────────
 
@@ -709,3 +712,268 @@ test("filterParentContext: no orphan toolResult invariant — every surviving to
     }
   }
 });
+
+// ── filterParentContextCompact ─────────────────────────────────────────
+//
+// Compact mode strips assistant TEXT blocks from the inherited transcript
+// while keeping tool_use blocks, user messages, tool results, branch
+// summaries and compaction summaries intact. Motivation: the parent
+// conductor's narration about a failed sub-agent ("Builder X is
+// auto-aborting — interpreting briefs as inherited parent narration")
+// gets inhaled by the next sub-agent under `inherit_context: filtered`
+// and copied as a behavioral template, producing a self-perpetuating
+// refusal cascade. Compact mode breaks the cascade for builder-shaped
+// personas without losing the file-ops / user-prose context they need.
+
+test("filterParentContextCompact: empty input → empty output (no synthetic header)", () => {
+  assert.deepEqual(filterParentContextCompact([]), []);
+});
+
+test("filterParentContextCompact: user prose passes through unchanged", () => {
+  const msgs = [user("hello world")];
+  assert.deepEqual(filterParentContextCompact(msgs), msgs);
+});
+
+test("filterParentContextCompact: no header prepended when nothing was elided", () => {
+  // Only user msgs + tool ops — no assistant prose to strip → no header.
+  const msgs = [
+    user("read context.md"),
+    assistantToolCall("read", "tc1"),
+    toolResult("tc1", "read", "file contents"),
+  ];
+  const out = filterParentContextCompact(msgs);
+  for (const m of out) {
+    if ((m as any).role === "assistant" && Array.isArray((m as any).content)) {
+      const hasText = ((m as any).content as any[]).some((b) => b.type === "text");
+      assert.ok(!hasText, "no assistant text block should appear");
+    }
+  }
+});
+
+test("filterParentContextCompact: assistant text-only message → dropped, header prepended", () => {
+  const msgs = [
+    user("hi"),
+    assistantText("here's some narration the parent emitted"),
+    user("now do the work"),
+  ];
+  const out = filterParentContextCompact(msgs);
+  // Output: [synthetic header, user, user]. The text-only assistant
+  // message is dropped entirely.
+  assert.equal(out.length, 3);
+  assert.equal(out[0].role, "assistant");
+  const headerContent = (out[0] as any).content;
+  assert.ok(Array.isArray(headerContent), "header content must be array");
+  assert.equal(headerContent[0].type, "text");
+  assert.match(headerContent[0].text, /\[conductor narration elided/);
+  assert.match(headerContent[0].text, /1 prose block/);
+  assert.equal(out[1].role, "user");
+  assert.equal(out[2].role, "user");
+  // Verify no leak of the parent's narration text.
+  for (const m of out.slice(1)) {
+    const c = (m as any).content;
+    if (Array.isArray(c)) {
+      for (const b of c) {
+        if (b.type === "text") {
+          assert.ok(
+            !b.text.includes("here's some narration"),
+            "narration leaked",
+          );
+        }
+      }
+    }
+  }
+});
+
+test("filterParentContextCompact: assistant text + tool call → text stripped, tool call preserved", () => {
+  const msgs = [
+    user("read it"),
+    assistantToolCall("read", "tc1", "I'll read the file now to understand."),
+    toolResult("tc1", "read", "file contents"),
+  ];
+  const out = filterParentContextCompact(msgs);
+  // Header (1 elided text block) + user + assistant-with-toolcall-only + toolResult.
+  assert.equal(out.length, 4);
+  assert.equal(out[0].role, "assistant");
+  assert.match((out[0] as any).content[0].text, /1 prose block/);
+  assert.equal(out[1].role, "user");
+  assert.equal(out[2].role, "assistant");
+  const kept = (out[2] as any).content;
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].type, "toolCall");
+  assert.equal(kept[0].name, "read");
+  assert.equal(out[3].role, "toolResult");
+});
+
+test("filterParentContextCompact: tool results, bash exec, summaries pass through", () => {
+  const msgs = [
+    branchSummary("checkpoint A"),
+    bashExec("ls -la"),
+    compactionSummary("compacted prior turns"),
+    assistantToolCall("read", "tc1"),
+    toolResult("tc1", "read", "data"),
+  ];
+  const out = filterParentContextCompact(msgs);
+  // No assistant prose → no header.
+  assert.equal(out.length, 5);
+  assert.equal(out[0].role, "branchSummary");
+  assert.equal(out[1].role, "bashExecution");
+  assert.equal(out[2].role, "compactionSummary");
+  assert.equal((out[3] as any).role, "assistant");
+  assert.equal((out[4] as any).role, "toolResult");
+});
+
+test("filterParentContextCompact: bare-string assistant content is dropped (counts as 1 elided block)", () => {
+  // Defensive path — pi-agent-core normally emits arrays, but legacy
+  // fixtures may have bare-string content.
+  const bareString = {
+    ...assistantText("anything"),
+    content: "bare string narration",
+  } as unknown as AgentMessage;
+  const msgs = [user("hi"), bareString, user("brief")];
+  const out = filterParentContextCompact(msgs);
+  assert.equal(out.length, 3);
+  assert.equal(out[0].role, "assistant");
+  assert.match((out[0] as any).content[0].text, /1 prose block/);
+});
+
+test("filterParentContextCompact: header count reflects multiple elided blocks", () => {
+  const msgs = [
+    assistantText("narration A"),
+    user("u1"),
+    assistantText("narration B"),
+    assistantToolCall("read", "tc1", "narration C"),
+    toolResult("tc1", "read", "ok"),
+  ];
+  const out = filterParentContextCompact(msgs);
+  assert.equal(out[0].role, "assistant");
+  assert.match((out[0] as any).content[0].text, /3 prose block/);
+});
+
+test("filterParentContextCompact: thinking blocks already stripped by inner filter (no double-count)", () => {
+  // filterParentContext drops thinking blocks; compact doesn't re-count
+  // them as elided narration. Only text blocks count.
+  const msgs = [
+    assistantThinking("my private thinking", "visible narration"),
+    user("brief"),
+  ];
+  const out = filterParentContextCompact(msgs);
+  // Inner filter strips thinking → leaves just text → compact strips text.
+  // Net elided: 1 text block.
+  assert.equal(out[0].role, "assistant");
+  assert.match((out[0] as any).content[0].text, /1 prose block/);
+});
+
+test("filterParentContextCompact: ensemble_* / subagent calls still dropped (delegates to inner filter)", () => {
+  const msgs = [
+    user("brief"),
+    assistantToolCall("ensemble_spawn", "es1", "spawning a sub-agent"),
+    toolResult("es1", "ensemble_spawn", "{}"),
+    assistantToolCall("read", "rd1", "reading the file"),
+    toolResult("rd1", "read", "data"),
+  ];
+  const out = filterParentContextCompact(msgs);
+  // ensemble_spawn message + result both dropped by inner filter.
+  for (const m of out) {
+    if ((m as any).role === "assistant" && Array.isArray((m as any).content)) {
+      for (const b of (m as any).content as any[]) {
+        if (b.type === "toolCall") {
+          assert.notEqual(b.name, "ensemble_spawn", "ensemble_spawn leaked");
+        }
+      }
+    }
+    if ((m as any).role === "toolResult") {
+      assert.notEqual(
+        (m as any).toolName,
+        "ensemble_spawn",
+        "ensemble_spawn result leaked",
+      );
+    }
+  }
+  // 'read' tool call should survive.
+  const sawRead = out.some(
+    (m: any) =>
+      m.role === "assistant" &&
+      Array.isArray(m.content) &&
+      m.content.some((b: any) => b.type === "toolCall" && b.name === "read"),
+  );
+  assert.ok(sawRead, "read tool call should be preserved");
+});
+
+test(
+  "filterParentContextCompact: self-perpetuating refusal cascade — verbatim parent narration is elided",
+  () => {
+    // Regression pin. Verbatim snippets from a witnessed seeded.jsonl
+    // (~/.pi/agent/conductor/runs/builder-p66e/session/seeded.jsonl,
+    // 2026-05-22) that caused builder auto-abort cascades. The parent
+    // conductor's narration about a *previous* sub-agent's behavior
+    // must NOT be inherited verbatim by the next sub-agent.
+    const cascadeQuote =
+      "Investigator nailed it. Root cause is reconcileOrphansAtStartup, not the watchdog.";
+    const oracleQuote =
+      "Oracle: APPROVE WITH FIXES. 4 blockers (all in-scope corrections, not redesign)";
+    const inspectorQuote =
+      'Inspector mapped it. The "ugly + scrolls off page" complaint maps to concrete code defects';
+    const msgs = [
+      user("please act on the brief at the bottom"),
+      assistantText(cascadeQuote),
+      assistantText(oracleQuote),
+      assistantText(inspectorQuote),
+      assistantToolCall("read", "tc1", "I'll start by reading context.md."),
+      toolResult("tc1", "read", "# Context\n\nHere is the context."),
+      user("BRIEF: implement slice 1 of the plan."),
+    ];
+    const out = filterParentContextCompact(msgs);
+
+    // 1. Synthetic header announces elision (4 narration blocks:
+    //    3 standalone assistant texts + 1 preface text inside toolCall msg).
+    assert.equal(out[0].role, "assistant");
+    assert.match(
+      (out[0] as any).content[0].text,
+      /\[conductor narration elided: 4 prose block/,
+    );
+
+    // 2. None of the verbatim parent narration appears in any kept
+    //    text block (other than the synthetic header itself).
+    for (const m of out.slice(1)) {
+      const c = (m as any).content;
+      if (Array.isArray(c)) {
+        for (const b of c) {
+          if (b.type === "text") {
+            assert.ok(
+              !b.text.includes(cascadeQuote),
+              "cascade quote leaked into sub-agent context",
+            );
+            assert.ok(!b.text.includes(oracleQuote), "oracle quote leaked");
+            assert.ok(
+              !b.text.includes(inspectorQuote),
+              "inspector quote leaked",
+            );
+          }
+        }
+      }
+    }
+
+    // 3. The user's actual brief is still present as the last user msg.
+    const lastUser = [...out].reverse().find((m) => m.role === "user");
+    assert.ok(lastUser, "last user message preserved");
+    const lastUserText =
+      typeof (lastUser as any).content === "string"
+        ? (lastUser as any).content
+        : JSON.stringify((lastUser as any).content);
+    assert.match(lastUserText, /BRIEF: implement slice 1/);
+
+    // 4. The 'read' toolCall + its result are preserved (file knowledge
+    //    survives — that's the whole point of compact over none).
+    const sawReadToolCall = out.some(
+      (m: any) =>
+        m.role === "assistant" &&
+        Array.isArray(m.content) &&
+        m.content.some((b: any) => b.type === "toolCall" && b.name === "read"),
+    );
+    const sawReadResult = out.some(
+      (m: any) => m.role === "toolResult" && m.toolName === "read",
+    );
+    assert.ok(sawReadToolCall, "read toolCall preserved");
+    assert.ok(sawReadResult, "read toolResult preserved");
+  },
+);

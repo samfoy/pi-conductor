@@ -204,3 +204,90 @@ export function filterParentContext(
   }
   return out;
 }
+
+// ── filterParentContextCompact ────────────────────────────────────────
+//
+// Compact mode for `inherit_context: filtered_compact`.
+//
+// Motivation: when the parent conductor narrates a sub-agent failure
+// (e.g. "Builder personas are auto-aborting — interpreting briefs as
+// inherited parent narration"), that prose lands in the parent's
+// assistant-role messages. The next sub-agent spawn inhales it via
+// `filterParentContext`, reads it as a behavioural template, and copies
+// the refusal pattern. The cascade is self-perpetuating: each failed
+// builder's response gets seeded into the next builder's context.
+//
+// Compact mode strips every assistant TEXT block from the inherited
+// transcript, leaving tool_use blocks intact (so file-reads / code-edits
+// the parent performed remain visible). User prose, tool results, branch
+// and compaction summaries pass through unchanged. A synthetic header
+// message is prepended so the sub-agent knows narration was elided.
+//
+// See: `tests/context-filter.test.ts` regression tests including the
+// "self-perpetuating refusal cascade" pin against verbatim quotes from
+// `~/.pi/agent/conductor/runs/builder-p66e/session/seeded.jsonl`.
+
+export function filterParentContextCompact(
+  messages: AgentMessage[],
+  opts: FilterOptions = {},
+): AgentMessage[] {
+  const filtered = filterParentContext(messages, opts);
+  const out: AgentMessage[] = [];
+  let elidedAssistantBlocks = 0;
+  for (const msg of filtered) {
+    if (msg.role !== "assistant") {
+      out.push(msg);
+      continue;
+    }
+    const content = (msg as any).content;
+    if (!Array.isArray(content)) {
+      // Bare-string assistant content gets dropped entirely (counts as one
+      // elided narration block). Defensive — current pi-agent-core emits
+      // arrays, but legacy fixtures may not.
+      elidedAssistantBlocks += 1;
+      continue;
+    }
+    const kept: any[] = [];
+    for (const block of content) {
+      if (block?.type === "text") {
+        elidedAssistantBlocks += 1;
+        continue;
+      }
+      kept.push(block);
+    }
+    if (kept.length === 0) {
+      // Whole message was prose; drop it to avoid emitting an empty turn.
+      continue;
+    }
+    out.push({ ...(msg as any), content: kept });
+  }
+  if (elidedAssistantBlocks === 0) return out;
+  // Prepend a synthetic header message describing what was elided.
+  const header: AgentMessage = {
+    role: "assistant",
+    content: [
+      {
+        type: "text",
+        text:
+          `[conductor narration elided: ${elidedAssistantBlocks} prose block(s) ` +
+          `from the parent removed in filtered_compact mode. Tool calls, file ` +
+          `reads, and user messages preserved. Your task is in the LAST user ` +
+          `message below.]`,
+      },
+    ],
+    api: "anthropic-messages" as any,
+    provider: "anthropic" as any,
+    model: "synthetic",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop",
+    timestamp: 0,
+  } as AgentMessage;
+  return [header, ...out];
+}

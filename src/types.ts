@@ -16,9 +16,14 @@ export const THINKING_LEVELS: ThinkingLevel[] = [
   "xhigh",
 ];
 
-export type ContextInheritance = "none" | "filtered" | "full";
+export type ContextInheritance = "none" | "filtered" | "filtered_compact" | "full";
 
-export const CONTEXT_INHERITANCE: ContextInheritance[] = ["none", "filtered", "full"];
+export const CONTEXT_INHERITANCE: ContextInheritance[] = [
+  "none",
+  "filtered",
+  "filtered_compact",
+  "full",
+];
 
 export type PersonaSource = "builtin" | "user" | "project";
 

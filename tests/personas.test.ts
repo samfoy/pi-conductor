@@ -224,7 +224,7 @@ prompt`,
 // behavior.
 
 test("personas: v0.8.1 inherit_context audit (PRD Open Q #16 fold-in)", () => {
-  const expected: Record<string, "none" | "filtered" | "full"> = {
+  const expected: Record<string, "none" | "filtered" | "filtered_compact" | "full"> = {
     // 7 read-only specialists / gates flipped to none in v0.8.1.
     oracle: "none",
     redteam: "none",
@@ -242,8 +242,8 @@ test("personas: v0.8.1 inherit_context audit (PRD Open Q #16 fold-in)", () => {
     finalizer: "filtered",
     designer: "filtered",
     planner: "filtered",
-    simplifier: "filtered",
-    builder: "filtered",
+    simplifier: "filtered_compact",
+    builder: "filtered_compact",
   };
 
   const dir = builtinPersonasDir();
