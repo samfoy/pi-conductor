@@ -432,7 +432,7 @@ test("buildConductorSystemPrompt: §11 — verifier briefs must be self-containe
   // transcript, so the conductor must spell out the claim, the files
   // changed, the existing check, and acceptance criteria explicitly.
   // §11 is where verifier shows up in the canonical chains, so the rule
-  // lives there. See docs/v0.8.2-backlog.md "§11 verifier-brief sub-rule".
+  // lives there. See docs/backlog.md "§11 verifier-brief sub-rule".
   const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
   const idx11 = out.indexOf("## 11.");
   assert.ok(idx11 >= 0, "§11 heading must exist");

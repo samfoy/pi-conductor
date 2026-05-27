@@ -145,6 +145,36 @@ Would interact with the v0.11 cascade pattern landing in slice 4 (per-call > pro
 
 ---
 
+## Conductor notification reliability — OPEN
+
+### 11. `<sub-agent-completed>` user-message didn't wake conductor (witnessed 2026-05-27, parallel session in pi-dashboard)
+
+**Witnessed:** in a parallel pi-dashboard chat-slot session (Rosie workspace cleanup task), `builder-rjpb` completed background spawn at 02:35 PM Pacific (4.7m, $1.813). The completion rendered as a lowercase-`i` info line in the chat slot (`i ## ✓ builder completed (4.7m, ...)`), NOT as a triggered user-role envelope. The conductor sat idle for 25 minutes (02:35 → 03:00) until the user manually poked *"you seem to be stalled. builder completed a while ago"*. Conductor woke: *"Right, I dropped the thread. Driving now."*
+
+**Contract violation:** `PRD.md:257` explicitly contracts:
+> On exit, a `<sub-agent-completed>` user-role message is pushed via `pi.sendMessage({ triggerTurn: true })` (team-mode's pattern), waking the conductor.
+
+The info-line rendering plus the absent turn together indicate the trigger fired as info, not as a triggering user message — OR the user message was injected but pi-dashboard's chat-slot rendering downgraded it to info, OR the conductor was in a state where `triggerTurn: true` is silently swallowed.
+
+**Three root-cause hypotheses (none verified):**
+1. **pi-conductor side:** `src/notifications.ts` is pushing background completions on a code path that pi-dashboard renders as info instead of a user message. The completion event reaches pi but doesn't trigger a turn.
+2. **pi-dashboard side:** chat-slot rendering downgrades `triggerTurn: true` user messages to info lines (out of this repo's scope but the integration contract). Could be a deliberate UX choice to avoid auto-firing on long threads, or a regression.
+3. **State-dependent swallow:** completion fires while conductor is in some "waiting for user input" / streaming / paused state where the trigger is silently swallowed by pi's runner.
+
+**Investigation entry points (when reopened):**
+- `src/notifications.ts` — trace the path that pushes `<sub-agent-completed>`. Confirm `triggerTurn: true` is unconditionally set for `foreground: false` completions.
+- `pi-dashboard/backend/pi-manager.ts` — audit how chat-slot mode handles `pi.sendMessage({ triggerTurn: true })`. Compare to TUI behavior.
+- Reproduce in TUI to determine repo boundary: if TUI fires the turn correctly, the bug is dashboard-side. If TUI also fails, it's pi-conductor-side.
+- Add a dead-man-switch as belt-and-braces: if a sub-agent completes and the conductor doesn't take a turn within N seconds, escalate the notification (e.g. resend with `triggerTurn: true` again).
+
+**Not the v0.10+ planned `sub-agent → conductor mid-run messaging` item.** That's intercom-direction (sub-agent reaches out from inside its turn). This is the basic completion contract that's supposed to already work post-v0.5.
+
+**Severity:** medium-high. Breaks autonomous chains — every conductor handoff between sub-agents needs a working completion-wake. Workaround: user manually pokes "you seem to be stalled" to recover, but that's the slip path.
+
+**Cross-link:** v0.12 (steering, in flight) is conductor → sub-agent direction; this bug is sub-agent → conductor on the completion edge. v0.12 doesn't fix it but doesn't make it worse either. Worth dogfooding once v0.12 ships, since the slash-command + overlay 's' steer paths exercise the same notification surface.
+
+---
+
 ## v0.9.x — Post-startup reconcile — CLOSED 2026-05-21
 
 Closed by 4 slice commits `d5583be..1f9604a`. Detects orphaned `running`

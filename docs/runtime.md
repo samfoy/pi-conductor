@@ -434,7 +434,7 @@ Resolution at `tools.ts:ensemble_spawn`:
 Watchdog overrides (`kill_on_stall`, `stall_threshold_seconds`) skip
 the persona-frontmatter layer at HEAD — frontmatter does not yet
 declare watchdog fields. Deferred at slice 3; see
-`docs/v0.8.2-backlog.md`. Today: per-call > config > built-in
+`docs/backlog.md`. Today: per-call > config > built-in
 default only.
 
 ### `defaultMode` (whether conductor mode is on at session start)

@@ -4,7 +4,7 @@ Status: design (no code).
 HEAD at design time: `git rev-parse --short HEAD` (capture in plan).
 Source: inspector map (cited inline), user decisions logged 2026-05-22, prior pass `docs/v0.8.3-item3-design.md`.
 
-Predecessor: `docs/v0.8.3-item3-design.md` (chrome-polish slice). That doc explicitly deferred "Box-bordered overlay viewport" as a structural redesign needing a pi-tui API pass (`docs/v0.8.2-backlog.md:661–664`). This is that pass.
+Predecessor: `docs/v0.8.3-item3-design.md` (chrome-polish slice). That doc explicitly deferred "Box-bordered overlay viewport" as a structural redesign needing a pi-tui API pass (`docs/backlog.md:661–664`). This is that pass.
 
 ---
 
@@ -371,6 +371,6 @@ Until that lands, this overlay's Tab cycle will include foreign agents and `s` /
 - `src/focused-stream-model.ts:92–97` — unbounded scrollDown.
 - `src/transcript.ts:30–112, 195–207, 245–264` — header, thinking, tool-call expanded JSON.
 - `docs/tui.md:24, 64–82, 120–145, 185, 207, 221, 244, 288` — Component contract, Focusable, overlayOptions, primitives, requestRender.
-- `docs/v0.8.2-backlog.md:661–664` — prior `Box` deferral.
+- `docs/backlog.md:661–664` — prior `Box` deferral.
 - `docs/v0.8.3-item3-design.md` — chrome-polish predecessor.
 - `PRD.md:283–296` — original spec.
