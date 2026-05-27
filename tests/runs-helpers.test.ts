@@ -280,6 +280,7 @@ test("buildPiArgs(fresh): emits json mode, -p, --session-dir, append-system-prom
     sessionDir: "/tmp/sess",
     systemPrompt: "SYS",
     prompt: "PROMPT",
+    steerable: false,
   });
   // Required base flags
   assert.deepEqual(args.slice(0, 3), ["--mode", "json", "-p"]);
@@ -301,6 +302,7 @@ test("buildPiArgs(resume): emits --session <path> + the message, omits --append-
     kind: "resume",
     sessionPath: "/tmp/sess/abc.jsonl",
     prompt: "another question",
+    steerable: false,
   });
   assert.deepEqual(args.slice(0, 3), ["--mode", "json", "-p"]);
   const s = args.indexOf("--session");
@@ -319,6 +321,7 @@ test("buildPiArgs: omits --model and --thinking when not provided", () => {
     sessionDir: "/tmp/sess",
     systemPrompt: "S",
     prompt: "P",
+    steerable: false,
   });
   assert.equal(args.includes("--model"), false);
   assert.equal(args.includes("--thinking"), false);
@@ -331,6 +334,7 @@ test("buildPiArgs: includes --model when set", () => {
     systemPrompt: "S",
     prompt: "P",
     model: "anthropic/claude-opus-4-1",
+    steerable: false,
   });
   const i = args.indexOf("--model");
   assert.ok(i > 0);
@@ -344,6 +348,7 @@ test("buildPiArgs: includes --thinking when set", () => {
     systemPrompt: "S",
     prompt: "P",
     thinking: "high",
+    steerable: false,
   });
   const i = args.indexOf("--thinking");
   assert.ok(i > 0);
@@ -1032,6 +1037,7 @@ test("buildPiArgs(fresh) + skillPaths: emits one --skill <path> per entry, all b
     systemPrompt: "S",
     prompt: "P",
     skillPaths: ["/u/skills", "/p/skills"],
+    steerable: false,
   });
   const skillIdxs: number[] = [];
   for (let i = 0; i < args.length; i++) if (args[i] === "--skill") skillIdxs.push(i);
@@ -1043,7 +1049,13 @@ test("buildPiArgs(fresh) + skillPaths: emits one --skill <path> per entry, all b
 });
 
 test("buildPiArgs: omits --skill when skillPaths is undefined or empty (default behavior unchanged)", () => {
-  const a1 = buildPiArgs({ kind: "fresh", sessionDir: "/tmp", systemPrompt: "S", prompt: "P" });
+  const a1 = buildPiArgs({
+    kind: "fresh",
+    sessionDir: "/tmp",
+    systemPrompt: "S",
+    prompt: "P",
+    steerable: false,
+  });
   assert.equal(a1.includes("--skill"), false);
   const a2 = buildPiArgs({
     kind: "fresh",
@@ -1051,6 +1063,7 @@ test("buildPiArgs: omits --skill when skillPaths is undefined or empty (default 
     systemPrompt: "S",
     prompt: "P",
     skillPaths: [],
+    steerable: false,
   });
   assert.equal(a2.includes("--skill"), false);
 });
@@ -1061,6 +1074,7 @@ test("buildPiArgs(resume) + skillPaths: emits --skill flags on resume too", () =
     sessionPath: "/tmp/s.jsonl",
     prompt: "msg",
     skillPaths: ["/u/skills"],
+    steerable: false,
   });
   const i = args.indexOf("--skill");
   assert.ok(i > 0);

@@ -1438,7 +1438,7 @@ function buildSubAgentPrompt(persona, task) {
   return parts.join("\n");
 }
 function buildPiArgs(opts) {
-  const args = ["--mode", "json", "-p"];
+  const args = opts.steerable ? ["--mode", "rpc"] : ["--mode", "json", "-p"];
   if (opts.kind === "fresh") {
     args.push("--session-dir", opts.sessionDir);
   } else {
@@ -1454,7 +1454,9 @@ function buildPiArgs(opts) {
   if (opts.skillPaths && opts.skillPaths.length > 0) {
     for (const p of opts.skillPaths) args.push("--skill", p);
   }
-  args.push(opts.prompt);
+  if (!opts.steerable) {
+    args.push(opts.prompt);
+  }
   return args;
 }
 function buildResumePiArgs(run, message) {
@@ -1469,7 +1471,11 @@ function buildResumePiArgs(run, message) {
     prompt: message,
     model: run.model,
     thinking: run.thinking,
-    systemPrompt: run.systemPrompt
+    systemPrompt: run.systemPrompt,
+    // v0.12 steering: print mode for now. Slice 4's `sendToRun`
+    // rewrite branches on `Run.streamingMode` and routes RPC-shaped
+    // sends to the queue instead of a fresh subprocess.
+    steerable: false
   });
 }
 function trimLeadingNonUser(messages) {
@@ -1525,7 +1531,11 @@ function planSpawnPiArgs(opts) {
         // prompt entry. Without this the sub-agent boots with pi's
         // default coding-agent prompt and loses its persona identity.
         systemPrompt,
-        skillPaths
+        skillPaths,
+        // v0.12 steering: print mode for seeded resume. Slice 4 wires
+        // the per-call cascade through to seeded RPC spawns when
+        // `Run.steerable` is set at spawn time.
+        steerable: false
       })
     };
   }
@@ -1538,7 +1548,11 @@ function planSpawnPiArgs(opts) {
       prompt,
       model,
       thinking,
-      skillPaths
+      skillPaths,
+      // v0.12 steering: fresh print-mode spawn. Slice 4 stamps
+      // `Run.steerable` from the per-call/project/user/default
+      // cascade and threads it through `planSpawnPiArgs` callers.
+      steerable: false
     })
   };
 }

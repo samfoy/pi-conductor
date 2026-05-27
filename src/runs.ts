@@ -311,6 +311,22 @@ export type PiArgsOptions =
        * Empty/undefined → no `--skill` flags emitted.
        */
       skillPaths?: string[];
+      /**
+       * v0.12 steering: drives `--mode`. `false` (today's path) emits
+       * `--mode json -p` plus the trailing positional prompt;
+       * `true` emits `--mode rpc` (no `-p`) and OMITS the trailing
+       * prompt positional — the prompt is delivered as the first
+       * `RpcCommand` line on stdin via `RpcStdinQueue` (slice 3).
+       *
+       * Slice 2 wires the argv flip only; no production caller passes
+       * `true` yet. Slice 4 stamps `Run.steerable` from the per-call
+       * `ensemble_spawn` arg + project/user config cascade.
+       *
+       * Required (not optional): every caller must declare its mode
+       * explicitly so the argv shape is never ambiguous. See
+       * `docs/v0.12-steering-design.md` §4.2.
+       */
+      steerable: boolean;
     }
   | {
       kind: "resume";
@@ -330,10 +346,26 @@ export type PiArgsOptions =
       systemPrompt?: string;
       /** See fresh-mode `skillPaths` above. Same semantics on resume. */
       skillPaths?: string[];
+      /**
+       * v0.12 steering: see fresh-mode `steerable` above. Resume-mode
+       * RPC spawns are produced by slice 4's `sendToRun` rewrite when
+       * the run is RPC-shaped; today's print-mode resume callers pass
+       * `false`.
+       */
+      steerable: boolean;
     };
 
 export function buildPiArgs(opts: PiArgsOptions): string[] {
-  const args: string[] = ["--mode", "json", "-p"];
+  // v0.12 steering: argv shape is mode-bifurcated. Print mode
+  // (`steerable: false`, today's only path) emits `--mode json -p`
+  // and the trailing prompt positional. RPC mode (`steerable: true`)
+  // emits `--mode rpc`, omits `-p`, AND omits the prompt positional
+  // — the prompt is delivered as the first `RpcCommand` line on
+  // stdin (slice 3 wires this; slice 2 only emits the argv).
+  // See `docs/v0.12-steering-design.md` §4.2.
+  const args: string[] = opts.steerable
+    ? ["--mode", "rpc"]
+    : ["--mode", "json", "-p"];
   if (opts.kind === "fresh") {
     args.push("--session-dir", opts.sessionDir);
   } else {
@@ -359,7 +391,11 @@ export function buildPiArgs(opts: PiArgsOptions): string[] {
   if (opts.skillPaths && opts.skillPaths.length > 0) {
     for (const p of opts.skillPaths) args.push("--skill", p);
   }
-  args.push(opts.prompt);
+  // Trailing prompt positional. RPC mode injects the prompt over
+  // stdin (slice 3); print mode passes it as the final argv slot.
+  if (!opts.steerable) {
+    args.push(opts.prompt);
+  }
   return args;
 }
 
@@ -391,6 +427,10 @@ export function buildResumePiArgs(run: Run, message: string): string[] {
     model: run.model,
     thinking: run.thinking,
     systemPrompt: run.systemPrompt,
+    // v0.12 steering: print mode for now. Slice 4's `sendToRun`
+    // rewrite branches on `Run.streamingMode` and routes RPC-shaped
+    // sends to the queue instead of a fresh subprocess.
+    steerable: false,
   });
 }
 
@@ -559,6 +599,10 @@ export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
         // default coding-agent prompt and loses its persona identity.
         systemPrompt,
         skillPaths,
+        // v0.12 steering: print mode for seeded resume. Slice 4 wires
+        // the per-call cascade through to seeded RPC spawns when
+        // `Run.steerable` is set at spawn time.
+        steerable: false,
       }),
     };
   }
@@ -573,6 +617,10 @@ export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
       model,
       thinking,
       skillPaths,
+      // v0.12 steering: fresh print-mode spawn. Slice 4 stamps
+      // `Run.steerable` from the per-call/project/user/default
+      // cascade and threads it through `planSpawnPiArgs` callers.
+      steerable: false,
     }),
   };
 }
