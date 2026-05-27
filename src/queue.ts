@@ -50,6 +50,11 @@ export interface PendingSpawn {
   killOnStall?: boolean;
   /** v0.10 watchdog (Slice 3) per-spawn soft-threshold (seconds). */
   softStallSeconds?: number;
+  /**
+   * v0.12 slice 4 — cascade-collapsed steerable boolean threaded
+   * through to spawnRun on dequeue. See `SpawnOptions.steerable`.
+   */
+  steerable?: boolean;
 }
 
 export class SpawnQueue {
@@ -148,6 +153,7 @@ export class SpawnQueue {
       onComplete: opts.onComplete,
       killOnStall: opts.killOnStall,
       softStallSeconds: opts.softStallSeconds,
+      steerable: opts.steerable,
     };
     this.pending.push(pending);
     return {
@@ -213,6 +219,7 @@ export class SpawnQueue {
         onComplete: next.onComplete,
         killOnStall: next.killOnStall,
         softStallSeconds: next.softStallSeconds,
+        steerable: next.steerable,
       });
     }
   }

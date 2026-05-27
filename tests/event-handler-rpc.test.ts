@@ -91,10 +91,12 @@ test("applyEvent: response line routes to routeRpcResponse stub and returns {kin
   );
 });
 
-test("routeRpcResponse: stub is a no-op and returns {kind: \"updated\"}", () => {
-  // Direct invocation pin — slice 4 will replace the body with the
-  // correlation-Map lookup. The signature is locked here so slice 4
-  // doesn't have to renegotiate the export shape.
+test("routeRpcResponse: no-op when run has no pendingAcks Map (defensive)", () => {
+  // Slice 4 replaced the slice-3 stub body with the correlation-Map
+  // lookup. Without a pendingAcks Map (run never had a steer
+  // enqueued), the function early-returns UPDATED without mutating
+  // run state. The ensemble-send slice-4 tests cover the
+  // populated-Map path (resolve + clearTimeout + delete).
   const run = makeRun();
   const before = JSON.stringify(run);
   const r = routeRpcResponse(run, {
@@ -104,7 +106,7 @@ test("routeRpcResponse: stub is a no-op and returns {kind: \"updated\"}", () => 
     success: true,
   } as any);
   assert.deepEqual(r, { kind: "updated" });
-  assert.equal(JSON.stringify(run), before, "stub must not mutate run state");
+  assert.equal(JSON.stringify(run), before, "no pendingAcks → no mutation");
 });
 
 // ── 2. extension_ui_request line ──────────────────────────────────────

@@ -41,3 +41,36 @@ import type { Run } from "./types.ts";
 export function resolveSteerable(run: Run, defaultSteerable: boolean): boolean {
   return run.steerable ?? defaultSteerable;
 }
+
+/**
+ * v0.12 slice 4 — 4-layer cascade collapse. Pure helper invoked at
+ * `ensemble_spawn` time to fold the per-call / project / user / built-in
+ * default layers into a single boolean which is then stamped onto
+ * `Run.steerable` before the spawn pipeline runs.
+ *
+ * Layer order, highest to lowest:
+ *   1. perCall      — `ensemble_spawn`'s `steerable` LLM tool arg.
+ *   2. project      — `<project>/.pi/conductor.json` `defaultSteerable`.
+ *   3. user         — `~/.pi/agent/extensions/conductor/config.json`.
+ *   4. defaultValue — built-in (`DEFAULT_CONFIG.defaultSteerable`, `false`).
+ *
+ * Each layer is `boolean | undefined`. `undefined` falls through to
+ * the next layer; explicit `true`/`false` short-circuits below.
+ *
+ * Pinned by `tests/steerable-spawn-cascade.test.ts` (8 cases unskipped
+ * by slice 4). The scaffold lives in slice 1; this helper makes those
+ * cases pass against a real production import. Mirrors the cascade
+ * shape from oracle gate 2 ADJUST + design §4.1 lines 282–340.
+ *
+ * Pure: no I/O, deterministic on the four inputs.
+ */
+export interface SteerableCascadeInputs {
+  perCall: boolean | undefined;
+  project: boolean | undefined;
+  user: boolean | undefined;
+  defaultValue: boolean;
+}
+
+export function collapseSteerableCascade(inputs: SteerableCascadeInputs): boolean {
+  return inputs.perCall ?? inputs.project ?? inputs.user ?? inputs.defaultValue;
+}

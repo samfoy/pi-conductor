@@ -130,28 +130,31 @@ export function applyEvent(run: Run, event: unknown): EventEffect {
 // ── v0.12 slice 3 — RPC line handlers ────────────────────────────
 
 /**
- * Route an RPC `response` line to the correlation router. Slice 3
- * STUB: the body is a no-op that returns `{kind: "updated"}`. Slice 4
- * fills in the `Run.pendingAcks` Map lookup that resolves the LLM
- * tool's send-promise with `delivered: true / false` based on
- * `evt.success`.
+ * Route an RPC `response` line to the correlation router. Slice 4
+ * implements the body: looks up `evt.id` in `run.pendingAcks`, clears
+ * the timeout timer, deletes the entry, and resolves the LLM tool's
+ * send-promise with `delivered = evt.success`.
  *
- * Signature is pinned here so slice 4 doesn't have to renegotiate the
- * export shape — it only swaps the body.
+ * No `lastEventAt` bump on this path — oracle fix #2 / design §4.7
+ * (slice 5 owns the bump-on-`response` policy). Slice 4 is correlation
+ * routing only.
+ *
+ * Defensive: if `pendingAcks` is undefined or `evt.id` doesn't match a
+ * registered entry (response arrived after the entry was already
+ * cleared by the timeout timer, or for an unsolicited ack), we no-op.
+ * The dispatch in `applyEvent` already returned UPDATED.
  */
 export function routeRpcResponse(
-  _run: Run,
-  _evt: RpcResponse,
+  run: Run,
+  evt: RpcResponse,
 ): EventEffect {
-  // Slice 4 will:
-  //   const entry = _run.pendingAcks?.get(_evt.id);
-  //   if (!entry) return UPDATED;
-  //   clearTimeout(entry.timer);
-  //   _run.pendingAcks!.delete(_evt.id);
-  //   entry.resolve(_evt.success);
-  // Slice 3 leaves the body as a no-op stub. The dispatch in
-  // `applyEvent` already returns UPDATED on our behalf; the direct-
-  // invocation path returns UPDATED here for symmetry.
+  const id = (evt as { id?: string }).id;
+  if (typeof id !== "string" || !run.pendingAcks) return UPDATED;
+  const entry = run.pendingAcks.get(id);
+  if (!entry) return UPDATED;
+  clearTimeout(entry.timer);
+  run.pendingAcks.delete(id);
+  entry.resolve((evt as { success?: boolean }).success === true);
   return UPDATED;
 }
 

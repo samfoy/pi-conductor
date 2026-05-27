@@ -12,6 +12,7 @@ import { Type } from "@sinclair/typebox";
 import type { Persona, PersonaOverride, Run, RunStatus, ThinkingLevel } from "./types.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
+import { collapseSteerableCascade } from "./steerable.ts";
 import { elapsedStr, forceTerminate, formatUsage, getFinalText, pauseRun, resolveTimeoutMs, resumeRun, sendToRun, type RunRegistry } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
 import {
@@ -238,6 +239,12 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
             "v0.10 watchdog soft-stall threshold for this spawn, in seconds (≥ 30). Hard threshold scales with the same ratio as conductor defaults (typically 5×). Override when the persona's expected tool calls are legitimately slow (npm install, brazil-build, large test suites). Default: 120s.",
         }),
       ),
+      steerable: Type.Optional(
+        Type.Boolean({
+          description:
+            "v0.12 steering opt-in. true → launch the sub-agent in `pi --mode rpc` so the conductor can `steer` / `follow_up` it mid-run via ensemble_send. false / omitted → today's `pi --mode json -p` print mode (no steering). Cascade per-call > project > user > built-in default false. Personas using ctx.ui.confirm/select must NOT be spawned with steerable=true (auto-cancelled on the conductor side).",
+        }),
+      ),
     }),
     async execute(_id, params, signal, onUpdate) {
       const tmRange = validateTimeoutMinutes(params.timeout_minutes);
@@ -272,6 +279,18 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       const thinking = resolveThinking(persona, ov);
       const timeoutMs = resolveTimeoutMs(persona, ov, cfg);
 
+      // v0.12 slice 4 — collapse the steerable cascade. `cfg` is
+      // already merged (`defaults <- user <- project`), so the merged
+      // `defaultSteerable` represents the project/user/default layers
+      // collapsed; the per-call layer wins above. No persona-frontmatter
+      // layer (oracle fix #1; PRD.md:517).
+      const steerable = collapseSteerableCascade({
+        perCall: params.steerable,
+        project: undefined,
+        user: undefined,
+        defaultValue: cfg.defaultSteerable ?? false,
+      });
+
       // Wire abort signal to cancel a running sub-agent.
       const result = queue.enqueueOrSpawn({
         persona,
@@ -288,6 +307,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         // conductor default (off / 120s soft).
         killOnStall: params.kill_on_stall,
         softStallSeconds: params.stall_threshold_seconds,
+        steerable,
         onUpdate: foreground ? () => {} : undefined, // foreground uses our own onUpdate below
         onComplete: foreground
           ? undefined
@@ -485,6 +505,20 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
             "v0.10 watchdog soft-stall threshold for the resumed turn, in seconds (≥ 30). Hard threshold scales with the same ratio as conductor defaults. Replaces the original spawn's value.",
         }),
       ),
+      streaming_behavior: Type.Optional(
+        Type.Union(
+          [
+            Type.Literal("auto"),
+            Type.Literal("steer"),
+            Type.Literal("follow_up"),
+            Type.Literal("resume"),
+          ],
+          {
+            description:
+              "v0.12 steering. Default 'auto' → follow_up for live RPC sub-agents, spawn-resume for terminal ones. 'steer' interrupts the running turn; 'follow_up' queues for the next turn boundary; 'resume' forces a fresh subprocess via pi --session (terminal runs only). Sub-agent must have been spawned with steerable: true for steer/follow_up to work.",
+          },
+        ),
+      ),
     }),
     async execute(_id, params, signal, onUpdate) {
       const tmRange = validateTimeoutMinutes(params.timeout_minutes);
@@ -527,10 +561,46 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         // the run's existing values.
         killOnStall: params.kill_on_stall,
         softStallSeconds: params.stall_threshold_seconds,
+        // v0.12 slice 4: drive resolveSendStrategy. Undefined → "auto".
+        streamingBehavior: params.streaming_behavior,
       });
 
       if (result.kind === "rejected") {
         return errorResult(result.reason);
+      }
+
+      // v0.12 slice 4 — RPC steer/follow_up path: await the ack and
+      // build the envelope from the delivered/timeout/EPIPE outcome.
+      // The sub-agent stays alive across sends, so we don't wait for
+      // a terminal status here — the steer is fire-and-forget-with-ack
+      // semantics. `foreground` is honored only on the spawn-resume
+      // path below.
+      if (result.ack !== undefined) {
+        try {
+          const ackResult = await result.ack;
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text:
+                  `delivered: ${result.run.id}\n` +
+                  `persona=${result.run.persona} mode=steering (RPC ack received)\n\n` +
+                  `The sub-agent acknowledged the message at ${new Date(ackResult.deliveredAt).toISOString()}. It continues running; reply will land on its next message_end.`,
+              },
+            ],
+            details: {
+              status: "delivered",
+              agent_id: result.run.id,
+              persona: result.run.persona,
+              delivered: ackResult.delivered,
+              delivered_at: ackResult.deliveredAt,
+            },
+          };
+        } catch (e) {
+          // 30s ack timeout OR EPIPE-after-enqueue (race where the
+          // subprocess exited between enqueue and our await).
+          return errorResult((e as Error).message);
+        }
       }
 
       if (foreground) {

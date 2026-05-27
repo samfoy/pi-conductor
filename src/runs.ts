@@ -428,9 +428,12 @@ export function buildResumePiArgs(run: Run, message: string): string[] {
     model: run.model,
     thinking: run.thinking,
     systemPrompt: run.systemPrompt,
-    // v0.12 steering: print mode for now. Slice 4's `sendToRun`
-    // rewrite branches on `Run.streamingMode` and routes RPC-shaped
-    // sends to the queue instead of a fresh subprocess.
+    // v0.12 steering: spawn-resume on a terminal run is always
+    // print-mode by design (§4.4 archived-run compat / Q10 lock).
+    // RPC mode is NOT sticky across the original-subprocess boundary
+    // — the previous RPC subprocess is gone, so the fresh `pi
+    // --session` resume picks the safer print-mode default. A per-call
+    // "resume into RPC" is deliberately not exposed in v0.12.
     steerable: false,
   });
 }
@@ -464,6 +467,15 @@ export interface PlanSpawnOptions {
    * inherited skills (default behavior pre-PRD #15).
    */
   skillPaths?: string[];
+  /**
+   * v0.12 slice 4 — collapsed cascade-derived steerable value
+   * (per-call > project > user > built-in default). Threaded into
+   * `buildPiArgs` so the argv shape (`--mode rpc` vs `--mode json -p`)
+   * matches the `Run.streamingMode` stamped by the spawn pipeline.
+   * Optional for backward-compat with pre-slice-4 callers in tests;
+   * defaults to `false` (print mode).
+   */
+  steerable?: boolean;
 }
 
 export interface PlanSpawnResult {
@@ -545,6 +557,7 @@ function filteredHistorySentinel(): AgentMessage {
  */
 export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
   const { persona, parentMessages = [], sessionDir, systemPrompt, prompt, cwd, model, thinking, skillPaths } = opts;
+  const steerable = opts.steerable === true;
 
   let seedMessages: AgentMessage[] | null = null;
   // Did filtering actually remove anything? If yes, prepend a sentinel
@@ -600,10 +613,11 @@ export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
         // default coding-agent prompt and loses its persona identity.
         systemPrompt,
         skillPaths,
-        // v0.12 steering: print mode for seeded resume. Slice 4 wires
-        // the per-call cascade through to seeded RPC spawns when
-        // `Run.steerable` is set at spawn time.
-        steerable: false,
+        // v0.12 slice 4 — thread the cascade-collapsed steerable
+        // through to the argv builder so resume-shaped RPC spawns
+        // (seeded session + steerable=true) emit `--mode rpc` and
+        // skip the trailing positional prompt.
+        steerable,
       }),
     };
   }
@@ -618,10 +632,10 @@ export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
       model,
       thinking,
       skillPaths,
-      // v0.12 steering: fresh print-mode spawn. Slice 4 stamps
-      // `Run.steerable` from the per-call/project/user/default
-      // cascade and threads it through `planSpawnPiArgs` callers.
-      steerable: false,
+      // v0.12 slice 4 — cascade-collapsed steerable threaded into the
+      // fresh-mode argv builder. `false` (default) preserves today's
+      // print-mode behaviour.
+      steerable,
     }),
   };
 }
@@ -741,6 +755,20 @@ export interface SpawnOptions {
    * reaching here.
    */
   softStallSeconds?: number;
+  /**
+   * v0.12 slice 4 — cascade-collapsed steerable boolean. Stamped
+   * onto `Run.steerable` / `Run.streamingMode` at spawn time and
+   * threaded into both the argv builder (`--mode rpc` vs
+   * `--mode json -p`) and the subprocess `stdio[0]` branch (`pipe`
+   * vs `ignore`). Optional for backward-compat with tests; defaults
+   * to `false` (print mode).
+   *
+   * The 4-layer cascade (per-call > project > user > built-in)
+   * collapses upstream in `tools.ts: ensemble_spawn` via
+   * `collapseSteerableCascade`; this field is the post-collapse
+   * boolean.
+   */
+  steerable?: boolean;
 }
 
 /**
@@ -851,6 +879,12 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // `classifyRecord` `skip-foreign` branch.
     parentPid: process.pid,
     parentStartTime: readProcessStartTime(process.pid),
+    // v0.12 slice 4 — stamp the cascade-collapsed steerable on the Run
+    // BEFORE the spawn pipeline runs. `runPiSubprocess` re-stamps via
+    // `stampSpawnStreamingMode` (idempotent) once the subprocess is
+    // up; setting it here means resolveSendStrategy and the watchdog
+    // see a consistent shape during the brief pre-spawn window.
+    steerable: opts.steerable === true,
   };
   opts.registry.register(run);
   void writeRecord(run);
@@ -878,6 +912,10 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     skillPaths: opts.persona.inheritSkills
       ? collectInheritedSkillPaths({ cwd: opts.cwd })
       : undefined,
+    // v0.12 slice 4 — thread the cascade-collapsed steerable so the
+    // argv shape matches the runPiSubprocess `steerable` we pass
+    // below. Both must agree or pi will boot with the wrong stdio.
+    steerable: opts.steerable === true,
   });
   // When we seeded a session, populate run.sessionPath up-front so callers
   // (e.g. ensemble_send mid-run) can find it without waiting for finalize().
@@ -892,18 +930,17 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // Only let the subprocess discover a session file when we didn't pre-seed
     // one — in resume mode the path is fixed.
     sessionDir: plan.seededSessionPath ? undefined : sessionDir,
-    // v0.12 slice 3 — spawn-pipeline plumbing for steerable runs.
-    // Slice 4 will derive `steerable` from the per-call cascade and
-    // thread it through `planSpawnPiArgs` so `plan.piArgs` matches the
-    // mode declared here. Slice 3 hard-codes `false` so production
-    // remains print-mode; the test seam to verify steerable wiring is
-    // `stampSpawnStreamingMode` (pinned in
-    // tests/runs-streaming-strategy.test.ts).
-    steerable: false,
-    // initialPrompt is unused in print mode (`-p` consumes the
-    // trailing argv positional). Slice 4 sets this from `prompt` when
-    // `steerable: true`.
-    initialPrompt: undefined,
+    // v0.12 slice 4 — thread the cascade-collapsed steerable into
+    // runPiSubprocess so the subprocess `stdio[0]` branch (`pipe` vs
+    // `ignore`) and the post-spawn `Run.streamingMode` stamp match
+    // the argv shape produced above. Slice 3 hard-coded `false`; the
+    // dead value was a known TODO.
+    steerable: opts.steerable === true,
+    // v0.12 slice 4 — when steerable, the prompt is delivered as the
+    // first `prompt` RPC command on stdin (not as the trailing argv
+    // positional, which RPC mode ignores). `runPiSubprocess` enqueues
+    // it via `RpcStdinQueue` once the subprocess is up.
+    initialPrompt: opts.steerable === true ? prompt : undefined,
     // v0.11 on_complete_hook (slice 2): resolve at spawn time from the
     // current config layers + persona frontmatter. Per-call args land
     // in slice 3; for slice 2 the per-call layer is always undefined.
@@ -1289,10 +1326,36 @@ export interface SendToRunOptions {
    * (seconds). When provided, replaces `Run.softStallSeconds`.
    */
   softStallSeconds?: number;
+  /**
+   * v0.12 slice 4 — LLM-facing `streaming_behavior` arg. Drives
+   * {@link resolveSendStrategy} to pick `rpc-steer` /
+   * `rpc-follow-up` / `spawn-resume` / `rejected`. Default `"auto"`
+   * which falls through to `rpc-follow-up` for live RPC runs and
+   * `spawn-resume` for terminal runs.
+   */
+  streamingBehavior?: StreamingBehavior;
 }
 
 export type SendToRunResult =
-  | { kind: "started"; run: Run; done: Promise<Run> }
+  | {
+      kind: "started";
+      run: Run;
+      done: Promise<Run>;
+      /**
+       * v0.12 slice 4 — RPC ack envelope. Set on the `rpc-steer` /
+       * `rpc-follow-up` paths; resolves when the matching `response`
+       * line arrives on stdout (within 30s) and rejects on timeout or
+       * `RpcStdinQueue` write failure. `undefined` on the
+       * `spawn-resume` path (legacy resume-via-`pi --session` has no
+       * stdin-side correlation).
+       *
+       * Callers that want the ack should `await result.ack` after
+       * receiving the started envelope. The `done` Promise still
+       * resolves on terminal status of the sub-agent, independent of
+       * the ack.
+       */
+      ack?: Promise<{ delivered: boolean; deliveredAt: number }>;
+    }
   | { kind: "rejected"; reason: string };
 
 /**
@@ -1455,6 +1518,110 @@ export function resolveSendStrategy(
 }
 
 /**
+ * v0.12 slice 4 — 30 seconds. Hard cap on how long we wait for the
+ * sub-agent to ack a `steer` / `follow_up` command. Real-world ack
+ * RTTs from `[pi-dist] modes/rpc/rpc-mode.js` are sub-second; 30s is
+ * generous. Pinned for the faked-clock test in
+ * `tests/ensemble-send.test.ts: running steerable + ack timeout`.
+ */
+export const RPC_ACK_TIMEOUT_MS = 30_000;
+
+let rpcSendCounter = 0;
+
+/**
+ * v0.12 slice 4 — enqueue a `steer` or `follow_up` RPC command on a
+ * live steerable run and register a `pendingAcks` entry so the matching
+ * `response` line on stdout resolves the returned ack promise.
+ *
+ * Lifecycle:
+ *   - allocates a fresh `id` (`send-<runId>-<counter>`) so
+ *     `routeRpcResponse` can correlate stdout responses to the ack.
+ *   - sets up a 30s timeout timer that, on fire, removes the entry
+ *     from `run.pendingAcks` and rejects the ack promise.
+ *   - calls `RpcStdinQueue.enqueue` and waits for the kernel-write
+ *     ack. On EPIPE / queue-destroyed / non-RPC subprocess, returns
+ *     `{kind: "epipe", reason}`.
+ *   - on successful enqueue, returns `{kind: "queued", ack}` where
+ *     `ack` resolves to `{delivered, deliveredAt}` on response and
+ *     rejects on timeout.
+ *
+ * Pure with respect to the rest of the spawn pipeline (no
+ * subprocess, no registry mutation — the caller flips run.status).
+ */
+function enqueueRpcSendWithAck(
+  run: Run,
+  type: "steer" | "follow_up",
+  message: string,
+):
+  | { kind: "queued"; ack: Promise<{ delivered: boolean; deliveredAt: number }> }
+  | { kind: "epipe"; reason: string } {
+  const queue = run.rpcStdinQueue;
+  if (!queue) {
+    return {
+      kind: "epipe",
+      reason: `sub-agent ${run.id} finished before steer was delivered (stdin queue gone).`,
+    };
+  }
+  // Lazy-init the correlation Map.
+  if (!run.pendingAcks) run.pendingAcks = new Map();
+  rpcSendCounter += 1;
+  const id = `send-${run.id}-${rpcSendCounter}`;
+  const ackPromise = new Promise<{ delivered: boolean; deliveredAt: number }>(
+    (resolve, reject) => {
+      const timer = setTimeout(() => {
+        // Self-removal from the Map: the timeout fires and the entry
+        // must clean itself up so a late-arriving `response` no-ops in
+        // routeRpcResponse instead of double-firing.
+        run.pendingAcks?.delete(id);
+        reject(
+          new Error(
+            `ack timeout — sub-agent may have received the message; check via ensemble_status`,
+          ),
+        );
+      }, RPC_ACK_TIMEOUT_MS);
+      run.pendingAcks!.set(id, {
+        resolve: (delivered: boolean) =>
+          resolve({ delivered, deliveredAt: Date.now() }),
+        reject,
+        timer,
+      });
+    },
+  );
+  // Fire-and-forget: the enqueue Promise resolves on kernel-write; if
+  // the pipe died (EPIPE), the queue rejects. Either way we surface
+  // through the ack promise (timeout) or via this catch (EPIPE).
+  let epipeFlag: { msg: string } | null = null;
+  void queue.enqueue({ id, type, message }).catch((err: Error) => {
+    // Sub-agent finished before steer was delivered. Clean up the
+    // pendingAcks entry and reject the ack promise with the Q3 lock
+    // wording.
+    const entry = run.pendingAcks?.get(id);
+    if (entry) {
+      clearTimeout(entry.timer);
+      run.pendingAcks?.delete(id);
+      entry.reject(
+        new Error(
+          `sub-agent ${run.id} finished before steer was delivered (${err.message}).`,
+        ),
+      );
+    }
+    epipeFlag = { msg: err.message };
+  });
+  // Detection of synchronous EPIPE — if the queue rejected
+  // synchronously (already-destroyed queue, etc.), the .catch above
+  // fired this tick. Surface as an `epipe` result so the caller can
+  // turn the started envelope back into a rejection without ever
+  // flipping run.status to running.
+  if (epipeFlag) {
+    return {
+      kind: "epipe",
+      reason: `sub-agent ${run.id} finished before steer was delivered.`,
+    };
+  }
+  return { kind: "queued", ack: ackPromise };
+}
+
+/**
  * Continue an existing sub-agent's pi session with a new user-role message.
  *
  * Spawns a fresh `pi` subprocess pointed at the run's `sessionPath` via
@@ -1462,28 +1629,80 @@ export function resolveSendStrategy(
  * plumbing as `spawnRun` so the run's messages, usage, and lastToolCall
  * accumulate across the original spawn AND any subsequent sends.
  *
+ * v0.12 slice 4: if the run is alive in RPC mode
+ * ({@link resolveSendStrategy} returns `rpc-steer` or `rpc-follow-up`),
+ * enqueues the command on the live subprocess via `Run.rpcStdinQueue`
+ * and returns an ack promise that resolves on the matching `response`
+ * line. The legacy `spawn-resume` path is unchanged for terminal runs.
+ *
  * Returns synchronously:
- *   - `{ kind: "started", run, done }` on success. The Run is mutated in
- *     place: status flips back to "running", terminal fields are cleared,
- *     and the registry is notified. `done` resolves when the new
- *     subprocess reaches a terminal status.
- *   - `{ kind: "rejected", reason }` if the run is in a state that can't
- *     be sent to (running, paused, queued) or has no resumable session.
+ *   - `{ kind: "started", run, done, ack? }` on success. The Run is
+ *     mutated in place: status flips back to "running", terminal
+ *     fields are cleared, and the registry is notified. `done`
+ *     resolves when the subprocess reaches terminal (or for RPC paths,
+ *     resolves with the current run on the next terminal). `ack` is
+ *     set on the RPC paths and `undefined` on `spawn-resume`.
+ *   - `{ kind: "rejected", reason }` if {@link resolveSendStrategy}
+ *     rejects (running-print, paused, queued, terminal-without-session)
+ *     OR if RPC enqueue surfaces a synchronous EPIPE.
  */
 export function sendToRun(
   run: Run,
   message: string,
   opts: SendToRunOptions,
 ): SendToRunResult {
-  const check = validateSendable(run);
-  if (!check.ok) {
-    return { kind: "rejected", reason: check.reason };
-  }
   const trimmed = message.trim();
   if (!trimmed) {
     return {
       kind: "rejected",
       reason: `cannot send an empty message to sub-agent ${run.id}.`,
+    };
+  }
+  const behavior: StreamingBehavior = opts.streamingBehavior ?? "auto";
+  const decision = resolveSendStrategy(run, behavior);
+  if (decision.strategy.kind === "rejected") {
+    return { kind: "rejected", reason: decision.strategy.reason };
+  }
+
+  // RPC paths: enqueue on the live subprocess; do NOT respawn.
+  if (
+    decision.strategy.kind === "rpc-steer" ||
+    decision.strategy.kind === "rpc-follow-up"
+  ) {
+    const cmdType = decision.strategy.kind === "rpc-steer" ? "steer" : "follow_up";
+    // v0.10 watchdog (Slice 3) per-send overrides apply on RPC paths
+    // too: a steer can be the moment the operator decides to
+    // re-arm `kill_on_stall`. Status stays "running" — the
+    // subprocess is alive throughout.
+    if (opts.killOnStall !== undefined) run.killOnStall = opts.killOnStall;
+    if (opts.softStallSeconds !== undefined) run.softStallSeconds = opts.softStallSeconds;
+    const result = enqueueRpcSendWithAck(run, cmdType, trimmed);
+    if (result.kind === "epipe") {
+      return { kind: "rejected", reason: result.reason };
+    }
+    // The run's `done` Promise was returned at spawn time and is no
+    // longer accessible here. Synthesise a Promise that resolves on
+    // the run's NEXT terminal status transition so callers that
+    // `await result.done` get a meaningful signal. The registry's
+    // change listener does the work.
+    const done = new Promise<Run>((resolve) => {
+      const unsub = opts.registry.onChange((r) => {
+        if (r.id === run.id && isTerminal(r.status)) {
+          unsub();
+          resolve(r);
+        }
+      });
+    });
+    return { kind: "started", run, done, ack: result.ack };
+  }
+
+  // spawn-resume: legacy fresh-subprocess path on a terminal run.
+  // Validate the session file exists on disk (validateSendable's
+  // post-strategy check, preserved verbatim from pre-slice-4).
+  if (run.sessionPath && !existsSync(run.sessionPath)) {
+    return {
+      kind: "rejected",
+      reason: `sub-agent ${run.id} session file is missing on disk: ${run.sessionPath}`,
     };
   }
 
@@ -1504,8 +1723,8 @@ export function sendToRun(
   if (opts.softStallSeconds !== undefined) run.softStallSeconds = opts.softStallSeconds;
   opts.registry.notify(run);
 
-  // validateSendable guarantees sessionPath is set, but TS can't see
-  // through a free-function call — capture it explicitly.
+  // resolveSendStrategy guarantees sessionPath is set on spawn-resume,
+  // but TS can't see through a free-function call — capture it.
   const sessionPath = run.sessionPath as string;
 
   const piArgs = buildResumePiArgs(run, trimmed);
@@ -1519,12 +1738,14 @@ export function sendToRun(
     // Re-discover sessionPath on finalize — the file path is stable but the
     // mtime updates, which lets future sends still find it.
     sessionDir: dirname(sessionPath),
-    // v0.12 slice 3 — sendToRun is print-mode-only today
-    // (`buildResumePiArgs` hard-codes `steerable: false`). Slice 4's
-    // `sendToRun` rewrite branches on `Run.streamingMode` and routes
-    // RPC-shaped sends through `Run.rpcStdinQueue` instead of
-    // spawning a fresh subprocess; this argument stays `false` for
-    // print-mode resume spawns.
+    // v0.12 steering: spawn-resume on a terminal run is always
+    // print-mode by design (§4.4 archived-run compat / Q10 lock).
+    // The live RPC paths (`rpc-steer` / `rpc-follow-up`) ride the
+    // existing subprocess via `Run.rpcStdinQueue` and never hit this
+    // branch — see the early-return in `sendToRun` above. This
+    // argument is hard-coded `false` because `pi --session` resume
+    // does not promise to re-enter RPC mode (the original subprocess
+    // is gone; no stickiness across the boundary).
     steerable: false,
     initialPrompt: undefined,
     // v0.11 on_complete_hook (slice 2): re-resolve at every terminal

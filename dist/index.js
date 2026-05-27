@@ -744,7 +744,14 @@ function applyEvent(run, event) {
   }
   return NONE;
 }
-function routeRpcResponse(_run, _evt) {
+function routeRpcResponse(run, evt) {
+  const id = evt.id;
+  if (typeof id !== "string" || !run.pendingAcks) return UPDATED;
+  const entry = run.pendingAcks.get(id);
+  if (!entry) return UPDATED;
+  clearTimeout(entry.timer);
+  run.pendingAcks.delete(id);
+  entry.resolve(evt.success === true);
   return UPDATED;
 }
 function handleExtensionUiRequest(run, evt) {
@@ -1646,9 +1653,12 @@ function buildResumePiArgs(run, message) {
     model: run.model,
     thinking: run.thinking,
     systemPrompt: run.systemPrompt,
-    // v0.12 steering: print mode for now. Slice 4's `sendToRun`
-    // rewrite branches on `Run.streamingMode` and routes RPC-shaped
-    // sends to the queue instead of a fresh subprocess.
+    // v0.12 steering: spawn-resume on a terminal run is always
+    // print-mode by design (§4.4 archived-run compat / Q10 lock).
+    // RPC mode is NOT sticky across the original-subprocess boundary
+    // — the previous RPC subprocess is gone, so the fresh `pi
+    // --session` resume picks the safer print-mode default. A per-call
+    // "resume into RPC" is deliberately not exposed in v0.12.
     steerable: false
   });
 }
@@ -1666,6 +1676,7 @@ function filteredHistorySentinel() {
 }
 function planSpawnPiArgs(opts) {
   const { persona, parentMessages = [], sessionDir, systemPrompt, prompt, cwd, model, thinking, skillPaths } = opts;
+  const steerable = opts.steerable === true;
   let seedMessages = null;
   let dropped = false;
   if ((persona.inheritContext === "filtered" || persona.inheritContext === "filtered_compact") && parentMessages.length > 0) {
@@ -1706,10 +1717,11 @@ function planSpawnPiArgs(opts) {
         // default coding-agent prompt and loses its persona identity.
         systemPrompt,
         skillPaths,
-        // v0.12 steering: print mode for seeded resume. Slice 4 wires
-        // the per-call cascade through to seeded RPC spawns when
-        // `Run.steerable` is set at spawn time.
-        steerable: false
+        // v0.12 slice 4 — thread the cascade-collapsed steerable
+        // through to the argv builder so resume-shaped RPC spawns
+        // (seeded session + steerable=true) emit `--mode rpc` and
+        // skip the trailing positional prompt.
+        steerable
       })
     };
   }
@@ -1723,10 +1735,10 @@ function planSpawnPiArgs(opts) {
       model,
       thinking,
       skillPaths,
-      // v0.12 steering: fresh print-mode spawn. Slice 4 stamps
-      // `Run.steerable` from the per-call/project/user/default
-      // cascade and threads it through `planSpawnPiArgs` callers.
-      steerable: false
+      // v0.12 slice 4 — cascade-collapsed steerable threaded into the
+      // fresh-mode argv builder. `false` (default) preserves today's
+      // print-mode behaviour.
+      steerable
     })
   };
 }
@@ -1833,7 +1845,13 @@ function spawnRun(opts) {
     // Survives /reload (in-process re-import). See
     // `classifyRecord` `skip-foreign` branch.
     parentPid: process.pid,
-    parentStartTime: readProcessStartTime(process.pid)
+    parentStartTime: readProcessStartTime(process.pid),
+    // v0.12 slice 4 — stamp the cascade-collapsed steerable on the Run
+    // BEFORE the spawn pipeline runs. `runPiSubprocess` re-stamps via
+    // `stampSpawnStreamingMode` (idempotent) once the subprocess is
+    // up; setting it here means resolveSendStrategy and the watchdog
+    // see a consistent shape during the brief pre-spawn window.
+    steerable: opts.steerable === true
   };
   opts.registry.register(run);
   void writeRecord(run);
@@ -1854,7 +1872,11 @@ function spawnRun(opts) {
     // flag is consumed at spawn time and not propagated into the
     // sub-agent's env, so a sub-agent spawning a further sub-agent
     // does NOT re-inherit (we discourage that pattern anyway).
-    skillPaths: opts.persona.inheritSkills ? collectInheritedSkillPaths({ cwd: opts.cwd }) : void 0
+    skillPaths: opts.persona.inheritSkills ? collectInheritedSkillPaths({ cwd: opts.cwd }) : void 0,
+    // v0.12 slice 4 — thread the cascade-collapsed steerable so the
+    // argv shape matches the runPiSubprocess `steerable` we pass
+    // below. Both must agree or pi will boot with the wrong stdio.
+    steerable: opts.steerable === true
   });
   if (plan.seededSessionPath) run.sessionPath = plan.seededSessionPath;
   const done = runPiSubprocess(run, plan.piArgs, {
@@ -1866,18 +1888,17 @@ function spawnRun(opts) {
     // Only let the subprocess discover a session file when we didn't pre-seed
     // one — in resume mode the path is fixed.
     sessionDir: plan.seededSessionPath ? void 0 : sessionDir,
-    // v0.12 slice 3 — spawn-pipeline plumbing for steerable runs.
-    // Slice 4 will derive `steerable` from the per-call cascade and
-    // thread it through `planSpawnPiArgs` so `plan.piArgs` matches the
-    // mode declared here. Slice 3 hard-codes `false` so production
-    // remains print-mode; the test seam to verify steerable wiring is
-    // `stampSpawnStreamingMode` (pinned in
-    // tests/runs-streaming-strategy.test.ts).
-    steerable: false,
-    // initialPrompt is unused in print mode (`-p` consumes the
-    // trailing argv positional). Slice 4 sets this from `prompt` when
-    // `steerable: true`.
-    initialPrompt: void 0,
+    // v0.12 slice 4 — thread the cascade-collapsed steerable into
+    // runPiSubprocess so the subprocess `stdio[0]` branch (`pipe` vs
+    // `ignore`) and the post-spawn `Run.streamingMode` stamp match
+    // the argv shape produced above. Slice 3 hard-coded `false`; the
+    // dead value was a known TODO.
+    steerable: opts.steerable === true,
+    // v0.12 slice 4 — when steerable, the prompt is delivered as the
+    // first `prompt` RPC command on stdin (not as the trailing argv
+    // positional, which RPC mode ignores). `runPiSubprocess` enqueues
+    // it via `RpcStdinQueue` once the subprocess is up.
+    initialPrompt: opts.steerable === true ? prompt : void 0,
     // v0.11 on_complete_hook (slice 2): resolve at spawn time from the
     // current config layers + persona frontmatter. Per-call args land
     // in slice 3; for slice 2 the per-call layer is always undefined.
@@ -2156,16 +2177,93 @@ function resolveSendStrategy(run, behavior = "auto") {
   }
   return { strategy: { kind: "spawn-resume" } };
 }
-function sendToRun(run, message, opts) {
-  const check = validateSendable(run);
-  if (!check.ok) {
-    return { kind: "rejected", reason: check.reason };
+var RPC_ACK_TIMEOUT_MS = 3e4;
+var rpcSendCounter = 0;
+function enqueueRpcSendWithAck(run, type, message) {
+  const queue = run.rpcStdinQueue;
+  if (!queue) {
+    return {
+      kind: "epipe",
+      reason: `sub-agent ${run.id} finished before steer was delivered (stdin queue gone).`
+    };
   }
+  if (!run.pendingAcks) run.pendingAcks = /* @__PURE__ */ new Map();
+  rpcSendCounter += 1;
+  const id = `send-${run.id}-${rpcSendCounter}`;
+  const ackPromise = new Promise(
+    (resolve2, reject) => {
+      const timer = setTimeout(() => {
+        run.pendingAcks?.delete(id);
+        reject(
+          new Error(
+            `ack timeout \u2014 sub-agent may have received the message; check via ensemble_status`
+          )
+        );
+      }, RPC_ACK_TIMEOUT_MS);
+      run.pendingAcks.set(id, {
+        resolve: (delivered) => resolve2({ delivered, deliveredAt: Date.now() }),
+        reject,
+        timer
+      });
+    }
+  );
+  let epipeFlag = null;
+  void queue.enqueue({ id, type, message }).catch((err) => {
+    const entry = run.pendingAcks?.get(id);
+    if (entry) {
+      clearTimeout(entry.timer);
+      run.pendingAcks?.delete(id);
+      entry.reject(
+        new Error(
+          `sub-agent ${run.id} finished before steer was delivered (${err.message}).`
+        )
+      );
+    }
+    epipeFlag = { msg: err.message };
+  });
+  if (epipeFlag) {
+    return {
+      kind: "epipe",
+      reason: `sub-agent ${run.id} finished before steer was delivered.`
+    };
+  }
+  return { kind: "queued", ack: ackPromise };
+}
+function sendToRun(run, message, opts) {
   const trimmed = message.trim();
   if (!trimmed) {
     return {
       kind: "rejected",
       reason: `cannot send an empty message to sub-agent ${run.id}.`
+    };
+  }
+  const behavior = opts.streamingBehavior ?? "auto";
+  const decision = resolveSendStrategy(run, behavior);
+  if (decision.strategy.kind === "rejected") {
+    return { kind: "rejected", reason: decision.strategy.reason };
+  }
+  if (decision.strategy.kind === "rpc-steer" || decision.strategy.kind === "rpc-follow-up") {
+    const cmdType = decision.strategy.kind === "rpc-steer" ? "steer" : "follow_up";
+    if (opts.killOnStall !== void 0) run.killOnStall = opts.killOnStall;
+    if (opts.softStallSeconds !== void 0) run.softStallSeconds = opts.softStallSeconds;
+    const result = enqueueRpcSendWithAck(run, cmdType, trimmed);
+    if (result.kind === "epipe") {
+      return { kind: "rejected", reason: result.reason };
+    }
+    const done2 = new Promise((resolve2) => {
+      const unsub = opts.registry.onChange((r) => {
+        if (r.id === run.id && isTerminal(r.status)) {
+          unsub();
+          resolve2(r);
+        }
+      });
+    });
+    return { kind: "started", run, done: done2, ack: result.ack };
+  }
+  if (run.sessionPath && !existsSync3(run.sessionPath)) {
+    return {
+      kind: "rejected",
+      reason: `sub-agent ${run.id} session file is missing on disk: ${run.sessionPath}`
     };
   }
   run.status = "running";
@@ -2190,12 +2288,14 @@ function sendToRun(run, message, opts) {
     // Re-discover sessionPath on finalize — the file path is stable but the
     // mtime updates, which lets future sends still find it.
     sessionDir: dirname4(sessionPath),
-    // v0.12 slice 3 — sendToRun is print-mode-only today
-    // (`buildResumePiArgs` hard-codes `steerable: false`). Slice 4's
-    // `sendToRun` rewrite branches on `Run.streamingMode` and routes
-    // RPC-shaped sends through `Run.rpcStdinQueue` instead of
-    // spawning a fresh subprocess; this argument stays `false` for
-    // print-mode resume spawns.
+    // v0.12 steering: spawn-resume on a terminal run is always
+    // print-mode by design (§4.4 archived-run compat / Q10 lock).
+    // The live RPC paths (`rpc-steer` / `rpc-follow-up`) ride the
+    // existing subprocess via `Run.rpcStdinQueue` and never hit this
+    // branch — see the early-return in `sendToRun` above. This
+    // argument is hard-coded `false` because `pi --session` resume
+    // does not promise to re-enter RPC mode (the original subprocess
+    // is gone; no stickiness across the boundary).
     steerable: false,
     initialPrompt: void 0,
     // v0.11 on_complete_hook (slice 2): re-resolve at every terminal
@@ -4195,6 +4295,11 @@ function buildWatchdogStatusReport(args) {
 // src/tools.ts
 import { Type } from "@sinclair/typebox";
 
+// src/steerable.ts
+function collapseSteerableCascade(inputs) {
+  return inputs.perCall ?? inputs.project ?? inputs.user ?? inputs.defaultValue;
+}
+
 // src/transcript.ts
 import { truncateToWidth, visibleWidth as visibleWidth2, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 var TOOL_CALL_FOLD_LIMIT = 12;
@@ -4821,6 +4926,11 @@ function registerSpawnTool(pi, opts) {
           minimum: 30,
           description: "v0.10 watchdog soft-stall threshold for this spawn, in seconds (\u2265 30). Hard threshold scales with the same ratio as conductor defaults (typically 5\xD7). Override when the persona's expected tool calls are legitimately slow (npm install, brazil-build, large test suites). Default: 120s."
         })
+      ),
+      steerable: Type.Optional(
+        Type.Boolean({
+          description: "v0.12 steering opt-in. true \u2192 launch the sub-agent in `pi --mode rpc` so the conductor can `steer` / `follow_up` it mid-run via ensemble_send. false / omitted \u2192 today's `pi --mode json -p` print mode (no steering). Cascade per-call > project > user > built-in default false. Personas using ctx.ui.confirm/select must NOT be spawned with steerable=true (auto-cancelled on the conductor side)."
+        })
       )
     }),
     async execute(_id, params, signal, onUpdate) {
@@ -4846,6 +4956,12 @@ function registerSpawnTool(pi, opts) {
       const model = resolveModel(persona, ov);
       const thinking = resolveThinking(persona, ov);
       const timeoutMs = resolveTimeoutMs(persona, ov, cfg);
+      const steerable = collapseSteerableCascade({
+        perCall: params.steerable,
+        project: void 0,
+        user: void 0,
+        defaultValue: cfg.defaultSteerable ?? false
+      });
       const result = queue.enqueueOrSpawn({
         persona,
         task: params.task,
@@ -4861,6 +4977,7 @@ function registerSpawnTool(pi, opts) {
         // conductor default (off / 120s soft).
         killOnStall: params.kill_on_stall,
         softStallSeconds: params.stall_threshold_seconds,
+        steerable,
         onUpdate: foreground ? () => {
         } : void 0,
         // foreground uses our own onUpdate below
@@ -5012,6 +5129,19 @@ function registerSendTool(pi, opts) {
           minimum: 30,
           description: "v0.10 watchdog soft-stall threshold for the resumed turn, in seconds (\u2265 30). Hard threshold scales with the same ratio as conductor defaults. Replaces the original spawn's value."
         })
+      ),
+      streaming_behavior: Type.Optional(
+        Type.Union(
+          [
+            Type.Literal("auto"),
+            Type.Literal("steer"),
+            Type.Literal("follow_up"),
+            Type.Literal("resume")
+          ],
+          {
+            description: "v0.12 steering. Default 'auto' \u2192 follow_up for live RPC sub-agents, spawn-resume for terminal ones. 'steer' interrupts the running turn; 'follow_up' queues for the next turn boundary; 'resume' forces a fresh subprocess via pi --session (terminal runs only). Sub-agent must have been spawned with steerable: true for steer/follow_up to work."
+          }
+        )
       )
     }),
     async execute(_id, params, signal, onUpdate) {
@@ -5041,10 +5171,37 @@ function registerSendTool(pi, opts) {
         // v0.10 Slice 3: per-send watchdog overrides. Undefined → keep
         // the run's existing values.
         killOnStall: params.kill_on_stall,
-        softStallSeconds: params.stall_threshold_seconds
+        softStallSeconds: params.stall_threshold_seconds,
+        // v0.12 slice 4: drive resolveSendStrategy. Undefined → "auto".
+        streamingBehavior: params.streaming_behavior
       });
       if (result.kind === "rejected") {
         return errorResult(result.reason);
+      }
+      if (result.ack !== void 0) {
+        try {
+          const ackResult = await result.ack;
+          return {
+            content: [
+              {
+                type: "text",
+                text: `delivered: ${result.run.id}
+persona=${result.run.persona} mode=steering (RPC ack received)
+
+The sub-agent acknowledged the message at ${new Date(ackResult.deliveredAt).toISOString()}. It continues running; reply will land on its next message_end.`
+              }
+            ],
+            details: {
+              status: "delivered",
+              agent_id: result.run.id,
+              persona: result.run.persona,
+              delivered: ackResult.delivered,
+              delivered_at: ackResult.deliveredAt
+            }
+          };
+        } catch (e) {
+          return errorResult(e.message);
+        }
       }
       if (foreground) {
         const streamWidth = resolveStreamWidth(process.stdout?.columns);
@@ -5534,7 +5691,8 @@ var SpawnQueue = class {
       parentMessages: opts.parentMessages,
       onComplete: opts.onComplete,
       killOnStall: opts.killOnStall,
-      softStallSeconds: opts.softStallSeconds
+      softStallSeconds: opts.softStallSeconds,
+      steerable: opts.steerable
     };
     this.pending.push(pending);
     return {
@@ -5586,7 +5744,8 @@ var SpawnQueue = class {
         parentMessages: next.parentMessages,
         onComplete: next.onComplete,
         killOnStall: next.killOnStall,
-        softStallSeconds: next.softStallSeconds
+        softStallSeconds: next.softStallSeconds,
+        steerable: next.steerable
       });
     }
   }

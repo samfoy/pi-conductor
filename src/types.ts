@@ -466,6 +466,32 @@ export interface Run {
    */
   rpcStdinQueue?: import("./rpc-stdin.ts").RpcStdinQueue;
 
+  /**
+   * v0.12 slice 4 — RPC `response` correlation Map. Each
+   * `ensemble_send` call against a steerable run that resolves to
+   * `rpc-steer` or `rpc-follow-up` allocates a unique `id`, registers
+   * an entry here, enqueues the command, and waits for the matching
+   * `response` line on stdout (handled by
+   * {@link import("./event-handler.ts").routeRpcResponse}).
+   *
+   * Lifecycle: lazy-init on first registration. Each entry carries a
+   * 30s timeout timer; on response match, the timer is cleared and
+   * the entry deleted; on timer fire, the entry is also deleted (it
+   * removes itself from the Map). On `forceTerminate` the queue's
+   * `destroy("force-terminate")` rejects every entry and the Map is
+   * cleared (slice 5).
+   *
+   * In-memory only; NOT persisted to `RunRecord`.
+   */
+  pendingAcks?: Map<
+    string,
+    {
+      resolve: (delivered: boolean) => void;
+      reject: (err: Error) => void;
+      timer: NodeJS.Timeout;
+    }
+  >;
+
   // ── v0.11 on_complete_hook (slice 1a types) ────────────────────────
   // Slice 1a declares these optional fields; slice 2 mutates them from
   // the hook enforcer in `runs.ts`. They are NOT read by anything in
