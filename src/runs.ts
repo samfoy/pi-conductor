@@ -42,9 +42,11 @@ import {
   type Persona,
   type PersonaOverride,
   type ResolvedHook,
+  type ResolvedSendStrategy,
   type Run,
   type RunStatus,
   type SpawnMode,
+  type StreamingBehavior,
   type ThinkingLevel,
 } from "./types.ts";
 
@@ -1150,45 +1152,162 @@ export type SendToRunResult =
   | { kind: "rejected"; reason: string };
 
 /**
- * Pure pre-check for whether a run can be sent to right now. Returns the
- * same set of rejection reasons sendToRun would, but without any side
- * effects — callers can use this to short-circuit UI flows (e.g. the
- * overlay's 's' keybinding) before opening an input prompt.
+ * Pure pre-check for whether a run can be sent to right now. Returns
+ * the same set of rejection reasons {@link sendToRun} would, but
+ * without any side effects — callers can use this to short-circuit UI
+ * flows (e.g. the overlay's 's' keybinding) before opening an input
+ * prompt.
+ *
+ * v0.12 slice 1: thin shim around {@link resolveSendStrategy} (called
+ * with `"auto"`) plus a post-strategy I/O check that the session file
+ * is actually present on disk. The pure resolver checks string
+ * presence (`run.sessionPath` set/unset); this layer adds the disk
+ * check via {@link existsSync}. Callers stay shape-stable; only the
+ * underlying decision logic moved into the resolver so the v0.12
+ * `streaming_behavior` arg can route through the same matrix.
  */
 export function validateSendable(
   run: Run,
 ): { ok: true } | { ok: false; reason: string } {
-  if (run.status === "running") {
-    return {
-      ok: false,
-      reason: `sub-agent ${run.id} is currently running; wait for it to finish before sending.`,
-    };
+  const r = resolveSendStrategy(run, "auto");
+  if (r.strategy.kind === "rejected") {
+    return { ok: false, reason: r.strategy.reason };
   }
-  if (run.status === "paused") {
-    return {
-      ok: false,
-      reason: `sub-agent ${run.id} is paused; resume it first via /conductor resume ${run.id}.`,
-    };
-  }
-  if (run.status === "queued") {
-    return {
-      ok: false,
-      reason: `sub-agent ${run.id} is queued and has not started yet; wait for it to start before sending.`,
-    };
-  }
-  if (!run.sessionPath) {
-    return {
-      ok: false,
-      reason: `sub-agent ${run.id} has no resumable session on disk (sessionPath unset).`,
-    };
-  }
-  if (!existsSync(run.sessionPath)) {
+  // I/O check after the pure resolver. The disk-existence check stays
+  // here because resolveSendStrategy is pure (no fs). Slice 4 may
+  // narrow this for true RPC steer/follow_up paths once the live
+  // subprocess is the source of truth, not the on-disk session file.
+  if (run.sessionPath && !existsSync(run.sessionPath)) {
     return {
       ok: false,
       reason: `sub-agent ${run.id} session file is missing on disk: ${run.sessionPath}`,
     };
   }
   return { ok: true };
+}
+
+/**
+ * v0.12 steering — pure decision matrix that routes an `ensemble_send`
+ * call to one of `rpc-steer`, `rpc-follow-up`, `spawn-resume`, or
+ * `rejected`. Pinned by `tests/runs-streaming-strategy.test.ts`.
+ *
+ * Slice 1 lands the resolver. Slice 2 wires the RPC subprocess
+ * plumbing (`--mode rpc`, single-writer stdin queue) that consumes
+ * `rpc-steer` / `rpc-follow-up`. Slice 4 wires the upstream cascade
+ * that stamps `Run.steerable` / `Run.streamingMode` at spawn time.
+ *
+ * Pure: no I/O, deterministic on `(run, behavior)`. Reject reasons
+ * are character-pinned (W3 string witness) by the corresponding test
+ * file so user-visible text drift is detectable.
+ *
+ * Decision matrix (design §4.3, lines ~571–640):
+ *
+ *   - `running` AND `streamingMode === "rpc"`:
+ *       "auto"      → rpc-follow-up   (safe non-interrupting queue)
+ *       "steer"     → rpc-steer
+ *       "follow_up" → rpc-follow-up
+ *       "resume"    → rejected ("...is currently running; resume is
+ *                    for terminal runs only...")
+ *
+ *   - `running` AND (`streamingMode === "print"` OR undefined):
+ *       (any)       → rejected ("...is not steerable; mark steerable:
+ *                    true at spawn...")
+ *
+ *   - `paused` (any streamingMode):
+ *       (any)       → rejected ("...is paused; resume it first...")
+ *                    Mirrors v0.5 contract; design §4.5 forbids steer-
+ *                    while-paused (state-space explosion).
+ *
+ *   - `queued`:
+ *       (any)       → rejected ("...is queued and has not started
+ *                    yet...").
+ *
+ *   - terminal status (`completed` / `failed` / `killed` / `timeout`
+ *     / `hook_failed`):
+ *       "steer"     → rejected ("...has already finished; cannot
+ *                    steer a terminal run...")
+ *       "follow_up" → rejected (analogous)
+ *       "auto"|"resume" + sessionPath unset → rejected ("...has no
+ *                    resumable session on disk...")
+ *       "auto"|"resume" + sessionPath set   → spawn-resume
+ */
+export function resolveSendStrategy(
+  run: Run,
+  behavior: StreamingBehavior = "auto",
+): ResolvedSendStrategy {
+  // running
+  if (run.status === "running") {
+    const isRpc = run.streamingMode === "rpc";
+    if (!isRpc) {
+      return {
+        strategy: {
+          kind: "rejected",
+          reason: `sub-agent ${run.id} is not steerable; mark steerable: true at spawn to send messages while the subprocess is alive. (Currently running; wait for it to finish before sending again.)`,
+        },
+      };
+    }
+    // running + rpc
+    if (behavior === "steer") return { strategy: { kind: "rpc-steer" } };
+    if (behavior === "follow_up" || behavior === "auto") {
+      return { strategy: { kind: "rpc-follow-up" } };
+    }
+    // behavior === "resume"
+    return {
+      strategy: {
+        kind: "rejected",
+        reason: `sub-agent ${run.id} is currently running; resume is for terminal runs only. Use streaming_behavior=steer or follow_up to send to the live subprocess.`,
+      },
+    };
+  }
+
+  // paused
+  if (run.status === "paused") {
+    return {
+      strategy: {
+        kind: "rejected",
+        reason: `sub-agent ${run.id} is paused; resume it first via /conductor resume ${run.id}.`,
+      },
+    };
+  }
+
+  // queued
+  if (run.status === "queued") {
+    return {
+      strategy: {
+        kind: "rejected",
+        reason: `sub-agent ${run.id} is queued and has not started yet; wait for it to start before sending.`,
+      },
+    };
+  }
+
+  // terminal — explicit steer/follow_up never makes sense.
+  if (behavior === "steer") {
+    return {
+      strategy: {
+        kind: "rejected",
+        reason: `sub-agent ${run.id} has already finished; cannot steer a terminal run. Send without streaming_behavior to spawn a fresh subprocess.`,
+      },
+    };
+  }
+  if (behavior === "follow_up") {
+    return {
+      strategy: {
+        kind: "rejected",
+        reason: `sub-agent ${run.id} has already finished; cannot follow_up a terminal run. Send without streaming_behavior to spawn a fresh subprocess.`,
+      },
+    };
+  }
+
+  // terminal + auto/resume — sessionPath must be present for spawn-resume.
+  if (!run.sessionPath) {
+    return {
+      strategy: {
+        kind: "rejected",
+        reason: `sub-agent ${run.id} has no resumable session on disk (sessionPath unset).`,
+      },
+    };
+  }
+  return { strategy: { kind: "spawn-resume" } };
 }
 
 /**

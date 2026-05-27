@@ -318,3 +318,74 @@ test("resolveBuiltinPersonasDir: passes through non-symlink paths unchanged", ()
   const resolved = resolveBuiltinPersonasDir(pathToFileURL(realFile).href);
   assert.equal(resolved, personasDir);
 });
+
+// ── v0.12 Slice 1 — negative test for `steerable` frontmatter parsing ──
+//
+// Per oracle fix #1 (`docs/v0.12-steering-design.md` revision log
+// 2026-05-27): the v0.12 `steerable` cascade has NO persona-frontmatter
+// layer. Mirrors v0.10 `kill_on_stall`'s deferred shape exactly
+// (`PRD.md:517`). The two cascades MUST stay isomorphic; a future PRD
+// entry that adds a frontmatter layer to one upgrades both.
+//
+// This test pins the absence: the parser MUST NOT extract `steerable`
+// from frontmatter into the resolved `Persona`, even when present.
+// Critic gate 2 (out-of-scope check) for slice 1 also greps `src/`
+// and should NOT find `steerable` in `src/personas.ts`.
+
+test("personas: v0.12 schema accepts no `steerable` field (parser does not extend Persona for steerable in v0.12)", async () => {
+  // Round-trip a persona file with `steerable: true` in frontmatter
+  // through the public parse → build pipeline. The resulting object
+  // MUST NOT carry a `steerable` property; if a future slice silently
+  // adds frontmatter parsing, this test catches it.
+  const tempDir = mkdtempSync(join(tmpdir(), "persona-steerable-neg-"));
+  const file = join(tempDir, "with-steerable.md");
+  writeFileSync(
+    file,
+    `---\nname: with-steerable\ndescription: probe\nsteerable: true\n---\n\nbody`,
+    "utf8",
+  );
+  const text = readFileSync(file, "utf8");
+  const { frontmatter } = parseFrontmatter(text);
+  // Frontmatter parsing keeps unknown keys around (raw map); the
+  // validate-and-build step is what's responsible for filtering them
+  // out of the typed Persona. Verify the raw frontmatter sees the key
+  // (so we know the test fixture is valid).
+  assert.equal(frontmatter.steerable, true, "raw frontmatter parser must surface the key");
+
+  // Drop a real persona file into a temp builtin dir and resolve via
+  // the production `resolvePersonas`. The resolved Persona object
+  // MUST NOT have a `steerable` property.
+  const userPersonaDir = join(tempDir, ".pi", "agent", "conductor", "personas");
+  mkdirSync(userPersonaDir, { recursive: true });
+  writeFileSync(
+    join(userPersonaDir, "steertest.md"),
+    `---\nname: steertest\ndescription: probe\nsteerable: true\n---\n\nYou are steertest.\n`,
+    "utf8",
+  );
+  const homeDir = tempDir;
+  const origHome = process.env.HOME;
+  process.env.HOME = homeDir;
+  try {
+    const resolved = await resolvePersonas({ cwd: tempDir });
+    const p = resolved.personas.get("steertest");
+    if (p) {
+      // Persona type does not declare `steerable`; the parser MUST
+      // not have set it. Use Object.hasOwn so we catch undefined-via-
+      // declared and undefined-via-absent equivalently.
+      assert.equal(
+        Object.hasOwn(p, "steerable"),
+        false,
+        "resolved Persona must NOT carry a `steerable` property; v0.12 explicitly defers frontmatter parsing",
+      );
+      // Belt-and-suspenders: assert via dynamic property access too.
+      assert.equal(
+        (p as unknown as Record<string, unknown>).steerable,
+        undefined,
+        "resolved Persona must NOT have a truthy `steerable` value",
+      );
+    }
+  } finally {
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+  }
+});

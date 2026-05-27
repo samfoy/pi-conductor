@@ -100,6 +100,14 @@ function mergeConfig(base: ConductorConfig, raw: unknown): ConductorConfig {
   if (r.defaultMode === "on" || r.defaultMode === "off") {
     out.defaultMode = r.defaultMode;
   }
+  if (typeof r.defaultSteerable === "boolean") {
+    // v0.12 steering: project/user-config layer for the steerable
+    // cascade. Mirrors `defaultKillOnStall` placement intent
+    // (oracle gate 2 ADJUST). Note: `defaultKillOnStall` does NOT
+    // currently have a JSON-merge path here; adjacent refactor is
+    // out of scope per oracle gate 2 forbid-adjacent-churn.
+    out.defaultSteerable = r.defaultSteerable;
+  }
   if (r.personaOverrides && typeof r.personaOverrides === "object") {
     // Field-level merge per persona name. A project entry that touches
     // `thinking` does not blow away a user entry's `model`.

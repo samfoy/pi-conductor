@@ -111,6 +111,14 @@ export interface ConductorConfig {
    * forget. Built-in default is `"off"`.
    */
   defaultMode: "on" | "off";
+  /**
+   * v0.12 steering: project/user-config default for `ensemble_spawn`'s
+   * `steerable` arg. Cascade per-call > project > user > built-in
+   * default `false`. Mirrors `WatchdogConfigDefaults.defaultKillOnStall`
+   * shape exactly (oracle gate 2 ADJUST: cascade-shape isomorphism).
+   * Slice 4 wires the per-call layer; slice 1 lands the type plumbing.
+   */
+  defaultSteerable?: boolean;
   personaOverrides: Record<string, PersonaOverride>;
   conductorPromptPath: string | null;
   /**
@@ -220,6 +228,10 @@ export const DEFAULT_CONFIG: ConductorConfig = {
     tickIntervalSeconds: 30,
     defaultKillOnStall: false,
   },
+  // v0.12 steering: built-in default OFF — mirrors v0.10 kill_on_stall
+  // posture (PRD.md:517). No autonomous-chain field data justifies
+  // flipping it. Slice 1 ships the field; slice 4 wires per-call.
+  defaultSteerable: false,
 };
 
 // ── Run lifecycle types (v0.2) ────────────────────────────────────────
@@ -315,6 +327,38 @@ export interface Run {
    * with no user benefit.
    */
   softStallSeconds?: number;
+
+  // ── v0.12 steering (slice 1 types) ───────────────────────────────────────
+  // Slice 1 declares these optional fields; slice 2 wires the RPC
+  // subprocess plumbing that consumes them; slice 4 wires the
+  // upstream cascade-collapse that stamps `steerable` at spawn time.
+  // Slice 1 leaves them undefined in production paths.
+
+  /**
+   * v0.12: per-spawn steerable flag, resolved at spawn time from the
+   * 4-layer cascade (per-call > project > user > built-in default
+   * `false`) collapsed onto this field, then read by
+   * `resolveSteerable(run, defaultSteerable)` in `src/steerable.ts`
+   * (one-line `run.steerable ?? defaultSteerable`, mirrors
+   * `src/watchdog.ts:287` resolveKillOnStall). Drives:
+   *   - `--mode` flag in `buildPiArgs` (rpc vs json -p) (slice 2)
+   *   - stdio: ["pipe", "pipe", "pipe"] in spawn opts (slice 2)
+   *   - `resolveSendStrategy`'s reject-on-running-print-mode branch
+   *     (slice 1)
+   * Persisted on RunRecord so post-startup reconcile (v0.9.x) knows
+   * which mode the orphan was launched in.
+   */
+  steerable?: boolean;
+
+  /**
+   * v0.12: derived from `steerable`. Either `"print"` (today's
+   * default) or `"rpc"`. Stored separately from `steerable` because
+   * it captures *what mode the subprocess is actually running in*
+   * — useful for diagnostics, doctor surface, and the tiny chance
+   * that future cascade layers invalidate `steerable` post-spawn.
+   * No production path produces `"rpc"` until slice 2.
+   */
+  streamingMode?: "print" | "rpc";
 
   /**
    * Process pid for the spawned pi subprocess. Used by post-startup
@@ -474,6 +518,18 @@ export interface RunRecord {
   sessionPath?: string;
   systemPrompt?: string;
   /**
+   * v0.12 steering: spawn-time steerable flag. See `Run.steerable`.
+   * Persisted to record.json so post-startup reconcile (v0.9.x) knows
+   * the original mode of an orphaned record.
+   */
+  steerable?: boolean;
+  /**
+   * v0.12 steering: actual subprocess mode. See `Run.streamingMode`.
+   * Persisted to record.json. Optional for back-compat with pre-v0.12
+   * records.
+   */
+  streamingMode?: "print" | "rpc";
+  /**
    * v0.11 on_complete_hook (slice 2): persisted hook outcome on terminal
    * runs whose close handler invoked a hook. Undefined for runs that did
    * not invoke a hook. Read by the completion-envelope renderer (slice 5)
@@ -507,6 +563,8 @@ export function toRunRecord(r: Run): RunRecord {
     finalPath: r.finalPath,
     sessionPath: r.sessionPath,
     systemPrompt: r.systemPrompt,
+    steerable: r.steerable,
+    streamingMode: r.streamingMode,
     hookResult: r.hookResult,
   };
 }
@@ -574,4 +632,27 @@ export const TERMINAL_STATUSES: RunStatus[] = [
 ];
 export function isTerminal(s: RunStatus): boolean {
   return TERMINAL_STATUSES.includes(s);
+}
+
+// ── v0.12 steering — send-strategy resolver types ──────────────────────
+//
+// Pinned by `tests/runs-streaming-strategy.test.ts` (slice 1).
+// Production resolver lives in `src/runs.ts: resolveSendStrategy`.
+// `validateSendable` becomes a 3-line shim around
+// `resolveSendStrategy(run, "auto")` plus a post-strategy I/O check
+// for session-file existence on disk.
+
+/** LLM-facing arg on `ensemble_send`. Slice 4 wires the tool param. */
+export type StreamingBehavior = "auto" | "steer" | "follow_up" | "resume";
+
+/**
+ * Output of `resolveSendStrategy`. Tagged union so the caller can
+ * dispatch on `kind` without re-checking status/streamingMode.
+ */
+export interface ResolvedSendStrategy {
+  strategy:
+    | { kind: "rpc-steer" }
+    | { kind: "rpc-follow-up" }
+    | { kind: "spawn-resume" }
+    | { kind: "rejected"; reason: string };
 }

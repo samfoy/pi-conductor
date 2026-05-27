@@ -68,7 +68,11 @@ var DEFAULT_CONFIG = {
     graceSeconds: 30,
     tickIntervalSeconds: 30,
     defaultKillOnStall: false
-  }
+  },
+  // v0.12 steering: built-in default OFF — mirrors v0.10 kill_on_stall
+  // posture (PRD.md:517). No autonomous-chain field data justifies
+  // flipping it. Slice 1 ships the field; slice 4 wires per-call.
+  defaultSteerable: false
 };
 function emptyUsage() {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
@@ -98,6 +102,8 @@ function toRunRecord(r) {
     finalPath: r.finalPath,
     sessionPath: r.sessionPath,
     systemPrompt: r.systemPrompt,
+    steerable: r.steerable,
+    streamingMode: r.streamingMode,
     hookResult: r.hookResult
   };
 }
@@ -382,6 +388,9 @@ function mergeConfig(base, raw) {
   }
   if (r.defaultMode === "on" || r.defaultMode === "off") {
     out.defaultMode = r.defaultMode;
+  }
+  if (typeof r.defaultSteerable === "boolean") {
+    out.defaultSteerable = r.defaultSteerable;
   }
   if (r.personaOverrides && typeof r.personaOverrides === "object") {
     const incoming = r.personaOverrides;
@@ -1853,37 +1862,81 @@ function mapFromRegistry(r) {
   return m;
 }
 function validateSendable(run) {
-  if (run.status === "running") {
-    return {
-      ok: false,
-      reason: `sub-agent ${run.id} is currently running; wait for it to finish before sending.`
-    };
+  const r = resolveSendStrategy(run, "auto");
+  if (r.strategy.kind === "rejected") {
+    return { ok: false, reason: r.strategy.reason };
   }
-  if (run.status === "paused") {
-    return {
-      ok: false,
-      reason: `sub-agent ${run.id} is paused; resume it first via /conductor resume ${run.id}.`
-    };
-  }
-  if (run.status === "queued") {
-    return {
-      ok: false,
-      reason: `sub-agent ${run.id} is queued and has not started yet; wait for it to start before sending.`
-    };
-  }
-  if (!run.sessionPath) {
-    return {
-      ok: false,
-      reason: `sub-agent ${run.id} has no resumable session on disk (sessionPath unset).`
-    };
-  }
-  if (!existsSync3(run.sessionPath)) {
+  if (run.sessionPath && !existsSync3(run.sessionPath)) {
     return {
       ok: false,
       reason: `sub-agent ${run.id} session file is missing on disk: ${run.sessionPath}`
     };
   }
   return { ok: true };
+}
+function resolveSendStrategy(run, behavior = "auto") {
+  if (run.status === "running") {
+    const isRpc = run.streamingMode === "rpc";
+    if (!isRpc) {
+      return {
+        strategy: {
+          kind: "rejected",
+          reason: `sub-agent ${run.id} is not steerable; mark steerable: true at spawn to send messages while the subprocess is alive. (Currently running; wait for it to finish before sending again.)`
+        }
+      };
+    }
+    if (behavior === "steer") return { strategy: { kind: "rpc-steer" } };
+    if (behavior === "follow_up" || behavior === "auto") {
+      return { strategy: { kind: "rpc-follow-up" } };
+    }
+    return {
+      strategy: {
+        kind: "rejected",
+        reason: `sub-agent ${run.id} is currently running; resume is for terminal runs only. Use streaming_behavior=steer or follow_up to send to the live subprocess.`
+      }
+    };
+  }
+  if (run.status === "paused") {
+    return {
+      strategy: {
+        kind: "rejected",
+        reason: `sub-agent ${run.id} is paused; resume it first via /conductor resume ${run.id}.`
+      }
+    };
+  }
+  if (run.status === "queued") {
+    return {
+      strategy: {
+        kind: "rejected",
+        reason: `sub-agent ${run.id} is queued and has not started yet; wait for it to start before sending.`
+      }
+    };
+  }
+  if (behavior === "steer") {
+    return {
+      strategy: {
+        kind: "rejected",
+        reason: `sub-agent ${run.id} has already finished; cannot steer a terminal run. Send without streaming_behavior to spawn a fresh subprocess.`
+      }
+    };
+  }
+  if (behavior === "follow_up") {
+    return {
+      strategy: {
+        kind: "rejected",
+        reason: `sub-agent ${run.id} has already finished; cannot follow_up a terminal run. Send without streaming_behavior to spawn a fresh subprocess.`
+      }
+    };
+  }
+  if (!run.sessionPath) {
+    return {
+      strategy: {
+        kind: "rejected",
+        reason: `sub-agent ${run.id} has no resumable session on disk (sessionPath unset).`
+      }
+    };
+  }
+  return { strategy: { kind: "spawn-resume" } };
 }
 function sendToRun(run, message, opts) {
   const check = validateSendable(run);

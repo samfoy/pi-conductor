@@ -160,7 +160,15 @@ test("ensemble_send rejects when agent_id is unknown", async () => {
 test("ensemble_send rejects a running sub-agent (busy)", async () => {
   const { dir, path } = tmpSessionFile();
   try {
-    const run = makeRun("oracle-aaaa", { status: "running", sessionPath: path, finishedAt: undefined });
+    // v0.12 slice 1 precondition: streamingMode === "print" pins this
+    // test as the *non-steerable* running case. The new "running
+    // steerable" test below covers the new accept-and-route path.
+    const run = makeRun("oracle-aaaa", {
+      status: "running",
+      sessionPath: path,
+      finishedAt: undefined,
+      streamingMode: "print",
+    });
     const { sendTool } = setup([run]);
     assert.ok(sendTool);
     const result = await sendTool.execute("call-1", {
@@ -168,7 +176,7 @@ test("ensemble_send rejects a running sub-agent (busy)", async () => {
       message: "hi",
     });
     const text = result.content.map((c: any) => c.text).join("\n");
-    assert.match(text, /running|busy/i);
+    assert.match(text, /running|busy|not steerable/i);
     // Run status must NOT have been mutated.
     assert.equal(run.status, "running");
   } finally {
@@ -258,3 +266,104 @@ for (const status of TERMINAL_STATES) {
     }
   });
 }
+
+// ── v0.12 Slice 1 — steerable acceptance / rejection contracts ──
+//
+// These tests pin the new resolveSendStrategy decisions through the
+// public ensemble_send tool. Slice 1 only ships the resolver +
+// validateSendable shim; slice 4 wires real RPC plumbing (steer /
+// follow_up commands on a live subprocess). For now, the "accepts a
+// running steerable" test verifies that the tool no longer
+// short-circuits-rejects on running runs whose `streamingMode` is
+// `"rpc"`. The actual stdin-write happens slice 4; this slice
+// preserves the contract: validateSendable returns ok:true, sendToRun
+// flips the run forward, and the response envelope is not a rejection.
+
+test(
+  'ensemble_send accepts a running steerable sub-agent under streaming_behavior=follow_up (kind: "started")',
+  async () => {
+    const { dir, path } = tmpSessionFile();
+    try {
+      const run = makeRun("oracle-stra", {
+        status: "running",
+        sessionPath: path,
+        finishedAt: undefined,
+        streamingMode: "rpc",
+        steerable: true,
+      });
+      const { sendTool } = setup([run]);
+      assert.ok(sendTool);
+
+      // Slice 1 stub: ensemble_send tool doesn't yet take a
+      // streaming_behavior param — slice 4 wires it. The contract
+      // pinned here is purely "the tool no longer rejects on running
+      // for steerable runs". The existing message envelope shape
+      // (kind:"started" -> non-error content) is what we verify.
+      const promise = sendTool.execute("call-1", {
+        agent_id: run.id,
+        message: "steer me",
+        foreground: false,
+      });
+      await promise.catch(() => undefined); // tolerate the (broken) downstream resume in slice 1
+
+      // Cleanup the spawned subprocess so the test exits cleanly.
+      try {
+        run.proc?.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+
+      const result = await promise.catch((e) => ({
+        content: [{ text: String((e as Error).message) }],
+      }));
+      const text = (result as { content: { text: string }[] }).content
+        .map((c) => c.text)
+        .join("\n");
+      // Slice-1 contract: the response envelope is NOT a rejection due
+      // to status=running. (It may be a downstream error from the
+      // junk session file in the fixture, but the resolver-level
+      // gate must have let us through.)
+      assert.doesNotMatch(
+        text,
+        /is not steerable; mark steerable: true at spawn/,
+        "steerable run was rejected by the print-mode gate",
+      );
+      assert.doesNotMatch(
+        text,
+        /currently running; wait for it to finish/,
+        "steerable run was rejected by the legacy running-busy gate",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "ensemble_send rejects a paused steerable sub-agent with a hint to resume (mirrors §4.5 forbid-with-reason)",
+  async () => {
+    const { dir, path } = tmpSessionFile();
+    try {
+      // Paused + steerable + rpc — the steer queue is the obvious
+      // place to buffer, but design §4.5 forbids it (state-space
+      // explosion). Reject with the same paused-resume hint as the
+      // print-mode case.
+      const run = makeRun("oracle-stpa", {
+        status: "paused",
+        sessionPath: path,
+        streamingMode: "rpc",
+        steerable: true,
+      });
+      const { sendTool } = setup([run]);
+      assert.ok(sendTool);
+      const result = await sendTool.execute("call-1", {
+        agent_id: "oracle-stpa",
+        message: "hi",
+      });
+      const text = result.content.map((c: any) => c.text).join("\n");
+      assert.match(text, /is paused; resume it first/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
