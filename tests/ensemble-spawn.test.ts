@@ -110,6 +110,68 @@ test("ensemble_spawn: per-call steerable=true stamps Run.steerable=true on the r
   }
 });
 
+// ── v0.12 slice 5 — carry-forward from slice-4 critic Note 2 ─────────
+//
+// Closes the gap surfaced by slice-4 critic: the production cascade
+// path `cfg.defaultSteerable ?? false` at `src/tools.ts:291` was
+// untested. Slice-4's cascade test only proved the resolver shape
+// (per-call > project > user > default) at the unit level; it did
+// NOT exercise the actual loadConfig → collapseSteerableCascade chain
+// in the LLM tool entrypoint.
+//
+// Test discipline: drop a `.pi/conductor.json` in the cwd with
+// `defaultSteerable: true`, omit the per-call arg, assert
+// run.steerable === true. Mutation-red when `cfg.defaultSteerable`
+// is dropped from `src/tools.ts:291`.
+
+test(
+  "ensemble_spawn: per-call steerable=undefined + config.defaultSteerable=true → run.steerable=true (production cascade path)",
+  async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "conductor-spawn-cfg-default-"));
+    try {
+      // Plant a project-config file that flips defaultSteerable on.
+      // loadConfig() reads `<cwd>/.pi/conductor.json` (project layer).
+      // Cascade order: per-call > project > user > built-in. With no
+      // per-call arg, the project value wins.
+      const cfgDir = join(cwd, ".pi");
+      const fs = await import("node:fs");
+      fs.mkdirSync(cfgDir, { recursive: true });
+      fs.writeFileSync(
+        join(cfgDir, "conductor.json"),
+        JSON.stringify({ defaultSteerable: true }),
+      );
+
+      const { reg, spawnTool } = setup(cwd);
+      assert.ok(spawnTool);
+
+      const promise = spawnTool.execute("call-1", {
+        persona: "oracle",
+        task: "production cascade test",
+        foreground: false,
+        // NOTE: no per-call `steerable` field — the project default
+        // must thread through to run.steerable.
+      });
+      await promise.catch(() => null);
+
+      const run = reg.list().find((r) => r.persona === "oracle");
+      assert.ok(run, "oracle run registered");
+      assert.equal(
+        run.steerable,
+        true,
+        "production cascade: cfg.defaultSteerable=true threads through to run.steerable=true even without a per-call arg (closes slice-4 critic Note 2)",
+      );
+
+      try {
+        run.proc?.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  },
+);
+
 test("ensemble_spawn: omitting steerable yields run.steerable=false (cascade falls through to built-in default)", async () => {
   const cwd = mkdtempSync(join(tmpdir(), "conductor-spawn-default-"));
   try {

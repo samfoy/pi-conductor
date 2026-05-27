@@ -25,6 +25,7 @@ import { test } from "node:test";
 
 import {
   applyEvent,
+  bumpOnRpcLine,
   handleExtensionUiRequest,
   routeRpcResponse,
 } from "../src/event-handler.ts";
@@ -69,26 +70,35 @@ class FakeRpcStdinQueue {
 
 // ── 1. response line ──────────────────────────────────────────────────
 
-test("applyEvent: response line routes to routeRpcResponse stub and returns {kind: \"updated\"}", () => {
-  const run = makeRun();
-  const lastEventAtBefore = run.lastEventAt;
-  const evt = {
-    type: "response",
-    id: "init-tester-abcd",
-    command: "prompt",
-    success: true,
-  };
-  const r = applyEvent(run, evt);
-  assert.deepEqual(r, { kind: "updated" });
-  // Slice 5 owns the `lastEventAt` bump on `response`. Slice 3 must
-  // NOT bump — verify the field is unchanged. (The W2 mutation
-  // witness in slice 5 will pin both directions; this assert is the
-  // pre-condition.)
-  assert.equal(
-    run.lastEventAt,
-    lastEventAtBefore,
-    "slice 3 must NOT bump lastEventAt on response (slice 5 owns)",
-  );
+test("applyEvent: response line on RPC run routes to routeRpcResponse and BUMPS lastEventAt (slice 5 contract; supersedes slice 3 no-bump)", () => {
+  // Slice 5 flips the slice-3 contract: `response` on a steerable run
+  // is concrete progress evidence (sub-agent acked our command), so
+  // it bumps `lastEventAt`. The W2(a) witness below pins the formula
+  // directly via `bumpOnRpcLine`; this test pins the wired effect on
+  // applyEvent for an RPC run.
+  const NOW = 2_500_000_000_000;
+  const run = makeRun({
+    streamingMode: "rpc",
+    lastEventAt: 1_000_000_000_000,
+  });
+  const realNow = Date.now;
+  Date.now = () => NOW;
+  try {
+    const r = applyEvent(run, {
+      type: "response",
+      id: "init-tester-abcd",
+      command: "prompt",
+      success: true,
+    });
+    assert.deepEqual(r, { kind: "updated" });
+    assert.equal(
+      run.lastEventAt,
+      NOW,
+      "slice 5 contract: response on streamingMode=rpc bumps lastEventAt",
+    );
+  } finally {
+    Date.now = realNow;
+  }
 });
 
 test("routeRpcResponse: no-op when run has no pendingAcks Map (defensive)", () => {
@@ -164,13 +174,17 @@ test("applyEvent: extension_ui_request auto-cancel covers every method (select/c
   }
 });
 
-test("applyEvent: extension_ui_request does NOT bump lastEventAt (no observable side effect on run.lastEventAt)", () => {
-  // Oracle fix #2 asymmetry. Slice 5 will add the W2 witness pinning
-  // the asymmetry between `response` (bumps in slice 5) and
-  // `extension_ui_request` (never bumps); slice 3 just establishes
-  // the no-bump path.
+test("applyEvent: extension_ui_request on RPC run does NOT bump lastEventAt (oracle fix #2 asymmetry)", () => {
+  // Oracle fix #2 asymmetry: `response` bumps; `extension_ui_request`
+  // does NOT bump even on a steerable run. Sub-agent is BLOCKED on
+  // host's reply — not progress. The W2(b) witness below pins the
+  // formula directly; this test pins the wired effect on applyEvent
+  // for an RPC run.
   const queue = new FakeRpcStdinQueue();
-  const run = makeRun({ rpcStdinQueue: queue as any });
+  const run = makeRun({
+    streamingMode: "rpc",
+    rpcStdinQueue: queue as any,
+  });
   const lastEventAtBefore = run.lastEventAt;
   applyEvent(run, {
     type: "extension_ui_request",
@@ -185,6 +199,104 @@ test("applyEvent: extension_ui_request does NOT bump lastEventAt (no observable 
     "extension_ui_request must NEVER bump lastEventAt (host-blocking ≠ progress)",
   );
 });
+
+// ── W2 mutation witness: bumpOnRpcLine asymmetry ────────────────
+//
+// Per `docs/wdd.md` parallel-formula rule, the mutation witnesses
+// import the production helper directly and assert against its
+// truth-table (NOT a re-derivation). Mutating the helper formula
+// in either direction reds the matching test.
+
+test(
+  'W2(a) bumpOnRpcLine returns true for evtType="response" — mutating to no-op fails this stall-recovery pin',
+  () => {
+    // The recovery scenario: a steerable sub-agent has been silent
+    // (no message_end / tool_result_end), about to soft-stall. A
+    // `response` ack arrives. Bumping lastEventAt is the only way
+    // the watchdog learns the sub-agent acked our prompt. If the
+    // helper is mutated to `return false` for "response", this
+    // assertion reds and the witness has teeth.
+    const run = makeRun({ streamingMode: "rpc" });
+    assert.equal(
+      bumpOnRpcLine(run, Date.now(), "response"),
+      true,
+      "response on streamingMode=rpc MUST signal a bump",
+    );
+  },
+);
+
+test(
+  'W2(b) bumpOnRpcLine returns false for evtType="extension_ui_request" — mutating to bump fails this host-blocked-stall-detection pin',
+  () => {
+    // The detection scenario: a steerable sub-agent's extension code
+    // emits ctx.ui.confirm — sub-agent is now BLOCKED on our reply.
+    // Bumping lastEventAt would mask this stall class ("sub-agent
+    // waiting on unanswered UI request"). The conductor auto-cancels
+    // synchronously today, but the no-bump policy is load-bearing for
+    // v0.13+ when extension_ui_request may be proxied to the user. If
+    // the helper is mutated to return true for "extension_ui_request",
+    // this assertion reds and the witness has teeth.
+    const run = makeRun({ streamingMode: "rpc" });
+    assert.equal(
+      bumpOnRpcLine(run, Date.now(), "extension_ui_request"),
+      false,
+      "extension_ui_request on streamingMode=rpc MUST NOT signal a bump",
+    );
+  },
+);
+
+test(
+  "W2(c) bumpOnRpcLine returns false for any non-RPC line type (defensive default)",
+  () => {
+    // Future RPC line types default to no-bump until explicitly
+    // added to the truth-table. Defensive default mirrors v0.10
+    // watchdog Q5-deferred pattern (build-on-demand).
+    const run = makeRun({ streamingMode: "rpc" });
+    for (const t of ["unknown_line", "agent_event", "", "message_end"]) {
+      assert.equal(
+        bumpOnRpcLine(run, Date.now(), t),
+        false,
+        `evtType=${JSON.stringify(t)} must default to no-bump`,
+      );
+    }
+  },
+);
+
+test(
+  "applyEvent: print-mode runs see no bumpOnRpcLine effect (streamingMode !== 'rpc' short-circuits the RPC bump policy)",
+  () => {
+    // Print-mode contract: applying a stray `response` line on a
+    // print-mode run (streamingMode undefined) must NOT bump
+    // lastEventAt via the RPC bump policy. This is the call-site
+    // short-circuit that the plan calls out: the RPC bump branch
+    // gates on `run.streamingMode === "rpc"` BEFORE entering
+    // bumpOnRpcLine.
+    //
+    // (The dispatch into routeRpcResponse / handleExtensionUiRequest
+    // still runs for backwards compatibility with the existing
+    // wire-permissive contract, but the bump branch does not.)
+    const NOW = 2_500_000_000_000;
+    const run = makeRun({ lastEventAt: 1_000_000_000_000 });
+    assert.equal(run.streamingMode, undefined);
+    const realNow = Date.now;
+    Date.now = () => NOW;
+    try {
+      applyEvent(run, {
+        type: "response",
+        id: "x",
+        command: "prompt",
+        success: true,
+      });
+      assert.equal(
+        run.lastEventAt,
+        1_000_000_000_000,
+        "print-mode response line must NOT bump lastEventAt (call-site short-circuit)",
+      );
+    } finally {
+      Date.now = realNow;
+    }
+  },
+);
 
 test("applyEvent: extension_ui_request without rpcStdinQueue (defensive) does not throw and returns {kind: \"updated\"}", () => {
   // Defensive: a print-mode run that somehow receives an

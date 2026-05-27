@@ -1919,6 +1919,41 @@ export function forceTerminate(
     clearTimeout(run.timeoutTimer);
     run.timeoutTimer = undefined;
   }
+
+  // v0.12 slice 5 — RPC stdin cleanup BEFORE SIGTERM (design §4.6 +
+  // plan §5 critic gate 3). For steerable runs:
+  //   1. Reject every pendingAcks entry with cause "force-terminate"
+  //      (clears its timer, calls reject()).
+  //   2. Destroy the rpcStdinQueue — rejects in-flight + queued
+  //      stdin writes with the same cause.
+  //   3. Clear the Map so a second forceTerminate (W7 idempotency)
+  //      sees an empty Map. The W7 isTerminal-guard above means we
+  //      never re-enter this branch on a double-kill, but clearing
+  //      defends against any future code path that bypasses the
+  //      guard.
+  // SIGTERM ladder below is unchanged (Q6 lock).
+  if (run.streamingMode === "rpc") {
+    if (run.pendingAcks) {
+      const err = new Error(`RpcStdinQueue destroyed: force-terminate`);
+      for (const entry of run.pendingAcks.values()) {
+        clearTimeout(entry.timer);
+        try {
+          entry.reject(err);
+        } catch {
+          // The reject callback shouldn't throw; defend against test
+          // stubs / future surprises.
+        }
+      }
+      run.pendingAcks.clear();
+    }
+    if (run.rpcStdinQueue) {
+      try {
+        run.rpcStdinQueue.destroy("force-terminate");
+      } catch {
+        // destroy is itself idempotent + non-throwing, but defend.
+      }
+    }
+  }
   if (run.proc) {
     try {
       run.proc.kill("SIGTERM");

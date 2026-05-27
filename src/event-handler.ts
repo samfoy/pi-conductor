@@ -39,6 +39,18 @@ export function applyEvent(run: Run, event: unknown): EventEffect {
   const e = event as Record<string, any>;
   if (typeof e.type !== "string") return NONE;
 
+  // ── v0.12 slice 5 — RPC `lastEventAt` bump policy (oracle fix #2) ──
+  //
+  // Print-mode short-circuit: only RPC runs route through bumpOnRpcLine.
+  // Print-mode runs keep their pre-v0.12 bump sites exactly
+  // (`message_end` / `tool_result_end` below). The RPC bump-asymmetry
+  // (`response` bumps; `extension_ui_request` does NOT) is captured in
+  // `bumpOnRpcLine` per design §4.7 + oracle fix #2; W2 mutation
+  // witness in tests/event-handler-rpc.test.ts pins both directions.
+  if (run.streamingMode === "rpc" && bumpOnRpcLine(run, Date.now(), e.type)) {
+    run.lastEventAt = Date.now();
+  }
+
   // ── v0.12 slice 3 — RPC-only line dispatch ──────────────────
   //
   // `--mode rpc` emits two line shapes that are NOT `AgentEvent`s:
@@ -125,6 +137,40 @@ export function applyEvent(run: Run, event: unknown): EventEffect {
   }
 
   return NONE;
+}
+
+// ── v0.12 slice 5 — RPC `lastEventAt` bump policy (oracle fix #2) ──
+
+/**
+ * Decide whether an RPC-only line type should bump `Run.lastEventAt`.
+ *
+ * Pure: no I/O, deterministic on (run, now, evtType). Exposed so the
+ * W2 mutation witness can pin the formula directly per `docs/wdd.md`
+ * parallel-formula rule (mirrors `src/watchdog.ts:287` `resolveKillOnStall`
+ * + slice-1 `resolveSteerable`).
+ *
+ * Truth table:
+ *   - `"response"`              → true  (sub-agent acked our command;
+ *                                       progress evidence)
+ *   - `"extension_ui_request"`  → false (sub-agent is BLOCKED on
+ *                                       host's reply; not progress)
+ *   - any other line type        → false (defensive default; build-on-demand)
+ *
+ * The `now` parameter is reserved for future thresholding (e.g. ack
+ * de-duplication) but is currently unused. Caller is responsible for
+ * applying the bump (`run.lastEventAt = now`) when this returns true.
+ *
+ * Caller is also responsible for the print-mode short-circuit
+ * (`run.streamingMode === "rpc"`); the helper itself does NOT gate
+ * on streamingMode so the W2 unit tests can exercise the formula in
+ * isolation. `applyEvent` short-circuits at the call site.
+ */
+export function bumpOnRpcLine(
+  _run: Run,
+  _now: number,
+  evtType: string,
+): boolean {
+  return evtType === "response";
 }
 
 // ── v0.12 slice 3 — RPC line handlers ────────────────────────────

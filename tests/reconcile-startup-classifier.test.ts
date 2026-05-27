@@ -297,3 +297,83 @@ test("classifyRecord: parentPid undefined (legacy record) → falls through to l
   );
   assert.equal(result, "readopt");
 });
+
+// ── v0.12 slice 5 — RPC orphan reclassify (oracle fix #3) ──────────
+//
+// RPC subprocesses outlive their turn; on conductor crash + restart
+// the child is alive but the stdin pipe is gone (previous parent
+// closed it). Such an orphan is unsteerable. Locked policy (oracle
+// fix #3, design §4.4): reclassify to `killed` with errorMessage
+// `"orphaned: rpc-stream-detached"`. Reuses the existing
+// `reclassify-killed` `ClassifyResult` (no new RunStatus / verdict
+// per PRD :524 D1); the executor inspects `record.streamingMode`
+// to gate the SIGTERM and select the errorMessage prefix.
+//
+// Print-mode `running` orphans keep their pre-v0.12 readopt branch
+// unchanged — they have no steerable channel to detach from.
+
+test(
+  "classifyRecord: rpc orphan (streamingMode='rpc', alive pid) → reclassify-killed (NOT readopt)",
+  () => {
+    const r = record({
+      status: "running",
+      pid: 12345,
+      streamingMode: "rpc",
+      steerable: true,
+    });
+    const result = classifyRecord(r, () => true, 0);
+    assert.equal(
+      result,
+      "reclassify-killed",
+      "a steerable orphan with the parent gone is unsteerable; reclassify-killed (executor will SIGTERM + write `orphaned: rpc-stream-detached`)",
+    );
+  },
+);
+
+test(
+  "classifyRecord: print-mode orphan (alive pid) keeps readopt (no regression)",
+  () => {
+    // Print-mode orphan with alive pid is the v0.9.x readopt class
+    // — we register a partial Run as `running` (no disk mutation).
+    // The new RPC branch must NOT change this behavior for print-mode.
+    const r = record({
+      status: "running",
+      pid: 12345,
+      streamingMode: "print",
+    });
+    const result = classifyRecord(r, () => true, 0);
+    assert.equal(result, "readopt");
+  },
+);
+
+test(
+  "classifyRecord: rpc orphan with dead pid → reclassify-killed (same as print-mode dead)",
+  () => {
+    // When the pid is already gone, we reclassify regardless of mode.
+    // No SIGTERM needed (executor's `kill(record.pid, SIGTERM)` will
+    // ESRCH-fail benignly).
+    const r = record({
+      status: "running",
+      pid: 12345,
+      streamingMode: "rpc",
+      steerable: true,
+    });
+    const result = classifyRecord(r, () => false, 0);
+    assert.equal(result, "reclassify-killed");
+  },
+);
+
+test(
+  "classifyRecord: undefined streamingMode + alive pid → readopt (legacy v0.11 records)",
+  () => {
+    // Records written before v0.12 have no streamingMode field.
+    // They were always print-mode; readopt remains correct.
+    const r = record({
+      status: "running",
+      pid: 12345,
+      streamingMode: undefined,
+    });
+    const result = classifyRecord(r, () => true, 0);
+    assert.equal(result, "readopt");
+  },
+);

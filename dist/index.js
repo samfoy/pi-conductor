@@ -682,6 +682,9 @@ function applyEvent(run, event) {
   if (!event || typeof event !== "object") return NONE;
   const e = event;
   if (typeof e.type !== "string") return NONE;
+  if (run.streamingMode === "rpc" && bumpOnRpcLine(run, Date.now(), e.type)) {
+    run.lastEventAt = Date.now();
+  }
   if (e.type === "response") {
     routeRpcResponse(run, e);
     return UPDATED;
@@ -743,6 +746,9 @@ function applyEvent(run, event) {
     return UPDATED;
   }
   return NONE;
+}
+function bumpOnRpcLine(_run, _now, evtType) {
+  return evtType === "response";
 }
 function routeRpcResponse(run, evt) {
   const id = evt.id;
@@ -1298,8 +1304,17 @@ function classifyRecord(record, isAlive, _now, selfPid = process.pid, isParentAl
   if (record.pid === void 0) {
     return "reclassify-pre-schema";
   }
-  return isAlive(record.pid) ? "readopt" : "reclassify-killed";
+  if (!isAlive(record.pid)) {
+    return "reclassify-killed";
+  }
+  if (record.streamingMode === "rpc") {
+    return "reclassify-killed";
+  }
+  return "readopt";
 }
+var defaultSignaler = (pid, signal) => {
+  process.kill(pid, signal);
+};
 function defaultLivenessProbe(pid) {
   try {
     process.kill(pid, 0);
@@ -1405,7 +1420,16 @@ async function reconcileOrphansAtStartup(deps) {
         }
         case "reclassify-killed":
         case "reclassify-pre-schema": {
-          const errorMessage = verdict === "reclassify-pre-schema" ? "orphaned: pre-pid-schema record (post-startup reconcile)" : "orphaned: process gone (post-startup reconcile)";
+          let errorMessage;
+          let isRpcDetached = false;
+          if (verdict === "reclassify-pre-schema") {
+            errorMessage = "orphaned: pre-pid-schema record (post-startup reconcile)";
+          } else if (record.streamingMode === "rpc" && record.pid !== void 0 && deps.isAlive(record.pid)) {
+            errorMessage = "orphaned: rpc-stream-detached";
+            isRpcDetached = true;
+          } else {
+            errorMessage = "orphaned: process gone (post-startup reconcile)";
+          }
           if (!dryRun) {
             await reclassifyOnDisk({
               recordPath,
@@ -1414,6 +1438,20 @@ async function reconcileOrphansAtStartup(deps) {
               errorMessage,
               now: deps.now
             });
+          }
+          if (isRpcDetached && record.pid !== void 0 && !dryRun) {
+            const sig = deps.signal ?? defaultSignaler;
+            try {
+              sig(record.pid, "SIGTERM");
+            } catch (e) {
+              const code = e?.code;
+              if (code !== "ESRCH" && code !== "EPERM") {
+                result.errors.push({
+                  id: record.id,
+                  message: `SIGTERM rpc-orphan: ${e?.message ?? String(e)}`
+                });
+              }
+            }
           }
           const orphan = buildOrphanRun({
             ...record,
@@ -2366,6 +2404,25 @@ function forceTerminate(run, reason, registry, onComplete, killGroup = defaultKi
     clearTimeout(run.timeoutTimer);
     run.timeoutTimer = void 0;
   }
+  if (run.streamingMode === "rpc") {
+    if (run.pendingAcks) {
+      const err = new Error(`RpcStdinQueue destroyed: force-terminate`);
+      for (const entry of run.pendingAcks.values()) {
+        clearTimeout(entry.timer);
+        try {
+          entry.reject(err);
+        } catch {
+        }
+      }
+      run.pendingAcks.clear();
+    }
+    if (run.rpcStdinQueue) {
+      try {
+        run.rpcStdinQueue.destroy("force-terminate");
+      } catch {
+      }
+    }
+  }
   if (run.proc) {
     try {
       run.proc.kill("SIGTERM");
@@ -2407,10 +2464,10 @@ function forceTerminate(run, reason, registry, onComplete, killGroup = defaultKi
     }
   }
 }
-var defaultSignaler = (pid, signal) => {
+var defaultSignaler2 = (pid, signal) => {
   process.kill(pid, signal);
 };
-function pauseRun(run, registry, signaler = defaultSignaler) {
+function pauseRun(run, registry, signaler = defaultSignaler2) {
   if (run.status !== "running") return false;
   if (!run.proc?.pid) return false;
   try {
@@ -2424,7 +2481,7 @@ function pauseRun(run, registry, signaler = defaultSignaler) {
   void writeRecord(run);
   return true;
 }
-function resumeRun(run, registry, signaler = defaultSignaler) {
+function resumeRun(run, registry, signaler = defaultSignaler2) {
   if (run.status !== "paused") return false;
   if (!run.proc?.pid) return false;
   try {

@@ -164,7 +164,28 @@ export function classifyRecord(
     return "reclassify-pre-schema";
   }
 
-  return isAlive(record.pid) ? "readopt" : "reclassify-killed";
+  if (!isAlive(record.pid)) {
+    return "reclassify-killed";
+  }
+
+  // v0.12 slice 5 — RPC orphan reclassify (oracle fix #3).
+  //
+  // RPC subprocesses outlive their turn; on conductor crash + restart
+  // the child is still alive but the stdin pipe is gone (the previous
+  // parent process closed it on exit). The reborn conductor cannot
+  // re-open that pipe — the orphan is unsteerable. Locked policy
+  // (design §4.4): reclassify to `killed`. The executor reads
+  // `record.streamingMode === "rpc"` to (a) write the
+  // `"orphaned: rpc-stream-detached"` errorMessage prefix and (b)
+  // SIGTERM the stranded child. No new ClassifyResult variant per
+  // plan §5 Q4 + PRD :524 D1.
+  //
+  // Print-mode orphans keep their pre-v0.12 readopt branch unchanged.
+  if (record.streamingMode === "rpc") {
+    return "reclassify-killed";
+  }
+
+  return "readopt";
 }
 
 /**
@@ -189,6 +210,21 @@ export function classifyRecord(
  * recoverable (`/conductor reconcile --force` re-checks); a phantom
  * re-adopt leaves the orphan stuck and confuses `ensemble_send`.
  */
+/**
+ * Default SIGTERM dispatcher used by the executor's RPC-orphan branch
+ * (v0.12 slice 5). Lifted to a named export so tests have a stable
+ * fallback shape if they want to compose with the production behaviour.
+ * Errors propagate to the caller — the executor swallows ESRCH/EPERM
+ * itself per oracle fix #3 (race: child may have died between classify
+ * and signal).
+ */
+export const defaultSignaler = (
+  pid: number,
+  signal: NodeJS.Signals | number,
+): void => {
+  process.kill(pid, signal);
+};
+
 export function defaultLivenessProbe(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -299,6 +335,21 @@ export interface PostStartupReconcileDeps {
    * preview. Defaults to false (real reconcile) when omitted.
    */
   dryRun?: boolean;
+  /**
+   * v0.12 slice 5 — SIGTERM injection seam for orphaned RPC subprocesses.
+   *
+   * The executor's `reclassify-killed` branch calls this when
+   * `record.streamingMode === "rpc"` AND `isAlive(record.pid)` returned
+   * true: the child outlived the conductor, the stdin pipe is gone,
+   * the orphan is unsteerable, so we SIGTERM it as a courtesy. ESRCH /
+   * EPERM are swallowed silently (race: pid may have died between the
+   * liveness probe and the signal call).
+   *
+   * Defaults to `process.kill` when omitted; tests inject a spy so no
+   * real SIGTERMs are dispatched. Print-mode orphans never invoke this
+   * (they keep the v0.9.x behaviour of write-only reclassify).
+   */
+  signal?: (pid: number, signal: NodeJS.Signals | number) => void;
 }
 
 /**
@@ -453,10 +504,30 @@ export async function reconcileOrphansAtStartup(
 
         case "reclassify-killed":
         case "reclassify-pre-schema": {
-          const errorMessage =
-            verdict === "reclassify-pre-schema"
-              ? "orphaned: pre-pid-schema record (post-startup reconcile)"
-              : "orphaned: process gone (post-startup reconcile)";
+          // v0.12 slice 5 — RPC orphan reclassify (oracle fix #3).
+          //
+          // Three errorMessage shapes flow through this branch:
+          //   1. pre-schema record (no pid)            → v0.9.x message
+          //   2. RPC + alive pid (stranded subprocess) → "orphaned: rpc-stream-detached"
+          //   3. else (dead pid, any mode)             → v0.9.x message
+          //
+          // Critic-gate-2 character pin: case 2 is byte-exact.
+          // The PRD :528 history-rendering glyph (`⏘ orphaned:`)
+          // matches all three on the shared `orphaned:` prefix.
+          let errorMessage: string;
+          let isRpcDetached = false;
+          if (verdict === "reclassify-pre-schema") {
+            errorMessage = "orphaned: pre-pid-schema record (post-startup reconcile)";
+          } else if (
+            record.streamingMode === "rpc" &&
+            record.pid !== undefined &&
+            deps.isAlive(record.pid)
+          ) {
+            errorMessage = "orphaned: rpc-stream-detached";
+            isRpcDetached = true;
+          } else {
+            errorMessage = "orphaned: process gone (post-startup reconcile)";
+          }
           if (!dryRun) {
             await reclassifyOnDisk({
               recordPath,
@@ -465,6 +536,23 @@ export async function reconcileOrphansAtStartup(
               errorMessage,
               now: deps.now,
             });
+          }
+          if (isRpcDetached && record.pid !== undefined && !dryRun) {
+            // SIGTERM the stranded child. ESRCH / EPERM benign — the
+            // child may have died between classify and signal.
+            const sig = deps.signal ?? defaultSignaler;
+            try {
+              sig(record.pid, "SIGTERM");
+            } catch (e: unknown) {
+              const code = (e as NodeJS.ErrnoException)?.code;
+              if (code !== "ESRCH" && code !== "EPERM") {
+                // Unknown errno — record but don't abort the scan.
+                result.errors.push({
+                  id: record.id,
+                  message: `SIGTERM rpc-orphan: ${(e as Error)?.message ?? String(e)}`,
+                });
+              }
+            }
           }
           const orphan = buildOrphanRun({
             ...record,
