@@ -32,8 +32,12 @@ import {
   resumeRun,
   runDir,
   runsRoot,
+  sendToRun,
   type RunRegistry,
+  validateSendable,
 } from "./runs.ts";
+import type { StreamingBehavior } from "./types.ts";
+import { resolveTimeoutMs } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
 import { buildDoctorReport, renderReconcileSummary } from "./doctor.ts";
 import { buildHistoryReport } from "./history.ts";
@@ -84,6 +88,7 @@ const SUBCOMMANDS = [
   "gc",
   "reconcile",
   "watchdog",
+  "send",
 ];
 
 export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): void {
@@ -157,6 +162,9 @@ export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): 
           return;
         case "watchdog":
           runWatchdog(opts, ctx, subRest);
+          return;
+        case "send":
+          await runSendCmd(opts, ctx, subRest);
           return;
         default:
           ctx.ui.notify(
@@ -378,6 +386,178 @@ function runFocus(
     }
   }
   opts.openFocusedOverlay(id);
+}
+
+// ── /conductor send <agent-id> [--steer|--follow-up|--resume] <message> ──
+//
+// v0.12 slice 6. Mirrors `ensemble_send`'s `streaming_behavior` arg
+// (design §4.8). Default = "auto". Routes through `sendToRun` exactly
+// like the LLM tool. Parser is pure + exported so the slice-6 unit
+// tests can pin behaviour without spinning up an ExtensionContext.
+
+const SEND_USAGE =
+  "usage: /conductor send <agent-id> [--steer|--follow-up|--resume] <message>";
+
+const SEND_FLAGS: Record<string, StreamingBehavior> = {
+  "--steer": "steer",
+  "--follow-up": "follow_up",
+  "--resume": "resume",
+};
+
+export type ParseSendResult =
+  | { kind: "ok"; agentId: string; message: string; behavior: StreamingBehavior }
+  | { kind: "error"; message: string };
+
+/**
+ * Parse the args supplied to `/conductor send`.
+ *
+ * Token shape: `<agent-id> [--steer|--follow-up|--resume] <message>`.
+ * Default streaming_behavior = "auto". Internal whitespace inside
+ * the message is preserved verbatim (the parser only strips leading
+ * + trailing whitespace from the input as a whole and re-trims after
+ * slicing past the agent-id and optional flag token).
+ *
+ * Pure: deterministic on `arg`. No I/O. Exposed for unit tests.
+ */
+export function parseSendCommand(arg: string): ParseSendResult {
+  const trimmed = arg.replace(/^\s+/, "").replace(/\s+$/, "");
+  if (trimmed.length === 0) {
+    return { kind: "error", message: `missing agent-id. ${SEND_USAGE}` };
+  }
+  const tokens = trimmed.split(/\s+/);
+  const agentId = tokens[0];
+  const rest = tokens.slice(1);
+
+  // Optional flag at position 0 of the rest. If present and a known
+  // flag, set behavior. If the next token is ALSO a known flag,
+  // reject as dual-flag.
+  let behavior: StreamingBehavior = "auto";
+  let flagToken: string | undefined;
+  if (rest.length > 0 && SEND_FLAGS[rest[0]] !== undefined) {
+    flagToken = rest[0];
+    behavior = SEND_FLAGS[flagToken];
+    if (rest.length > 1 && SEND_FLAGS[rest[1]] !== undefined) {
+      return {
+        kind: "error",
+        message: `${flagToken} and ${rest[1]} are mutually exclusive; pick one.`,
+      };
+    }
+  }
+
+  // Reconstruct the message preserving original whitespace. We slice
+  // past the agent-id and (if present) the flag token from the
+  // already-trimmed input. The internal whitespace runs the user typed
+  // (e.g. "hello   world") survive intact — important when the message
+  // is a code snippet or formatted text.
+  let remainder = trimmed.slice(agentId.length).replace(/^\s+/, "");
+  if (flagToken !== undefined) {
+    remainder = remainder.slice(flagToken.length).replace(/^\s+/, "");
+  }
+  remainder = remainder.replace(/\s+$/, "");
+  if (remainder.length === 0) {
+    return { kind: "error", message: `missing message. ${SEND_USAGE}` };
+  }
+  return { kind: "ok", agentId, message: remainder, behavior };
+}
+
+async function runSendCmd(
+  opts: RegisterCommandsOpts,
+  ctx: ExtensionCommandContext,
+  arg: string,
+): Promise<void> {
+  const parsed = parseSendCommand(arg);
+  if (parsed.kind === "error") {
+    ctx.ui.notify(parsed.message, "warning");
+    return;
+  }
+  const { agentId, message, behavior } = parsed;
+
+  const registry = opts.getRegistry();
+  const run = registry.get(agentId);
+  if (!run) {
+    ctx.ui.notify(
+      `agent_id "${agentId}" not found. Run /conductor status to see active sub-agents.`,
+      "warning",
+    );
+    return;
+  }
+
+  // Pre-check via validateSendable mirrors the overlay 's' keybinding
+  // path (executePromptAndSend). We keep the pre-check even though
+  // sendToRun re-validates internally — it lets us surface a clean
+  // "not steerable" / "is queued" message before any side effects.
+  // Note: validateSendable uses streaming_behavior="auto". The
+  // strategy resolver will reject the combination in sendToRun if
+  // (e.g.) the user passed --resume on a running run; that rejection
+  // arrives via the result.kind="rejected" branch below.
+  const check = validateSendable(run);
+  if (!check.ok && behavior === "auto") {
+    ctx.ui.notify(check.reason, "warning");
+    return;
+  }
+
+  const cwd = opts.getCwd();
+  const cfg = loadConfig(cwd);
+  const baseOv = cfg.personaOverrides[run.persona] ?? {};
+  const resolved = await resolvePersonas({
+    cwd,
+    personaOverrides: cfg.personaOverrides,
+  });
+  const persona = resolved.personas.get(run.persona);
+  const timeoutMs = resolveTimeoutMs(persona, baseOv, cfg);
+
+  const result = sendToRun(run, message, {
+    registry,
+    timeoutMs,
+    streamingBehavior: behavior,
+  });
+
+  if (result.kind === "rejected") {
+    ctx.ui.notify(result.reason, "warning");
+    return;
+  }
+
+  // RPC steer / follow_up: the ack resolves when pi acknowledges the
+  // line. Surface delivered/timeout async so the slash command
+  // returns immediately (the user can continue typing). Mirrors the
+  // LLM tool's ack-bearing branch but without the foreground await.
+  if (result.ack !== undefined) {
+    ctx.ui.notify(
+      `${behavior} dispatched to ${agentId} — awaiting ack...`,
+      "info",
+    );
+    result.ack.then(
+      (ack) => {
+        try {
+          ctx.ui.notify(
+            `${agentId} ack delivered (Δ ${ack.deliveredAt - run.lastEventAt}ms)`,
+            "info",
+          );
+        } catch {
+          // ctx may have gone stale; nothing to do.
+        }
+      },
+      (err: unknown) => {
+        try {
+          ctx.ui.notify(
+            `${agentId} ack failed: ${err instanceof Error ? err.message : String(err)}`,
+            "warning",
+          );
+        } catch {
+          // ctx may have gone stale; nothing to do.
+        }
+      },
+    );
+    return;
+  }
+
+  // spawn-resume path: the run is restarted as a fresh subprocess.
+  // Mirror the LLM tool's spawn-resume notify; we don't await `done`
+  // because that blocks the slash command until the sub-agent finishes.
+  ctx.ui.notify(
+    `${agentId} resuming via fresh subprocess (streaming_behavior=${behavior})`,
+    "info",
+  );
 }
 
 function formatRunRow(r: Run): string {

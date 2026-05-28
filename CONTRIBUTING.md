@@ -103,3 +103,34 @@ Some legitimate cases where TDD is awkward:
 - **Time-based logic.** Inject a clock or use a fake timer; never assert on `Date.now()`.
 
 If you can't find a way to test something cleanly within these constraints, write the change anyway, then file an issue ("untested: X — refactor needed for testability") and link it from the commit message.
+
+## v0.12 dogfood (steerable sub-agents)
+
+Before merging changes that touch the v0.12 RPC steering surface
+(`src/rpc-stdin.ts`, `src/rpc-types.ts`, `src/event-handler.ts`'s
+RPC dispatch, `src/runs.ts` initial-prompt injection or
+`forceTerminate` RPC cleanup, `sendToRun`'s `streamingBehavior`
+branches, or the `/conductor send` slash command):
+
+1. **Run the gated live integration tests.** From the repo root:
+   ```
+   CONDUCTOR_LIVE_TESTS=1 npm test
+   ```
+   This exercises real `pi --mode rpc` subprocesses against your
+   AWS-credentialled provider. The 4 cases in
+   `tests/integration-rpc-spawn.test.ts` (initial-prompt injection,
+   mid-turn steer, mid-turn follow_up, mid-turn forceTerminate) and
+   the 1 case in `tests/integration-rpc-extension-ui.test.ts`
+   (`ctx.ui.confirm` auto-cancel) total ~50–60s wall clock.
+2. **Manually steer a real builder.** Spawn a steerable builder
+   from a parent pi session:
+   ```
+   /conductor send <agent-id> --steer <interrupt message>
+   ```
+   or use `ensemble_send` with `streaming_behavior: "steer"` from the
+   LLM tool surface. Watch the steered intent land in the final
+   commit message via the focused-stream overlay (Ctrl+G).
+
+Default `npm test` (without the env var) skips the live tests; the
+fast path stays under the 5s unit-suite budget. The brief for slice
+6 is at `docs/v0.12-steering-plan.md` §"Slice 6".
