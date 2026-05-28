@@ -81,6 +81,23 @@ interface RegisterToolsOpts {
 }
 
 export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
+  // Item 14 (`docs/backlog.md`) — env-var gate. When this pi process
+  // is itself a conductor sub-agent (`CONDUCTOR_SUBAGENT=1`, set by
+  // `buildSubagentEnv` at spawn time), skip-register every
+  // `ensemble_*` LLM tool so the sub-agent cannot fan out via
+  // `ensemble_spawn` / `ensemble_send` / etc. Strict equality on `"1"`
+  // (NOT truthy) so an accidentally-empty env var doesn't silently
+  // disable the conductor's own tools in the parent process.
+  //
+  // Slash commands (`/conductor list | show | doctor | ...`) are
+  // registered separately by `registerCommands` and are NOT gated
+  // here — they're meta-UI surfaces, not LLM-callable.
+  //
+  // Witnessed: `builder-k6dc → builder-55a4` chain, 2026-05-28. The
+  // outer builder fanned out instead of executing its brief; this
+  // gate closes that channel.
+  if (process.env.CONDUCTOR_SUBAGENT === "1") return;
+
   registerListTool(pi, opts);
   registerStatusTool(pi, opts);
   registerSpawnTool(pi, opts);

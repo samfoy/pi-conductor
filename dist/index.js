@@ -4976,6 +4976,7 @@ function installPostDetachCompletionListener(run, registry, pushNotification) {
 // src/tools.ts
 var FOREGROUND_STREAM_INTERVAL_MS = 50;
 function registerTools(pi, opts) {
+  if (process.env.CONDUCTOR_SUBAGENT === "1") return;
   registerListTool(pi, opts);
   registerStatusTool(pi, opts);
   registerSpawnTool(pi, opts);
