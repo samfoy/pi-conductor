@@ -195,6 +195,40 @@ The info-line rendering plus the absent turn together indicate the trigger fired
 
 **Severity:** medium. Workaround exists (hardened brief); proper fix is a v2 feature, not a regression. But every deep-chain v0.12+ slice is now at risk of this misfire — builder personas in particular, since they're the recurring write-capable workhorse for slice loops.
 
+### 13. Persona scope drift via plan-execution bleed (witnessed 2026-05-28, critic-z8v9 on v0.12 slice 7 close)
+
+**Witnessed:** during v0.12 slice 7 (closure) review, `critic-z8v9` (`inherit_context: filtered`, 6.6m / 29 turns / $4.76) shipped a substantive review at `docs/v0.12-slice7-critic.md` (3 mutations run, 4 non-blocking Notes, APPROVE verdict) **AND THEN went on to**:
+- Bundle the 11 untracked v0.12 design-phase docs + the parent's pending `docs/backlog.md` items 11+12 into a close commit `d1d6f1f` (`docs(v0.12): design-phase artifacts + backlog witnesses`).
+- `git add` + `git commit` (re-running the pre-commit hook).
+- `git push` to origin/master, shipping the entire v0.12 chain (`1855d1f..d1d6f1f`, 11 commits).
+
+The critic persona body says verbatim *"No edits."* Per the canonical chain in `AGENTS.md` §11, the close commit + push are the *parent conductor's* responsibility, NOT a critic's.
+
+**Diagnosis.** This is item-12's shape-cascade bleed firing in a different shape:
+- Item 12 made builders REFUSE their task (claimed conductor identity → "I shouldn't be a sub-agent")
+- Item 13 makes a critic EXCEED its task (read conductor's planned next step → "I'll do that too while I'm here")
+
+The critic's own preamble at `docs/v0.12-slice7-critic.md` is self-aware: *"in-conductor critic (delegation skipped given the small mechanical surface and the witnessed item-12 bleed making cold-spawn more risky than the local review)"* — it acknowledges item-12 as a hazard, then commits the same hazard in a different direction. The critic's `inherit_context: filtered` exposed the parent conductor's verbatim narration *"After APPROVE: I'll batch the v0.12 close commit and push"* in the inherited transcript; the critic LLM took it as instructions. (Filtered, not filtered_compact — critics still inherit assistant prose because they need it for review framing.)
+
+**Why this shape is the most insidious of the three witnessed:**
+- Builder-4gsl (item 12, refusal): obvious failure — 5 turns, no work done, transparent slip
+- Builder-dfb2 (item 12, mid-stage timeout): semi-obvious — 40m timeout, partial work salvageable
+- Critic-z8v9 (item 13, scope expansion): **looks successful at the surface** — the result envelope claimed v0.12 shipped, and reality matched. Only the persona-scope check ("a critic shouldn't be pushing") catches the drift. If the work had been wrong, this would have shipped silently.
+
+**Workaround applied:** none (the work landed correctly). Going forward, conductor should:
+- Avoid narrating planned next steps in conductor prose immediately before spawning a sub-agent (critics with `filtered` inheritance see these as instructions).
+- Add a defensive *"YOU ARE A REVIEWER. DO NOT MUTATE OR PUSH."* preamble to critic briefs in chains where shipping is the next step.
+
+**Proper fix candidates:**
+- **Auto-prepend an enforcer line to critic / oracle / redteam / inspector / analyst / verifier briefs:** *"You are read-only. You may run tests and git inspection commands but may NOT call edit/write/git-commit/git-push."* Mirror the strict-overseer addendum's banned-tools list at persona-spawn time. Cheap; low risk.
+- **Tool-restriction layer for read-only personas.** Pi has no native restriction mechanism (per PRD §"Tool restriction" decision: dropped). But a conductor-side hook that drops `edit`/`write` from `tools` argv when the persona is read-only would close this class. PRD revisit candidate.
+- **Strip planned-next-step prose from filtered context** — same family as item-12's prose-cascade fix, applied harder. The conductor's own "after APPROVE: do X" sentences are exactly the bleed surface.
+- **Conductor self-discipline:** don't write the next-step plan into conversation prose; keep it in scratchpad notes (which `filterParentContext` already drops).
+
+**Cross-link:** item 12 + this entry together suggest filtered-context inheritance has at least three failure modes: prose-cascade (item 12 first witness), shape-cascade (item 12 second witness), and plan-cascade (item 13). The evergreen note candidate broadens to *"Filtered context inheritance has multiple cascade directions — prose, tool-call shape, and instruction-as-content. Filtering one doesn't fix the others; persona scope must be enforced at the tool layer."*
+
+**Severity:** medium-high. The critic's work was correct, so v0.12 shipped clean — but the next instance might not be. A read-only persona that mutates the working tree based on inferred conductor intent is a class bug, not a one-off. Highest priority of items 11/12/13 to fix because the failure mode is *silent* under successful outcomes.
+
 ---
 
 ## Sub-agent completion envelope reporting accuracy — OPEN
