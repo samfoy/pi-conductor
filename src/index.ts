@@ -26,6 +26,10 @@ import { RunRegistry } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
 import { mountEnsembleWidget, type EnsembleWidget } from "./widget.ts";
 import { buildCompletionSendMessageOptions, formatCompletionNotification } from "./notifications.ts";
+import {
+  CompletionWakeTracker,
+  DEFAULT_TICK_INTERVAL_MS,
+} from "./completion-wake-tracker.ts";
 import { buildConductorSystemPrompt } from "./conductor-prompt.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
@@ -81,6 +85,16 @@ export default function (pi: ExtensionAPI): void {
   // here as a session-scoped instance; restarted on session_start,
   // disposed on session_shutdown. See src/watchdog.ts (Slice 2).
   let watchdogDispose: (() => void) | null = null;
+
+  // Item 11 dead-man-switch: belt-and-braces for the
+  // completion-wake-not-firing failure mode (witness: builder-rjpb
+  // 2026-05-27, 25-min idle). Tracks pushed completions; cleared on
+  // turn_start; on a 15s tick re-fires wakes >30s old up to 2 times,
+  // then surfaces an "abandoned wake" warning. Dispose'd on session_shutdown.
+  // See `src/completion-wake-tracker.ts` and
+  // `docs/items-11-12-inspector-map.md` §6 rec 3.
+  const completionWakeTracker = new CompletionWakeTracker();
+  let completionWakeTimer: NodeJS.Timeout | null = null;
 
   // v0.8.2 (B-4) — toolUse.name sanitizer hook. Owns its own
   // session-scoped warned-set; we hold the handle to call reset() in
@@ -316,6 +330,10 @@ export default function (pi: ExtensionAPI): void {
         },
         buildCompletionSendMessageOptions(run),
       );
+      // Item 11 dead-man-switch: track this wake. clearOnTurnStart()
+      // drops it when the conductor's next turn fires (the wake
+      // worked). The 15s tick re-fires if no turn fires within 30s.
+      completionWakeTracker.track(run.id, Date.now());
     },
   };
 
@@ -486,6 +504,48 @@ export default function (pi: ExtensionAPI): void {
       });
       watchdogDispose = wd.start();
     }
+
+    // Item 11 dead-man-switch: start the wake-recheck tick. Mirrors
+    // the watchdog lifecycle (started in session_start, disposed in
+    // session_shutdown). The interval is independent of the watchdog's
+    // 30s tick because the failure modes are independent: watchdog
+    // detects silent sub-agents; this detects silent CONDUCTOR not
+    // waking after the sub-agent finished.
+    completionWakeTimer = setInterval(() => {
+      const result = completionWakeTracker.tick(Date.now());
+      for (const runId of result.refire) {
+        const run = registry.get(runId);
+        if (!run) {
+          // Run was killed / removed from registry. Drop the entry
+          // silently; nothing useful to re-fire.
+          completionWakeTracker.drop(runId);
+          continue;
+        }
+        // Re-fire the same wake notification with the same options.
+        // PRD line 257 contract is binary — fire a turn or don't —
+        // so a second attempt is appropriate even if the first was a
+        // host-side downgrade rather than a missed event.
+        pi.sendMessage(
+          {
+            customType: "ensemble-notification",
+            content: formatCompletionNotification(run),
+            display: true,
+          },
+          buildCompletionSendMessageOptions(run),
+        );
+      }
+      for (const runId of result.expired) {
+        // Cap hit — surface a warning so a human notices. The conductor
+        // is unresponsive after multiple wake attempts; manual recovery
+        // (an explicit user message or `/conductor status`) is required.
+        ctxRef?.ui.notify(
+          `sub-agent ${runId} completed but the conductor did not wake after ` +
+            `multiple attempts. Run /conductor status to inspect; the wake ` +
+            `notification is documented at docs/backlog.md item 11.`,
+          "warning",
+        );
+      }
+    }, DEFAULT_TICK_INTERVAL_MS);
   });
 
   pi.on("session_shutdown", async (event) => {
@@ -503,6 +563,13 @@ export default function (pi: ExtensionAPI): void {
       watchdogDispose();
       watchdogDispose = null;
     }
+    // Item 11 dead-man-switch: dispose the wake-recheck timer + clear
+    // any pending entries so the next session_start starts clean.
+    if (completionWakeTimer) {
+      clearInterval(completionWakeTimer);
+      completionWakeTimer = null;
+    }
+    completionWakeTracker.clearOnTurnStart();
     // Reason-aware tear-down. On `/reload` (reason === "reload") the
     // host re-imports dist/index.js while preserving chat + scratchpad +
     // brief; killing in-flight children would defeat the whole point of
@@ -531,6 +598,10 @@ export default function (pi: ExtensionAPI): void {
     cwd = ctx.cwd;
     ctxRef = ctx;
     if (!widget) widget = mountEnsembleWidget(registry, () => ctxRef);
+    // Item 11 dead-man-switch: a turn fired — the wake notification
+    // chain is proven to be working. Drop every pending entry; we don't
+    // need to re-fire any of them.
+    completionWakeTracker.clearOnTurnStart();
   });
 
   // Inject the conductor system prompt at every turn start when on.

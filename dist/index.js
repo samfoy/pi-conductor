@@ -6323,6 +6323,71 @@ function buildCompletionSendMessageOptions(run) {
   return { triggerTurn: true, deliverAs: "followUp" };
 }
 
+// src/completion-wake-tracker.ts
+var DEFAULT_STALE_THRESHOLD_MS = 3e4;
+var DEFAULT_MAX_REFIRES_PER_RUN = 2;
+var DEFAULT_TICK_INTERVAL_MS2 = 15e3;
+var CompletionWakeTracker = class {
+  pending = /* @__PURE__ */ new Map();
+  staleThresholdMs;
+  maxRefiresPerRun;
+  constructor(options = {}) {
+    this.staleThresholdMs = options.staleThresholdMs ?? DEFAULT_STALE_THRESHOLD_MS;
+    this.maxRefiresPerRun = options.maxRefiresPerRun ?? DEFAULT_MAX_REFIRES_PER_RUN;
+  }
+  /** Record that a wake notification has been sent for `runId` at `now`. */
+  track(runId, now) {
+    this.pending.set(runId, { sentAt: now, refireCount: 0 });
+  }
+  /** A turn fired — clear every pending entry. The notification chain is
+   *  proven to be working for the host. */
+  clearOnTurnStart() {
+    this.pending.clear();
+  }
+  /** True iff there is at least one pending wake. */
+  hasPending() {
+    return this.pending.size > 0;
+  }
+  /** Test-only: read pending state without mutating. */
+  inspectPending() {
+    return this.pending;
+  }
+  /**
+   * Drive one tick. Identifies entries that are stale (> threshold old)
+   * and either schedules them for re-fire (if under the cap) or marks
+   * them expired (if at the cap). The caller is responsible for actually
+   * sending the re-fire `pi.sendMessage` call AND for surfacing the
+   * expired warning to the user.
+   *
+   * Side effect: pending entries returned in `refire` get their
+   * `sentAt` reset to `now` and `refireCount` incremented. Entries
+   * returned in `expired` are removed from the map (the wake is
+   * abandoned).
+   */
+  tick(now) {
+    const refire = [];
+    const expired = [];
+    for (const [runId, entry] of this.pending) {
+      const age = now - entry.sentAt;
+      if (age <= this.staleThresholdMs) continue;
+      if (entry.refireCount >= this.maxRefiresPerRun) {
+        expired.push(runId);
+        this.pending.delete(runId);
+        continue;
+      }
+      entry.sentAt = now;
+      entry.refireCount += 1;
+      refire.push(runId);
+    }
+    return { refire, expired };
+  }
+  /** Drop a specific run (used when the host learns the run was killed
+   *  or the registry no longer knows about it). */
+  drop(runId) {
+    this.pending.delete(runId);
+  }
+};
+
 // src/conductor-prompt.ts
 function buildConductorSystemPrompt(opts) {
   const personaDescriptions = opts.personas.map((p) => `- \`${p.name}\` \u2014 ${p.description}`).join("\n");
@@ -7689,6 +7754,8 @@ function index_default(pi) {
   let unsubFocusedShortcut = null;
   let lastReconcile;
   let watchdogDispose = null;
+  const completionWakeTracker = new CompletionWakeTracker();
+  let completionWakeTimer = null;
   const sanitizerHook = installSanitizerHook(pi, {
     getCtx: () => ctxRef
   });
@@ -7861,6 +7928,7 @@ function index_default(pi) {
         },
         buildCompletionSendMessageOptions(run)
       );
+      completionWakeTracker.track(run.id, Date.now());
     }
   };
   pi.on("session_start", async (_event, ctx) => {
@@ -7991,6 +8059,30 @@ function index_default(pi) {
       });
       watchdogDispose = wd.start();
     }
+    completionWakeTimer = setInterval(() => {
+      const result = completionWakeTracker.tick(Date.now());
+      for (const runId of result.refire) {
+        const run = registry.get(runId);
+        if (!run) {
+          completionWakeTracker.drop(runId);
+          continue;
+        }
+        pi.sendMessage(
+          {
+            customType: "ensemble-notification",
+            content: formatCompletionNotification(run),
+            display: true
+          },
+          buildCompletionSendMessageOptions(run)
+        );
+      }
+      for (const runId of result.expired) {
+        ctxRef?.ui.notify(
+          `sub-agent ${runId} completed but the conductor did not wake after multiple attempts. Run /conductor status to inspect; the wake notification is documented at docs/backlog.md item 11.`,
+          "warning"
+        );
+      }
+    }, DEFAULT_TICK_INTERVAL_MS2);
   });
   pi.on("session_shutdown", async (event) => {
     if (unsubFocusedShortcut) {
@@ -8005,6 +8097,11 @@ function index_default(pi) {
       watchdogDispose();
       watchdogDispose = null;
     }
+    if (completionWakeTimer) {
+      clearInterval(completionWakeTimer);
+      completionWakeTimer = null;
+    }
+    completionWakeTracker.clearOnTurnStart();
     handleSessionShutdown(event, {
       runs: registry.list(),
       resetSanitizer: () => sanitizerHook.reset(),
@@ -8024,6 +8121,7 @@ function index_default(pi) {
     cwd = ctx.cwd;
     ctxRef = ctx;
     if (!widget) widget = mountEnsembleWidget(registry, () => ctxRef);
+    completionWakeTracker.clearOnTurnStart();
   });
   pi.on("before_agent_start", async (event) => {
     if (!conductorModeOn) return void 0;
