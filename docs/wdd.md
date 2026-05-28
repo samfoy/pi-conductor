@@ -160,3 +160,33 @@ Build tooling only when one of these forcing functions actually fires:
   need automated verification.
 
 None have happened. Don't pre-build.
+
+## Mutation discipline
+
+WDD witnesses should ideally name mutations that compile cleanly under
+strict TypeScript so they exercise the runtime check rather than
+relying on `tsx`'s loose-transpile fall-through. When a witness's
+mutation is type-rejected by `tsc --noEmit`, the witness is still
+meaningful (it does kill the test) but should be paired with a sibling
+mutation that compiles — or the design should explicitly note that the
+witness is a TypeScript-level catch.
+
+Witnessed in v0.9.x slice-1 critic gate: the named mutation
+`record.pid === undefined` → `record.pid === null` was rejected at
+type-check time. The runtime assertion still fired (because `tsx`
+runs under loose transpile), so the witness was valid — but a more
+subtle mutation that compiles cleanly under strict TS could evade the
+same check. See `docs/backlog.md` item 10.
+
+## Revert hygiene
+
+WDD scripts that mutate files in-place must use **snapshot-based
+revert** (`cp src/foo.ts /tmp/snap/foo.ts.orig` before mutation;
+`cp /tmp/snap/foo.ts.orig src/foo.ts` to restore), not `git checkout`.
+`git checkout` is a no-op on untracked files, so a mutation against a
+file the slice just created persists silently and the next mutation
+stacks on top.
+
+Full discussion + witnessed bug: `personas/builder.md` "WDD revert"
+subsection under `## Test discipline`. Witness reference:
+`docs/backlog.md` item 8.

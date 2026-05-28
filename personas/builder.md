@@ -55,6 +55,32 @@ Rules:
 - Don't pipe long-running test commands through `| tail -N` or `| head -N` — those buffer until the upstream pipe closes, hiding all intermediate progress. Use `--test-reporter=spec` if you want streaming output.
 - See `CONTRIBUTING.md` “Running the test suite” for the unit-suite wall-time target (under 5s).
 
+### Real-subprocess liveness signals
+
+For any test that forks a real subprocess and asserts on liveness or exit state: prefer `child.signalCode` plus an `exit`-listener flag over `child.killed` / `child.exitCode`.
+
+- `child.killed` is set only when `subprocess.kill()` is called on the local Node handle — it stays `false` even if the child died from an external `SIGKILL` or its own exit.
+- `child.exitCode` stays `null` after a signal-based termination; only graceful exits populate it.
+- `child.signalCode` is set when the child died from a signal; combine it with an `exit` listener that flips a local flag for the comprehensive case.
+
+Witness reference: `docs/backlog.md` item 9 (`builder-7e93` slice-1 finding, v0.9.x). Same hazard family as the `--test-timeout=0` rule above — both are about real-subprocess test discipline.
+
+### WDD revert: prefer snapshot copy over `git checkout` for untracked / staged files
+
+`git checkout <path>` is a **no-op on untracked files**. If a WDD verification script mutates a file the slice just created (so it isn't yet tracked) and tries to revert via `git checkout`, the mutation persists. The next mutation stacks on top of the previous one and the witness becomes meaningless.
+
+Witnessed in v0.9.x slice-1 (`docs/backlog.md` item 8): the builder mutated the new `src/reconcile-startup.ts`, `git checkout`-ed it, then mutated again. The first mutation never reverted; the second stacked on top. Recovery required re-writing the file from scratch.
+
+Use snapshot-based revert by default for all WDD scripts:
+
+```bash
+cp src/foo.ts /tmp/snap/foo.ts.orig   # before mutation
+# ... mutate src/foo.ts ...
+cp /tmp/snap/foo.ts.orig src/foo.ts   # restore
+```
+
+The snapshot pattern works on tracked + untracked files alike, so it's a strict superset of `git checkout`. Make it the default.
+
 ## Git history hygiene
 
 **Before any history-modifying op (`git commit --amend`, `git rebase`, `git reset`, `git cherry-pick`, force-push), capture the parent SHA you expect and verify it before proceeding:**
