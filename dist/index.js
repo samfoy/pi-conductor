@@ -4130,11 +4130,12 @@ async function runSendCmd(opts, ctx, arg) {
     "info"
   );
 }
-function formatRunRow(r) {
+function formatRunRow(r, livenessProbe = defaultLivenessProbe) {
   const u = formatUsage(r.usage);
   const usagePart = u ? `[${u}]` : "";
   const hint = r.lastToolCall ? ` \u2192 ${r.lastToolCall}` : "";
-  return `  ${STATUS_GLYPH[r.status] ?? "\xB7"} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint}`;
+  const liveness = r.status === "running" && r.pid !== void 0 && !livenessProbe(r.pid) ? " \xB7 pid-gone" : "";
+  return `  ${STATUS_GLYPH[r.status] ?? "\xB7"} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint}${liveness}`;
 }
 function runHistory(_opts, ctx, arg) {
   const root = runsRoot();

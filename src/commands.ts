@@ -560,12 +560,34 @@ async function runSendCmd(
   );
 }
 
-function formatRunRow(r: Run): string {
+function formatRunRow(
+  r: Run,
+  livenessProbe: (pid: number) => boolean = defaultLivenessProbe,
+): string {
   const u = formatUsage(r.usage);
   const usagePart = u ? `[${u}]` : "";
   const hint = r.lastToolCall ? ` → ${r.lastToolCall}` : "";
-  return `  ${STATUS_GLYPH[r.status] ?? "·"} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint}`;
+  // Item 4: liveness probe for running runs with a known pid. Witness:
+  // `builder-ew9e` (docs/backlog.md item 4) — pgrep returned no match
+  // and the orchestrator wrongly concluded the subprocess was dead;
+  // a probe-based suffix surfaces the actual liveness signal next to
+  // the silence advisory the watchdog already emits. Probe only fires
+  // for `running` runs with `pid` set: terminal/queued/paused runs
+  // legitimately may have a dead pid, and legacy runs predating the
+  // pid schema bump (v0.9.x) have no pid to probe.
+  const liveness =
+    r.status === "running" && r.pid !== undefined && !livenessProbe(r.pid)
+      ? " · pid-gone"
+      : "";
+  return `  ${STATUS_GLYPH[r.status] ?? "·"} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint}${liveness}`;
 }
+
+/**
+ * Test seam: `formatRunRow` exposed for unit tests so they can pin
+ * the liveness-probe suffix without going through the slash-command
+ * dispatcher. Production callers go through {@link runStatus}.
+ */
+export const formatRunRowForTest = formatRunRow;
 
 export function statusGlyph(s: string): string {
   return STATUS_GLYPH[s as RunStatus] ?? "·";
