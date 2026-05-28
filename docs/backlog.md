@@ -24,7 +24,7 @@ Until this lands, the reaper is off in pi-dashboard. Memory cost: idle slots hol
 
 **Cross-repo half remains OPEN:** the proper fix described in the next sub-section (heartbeat from conductor into pi-dashboard so background sub-agents count as parent activity, allowing the idle-reaper to be re-enabled) is a pi-dashboard change, not a pi-conductor change. Tracked here for cross-repo coordination but not closeable from this repo.
 
-### 3. Watchdog hostility to long quiet bash tool calls (`builder-ccl8`, fourth slice-2 witness)
+### 3. Watchdog hostility to long quiet bash tool calls (`builder-ccl8`, fourth slice-2 witness) — CLOSED 2026-05-28 (`8364252`)
 
 **Witnessed:** `builder-ccl8` was killed by its own watchdog at 622s silent. Cause: a single bash call ran `bash /tmp/wdd-verify-slice2.sh 2>&1 | tail -90` — a multi-witness WDD verification script piped through `tail -90`. `tail -N` buffers until the upstream pipe closes, so 8 sequential `npx tsx --test` invocations (~30–60s each cold-start) emitted no output to the parent for ~10 minutes. The `kill_on_stall: true` setting on the spawn caused the watchdog to escalate the hard threshold to `forceTerminate`. Working as designed; bad outcome.
 
