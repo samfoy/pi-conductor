@@ -468,26 +468,18 @@ import { mkdir, writeFile as writeFile2, appendFile } from "node:fs/promises";
 import { homedir as homedir3 } from "node:os";
 
 // src/rpc-stdin.ts
-function findRawLineSeparator(value, depth = 0) {
-  if (depth > 16) return null;
-  if (typeof value === "string") {
-    if (value.includes("\n")) return "\n";
-    if (value.includes("\r")) return "\r";
-    return null;
-  }
-  if (value === null || typeof value !== "object") return null;
+function findRawCr(value, depth = 0) {
+  if (depth > 16) return false;
+  if (typeof value === "string") return value.includes("\r");
+  if (value === null || typeof value !== "object") return false;
   if (Array.isArray(value)) {
-    for (const item of value) {
-      const r = findRawLineSeparator(item, depth + 1);
-      if (r) return r;
-    }
-    return null;
+    for (const item of value) if (findRawCr(item, depth + 1)) return true;
+    return false;
   }
   for (const key of Object.keys(value)) {
-    const r = findRawLineSeparator(value[key], depth + 1);
-    if (r) return r;
+    if (findRawCr(value[key], depth + 1)) return true;
   }
-  return null;
+  return false;
 }
 var RpcStdinQueue = class {
   stream;
@@ -514,16 +506,7 @@ var RpcStdinQueue = class {
         reject(new Error("RpcStdinQueue is destroyed; cannot enqueue"));
         return;
       }
-      const violation = findRawLineSeparator(cmd);
-      if (violation === "\n") {
-        reject(
-          new Error(
-            "embedded newline in command payload string field; LF-only framing forbids raw \\n"
-          )
-        );
-        return;
-      }
-      if (violation === "\r") {
+      if (findRawCr(cmd)) {
         reject(
           new Error(
             "embedded carriage return in command payload string field; LF-only framing forbids raw CR"
@@ -3726,7 +3709,8 @@ var SUBCOMMANDS = [
   "unpin",
   "gc",
   "reconcile",
-  "watchdog"
+  "watchdog",
+  "send"
 ];
 function registerCommands(pi, opts) {
   pi.registerCommand("conductor", {
@@ -3798,6 +3782,9 @@ function registerCommands(pi, opts) {
           return;
         case "watchdog":
           runWatchdog(opts, ctx, subRest);
+          return;
+        case "send":
+          await runSendCmd(opts, ctx, subRest);
           return;
         default:
           ctx.ui.notify(
@@ -3979,6 +3966,113 @@ function runFocus(opts, ctx, arg) {
     }
   }
   opts.openFocusedOverlay(id);
+}
+var SEND_USAGE = "usage: /conductor send <agent-id> [--steer|--follow-up|--resume] <message>";
+var SEND_FLAGS = {
+  "--steer": "steer",
+  "--follow-up": "follow_up",
+  "--resume": "resume"
+};
+function parseSendCommand(arg) {
+  const trimmed = arg.replace(/^\s+/, "").replace(/\s+$/, "");
+  if (trimmed.length === 0) {
+    return { kind: "error", message: `missing agent-id. ${SEND_USAGE}` };
+  }
+  const tokens = trimmed.split(/\s+/);
+  const agentId = tokens[0];
+  const rest = tokens.slice(1);
+  let behavior = "auto";
+  let flagToken;
+  if (rest.length > 0 && SEND_FLAGS[rest[0]] !== void 0) {
+    flagToken = rest[0];
+    behavior = SEND_FLAGS[flagToken];
+    if (rest.length > 1 && SEND_FLAGS[rest[1]] !== void 0) {
+      return {
+        kind: "error",
+        message: `${flagToken} and ${rest[1]} are mutually exclusive; pick one.`
+      };
+    }
+  }
+  let remainder = trimmed.slice(agentId.length).replace(/^\s+/, "");
+  if (flagToken !== void 0) {
+    remainder = remainder.slice(flagToken.length).replace(/^\s+/, "");
+  }
+  remainder = remainder.replace(/\s+$/, "");
+  if (remainder.length === 0) {
+    return { kind: "error", message: `missing message. ${SEND_USAGE}` };
+  }
+  return { kind: "ok", agentId, message: remainder, behavior };
+}
+async function runSendCmd(opts, ctx, arg) {
+  const parsed = parseSendCommand(arg);
+  if (parsed.kind === "error") {
+    ctx.ui.notify(parsed.message, "warning");
+    return;
+  }
+  const { agentId, message, behavior } = parsed;
+  const registry = opts.getRegistry();
+  const run = registry.get(agentId);
+  if (!run) {
+    ctx.ui.notify(
+      `agent_id "${agentId}" not found. Run /conductor status to see active sub-agents.`,
+      "warning"
+    );
+    return;
+  }
+  const check = validateSendable(run);
+  if (!check.ok && behavior === "auto") {
+    ctx.ui.notify(check.reason, "warning");
+    return;
+  }
+  const cwd = opts.getCwd();
+  const cfg = loadConfig(cwd);
+  const baseOv = cfg.personaOverrides[run.persona] ?? {};
+  const resolved = await resolvePersonas({
+    cwd,
+    personaOverrides: cfg.personaOverrides
+  });
+  const persona = resolved.personas.get(run.persona);
+  const timeoutMs = resolveTimeoutMs(persona, baseOv, cfg);
+  const result = sendToRun(run, message, {
+    registry,
+    timeoutMs,
+    streamingBehavior: behavior
+  });
+  if (result.kind === "rejected") {
+    ctx.ui.notify(result.reason, "warning");
+    return;
+  }
+  if (result.ack !== void 0) {
+    ctx.ui.notify(
+      `${behavior} dispatched to ${agentId} \u2014 awaiting ack...`,
+      "info"
+    );
+    result.ack.then(
+      (ack) => {
+        try {
+          ctx.ui.notify(
+            `${agentId} ack delivered (\u0394 ${ack.deliveredAt - run.lastEventAt}ms)`,
+            "info"
+          );
+        } catch {
+        }
+      },
+      (err) => {
+        try {
+          ctx.ui.notify(
+            `${agentId} ack failed: ${err instanceof Error ? err.message : String(err)}`,
+            "warning"
+          );
+        } catch {
+        }
+      }
+    );
+    return;
+  }
+  ctx.ui.notify(
+    `${agentId} resuming via fresh subprocess (streaming_behavior=${behavior})`,
+    "info"
+  );
 }
 function formatRunRow(r) {
   const u = formatUsage(r.usage);

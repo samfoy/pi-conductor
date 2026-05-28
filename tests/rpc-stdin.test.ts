@@ -232,65 +232,83 @@ test("RpcStdinQueue: destroy(reason) rejects all pending writes with the supplie
   }
 });
 
-test("RpcStdinQueue: enqueue rejects payloads containing embedded newlines after JSON.stringify", async () => {
-  const w = makeFakeWritable();
-  const q = new RpcStdinQueue(asWritable(w));
+test(
+  "RpcStdinQueue: multi-line strings in payload values are escaped by JSON.stringify and accepted (slice 6 fix)",
+  async () => {
+    // Slice 2 originally rejected raw `\n` in any string field. That
+    // broke slice 3's initial-prompt injection because
+    // `buildSubAgentPrompt` always produces multi-line text. The
+    // slice 6 live integration tests caught the bug. Removed
+    // 2026-05-28 as part of slice 6 closure. CR rejection survives
+    // as a defense against accidental CRLF tooling.
+    const w = makeFakeWritable();
+    const q = new RpcStdinQueue(asWritable(w));
 
-  // Defensive policy (design §4.2): the conductor never has a
-  // reason to send a command whose string fields contain raw LF /
-  // CR. JSON.stringify *would* escape them on the wire so pi's
-  // parser would survive, but a raw \n in a payload value is
-  // always evidence of a caller bug. We reject at enqueue time and
-  // never write the chunk.
-  let err: Error | undefined;
-  try {
-    await q.enqueue({ id: "A", type: "prompt", message: "hello\nworld" });
-    assert.fail("expected rejection on embedded newline");
-  } catch (e) {
-    err = e as Error;
-  }
-  assert.ok(err);
-  assert.match(err!.message, /embedded newline|raw \\n|newline/i);
-  // The illegal payload was NOT written to the wire.
-  assert.equal(w.chunks.length, 0, "rejected payload must not reach the stream");
-
-  // CR handling — \r is also forbidden (LF-only framing).
-  let errCR: Error | undefined;
-  try {
-    await q.enqueue({ id: "B", type: "prompt", message: "hello\rworld" });
-    assert.fail("expected rejection on embedded CR");
-  } catch (e) {
-    errCR = e as Error;
-  }
-  assert.ok(errCR);
-  assert.match(errCR!.message, /carriage return|raw CR|CR/i);
-  assert.equal(w.chunks.length, 0);
-
-  // Nested objects / arrays trigger the recursive scan too.
-  let errNested: Error | undefined;
-  try {
+    // Multi-line message must enqueue cleanly.
     await q.enqueue({
-      id: "C",
+      id: "A",
       type: "prompt",
-      message: "ok",
-      images: [{ content: "data\nbreak" } as unknown as never],
+      message: "hello\nworld\nReply with HELLO_MULTI and stop.",
     });
-    assert.fail("expected rejection on nested embedded newline");
-  } catch (e) {
-    errNested = e as Error;
-  }
-  assert.ok(errNested);
-  assert.match(errNested!.message, /newline/i);
-  assert.equal(w.chunks.length, 0);
+    assert.equal(w.chunks.length, 1, "multi-line message must reach the stream");
 
-  // After all the rejections, a clean payload still goes through:
-  // the queue is not poisoned by prior validation failures.
-  await q.enqueue({ id: "D", type: "prompt", message: "clean" });
-  assert.equal(w.chunks.length, 1);
-  assert.match(w.chunks[0], /"id":"D"/);
+    // The wire bytes must be safe: no raw `\n` inside the JSON
+    // object portion (only the framing trailing LF). JSON.stringify
+    // escapes string `\n` to `\\n` (two chars: backslash + n).
+    const wire = w.chunks[0];
+    assert.equal(wire.endsWith("\n"), true, "framing trailing LF");
+    const objPortion = wire.slice(0, -1);
+    // Round-trip parse: pi's reader does the same.
+    const parsed = JSON.parse(objPortion);
+    assert.equal(parsed.id, "A");
+    assert.equal(parsed.type, "prompt");
+    assert.equal(
+      parsed.message,
+      "hello\nworld\nReply with HELLO_MULTI and stop.",
+      "message must round-trip through JSON.stringify with newlines preserved as JSON escapes",
+    );
+    // The object portion itself contains no raw LF (every newline
+    // inside the message is JSON-escaped to backslash-n).
+    assert.equal(objPortion.includes("\n"), false, "object portion is single-line wire-safe");
 
-  q.destroy("end of test");
-});
+    // CR rejection still fires as a tripwire.
+    let errCR: Error | undefined;
+    try {
+      await q.enqueue({ id: "B", type: "prompt", message: "hello\rworld" });
+      assert.fail("expected rejection on embedded CR");
+    } catch (e) {
+      errCR = e as Error;
+    }
+    assert.ok(errCR);
+    assert.match(errCR!.message, /carriage return|raw CR|CR/i);
+    assert.equal(w.chunks.length, 1, "rejected CR payload must not reach the stream");
+
+    // Nested CR in array values still trips the recursive scan.
+    let errNested: Error | undefined;
+    try {
+      await q.enqueue({
+        id: "C",
+        type: "prompt",
+        message: "ok",
+        images: [{ content: "data\rbreak" } as unknown as never],
+      });
+      assert.fail("expected rejection on nested embedded CR");
+    } catch (e) {
+      errNested = e as Error;
+    }
+    assert.ok(errNested);
+    assert.match(errNested!.message, /CR|carriage/i);
+    assert.equal(w.chunks.length, 1, "nested CR rejected");
+
+    // After all the rejections, a clean payload still goes through:
+    // the queue is not poisoned by prior validation failures.
+    await q.enqueue({ id: "D", type: "prompt", message: "clean" });
+    assert.equal(w.chunks.length, 2);
+    assert.match(w.chunks[1], /"id":"D"/);
+
+    q.destroy("end of test");
+  },
+);
 
 test("RpcStdinQueue: framing is LF-only (no CR; matches pi serializeJsonLine)", async () => {
   const w = makeFakeWritable();

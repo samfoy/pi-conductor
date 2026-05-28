@@ -26,30 +26,39 @@ import type { Writable } from "node:stream";
 
 /**
  * Recursively scan a value for any string field containing a raw
- * LF or CR. Returns the offending separator ("\n" or "\r") on
- * first hit, or null. Bounded by `MAX_DEPTH` to defeat cycle bombs;
- * cycles otherwise are caught by JSON.stringify later.
+ * CR. Returns `"\r"` on first hit, or null. Bounded by `MAX_DEPTH`
+ * to defeat cycle bombs; cycles otherwise are caught by
+ * `JSON.stringify` later.
+ *
+ * Why CR-only (was LF + CR pre-v0.12-slice-6): `JSON.stringify`
+ * always escapes a string-value `\n` to the JSON two-char escape
+ * `\\n`, so the wire byte-stream never carries a raw LF inside a
+ * payload string — pi's `attachJsonlLineReader` framing is safe.
+ * Slice 2 was over-defensive: it rejected raw `\n` in input strings
+ * AND broke slice 3's initial-prompt-injection path, because
+ * `buildSubAgentPrompt` always produces multi-line text. The slice 6
+ * live integration tests caught it (no `response` line ever arrived
+ * because every steerable spawn's initial prompt was silently
+ * rejected by the queue's pre-check).
+ *
+ * CR (`\r`) is still rejected because pi's reader strips a trailing
+ * `\r` before parsing; a CR inside a payload string is unusual and
+ * not produced by any production caller, so we keep that defense as
+ * a tripwire for accidental CRLF tooling. Drop if a real use case
+ * appears.
  */
-function findRawLineSeparator(value: unknown, depth = 0): "\n" | "\r" | null {
-  if (depth > 16) return null;
-  if (typeof value === "string") {
-    if (value.includes("\n")) return "\n";
-    if (value.includes("\r")) return "\r";
-    return null;
-  }
-  if (value === null || typeof value !== "object") return null;
+function findRawCr(value: unknown, depth = 0): boolean {
+  if (depth > 16) return false;
+  if (typeof value === "string") return value.includes("\r");
+  if (value === null || typeof value !== "object") return false;
   if (Array.isArray(value)) {
-    for (const item of value) {
-      const r = findRawLineSeparator(item, depth + 1);
-      if (r) return r;
-    }
-    return null;
+    for (const item of value) if (findRawCr(item, depth + 1)) return true;
+    return false;
   }
   for (const key of Object.keys(value as Record<string, unknown>)) {
-    const r = findRawLineSeparator((value as Record<string, unknown>)[key], depth + 1);
-    if (r) return r;
+    if (findRawCr((value as Record<string, unknown>)[key], depth + 1)) return true;
   }
-  return null;
+  return false;
 }
 
 /** A single FIFO entry — one enqueued command. */
@@ -90,24 +99,21 @@ export class RpcStdinQueue {
         return;
       }
 
-      // LF-only framing invariant. The conductor never has a reason
-      // to send a command whose string fields contain raw LF or CR
-      // (JSON.stringify escapes them on the wire, so this is
-      // technically redundant against pi's parser — but a raw \n in
-      // a payload value is always evidence of a caller bug, and
-      // defending here keeps the wire byte-stream cleanly auditable).
-      // We scan recursively because a deeply-nested string field could
-      // tear caller logs that print the un-escaped value.
-      const violation = findRawLineSeparator(cmd);
-      if (violation === "\n") {
-        reject(
-          new Error(
-            "embedded newline in command payload string field; LF-only framing forbids raw \\n",
-          ),
-        );
-        return;
-      }
-      if (violation === "\r") {
+      // CR-only framing tripwire. `JSON.stringify` escapes a
+      // string-value `\n` to `\\n` (the JSON two-char escape) so the
+      // wire byte-stream never carries a raw LF inside a payload —
+      // pi's `attachJsonlLineReader` framing is safe regardless. We
+      // keep CR rejection as a defense against accidental CRLF
+      // tooling (pi's reader strips trailing `\r` before parsing,
+      // but mid-payload CR is still suspicious).
+      //
+      // Slice 2 originally rejected raw `\n` too; that broke slice 3's
+      // initial-prompt injection because `buildSubAgentPrompt` always
+      // produces multi-line text. The slice 6 live integration tests
+      // caught it (no `response` line ever arrived because every
+      // steerable spawn's initial prompt was rejected here). Removed
+      // 2026-05-28 as part of slice 6 closure.
+      if (findRawCr(cmd)) {
         reject(
           new Error(
             "embedded carriage return in command payload string field; LF-only framing forbids raw CR",
