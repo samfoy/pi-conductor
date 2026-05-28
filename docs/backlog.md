@@ -84,7 +84,9 @@ Low-cost; high signal. Worth a follow-up commit when the milestone closes.
 
 **Adjacent v0.9 connection:** v0.9 already implemented "pre-shutdown reconcile of orphaned `running` records" (PRD #12 closure). The complementary case — *post-startup* reconcile after a hard restart — wasn't part of v0.9's scope. Worth treating as a v0.9.x patch rather than v0.10.x backlog.
 
-### 8. WDD revert hazards (`builder-7e93` slice-1 finding) — OPEN, deferred to milestone-close cleanup commit (post-v0.9.x)
+### 8. WDD revert hazards (`builder-7e93` slice-1 finding) — CLOSED 2026-05-28 (`a53edc3`)
+
+Closed by adding the snapshot-revert pattern as a new "WDD revert" subsection in `personas/builder.md`'s `## Test discipline` block, plus a one-paragraph cross-reference in `docs/wdd.md`'s new "Revert hygiene" section.
 
 **Witnessed:** during v0.9.x slice-1 WDD verification, the builder mutated the new `src/reconcile-startup.ts` (untracked at the start of the cycle), then tried `git checkout src/reconcile-startup.ts` to revert. **`git checkout` is a no-op on untracked files** — the mutation persisted, and the next mutation stacked on top of it. Recovered by re-writing the file from scratch and switching to snapshot-based revert under `/tmp/wdd-slice1-snap/`.
 
@@ -94,7 +96,9 @@ Low-cost; high signal. Worth a follow-up commit when the milestone closes.
 - A simple pattern: `cp src/foo.ts /tmp/snap/foo.ts.orig` before mutating; `cp /tmp/snap/foo.ts.orig src/foo.ts` to revert. Works on tracked + untracked files alike.
 - Worth pinning into `personas/builder.md` or `docs/wdd.md`.
 
-### 9. `child.killed` / `child.exitCode` are unreliable liveness signals (`builder-7e93` slice-1 finding) — OPEN, deferred to milestone-close cleanup commit (post-v0.9.x)
+### 9. `child.killed` / `child.exitCode` are unreliable liveness signals (`builder-7e93` slice-1 finding) — CLOSED 2026-05-28 (`a53edc3`)
+
+Closed by adding the "Real-subprocess liveness signals" subsection to `personas/builder.md`'s `## Test discipline` block.
 
 **Witnessed:** during v0.9.x slice-1 W1 test (real-subprocess liveness probe), the initial test asserted on `child.killed` and `child.exitCode` to confirm the child survived the probe. Both are unsafe in this scenario:
 
@@ -111,7 +115,9 @@ Same hazard family as commit `85ee77f` (`docs(builder): warn against --test-time
 - Combine with the existing rule from `personas/builder.md` (commit `85ee77f`): explicit `--test-timeout=<ms>` to bound real-subprocess hangs.
 - Worth folding into `personas/builder.md`'s real-subprocess section as a follow-up at milestone close.
 
-### 10. WDD witness brittleness via tsx loose-transpile (`critic-2kx5` slice-1 finding) — OPEN, deferred to milestone-close cleanup commit (post-v0.9.x)
+### 10. WDD witness brittleness via tsx loose-transpile (`critic-2kx5` slice-1 finding) — CLOSED 2026-05-28 (`a53edc3`)
+
+Closed by adding the "Mutation discipline" section to `docs/wdd.md`.
 
 **Witnessed:** during v0.9.x slice-1 critic gate (W3 reproduction), the named mutation `record.pid === undefined` → `record.pid === null` produced a TypeScript compile error (`number | undefined` not assignable to `number`). The strict path would reject the mutation as not-buildable. But `tsx` runs tests with loose transpile, so the test still executed and the assertion still fired correctly.
 
