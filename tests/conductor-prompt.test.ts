@@ -30,6 +30,7 @@ function makePersona(name: string, description: string): Persona {
     systemPrompt: `you are ${name}`,
     source: "builtin",
     sourcePath: `/tmp/${name}.md`,
+    readOnly: false,
   };
 }
 

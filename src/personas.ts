@@ -201,6 +201,10 @@ function validateAndBuild(
   const defaultReads = optionalStringList(frontmatter, "default_reads") ?? [];
   const worktree = optionalBoolean(frontmatter, "worktree") ?? false;
   const timeoutMinutes = optionalNumber(frontmatter, "timeout_minutes") ?? 60;
+  // Item 13: optional read_only (default false). When true, the
+  // spawn-time prompt assembly prepends READ_ONLY_PERSONA_ENFORCER
+  // (see src/runs.ts: assemblePersonaSystemPrompt).
+  const readOnly = optionalBoolean(frontmatter, "read_only") ?? false;
 
   if (timeoutMinutes <= 0 || timeoutMinutes > 24 * 60) {
     throw new Error(`timeout_minutes must be in (0, 1440]; got ${timeoutMinutes}`);
@@ -224,6 +228,7 @@ function validateAndBuild(
     systemPrompt,
     source,
     sourcePath,
+    readOnly,
   };
 }
 

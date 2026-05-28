@@ -269,6 +269,91 @@ test("personas: v0.8.1 inherit_context audit (PRD Open Q #16 fold-in)", () => {
   }
 });
 
+// ── read_only audit (item 13 fix candidate #1) ────────────────────────
+//
+// Mirrors the v0.8.1 inherit_context audit shape. Pins which personas
+// are read-only versus write-capable. The 10 read-only personas get an
+// auto-prepended scope-enforcer block in their system prompt at spawn
+// time (see `tests/read-only-enforcer.test.ts`). The 6 write-capable
+// personas do not. Closes the silent-scope-drift class documented in
+// `docs/backlog.md` item 13 (critic-z8v9 witness, 2026-05-28).
+
+test("personas: read_only audit (docs/backlog.md item 13 fix candidate #1)", () => {
+  // 10 read-only personas — bodies declare "No edits" / "No fixes" /
+  // "Read-only" / "no optimization, no edits" / gate-only behavior.
+  // 6 write-capable personas — bodies implement code (builder),
+  // simplifications (simplifier), or write specific artifacts
+  // (cartographer/designer/planner/scribe).
+  const expected: Record<string, boolean> = {
+    // 10 read-only.
+    analyst: true,
+    clarifier: true,
+    critic: true,
+    finalizer: true,
+    inspector: true,
+    investigator: true,
+    oracle: true,
+    profiler: true,
+    redteam: true,
+    verifier: true,
+    // 6 write-capable.
+    builder: false,
+    cartographer: false,
+    designer: false,
+    planner: false,
+    scribe: false,
+    simplifier: false,
+  };
+
+  const dir = builtinPersonasDir();
+  const files = readdirSync(dir).filter((f) => f.endsWith(".md"));
+  assert.equal(files.length, 16, `expected 16 personas, found ${files.length}`);
+
+  for (const file of files) {
+    const text = readFileSync(join(dir, file), "utf8");
+    const { frontmatter } = parseFrontmatter(text);
+    const name = String(frontmatter.name);
+    const expectedReadOnly = expected[name];
+    assert.ok(
+      expectedReadOnly !== undefined,
+      `persona '${name}' (${file}) is not in the read_only audit table; update tests/personas.test.ts and docs/backlog.md item 13`,
+    );
+    // Frontmatter parser default: undefined → false. Both representations
+    // are equivalent at the Persona-type level (Persona.readOnly is
+    // strictly boolean post-parse). The audit pins the YAML shape:
+    //   read_only: true   for the 10 read-only personas
+    //   <field absent>    for the 6 write-capable personas
+    if (expectedReadOnly === true) {
+      assert.equal(
+        frontmatter.read_only,
+        true,
+        `persona '${name}' read_only drifted (expected true, got ${String(frontmatter.read_only)})`,
+      );
+    } else {
+      assert.ok(
+        frontmatter.read_only === undefined || frontmatter.read_only === false,
+        `persona '${name}' is write-capable but has read_only=${String(frontmatter.read_only)} (expected undefined or false)`,
+      );
+    }
+  }
+});
+
+test("personas: parser populates Persona.readOnly with default false (write-capable)", () => {
+  // Pins the parser default so a regression that strips the readOnly
+  // field from validateAndBuild() is caught even if no persona file
+  // changes.
+  const text = `---
+name: tester
+description: test
+inherit_context: filtered
+---
+
+body`;
+  const { frontmatter, body } = parseFrontmatter(text);
+  assert.equal(frontmatter.read_only, undefined);
+  assert.ok(body.includes("body"));
+});
+
 test("resolveBuiltinPersonasDir: canonicalizes through legacy symlink layout", () => {
   // Reproduces the v0.8 failure mode: pi-conductor loaded via a legacy
   // ~/.pi/agent/extensions/conductor/index.js symlink whose target lives

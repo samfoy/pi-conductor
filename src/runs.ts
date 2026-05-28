@@ -267,6 +267,64 @@ const SUBAGENT_NESTING_GUARD = [
 ].join(" ");
 
 /**
+ * Item 13 (docs/backlog.md, 2026-05-28): scope-enforcer block prepended
+ * to a read-only persona's `--append-system-prompt` content at spawn
+ * time. Closes the silent-scope-drift class witnessed when critic-z8v9
+ * shipped a review AND THEN bundled, committed, and pushed v0.12 from
+ * inside its own turn (per `AGENTS.md` §11 the close commit + push are
+ * the parent conductor's responsibility, NOT a critic's).
+ *
+ * Wording is character-pinned by
+ * `tests/read-only-enforcer.test.ts: READ_ONLY_PERSONA_ENFORCER:
+ * enforcer text is character-pinned (W3 string witness)`. Mutating one
+ * character of this constant reds that test — update the test in
+ * lockstep when intentionally rewording.
+ */
+export const READ_ONLY_PERSONA_ENFORCER = [
+  "[READ-ONLY PERSONA ENFORCER]",
+  "You are a read-only persona. You MAY: read files, run tests",
+  "(orientation), git inspection, run mutations IN-PLACE for",
+  "verification (followed by IMMEDIATE restoration via git checkout).",
+  "You MUST NOT: edit, write, or otherwise mutate any tracked file",
+  "beyond mutation-test-and-restore cycles. You MUST NOT: run",
+  "git commit, git add, git push, git merge, git rebase, git tag, or",
+  "any operation that changes the repository's tracked state. If your",
+  "review concludes you have advice for the parent conductor, RETURN",
+  "that advice in your output — do not act on it. Acting beyond your",
+  "review scope is the failure mode documented in docs/backlog.md",
+  "item 13.",
+  "[END READ-ONLY PERSONA ENFORCER]",
+].join("\n");
+
+/**
+ * Item 13: assemble the spawn-time `--append-system-prompt` content.
+ *
+ * For read-only personas (`persona.readOnly === true`), prepends
+ * {@link READ_ONLY_PERSONA_ENFORCER} + a blank line in front of the
+ * persona body. For write-capable personas (or any persona whose
+ * `readOnly` field is falsy/undefined defensively), returns the body
+ * unchanged.
+ *
+ * Pure: deterministic on `(persona.readOnly, persona.systemPrompt)`.
+ * No I/O. Used by `spawnRun` (fresh spawn) when populating the
+ * `Run.systemPrompt` capture and the `planSpawnPiArgs` argv. Resume
+ * paths re-read `Run.systemPrompt`, which already contains the
+ * enforcer if applicable, so the prepend ships exactly once per
+ * lifetime even across `ensemble_send` resumes.
+ *
+ * W1 mutation witness: the killing test imports this helper directly
+ * and pins the prepend formula — see
+ * `tests/read-only-enforcer.test.ts: assemblePersonaSystemPrompt:
+ * read-only persona prompt begins with the enforcer block`.
+ */
+export function assemblePersonaSystemPrompt(persona: Persona): string {
+  if (persona.readOnly === true) {
+    return `${READ_ONLY_PERSONA_ENFORCER}\n\n${persona.systemPrompt}`;
+  }
+  return persona.systemPrompt;
+}
+
+/**
  * Build the prompt sent to the sub-agent.
  *
  * The persona's system prompt body is passed via `pi --system-prompt-replace`
@@ -867,7 +925,10 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     sessionPath: undefined,
     // Capture the persona body now so future ensemble_send calls can
     // re-pass it on resume. Pi doesn't persist system prompts to disk.
-    systemPrompt: opts.persona.systemPrompt,
+    // Item 13: assemblePersonaSystemPrompt prepends the read-only
+    // enforcer when persona.readOnly is true. Captured ONCE here so
+    // resumes re-pass the already-prepended body without doubling it.
+    systemPrompt: assemblePersonaSystemPrompt(opts.persona),
     // v0.10 watchdog (Slice 3) per-spawn overrides; undefined falls
     // back to conductor-wide defaults at watchdog dispatch time.
     killOnStall: opts.killOnStall,
@@ -899,7 +960,11 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     persona: opts.persona,
     parentMessages: opts.parentMessages,
     sessionDir,
-    systemPrompt: opts.persona.systemPrompt,
+    // Item 13: prepend read-only enforcer when applicable. Same
+    // assembly used at the Run.systemPrompt capture above so the
+    // initial spawn argv and resume argv stay byte-identical for
+    // a given persona.
+    systemPrompt: assemblePersonaSystemPrompt(opts.persona),
     prompt,
     cwd: opts.cwd,
     model: opts.model,

@@ -40,6 +40,7 @@ function makePersona(name = "oracle"): Persona {
     systemPrompt: "you are " + name,
     source: "builtin",
     sourcePath: "/tmp/" + name + ".md",
+    readOnly: false,
   };
 }
 

@@ -34,6 +34,7 @@ function persona(overrides: Partial<Persona> & { inheritContext: ContextInherita
     systemPrompt: "you are a tester",
     source: "builtin",
     sourcePath: "/tmp/tester.md",
+    readOnly: false,
     ...overrides,
   };
 }

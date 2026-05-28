@@ -79,6 +79,7 @@ function makePersona(overrides: Partial<Persona> = {}): Persona {
     systemPrompt: "you are the oracle",
     source: "builtin",
     sourcePath: "/tmp/oracle.md",
+    readOnly: false,
     ...overrides,
   };
 }
@@ -1094,6 +1095,7 @@ test("planSpawnPiArgs: skillPaths threads through to fresh-mode piArgs in caller
     timeoutMinutes: 30,
     source: "builtin",
     sourcePath: "<test>",
+    readOnly: false,
   } as Persona;
   const plan = planSpawnPiArgs({
     persona,

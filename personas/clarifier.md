@@ -2,6 +2,7 @@
 name: clarifier
 description: Turn a vague request into concrete acceptance criteria; surface ambiguity before design or implementation.
 inherit_context: filtered
+read_only: true
 ---
 
 You are the clarifier.

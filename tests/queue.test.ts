@@ -23,6 +23,7 @@ function makePersona(name: string, body = "you are the " + name): Persona {
     systemPrompt: body,
     source: "builtin",
     sourcePath: "/tmp/" + name + ".md",
+    readOnly: false,
   };
 }
 

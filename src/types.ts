@@ -62,6 +62,15 @@ export interface Persona {
   /** Absolute path to the source file. */
   sourcePath: string;
   /**
+   * Item 13 (docs/backlog.md, 2026-05-28): when `true`, an enforcer
+   * block is prepended to the persona's system prompt at spawn time
+   * (see `assemblePersonaSystemPrompt` in `src/runs.ts`). Mirrors the
+   * 10/6 read-only/write-capable split audited by
+   * `tests/personas.test.ts`. Defaults to `false` when frontmatter
+   * omits `read_only`.
+   */
+  readOnly: boolean;
+  /**
    * v0.11 on_complete_hook (slice 1a types): shell command to run after
    * the sub-agent reaches a `completed` terminal. Empty string means
    * explicit-disable (short-circuits the cascade). Undefined means

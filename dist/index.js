@@ -213,6 +213,7 @@ function validateAndBuild(raw, source, sourcePath) {
   const defaultReads = optionalStringList(frontmatter, "default_reads") ?? [];
   const worktree = optionalBoolean(frontmatter, "worktree") ?? false;
   const timeoutMinutes = optionalNumber(frontmatter, "timeout_minutes") ?? 60;
+  const readOnly = optionalBoolean(frontmatter, "read_only") ?? false;
   if (timeoutMinutes <= 0 || timeoutMinutes > 24 * 60) {
     throw new Error(`timeout_minutes must be in (0, 1440]; got ${timeoutMinutes}`);
   }
@@ -232,7 +233,8 @@ function validateAndBuild(raw, source, sourcePath) {
     timeoutMinutes,
     systemPrompt,
     source,
-    sourcePath
+    sourcePath,
+    readOnly
   };
 }
 function requireString(fm, key) {
@@ -1627,6 +1629,29 @@ var SUBAGENT_NESTING_GUARD = [
   "further sub-agents (no calls to ensemble_spawn, subagent, agent, delegate, etc).",
   "Complete the entire task yourself and return your findings."
 ].join(" ");
+var READ_ONLY_PERSONA_ENFORCER = [
+  "[READ-ONLY PERSONA ENFORCER]",
+  "You are a read-only persona. You MAY: read files, run tests",
+  "(orientation), git inspection, run mutations IN-PLACE for",
+  "verification (followed by IMMEDIATE restoration via git checkout).",
+  "You MUST NOT: edit, write, or otherwise mutate any tracked file",
+  "beyond mutation-test-and-restore cycles. You MUST NOT: run",
+  "git commit, git add, git push, git merge, git rebase, git tag, or",
+  "any operation that changes the repository's tracked state. If your",
+  "review concludes you have advice for the parent conductor, RETURN",
+  "that advice in your output \u2014 do not act on it. Acting beyond your",
+  "review scope is the failure mode documented in docs/backlog.md",
+  "item 13.",
+  "[END READ-ONLY PERSONA ENFORCER]"
+].join("\n");
+function assemblePersonaSystemPrompt(persona) {
+  if (persona.readOnly === true) {
+    return `${READ_ONLY_PERSONA_ENFORCER}
+
+${persona.systemPrompt}`;
+  }
+  return persona.systemPrompt;
+}
 function buildSubAgentPrompt(persona, task) {
   const parts = [SUBAGENT_NESTING_GUARD, ""];
   if (persona.defaultReads.length > 0) {
@@ -1855,7 +1880,10 @@ function spawnRun(opts) {
     sessionPath: void 0,
     // Capture the persona body now so future ensemble_send calls can
     // re-pass it on resume. Pi doesn't persist system prompts to disk.
-    systemPrompt: opts.persona.systemPrompt,
+    // Item 13: assemblePersonaSystemPrompt prepends the read-only
+    // enforcer when persona.readOnly is true. Captured ONCE here so
+    // resumes re-pass the already-prepended body without doubling it.
+    systemPrompt: assemblePersonaSystemPrompt(opts.persona),
     // v0.10 watchdog (Slice 3) per-spawn overrides; undefined falls
     // back to conductor-wide defaults at watchdog dispatch time.
     killOnStall: opts.killOnStall,
@@ -1883,7 +1911,11 @@ function spawnRun(opts) {
     persona: opts.persona,
     parentMessages: opts.parentMessages,
     sessionDir,
-    systemPrompt: opts.persona.systemPrompt,
+    // Item 13: prepend read-only enforcer when applicable. Same
+    // assembly used at the Run.systemPrompt capture above so the
+    // initial spawn argv and resume argv stay byte-identical for
+    // a given persona.
+    systemPrompt: assemblePersonaSystemPrompt(opts.persona),
     prompt,
     cwd: opts.cwd,
     model: opts.model,

@@ -3,6 +3,7 @@ name: profiler
 description: Identify performance hot paths and establish baseline measurements. No optimization, no edits.
 inherit_context: none
 inherit_skills: true
+read_only: true
 ---
 
 You are the profiler.

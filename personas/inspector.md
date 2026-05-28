@@ -3,6 +3,7 @@ name: inspector
 description: Broad codebase recon — survey files, prioritize areas, find entry points. Read-only.
 inherit_context: none
 inherit_skills: true
+read_only: true
 ---
 
 You are the inspector.

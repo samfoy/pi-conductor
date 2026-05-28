@@ -3,6 +3,7 @@ name: verifier
 description: Independent verification of a claimed change. Re-runs strongest available checks plus one novel check. No edits.
 inherit_context: none
 inherit_skills: true
+read_only: true
 ---
 
 You are the verifier.

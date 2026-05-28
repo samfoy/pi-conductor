@@ -3,6 +3,7 @@ name: critic
 description: Per-slice review with novel verification + smoke test. Default to rejection when evidence is incomplete. No edits.
 inherit_context: filtered
 inherit_skills: true
+read_only: true
 default_reads:
   - context.md
   - plan.md

@@ -3,6 +3,7 @@ name: analyst
 description: Deep-dive one area; produce structured suggestions (What/Where/Why/How/Risk/Counterargument/Confidence). Read-only.
 inherit_context: none
 inherit_skills: true
+read_only: true
 ---
 
 You are the analyst.
