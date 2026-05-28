@@ -280,3 +280,143 @@ test(
     assert.equal(run.status, "killed");
   },
 );
+
+// ── 6. Hard-threshold no-op-safety with dead pid (item 1 in-repo half) ──
+//
+// Pins the invariant from docs/backlog.md item 1: when the watchdog
+// hits hard threshold AND `kill_on_stall: true` AND the underlying pi
+// subprocess has died externally (e.g. pi-dashboard server restart per
+// `builder-shzs` witness, host crash per `builder-mtpt` witness, idle-
+// reaper per `builder-utrr` witness), the dispatch chain through
+// `forceTerminate` → `subprocess.kill()` is no-op-safe:
+//   - status flips to "killed" exactly once
+//   - errorMessage is set to the watchdog hard-stall message
+//   - no exception escapes
+// The cross-repo half (heartbeat into pi-dashboard so the reaper can
+// be re-enabled) remains OPEN. This is purely the in-repo invariant.
+//
+// Implementation note: the `try { run.proc.kill("SIGTERM") } catch {}`
+// wrapper at src/runs.ts already swallows the dead-pid case for both
+// Node's `subprocess.kill()` (returns false) and our test's throwing
+// fake (catches the throw). We pin both shapes — the throwing fake is
+// the worst case the production catch must absorb.
+
+function makePrintRun(
+  proc: FakeProcLike & { kill: (sig: NodeJS.Signals) => void },
+  startTimeMs: number,
+): Run {
+  return {
+    id: "tester-zombie",
+    persona: "builder",
+    task: "test",
+    mode: "background",
+    status: "running",
+    startTime: startTimeMs,
+    lastEventAt: startTimeMs,
+    messages: [],
+    usage: emptyUsage(),
+    cwd: "/tmp",
+    recordPath: "/tmp/x-zombie/record.json",
+    transcriptPath: "/tmp/x-zombie/transcript.jsonl",
+    finalPath: "/tmp/x-zombie/final.md",
+    streamingMode: "print",
+    steerable: false,
+    pid: 99999,
+    proc: proc as any,
+    parentPid: process.pid,
+    killOnStall: true,
+  } as Run;
+}
+
+test(
+  "forceTerminate: hard-threshold dead-pid (kill returns false) flips status to killed exactly once",
+  () => {
+    // Node's `subprocess.kill()` on a dead pid returns false WITHOUT
+    // throwing. Same pid-already-gone shape as the witnessed
+    // pi-dashboard restart.
+    const proc = makeFakeProc();
+    const run = makePrintRun(proc, 1_700_000_000_000);
+    const reg = new RunRegistry();
+    reg.register(run);
+
+    let notifications = 0;
+    const unsub = reg.onChange(() => notifications++);
+    forceTerminate(run, "stalled", reg);
+    unsub();
+
+    assert.equal(run.status, "killed", "status flips to killed exactly once");
+    assert.match(
+      run.errorMessage ?? "",
+      /watchdog: hard-stalled/,
+      "errorMessage indicates watchdog hard-stall reason",
+    );
+    assert.deepEqual(proc.killCalls, ["SIGTERM"]);
+    assert.equal(notifications, 1, "registry.notify fires once for the terminal flip");
+  },
+);
+
+test(
+  "forceTerminate: hard-threshold pid already gone (kill throws ESRCH) is swallowed by the try/catch wrapper",
+  () => {
+    // Worst case: the proc.kill handle throws (some test fakes /
+    // exotic platforms do). The production try/catch must swallow.
+    const killCalls: NodeJS.Signals[] = [];
+    const proc = {
+      killCalls,
+      pid: 99999,
+      kill: (sig: NodeJS.Signals) => {
+        killCalls.push(sig);
+        const err = new Error("ESRCH: no such process");
+        (err as { code?: string }).code = "ESRCH";
+        throw err;
+      },
+    };
+    const run = makePrintRun(proc as any, 1_700_000_000_000);
+    const reg = new RunRegistry();
+    reg.register(run);
+
+    assert.doesNotThrow(
+      () => forceTerminate(run, "stalled", reg),
+      "forceTerminate must not surface the kill() throw",
+    );
+    assert.equal(run.status, "killed", "status still flips to killed");
+    assert.deepEqual(killCalls, ["SIGTERM"], "SIGTERM was attempted before the throw");
+    assert.match(
+      run.errorMessage ?? "",
+      /watchdog: hard-stalled/,
+    );
+  },
+);
+
+test(
+  "forceTerminate: hard-threshold W7 idempotency — second call on already-killed run is a no-op",
+  () => {
+    // The W7 idempotency guard at src/runs.ts:2013
+    // (`if (isTerminal(run.status)) return;`) protects the dead-pid
+    // path the same way it protects the live-pid path: a second
+    // forceTerminate call MUST NOT re-flip status, re-emit notifications,
+    // or re-attempt SIGTERM. Pinning here for the dead-pid × watchdog
+    // path specifically (the RPC W7 case is already pinned in test 4
+    // above).
+    const proc = makeFakeProc();
+    const run = makePrintRun(proc, 1_700_000_000_000);
+    const reg = new RunRegistry();
+    reg.register(run);
+
+    forceTerminate(run, "stalled", reg);
+    const firstStatus = run.status;
+    const firstFinishedAt = run.finishedAt;
+    const firstError = run.errorMessage;
+
+    // Second call — must be a no-op.
+    forceTerminate(run, "stalled", reg);
+    assert.equal(run.status, firstStatus, "status unchanged on second call");
+    assert.equal(run.finishedAt, firstFinishedAt, "finishedAt unchanged on second call");
+    assert.equal(run.errorMessage, firstError, "errorMessage unchanged on second call");
+    assert.deepEqual(
+      proc.killCalls,
+      ["SIGTERM"],
+      "SIGTERM not re-issued on second call",
+    );
+  },
+);
