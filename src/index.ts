@@ -25,7 +25,7 @@ import { registerTools } from "./tools.ts";
 import { RunRegistry } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
 import { mountEnsembleWidget, type EnsembleWidget } from "./widget.ts";
-import { formatCompletionNotification } from "./notifications.ts";
+import { buildCompletionSendMessageOptions, formatCompletionNotification } from "./notifications.ts";
 import { buildConductorSystemPrompt } from "./conductor-prompt.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
@@ -314,7 +314,7 @@ export default function (pi: ExtensionAPI): void {
           content: text,
           display: true,
         },
-        { triggerTurn: true, deliverAs: "followUp" },
+        buildCompletionSendMessageOptions(run),
       );
     },
   };

@@ -6316,6 +6316,12 @@ function formatStallNotification(run, args) {
   const header = `## ${glyph} \`${run.persona}\` ${verb} \u2014 silent ${args.silentSeconds}s${lastTool} \u2014 id \`${run.id}\``;
   return [header, "", ...lines].join("\n");
 }
+function buildCompletionSendMessageOptions(run) {
+  if (run.mode === "background") {
+    return { triggerTurn: true };
+  }
+  return { triggerTurn: true, deliverAs: "followUp" };
+}
 
 // src/conductor-prompt.ts
 function buildConductorSystemPrompt(opts) {
@@ -7853,7 +7859,7 @@ function index_default(pi) {
           content: text,
           display: true
         },
-        { triggerTurn: true, deliverAs: "followUp" }
+        buildCompletionSendMessageOptions(run)
       );
     }
   };

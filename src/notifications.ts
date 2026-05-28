@@ -229,3 +229,39 @@ export function formatStallNotification(
   const header = `## ${glyph} \`${run.persona}\` ${verb} — silent ${args.silentSeconds}s${lastTool} — id \`${run.id}\``;
   return [header, "", ...lines].join("\n");
 }
+
+/**
+ * Item 11 (2026-05-28): build the `pi.sendMessage` options for a
+ * sub-agent completion notification.
+ *
+ * Locked decision (c) per `docs/items-11-12-inspector-map.md` §6 rec 2:
+ *
+ *   - **Background spawns** flip to `triggerTurn: true` ONLY (no
+ *     `deliverAs`). PRD line 257 contracts that the conductor wakes
+ *     on background completion. The witnessed 25-min idle bug
+ *     (builder-rjpb 2026-05-27) was a background spawn that did NOT
+ *     wake; under `deliverAs: "followUp"` the message gets queued
+ *     via `agent.followUp(...)` on the streaming branch and then
+ *     never pulls a turn when the parent is between turns.
+ *     `triggerTurn: true` alone hits the `await this.agent.prompt(...)`
+ *     branch in `dist/core/agent-session.js: sendCustomMessage` which
+ *     fires a turn unconditionally.
+ *
+ *   - **Foreground spawns** keep `triggerTurn: true, deliverAs:
+ *     "followUp"`. The completion is already visible inline in the
+ *     parent's tool-call card (v0.4 inline-streamed transcript), so
+ *     queueing the wake instead of preempting matches the v0.10 Q3
+ *     advisory pattern (PRD line 614 — non-disruptive default).
+ *
+ * Pure: deterministic on `run.mode`. Exposed for direct unit-test
+ * coverage of the options arg, which prior tests stubbed away.
+ */
+export function buildCompletionSendMessageOptions(run: Run): {
+  triggerTurn: boolean;
+  deliverAs?: "followUp" | "nextTurn";
+} {
+  if (run.mode === "background") {
+    return { triggerTurn: true };
+  }
+  return { triggerTurn: true, deliverAs: "followUp" };
+}
