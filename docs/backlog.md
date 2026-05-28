@@ -12,7 +12,14 @@ Captured 2026-05-21 during v0.11 slice 1a builder run (`builder-mtpt` zombie obs
 
 **Second witness 2026-05-21 (`builder-shzs`, slice 2):** same shape. Cause attributed by the user to a **pi-dashboard server restart** — the host's pi infra restarted out from under the running subagent subprocess. Not an internal pi/conductor failure mode; an external host event. The watchdog's behavior was correct (silent transcript → soft + hard advisories). `kill_on_stall: true` was set on this spawn, so the hard threshold should have escalated to `forceTerminate`; verify the enforcer kicks for hard-when-pid-already-gone (probably no-op safe but worth a test).
 
-**Third witness 2026-05-21 (`builder-utrr`, slice 2 retry):** same shape, ~39m duration. Investigation pinned the actual root cause to **pi-dashboard's `_healthCheck` idle-reaper at `backend/pi-manager.ts:_healthCheck`** — reaps slots that are `!pi.running && idle > 30 min`. Background sub-agents (`ensemble_spawn` with `foreground: false`) end the parent's turn immediately on tool return; the parent slot then looks idle from pi-dashboard's POV while a background sub-agent is still doing real work. After 30 min the parent slot was getting `gracefulShutdown()`-ed, killing the conductor extension and orphaning all its sub-agents. Patched 2026-05-21 by disabling the reap block (preserved as commented-out code with a 2026-05-21 dated rationale). Witnessed dirty tree salvaged via `stash@{0}`.
+**Third witness 2026-05-21 (`builder-utrr`, slice 2 retry):** same shape, ~39m duration. Investigation pinned the actual root cause to **pi-dashboard's `_healthCheck` idle-reaper at `backend/pi-manager.ts:_healthCheck`** — reaps slots that are `!pi.running && idle > <threshold>`. Background sub-agents (`ensemble_spawn` with `foreground: false`) end the parent's turn immediately on tool return; the parent slot then looks idle from pi-dashboard's POV while a background sub-agent is still doing real work. After the threshold elapsed the parent slot was getting `gracefulShutdown()`-ed, killing the conductor extension and orphaning all its sub-agents.
+
+**Mitigation history (per `docs/items-1-11-pi-dashboard-inspector-map.md` 2026-05-28 recon):**
+- 2026-05-21 (`bbd55464` on origin master): the reap block was disabled outright.
+- 2026-05-28 (`aa118fca` on origin master, parallel branch): reap threshold extended from 30 minutes to **30 hours** with the rationale that slots should survive overnight; the disable was reverted in this branch.
+- Merge commit `349eb962` resolved the conflict in favor of the **30-hour threshold**, NOT the disable. So at pi-dashboard HEAD as of 2026-05-28 the reaper IS active with a 30h threshold. The dated rationale comment at `backend/pi-manager.ts:967–979` reflects this current state correctly; the prior backlog claim that the reaper was "disabled (preserved as commented-out code)" was stale.
+
+The 30h threshold makes the cross-repo heartbeat fix (proposed in the next sub-section) lower priority — slots survive overnight without being reaped — but a cheap defense (D1 in the inspector map: bump `_lastActivity` on `extension_ui_request` events at `pi-manager.ts:765`, ~3 LOC pi-dashboard side) further hardens the slot life while extensions are visibly busy.
 
 ### Proper fix (separate from the zombie-detection backlog item)
 
@@ -189,7 +196,7 @@ The info-line rendering plus the absent turn together indicate the trigger fired
 
 ## Persona context-inheritance failure modes — OPEN
 
-### 12. `inherit_context: filtered_compact` admits parent-identity bleed via orchestration tool calls — PARTIALLY CLOSED 2026-05-28 (`d961fb0`); candidates #1, #3, #4 remain OPEN (witnessed 2026-05-27, builder-4gsl)
+### 12. `inherit_context: filtered_compact` admits parent-identity bleed via orchestration tool calls — PARTIALLY CLOSED 2026-05-28 (`d961fb0` candidate #2; `8fb8077` candidate #3); candidates #1, #4 remain OPEN (witnessed 2026-05-27, builder-4gsl)
 
 **Witnessed:** during v0.12 slice 6 spawn, `builder-4gsl` (persona `builder`, `inherit_context: filtered_compact`) terminated in 1.3m / 5 turns / $1.43 with **zero tool calls into the slice**. Output was a refusal-and-meta-commentary message reading from the parent conductor's first-person perspective — it claimed *"v0.12 slices 1–5 have shipped... somehow built and committed while I was editing"*, said the slice-6 brief at the bottom *"includes another session's Recent Sessions / memory dump header, claims I'm a sub-agent, and tells me not to push,"* and proposed two options as if it were the parent conductor deciding next steps.
 
