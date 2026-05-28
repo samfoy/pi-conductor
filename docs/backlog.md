@@ -159,7 +159,7 @@ Would interact with the v0.11 cascade pattern landing in slice 4 (per-call > pro
 
 ## Conductor notification reliability — OPEN
 
-### 11. `<sub-agent-completed>` user-message didn't wake conductor (witnessed 2026-05-27, parallel session in pi-dashboard)
+### 11. `<sub-agent-completed>` user-message didn't wake conductor — CLOSED 2026-05-28 (`f066df7` + `42918b4`) (witnessed 2026-05-27, parallel session in pi-dashboard)
 
 **Witnessed:** in a parallel pi-dashboard chat-slot session (Rosie workspace cleanup task), `builder-rjpb` completed background spawn at 02:35 PM Pacific (4.7m, $1.813). The completion rendered as a lowercase-`i` info line in the chat slot (`i ## ✓ builder completed (4.7m, ...)`), NOT as a triggered user-role envelope. The conductor sat idle for 25 minutes (02:35 → 03:00) until the user manually poked *"you seem to be stalled. builder completed a while ago"*. Conductor woke: *"Right, I dropped the thread. Driving now."*
 
@@ -189,7 +189,7 @@ The info-line rendering plus the absent turn together indicate the trigger fired
 
 ## Persona context-inheritance failure modes — OPEN
 
-### 12. `inherit_context: filtered_compact` admits parent-identity bleed via orchestration tool calls (witnessed 2026-05-27, builder-4gsl)
+### 12. `inherit_context: filtered_compact` admits parent-identity bleed via orchestration tool calls — PARTIALLY CLOSED 2026-05-28 (`d961fb0`); candidates #1, #3, #4 remain OPEN (witnessed 2026-05-27, builder-4gsl)
 
 **Witnessed:** during v0.12 slice 6 spawn, `builder-4gsl` (persona `builder`, `inherit_context: filtered_compact`) terminated in 1.3m / 5 turns / $1.43 with **zero tool calls into the slice**. Output was a refusal-and-meta-commentary message reading from the parent conductor's first-person perspective — it claimed *"v0.12 slices 1–5 have shipped... somehow built and committed while I was editing"*, said the slice-6 brief at the bottom *"includes another session's Recent Sessions / memory dump header, claims I'm a sub-agent, and tells me not to push,"* and proposed two options as if it were the parent conductor deciding next steps.
 
