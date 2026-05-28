@@ -6,7 +6,7 @@ Seeded from v0.8.1 Item 1 close (commit `423f500`, finalizer `finalizer-7794` ru
 
 Captured 2026-05-21 during v0.11 slice 1a builder run (`builder-mtpt` zombie observation).
 
-### 1. Zombie sub-process detection — IN-REPO HALF CLOSED 2026-05-28 (`090140d`); cross-repo OPEN
+### 1. Zombie sub-process detection — IN-REPO HALF CLOSED 2026-05-28 (`090140d`); pi-dashboard heartbeat-defense CLOSED 2026-05-28 (pi-dashboard `e9d2a8a9`); cross-repo HEARTBEAT EMITTER REMAINS DEFERRED (lower priority post-30h-threshold)
 
 **Witnessed:** `builder-mtpt` pi subprocess died mid-first-bash-call. Transcript ended with one `tool_use` and zero `tool_result`. The pi process disappeared from `ps -ef`. The run record stayed `status: running` until manual `ensemble_kill` 12 minutes later. The v0.10 watchdog correctly emitted soft (132s) and hard (612s) advisories, but `kill_on_stall: false` (the default) meant the hard advisory was advisory-only — the run held its `m_w_c=1` write slot until a human (the orchestrator) killed it.
 
@@ -166,7 +166,7 @@ Would interact with the v0.11 cascade pattern landing in slice 4 (per-call > pro
 
 ## Conductor notification reliability — OPEN
 
-### 11. `<sub-agent-completed>` user-message didn't wake conductor — CLOSED 2026-05-28 (`f066df7` + `42918b4`) (witnessed 2026-05-27, parallel session in pi-dashboard)
+### 11. `<sub-agent-completed>` user-message didn't wake conductor — CLOSED 2026-05-28 (in-repo: `f066df7` + `42918b4`; pi-dashboard visual fallback: `e9d2a8a9`) (witnessed 2026-05-27, parallel session in pi-dashboard)
 
 **Witnessed:** in a parallel pi-dashboard chat-slot session (Rosie workspace cleanup task), `builder-rjpb` completed background spawn at 02:35 PM Pacific (4.7m, $1.813). The completion rendered as a lowercase-`i` info line in the chat slot (`i ## ✓ builder completed (4.7m, ...)`), NOT as a triggered user-role envelope. The conductor sat idle for 25 minutes (02:35 → 03:00) until the user manually poked *"you seem to be stalled. builder completed a while ago"*. Conductor woke: *"Right, I dropped the thread. Driving now."*
 
