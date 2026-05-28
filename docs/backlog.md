@@ -6,7 +6,7 @@ Seeded from v0.8.1 Item 1 close (commit `423f500`, finalizer `finalizer-7794` ru
 
 Captured 2026-05-21 during v0.11 slice 1a builder run (`builder-mtpt` zombie observation).
 
-### 1. Zombie sub-process detection — independent of `kill_on_stall`
+### 1. Zombie sub-process detection — IN-REPO HALF CLOSED 2026-05-28 (`090140d`); cross-repo OPEN
 
 **Witnessed:** `builder-mtpt` pi subprocess died mid-first-bash-call. Transcript ended with one `tool_use` and zero `tool_result`. The pi process disappeared from `ps -ef`. The run record stayed `status: running` until manual `ensemble_kill` 12 minutes later. The v0.10 watchdog correctly emitted soft (132s) and hard (612s) advisories, but `kill_on_stall: false` (the default) meant the hard advisory was advisory-only — the run held its `m_w_c=1` write slot until a human (the orchestrator) killed it.
 
@@ -19,6 +19,10 @@ Captured 2026-05-21 during v0.11 slice 1a builder run (`builder-mtpt` zombie obs
 **Conductor should publish run-state into pi-dashboard so background sub-agents count as parent activity.** Sketch: when the conductor extension has at least one `Run.status === "running"` in the registry, emit a heartbeat that bumps the parent slot's `_lastActivity` (via a synthetic event the pi-manager's `tool_execution_update` handler already updates on, or a new `agent_busy` channel). The reaper can then be re-enabled safely with the same 30-min default; idle slots that *truly* have no background work will still be reaped, but slots actively orchestrating sub-agents won't.
 
 Until this lands, the reaper is off in pi-dashboard. Memory cost: idle slots hold RSS until manually closed. Acceptable trade-off given the bug.
+
+**Closure (in-repo half, 2026-05-28, `090140d`):** the in-repo testable invariant from this entry — *"verify the enforcer kicks for hard-when-pid-already-gone (probably no-op safe but worth a test)"* — is now pinned in `tests/forceTerminate.test.ts` with three new tests covering (a) `subprocess.kill()` returning `false` on a dead pid (Node's standard behaviour), (b) `subprocess.kill()` throwing `ESRCH` swallowed by the production `try {} catch {}` wrapper, and (c) W7 idempotency: a second `forceTerminate` call on an already-killed-via-stalled run is a strict no-op (status unchanged, finishedAt unchanged, errorMessage unchanged, no second SIGTERM). The dispatch chain `Watchdog.dispatch → deps.kill(run, "stalled") → forceTerminate(run, "stalled", registry)` is no-op-safe; status flips to `"killed"` exactly once with `errorMessage` set to `"watchdog: hard-stalled (no events past hard threshold)"`.
+
+**Cross-repo half remains OPEN:** the proper fix described in the next sub-section (heartbeat from conductor into pi-dashboard so background sub-agents count as parent activity, allowing the idle-reaper to be re-enabled) is a pi-dashboard change, not a pi-conductor change. Tracked here for cross-repo coordination but not closeable from this repo.
 
 ### 3. Watchdog hostility to long quiet bash tool calls (`builder-ccl8`, fourth slice-2 witness)
 
@@ -39,7 +43,7 @@ Until this lands, the reaper is off in pi-dashboard. Memory cost: idle slots hol
 
 May also be worth pinning these into `personas/builder.md` if the failure recurs.
 
-### 4. Pi process discovery from the orchestrator (`builder-ew9e` triage)
+### 4. Pi process discovery from the orchestrator (`builder-ew9e` triage) — CLOSED 2026-05-28 (`4c4ab85`)
 
 **Witnessed:** during slice-2 triage, `pgrep -af 'builder-ew9e'` returned no matches — leading me to incorrectly conclude the pi subprocess was dead. The actual pi process for the run was alive (`pid 22373`), but its command line was just `pi` (no run-id, no agent_id, no session id visible). The only way to find it was via `pstree -p <dashboard-pid>` walking children of pi-dashboard's main process. The dashboard knew the run was alive; my orchestrator triage path didn't.
 
@@ -49,6 +53,8 @@ May also be worth pinning these into `personas/builder.md` if the failure recurs
 - Or richer: an `agent_status` slash command (`/conductor agent <id> status`) that reads liveness + last activity directly. Today the orchestrator has no first-class "is the sub-agent process alive" probe — only the watchdog's silence advisory.
 
 **Why this matters:** distinguishing "pi alive but stuck on slow tool" from "pi crashed" is currently ambiguous from the orchestrator's view. The watchdog signals silence; both states look the same. A real pid + liveness probe would make the triage path mechanical.
+
+**Closure (2026-05-28, `4c4ab85`):** `Run.pid` was already persisted by the v0.9.x post-startup reconcile schema bump (`PRD.md:521` D-block). The remaining gap was orchestrator-side surfacing: the closure commit wires `defaultLivenessProbe(pid)` into `formatRunRow`'s `/conductor status` output, appending `· pid-gone` to running rows whose pid no longer exists. The wording is character-pinned (W3 string witness) and probe-call gated on `status === "running" && pid !== undefined` so terminal/queued/paused runs and legacy pre-pid records do not trigger probes. The richer `agent_status` slash command remains deferred — the inline suffix is a sufficient first-class signal for the witnessed triage class.
 
 ### 5. Builder anti-pattern: real-subprocess smoke tests with `--test-timeout=0` (`builder-ccl8` / `builder-ew9e` triage) — CLOSED 2026-05-21 (`85ee77f`)
 
