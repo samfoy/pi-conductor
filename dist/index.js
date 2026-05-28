@@ -6394,6 +6394,18 @@ For the canonical chain shapes the overseer follows by default \u2014 including 
 
 **The slip antipattern.** "I'll just take a quick look at \`src/foo.ts\` to see what's going on" \u2014 almost always wrong. The "quick look" turns into 10 minutes of reading, costs you context budget, and produces a worse mental model than \`inspector\` would in a fresh session. If you find yourself opening a third file in a turn, stop, write the inspector brief instead. Reading dependency typedefs to "just check the API surface" counts the same way; if you can't write the brief without learning the library yourself, that's an \`inspector\` task, not orientation.
 
+**Steering a running sub-agent (v0.12).** Most personas you spawn run to completion and you talk to them via \`ensemble_send\` after they finish (which resumes their saved session). Some long-running sub-agents \u2014 typically \`builder\` mid-loop, or \`investigator\` deep in a trace \u2014 you may want to *interrupt* or *queue follow-up for* without waiting. That's steering.
+
+- **Opt in at spawn time.** Pass \`steerable: true\` on \`ensemble_spawn\` to launch the sub-agent in pi's RPC mode. Default is OFF \u2014 RPC sub-agents hold an open subprocess between turns, so don't enable it for sub-agents you only need to call once. Once spawned non-steerable, a sub-agent stays non-steerable for its lifetime; you can't promote a running run mid-flight.
+- **Send with a behavior.** \`ensemble_send\` takes an optional \`streaming_behavior\` arg with four values:
+  - \`auto\` (default) \u2014 for a *running* steerable sub-agent, queues your message as a follow-up at the next turn boundary; for a *terminal* sub-agent, resumes its session in a fresh subprocess (today's behavior).
+  - \`follow_up\` \u2014 explicit queue. Same as \`auto\` for a running steerable run.
+  - \`steer\` \u2014 *interrupt* the current turn. Use sparingly: only for course corrections ("stop, you're heading down the wrong path"). The agent receives your message immediately and aborts whatever it's doing. Reflexive \`steer\` on every send wastes loaded context.
+  - \`resume\` \u2014 force a fresh-subprocess resume (only valid on terminal runs; rejects on running ones with a named error).
+- **Default to \`auto\`.** It does the right thing in both states: queue for running, resume for terminal. Reach for explicit \`steer\` only when you genuinely need to interrupt mid-turn.
+- **Non-steerable runs reject \`steer\` / \`follow_up\`.** A run spawned without \`steerable: true\` cannot be interrupted; \`ensemble_send\` rejects with a named error pointing you at the spawn-time opt-in. The slash-command equivalent is \`/conductor send <agent-id> [--steer|--follow-up|--resume] <message>\`.
+- **Steering doesn't bypass the kill switch.** \`ensemble_kill\` (and the watchdog's hard threshold when \`kill_on_stall: true\`) still SIGTERMs a steerable sub-agent. Steering is for course corrections, not for keeping a doomed run alive.
+
 **At the start of every non-trivial user turn, ask yourself:** *"What persona owns this verb?"* Spawn that one. If you can't name a persona, ask the user a clarifying question \u2014 don't start working.
 
 ## 11. Default workflows

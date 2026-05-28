@@ -114,8 +114,19 @@ branches, or the `/conductor send` slash command):
 
 1. **Run the gated live integration tests.** From the repo root:
    ```
-   CONDUCTOR_LIVE_TESTS=1 npm test
+   env -u CONDUCTOR_SUBAGENT CONDUCTOR_LIVE_TESTS=1 npm test
    ```
+   The `env -u CONDUCTOR_SUBAGENT` prefix is required when running
+   inside a pi-conductor sub-agent shell (e.g. a builder spawned
+   to land slice 6+). The conductor sub-agent extension reads
+   `CONDUCTOR_SUBAGENT` to suppress its own loading, but child pi
+   processes spawned by the live integration tests inherit the
+   var and refuse to act as steerable sub-agents themselves —
+   `tests/integration-rpc-spawn.test.ts` then sees zero
+   `agent_event` lines and times out. Strip the var and the live
+   tests work normally. Outside a sub-agent shell the prefix is
+   harmless.
+
    This exercises real `pi --mode rpc` subprocesses against your
    AWS-credentialled provider. The 4 cases in
    `tests/integration-rpc-spawn.test.ts` (initial-prompt injection,

@@ -57,7 +57,13 @@ test("parseSendCommand: empty arg → helpful error mentioning agent-id", () => 
   const out = parseSendCommand("");
   assert.equal(out.kind, "error");
   if (out.kind !== "error") return;
-  assert.match(out.message, /agent-id/);
+  // Slice 6 critic carry-forward 8a: pin against the specific
+  // missing-agent-id production string rather than the SEND_USAGE
+  // interpolation, which also fires from the missing-message branch
+  // and other error paths. The literal "missing agent-id." prefix is
+  // unique to the empty-arg / whitespace-only-arg branch in
+  // src/commands.ts:425.
+  assert.match(out.message, /^missing agent-id\./);
   assert.match(out.message, /usage/i);
 });
 
@@ -65,7 +71,8 @@ test("parseSendCommand: whitespace-only arg → helpful error mentioning agent-i
   const out = parseSendCommand("   ");
   assert.equal(out.kind, "error");
   if (out.kind !== "error") return;
-  assert.match(out.message, /agent-id/);
+  // Same scoping as the empty-arg test above (carry-forward 8a).
+  assert.match(out.message, /^missing agent-id\./);
 });
 
 // ── Edge cases beyond the slice-6 minimum acceptance — keep the

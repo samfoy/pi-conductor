@@ -502,3 +502,52 @@ test("buildConductorSystemPrompt: §1 — forward references the §1.5 tiny-acti
   assert.match(beforeS15, /§1\.5/);
   assert.match(beforeS15, /tiny.action/i);
 });
+
+// ── v0.12 closure: §10 steering addendum pins ──────────────────────────────
+//
+// Slice 7 of v0.12 wires `streaming_behavior` (on `ensemble_send`) and
+// per-spawn `steerable: true` (on `ensemble_spawn`) into the conductor
+// system prompt's §10 delegation playbook. Without this addendum the
+// LLM defaults to print-mode usage and never opts into steering.
+
+function section10(): string {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  const idx10 = out.indexOf("## 10.");
+  assert.ok(idx10 >= 0, "§10 heading must exist");
+  const idx11 = out.indexOf("## 11.", idx10);
+  assert.ok(idx11 > idx10, "§11 heading must follow §10");
+  return out.slice(idx10, idx11);
+}
+
+test("buildConductorSystemPrompt: §10 — names streaming_behavior verbatim (v0.12 steering addendum)", () => {
+  // The arg name is the LLM's only way to discover the steering surface.
+  // Pinning the verbatim spelling guards against well-meaning prose
+  // refactors that paraphrase "streaming behavior" or "steering mode".
+  assert.match(section10(), /streaming_behavior/);
+});
+
+test("buildConductorSystemPrompt: §10 — names the steer / follow_up / resume verbs verbatim", () => {
+  // The plan locks these as the four behaviors (auto + 3 explicit). The
+  // LLM must see the explicit verbs to invoke them; "auto" is the
+  // default and need not be pinned.
+  const s = section10();
+  assert.match(s, /\bsteer\b/);
+  assert.match(s, /follow_up/);
+  assert.match(s, /\bresume\b/);
+});
+
+test("buildConductorSystemPrompt: §10 — names steerable: true per-spawn opt-in verbatim", () => {
+  // The default is OFF (mirrors v0.10 kill_on_stall Q1). The LLM must
+  // see the per-spawn arg name to opt in. Pinning the verbatim spelling
+  // guards against "steerable=true" or "steerable mode" drift.
+  assert.match(section10(), /steerable: true/);
+});
+
+test("buildConductorSystemPrompt: §10 — ensemble_spawn and ensemble_send still named in the addendum (no regression)", () => {
+  // The two tools that gain new v0.12 args. The addendum must reference
+  // them by name so the LLM connects steerable: true to ensemble_spawn
+  // and streaming_behavior to ensemble_send.
+  const s = section10();
+  assert.match(s, /ensemble_spawn/);
+  assert.match(s, /ensemble_send/);
+});
