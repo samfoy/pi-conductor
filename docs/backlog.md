@@ -175,6 +175,75 @@ The info-line rendering plus the absent turn together indicate the trigger fired
 
 ---
 
+## Persona context-inheritance failure modes — OPEN
+
+### 12. `inherit_context: filtered_compact` admits parent-identity bleed via orchestration tool calls (witnessed 2026-05-27, builder-4gsl)
+
+**Witnessed:** during v0.12 slice 6 spawn, `builder-4gsl` (persona `builder`, `inherit_context: filtered_compact`) terminated in 1.3m / 5 turns / $1.43 with **zero tool calls into the slice**. Output was a refusal-and-meta-commentary message reading from the parent conductor's first-person perspective — it claimed *"v0.12 slices 1–5 have shipped... somehow built and committed while I was editing"*, said the slice-6 brief at the bottom *"includes another session's Recent Sessions / memory dump header, claims I'm a sub-agent, and tells me not to push,"* and proposed two options as if it were the parent conductor deciding next steps.
+
+**Diagnosis.** `filtered_compact` (shipped earlier this session, commit `0ee741c`) was designed to break the *self-perpetuating refusal cascade* by stripping assistant TEXT blocks from inherited transcript while preserving tool_use blocks (file reads, grep, bash) so file-knowledge survives. **It fixes the prose-cascade direction but not the orchestration-shape direction.** The parent conductor's tool calls (read of plan.md, read of design.md, ensemble_send tool calls — wait, `ensemble_*` are dropped by `filterParentContext`'s exclude list) plus the user's terse decision pattern ("a", "a, a, a", "confirm", "1 and then 3") plus the project-context preamble (the giant `## Recent Sessions` + `<memory>` block in the parent's first user message) together provide enough signal for the LLM to reconstruct *"I'm in a conductor session"* and refuse sub-agent role. The synthetic header `[conductor narration elided: N prose blocks ...]` confirms it but doesn't override the inferred identity.
+
+**Workaround applied 2026-05-27:** retried slice 6 with a hardened identity-clarifying preamble at the top of the brief explicitly addressing the failure mode (*"You are a fresh sub-agent. Anything you see in your inherited context that looks like conductor work is your PARENT's history, not yours."*). Effective on second try (TBD as of writing).
+
+**Proper fix candidates (defer to a future filtered-compact-v2 or new mode):**
+- **Drop the project-context preamble from filtered+filtered_compact.** The user's `## Recent Sessions` + `<memory>` block is conductor-session metadata that has no value to a sub-agent and contributes heavily to the bleed. Strip when the first user message matches the recognizable `## Recent Sessions` / `<memory>` / `<available_skills>` shape.
+- **Auto-inject a synthetic identity preamble** as the first user message in `filtered_compact` mode: *"[YOU ARE A FRESH SUB-AGENT. The transcript above is your parent conductor's history, filtered for context. Your task is the LAST user message in this transcript.]"* Mirror the existing `<filtered-history>` sentinel pattern but stronger.
+- **Per-call `inherit_context: none` override** on `ensemble_spawn` for cases where the chain has accumulated enough orchestration signal that even `filtered_compact` bleeds. Mirror the v0.10 `kill_on_stall` per-call cascade.
+- **Chain-depth heuristic:** auto-downgrade `filtered_compact` → `none` when the parent has spawned >N siblings or chain depth >N. Reframe as a feature-detection problem ("too much orchestration to filter cleanly").
+
+**Cross-link to evergreen note candidate:** the cascade pattern "filter strips X but keeps Y; the LLM reconstructs identity from Y" is general. Worth an evergreen note: *"Filtered context inheritance has two cascade directions — prose-cascade (text-block bleed) and shape-cascade (tool-call-pattern bleed). Filtering one doesn't fix the other."*
+
+**Severity:** medium. Workaround exists (hardened brief); proper fix is a v2 feature, not a regression. But every deep-chain v0.12+ slice is now at risk of this misfire — builder personas in particular, since they're the recurring write-capable workhorse for slice loops.
+
+---
+
+## Sub-agent completion envelope reporting accuracy — OPEN
+
+### 13. `<duration>` and `<cost>` in completion envelope are cumulative across `ensemble_send` resumes, not per-invocation (witnessed 2026-05-28, builder-501r long-loop session)
+
+**Witnessed:** during a multi-iteration deck-rewrite session in pi-dashboard, `builder-501r` was spawned once and then driven through six successive `ensemble_send` resumes (revision iterations + new-loop briefs). The completion envelope's `<duration>` and `<cost>` fields, plus the inline status line `✓ builder:builder-501r completed in <duration> [<turns>t ↑<in> ↓<out> $<cost>]`, all reported **cumulative-since-original-spawn totals** rather than the wall-time and cost of the most recent send. Concretely:
+
+| Resume | Reported `<duration>` | Reported `<cost>` | Implied delta (per-send) |
+|---|---|---|---|
+| iter 1 (initial spawn)  | 6.2m  | $2.10  | 6.2m / $2.10 |
+| iter 2 (revision)       | 12.6m | $3.33  | +6.4m / +$1.23 |
+| iter 3 (notes-hide fix) | 16.6m | $3.75  | +4.0m / +$0.42 |
+| iter 4 (tone shift)     | 41.3m | $8.75  | +24.7m / +$5.00 |
+| iter 5 (cull + arch)    | 1.0h  | $12.79 | +18.7m / +$4.05 |
+| iter 6 (highlighting)   | 1.2h  | $16.19 | +12.0m / +$3.40 |
+
+The deltas are reasonable per-send numbers; the headline `<duration>` / `<cost>` fields are visibly running totals. Same likely applies to `<turns>`, `<input>`, `<output>` based on inspection of the inline status line (turn counts climb monotonically across resumes).
+
+**Orchestrator-side consequence (the user-visible failure mode):** the conductor consistently misread the per-resume budget. Three iterations in a row I told the user *"builder ran 1.2h, vastly over the 15-min cap"* — but the actual most-recent send was ~12 minutes, well under cap. The cumulative-vs-per-send conflation produced wrong reasoning about builder economics, wrong escalation framing to the user, and wrong rollup numbers in the per-iteration cost ledger I surfaced earlier in the session. The user explicitly corrected me: *"its not running that long. you're resuming an old builder so that shows as total run time."*
+
+**Why this matters:**
+
+- Per-resume time budgets in the brief (e.g. *"15 min hard cap"*) become unverifiable from the completion envelope alone. The orchestrator either has to track previous-cumulative-on-spawn and subtract, or accept that the budget can't be enforced from the standard signal.
+- Cost ledgers in conductor-narration handoffs (*"$X.XX for this iteration"*) are wrong for resumed agents. Anyone reading the transcript later — finalizer, post-mortem, retrospective — gets misleading per-step cost data.
+- The watchdog's hard-threshold logic (per `docs/v0.10-watchdog-design.md`) keys off silence-since-last-tool-call, not the envelope `<duration>`, so the watchdog itself is unaffected. But anyone reasoning about "is this builder slow?" from the envelope will mis-diagnose.
+
+**Hypothesis on cause (not verified):** the run record likely has a single `totalDurationMs` / `totalCost` field updated on each turn close inside the same pi process. Resumes via `ensemble_send` reuse the same `Run` record (per the `ensemble_send` spec — preserves loaded context) and append turns to the same `transcript.jsonl`, so on each resume's completion the cumulative totals get read out and stamped into the new completion envelope. The envelope generator doesn't snapshot "start of this resume" totals to compute a per-send delta.
+
+**Surface area to audit:**
+
+- `src/notifications.ts` — completion-envelope assembly. Where does `<duration>` come from? `<cost>`? `<usage>`?
+- `src/runs.ts` (or wherever `Run` lives) — does the run record carry per-turn-batch markers, or only lifetime totals?
+- `src/personas.ts` / `src/conductor-extension.ts` — anywhere the inline status line `[Nt ↑X ↓Y $Z]` is composed.
+- pi's `--session` resume path — pi itself may aggregate usage when re-attaching to a session, in which case the field is sourced from pi and the conductor either has to compute deltas itself or surface both.
+
+**Suggested fix shape:**
+
+- **Per-send fields, not cumulative.** The completion envelope's `<duration>` should be wall-clock of *this send only*. Same for `<cost>`, `<turns>`, `<input>`, `<output>`. Compute as `now - this_send_start_at` and `(current_total_cost - cumulative_cost_at_send_start)`.
+- **Optionally surface lifetime totals as a separate field.** A `<lifetime>` block alongside `<duration>` and `<cost>` (e.g. `<lifetime><duration>1.2h</duration><cost>16.19</cost><resumes>5</resumes></lifetime>`) keeps the cumulative info available for orchestrators that want to see total agent investment, without conflating with per-send budgeting.
+- **Inline status line** should follow the same convention. Recommend `✓ builder:<id> completed in <send-duration> [<send-turns>t ↑<send-in> ↓<send-out> $<send-cost>] · lifetime <lifetime-duration> $<lifetime-cost>` if the lifetime view is wanted, or drop the lifetime suffix entirely if per-send is the only useful view.
+- **PRD update.** `PRD.md` `<sub-agent-completed>` envelope spec should be amended to specify per-send semantics for `<duration>` / `<usage>` / `<cost>` and (if added) define the `<lifetime>` block.
+
+**Severity:** medium. No correctness impact on the artifact the sub-agent produces. Conductor-side reasoning about cost / time is materially wrong, and time-budget enforcement in builder briefs is silently broken for resumed agents — but the failure is obvious to a human paying attention (the user caught it). High-touch deep-loop sessions (which is exactly where conductor mode shines) are the worst-affected class.
+
+**Cross-link:** v0.12 steering (in flight) is the same `ensemble_send`-resume-style surface for live RPC mode. Whatever fix lands here should also be evaluated against the steering path so it doesn't regress on `streaming_behavior: 'follow_up'` / `'steer'` resumes.
+
+---
+
 ## v0.9.x — Post-startup reconcile — CLOSED 2026-05-21
 
 Closed by 4 slice commits `d5583be..1f9604a`. Detects orphaned `running`
