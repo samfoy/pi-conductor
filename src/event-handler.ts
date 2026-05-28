@@ -136,6 +136,34 @@ export function applyEvent(run: Run, event: unknown): EventEffect {
     return UPDATED;
   }
 
+  // ── Backlog item 3 fix — tool_execution_update bump policy ───────────────────────
+  //
+  // Pi emits `tool_execution_update` events as a long-running tool
+  // produces output. Pre-fix, the watchdog's `lastEventAt` was only
+  // bumped on `message_end` / `tool_result_end` (and the slice-5
+  // RPC `response`); a long bash with multi-minute output buffering
+  // (e.g. piped through `tail -N` which holds output until the
+  // upstream pipe closes) emitted no `_end` events for 10+ minutes
+  // and the watchdog killed the run. See docs/backlog.md item 3
+  // (witness `builder-ccl8`).
+  //
+  // Asymmetry locked: `_update` bumps; `_start` and `_end` do not.
+  // `_start` is informational (a tool kicked off; no progress yet);
+  // `_end` fires alongside `tool_result_end` which already bumps.
+  // Mirrors slice-5's `response` / `extension_ui_request` bump-
+  // asymmetry pattern (see `bumpOnRpcLine` and the W2 mutation
+  // witness in tests/event-handler-rpc.test.ts), but for the
+  // mode-agnostic tool-execution event family.
+  //
+  // We do NOT push to `run.messages` here — these events may carry
+  // partial / streaming content and the canonical transcript only
+  // accepts complete AgentMessages from `message_end` /
+  // `tool_result_end`. The bump is the only side effect.
+  if (e.type === "tool_execution_update") {
+    run.lastEventAt = Date.now();
+    return UPDATED;
+  }
+
   return NONE;
 }
 

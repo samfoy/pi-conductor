@@ -462,3 +462,100 @@ test("applyEvent: no-op events leave run.lastEventAt unchanged", () => {
   applyEvent(run, { type: "tool_result_end" }); // missing message → NONE
   assert.equal(run.lastEventAt, 12345, "events that do not push to messages must not bump lastEventAt");
 });
+
+// ── Backlog item 3 fix — tool_execution_update bump policy ───────────────────────────────────────────────────────────────────────────────────────────────────────────
+//
+// Pi emits `tool_execution_*` events around long-running tool calls.
+// Watchdog observes Run.lastEventAt; pre-fix only `message_end` /
+// `tool_result_end` (and slice-5 `response` for RPC) bumped it. A
+// long bash with multi-minute output buffering (e.g. piped through
+// `tail -N` which holds output until the upstream pipe closes)
+// emitted no `_end` events for 10+ minutes — watchdog crossed the
+// hard threshold and killed `builder-ccl8`. Working as designed;
+// bad outcome (see docs/backlog.md item 3).
+//
+// Asymmetry locked: `_update` bumps; `_start` and `_end` do not.
+// `_start` is informational (a tool kicked off); the bump must come
+// when the tool produces visible progress (`_update`). `_end` fires
+// alongside `tool_result_end` which already bumps via the existing
+// branch — double-bumping would obscure the bump-source attribution.
+//
+// Mirrors slice-5's `response` / `extension_ui_request` bump-asymmetry
+// pattern (see tests/event-handler-rpc.test.ts) but for the universal
+// (mode-agnostic) tool-execution event family.
+
+test(
+  "applyEvent: tool_execution_update bumps lastEventAt to ~now (closes backlog item 3)",
+  () => {
+    // Positive pin. Mutation kill: removing the bump line in
+    // applyEvent's tool_execution_update branch reds this test.
+    const run = makeRun();
+    run.lastEventAt = run.startTime; // 1_700_000_000_000 — well in the past
+    const before = Date.now();
+    const r = applyEvent(run, { type: "tool_execution_update" });
+    const after = Date.now();
+    assert.deepEqual(r, { kind: "updated" }, "tool_execution_update returns UPDATED");
+    assert.ok(
+      run.lastEventAt >= before && run.lastEventAt <= after,
+      `lastEventAt ${run.lastEventAt} not within [${before}, ${after}] — bump missing`,
+    );
+  },
+);
+
+test(
+  "applyEvent: tool_execution_start does NOT bump lastEventAt (informational; no progress)",
+  () => {
+    // Negative pin. The asymmetry is load-bearing for the watchdog's
+    // ability to detect a hung tool call: a tool that started but
+    // never produced output (or for which pi never emitted updates)
+    // must still be flagged by the silence threshold. Mutating the
+    // applyEvent dispatch to bump on `_start` (e.g. by reusing the
+    // `_update` branch) reds this test.
+    const run = makeRun();
+    run.lastEventAt = 12345;
+    applyEvent(run, { type: "tool_execution_start" });
+    assert.equal(
+      run.lastEventAt,
+      12345,
+      "tool_execution_start MUST NOT bump lastEventAt — start is informational; no progress",
+    );
+  },
+);
+
+test(
+  "applyEvent: tool_execution_end does NOT bump lastEventAt (sibling tool_result_end carries the bump)",
+  () => {
+    // Negative pin. Pi emits `tool_execution_end` alongside the
+    // higher-level `tool_result_end`; the latter already bumps via
+    // the existing branch. Bumping in both paths would obscure the
+    // bump-source attribution and double-fire UPDATED notifications.
+    // Mutating applyEvent to bump on `_end` reds this test.
+    const run = makeRun();
+    run.lastEventAt = 12345;
+    applyEvent(run, { type: "tool_execution_end" });
+    assert.equal(
+      run.lastEventAt,
+      12345,
+      "tool_execution_end MUST NOT bump lastEventAt — sibling tool_result_end carries the bump",
+    );
+  },
+);
+
+test(
+  "applyEvent: tool_execution_update does not push partial state to run.messages",
+  () => {
+    // Defensive pin. tool_execution_update events may carry partial /
+    // streaming content; pushing them to run.messages would corrupt
+    // the canonical transcript (which expects complete AgentMessages
+    // from message_end / tool_result_end). The bump is the only side
+    // effect; the message channel stays clean.
+    const run = makeRun();
+    const lenBefore = run.messages.length;
+    applyEvent(run, { type: "tool_execution_update", payload: { partial: "chunk" } });
+    assert.equal(
+      run.messages.length,
+      lenBefore,
+      "tool_execution_update must not push to run.messages",
+    );
+  },
+);

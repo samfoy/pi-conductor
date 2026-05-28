@@ -733,6 +733,10 @@ function applyEvent(run, event) {
     run.lastEventAt = Date.now();
     return UPDATED;
   }
+  if (e.type === "tool_execution_update") {
+    run.lastEventAt = Date.now();
+    return UPDATED;
+  }
   return NONE;
 }
 function bumpOnRpcLine(_run, _now, evtType) {
