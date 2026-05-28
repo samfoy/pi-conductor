@@ -535,3 +535,53 @@ test("planSpawnPiArgs: persona with inherit_context=none never seeds (Q#16 flips
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── Item 12 candidate #3: per-call inherit_context override ──────────
+//
+// Pinning that planSpawnPiArgs honors `inheritContextOverride` above
+// `persona.inheritContext`. The resolver itself
+// (`resolveInheritContext`) is unit-tested at
+// tests/inherit-context-resolver.test.ts; these tests are the
+// integration pin that the override actually flows through to filter
+// selection at the spawn site.
+
+test("planSpawnPiArgs: per-call inherit_context='none' overrides persona inheritContext='filtered'", () => {
+  const dir = tmpSessionDir();
+  try {
+    // Persona says "filtered" but per-call override says "none" → no
+    // seeded session, fresh mode.
+    const result = planSpawnPiArgs({
+      persona: persona({ inheritContext: "filtered" }),
+      parentMessages: [user("u1"), user("u2")],
+      sessionDir: dir,
+      systemPrompt: "sys",
+      prompt: "go",
+      cwd: "/work",
+      inheritContextOverride: "none",
+    });
+    assert.equal(result.mode, "fresh");
+    assert.equal(result.seededSessionPath, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("planSpawnPiArgs: per-call inherit_context absent → falls back to persona inheritContext (filtered seeded)", () => {
+  const dir = tmpSessionDir();
+  try {
+    // No override: persona's "filtered" wins, seed is created.
+    const result = planSpawnPiArgs({
+      persona: persona({ inheritContext: "filtered" }),
+      parentMessages: [user("u1"), user("u2")],
+      sessionDir: dir,
+      systemPrompt: "sys",
+      prompt: "go",
+      cwd: "/work",
+      // inheritContextOverride: undefined
+    });
+    assert.equal(result.mode, "resume");
+    assert.ok(result.seededSessionPath);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

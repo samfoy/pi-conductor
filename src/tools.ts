@@ -262,6 +262,20 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
             "v0.12 steering opt-in. true → launch the sub-agent in `pi --mode rpc` so the conductor can `steer` / `follow_up` it mid-run via ensemble_send. false / omitted → today's `pi --mode json -p` print mode (no steering). Cascade per-call > project > user > built-in default false. Personas using ctx.ui.confirm/select must NOT be spawned with steerable=true (auto-cancelled on the conductor side).",
         }),
       ),
+      inherit_context: Type.Optional(
+        Type.Union(
+          [
+            Type.Literal("none"),
+            Type.Literal("filtered"),
+            Type.Literal("filtered_compact"),
+            Type.Literal("full"),
+          ],
+          {
+            description:
+              "Item 12 candidate #3 — per-call override for the persona's inherit_context frontmatter. Useful when the parent conductor's narration is contaminating the sub-agent's identity (see docs/backlog.md item 12 for the witnessed builder-4gsl bleed). Cascade: per-call > project config persona override > user config persona override > persona frontmatter. Default: persona frontmatter.",
+          },
+        ),
+      ),
     }),
     async execute(_id, params, signal, onUpdate) {
       const tmRange = validateTimeoutMinutes(params.timeout_minutes);
@@ -325,6 +339,11 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         killOnStall: params.kill_on_stall,
         softStallSeconds: params.stall_threshold_seconds,
         steerable,
+        // Item 12 candidate #3 — per-call inherit_context override.
+        // Wins above persona.inheritContext (which already merges
+        // project/user personaOverrides). Resolved in planSpawnPiArgs
+        // via resolveInheritContext. See src/inherit-context.ts.
+        inheritContextOverride: params.inherit_context,
         onUpdate: foreground ? () => {} : undefined, // foreground uses our own onUpdate below
         onComplete: foreground
           ? undefined

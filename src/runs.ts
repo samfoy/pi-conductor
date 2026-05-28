@@ -27,6 +27,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { noteAllocatedId } from "./gc/id-reuse.ts";
 import { applyEvent } from "./event-handler.ts";
 import { filterParentContext, filterParentContextCompact } from "./context-filter.ts";
+import { resolveInheritContext } from "./inherit-context.ts";
 import { seedSessionFile } from "./session-seed.ts";
 import { isNonSubstantiveFinalMessage } from "./substance-check.ts";
 import { resolveOnCompleteHook, type HookCascadeInput } from "./hook-cascade.ts";
@@ -38,6 +39,7 @@ import {
   isTerminal,
   toRunRecord,
   type ConductorConfig,
+  type ContextInheritance,
   type HookResult,
   type HookSpec,
   type Persona,
@@ -534,6 +536,15 @@ export interface PlanSpawnOptions {
    * defaults to `false` (print mode).
    */
   steerable?: boolean;
+  /**
+   * Item 12 candidate #3 — per-call `inherit_context` override from
+   * `ensemble_spawn`. When set, wins above `persona.inheritContext`
+   * (which is already merged with project / user `personaOverrides`
+   * upstream). When `undefined`, falls back to `persona.inheritContext`.
+   * Resolved via `resolveInheritContext` in `src/inherit-context.ts`.
+   * See `docs/backlog.md` item 12 for the witness.
+   */
+  inheritContextOverride?: ContextInheritance;
 }
 
 export interface PlanSpawnResult {
@@ -634,17 +645,27 @@ export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
   const { persona, parentMessages = [], sessionDir, systemPrompt, prompt, cwd, model, thinking, skillPaths } = opts;
   const steerable = opts.steerable === true;
 
+  // Item 12 candidate #3: per-call inherit_context wins above
+  // persona.inheritContext (which already merges project/user
+  // personaOverrides upstream via resolvePersonas). resolveInheritContext
+  // is a one-liner mirroring resolveKillOnStall / resolveSteerable shape;
+  // see src/inherit-context.ts.
+  const effectiveInheritContext = resolveInheritContext(
+    opts.inheritContextOverride,
+    persona,
+  );
+
   let seedMessages: AgentMessage[] | null = null;
   // Did filtering actually remove anything? If yes, prepend a sentinel
   // so the sub-agent knows its transcript is filtered and doesn't trust
   // dangling assistant references to dropped orchestration.
   let dropped = false;
   if (
-    (persona.inheritContext === "filtered" || persona.inheritContext === "filtered_compact") &&
+    (effectiveInheritContext === "filtered" || effectiveInheritContext === "filtered_compact") &&
     parentMessages.length > 0
   ) {
     const filterFn =
-      persona.inheritContext === "filtered_compact"
+      effectiveInheritContext === "filtered_compact"
         ? filterParentContextCompact
         : filterParentContext;
     const filtered = filterFn(parentMessages);
@@ -662,7 +683,7 @@ export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
     }
     const trimmed = trimLeadingNonUser(filtered);
     if (trimmed.length > 0) seedMessages = trimmed;
-  } else if (persona.inheritContext === "full" && parentMessages.length > 0) {
+  } else if (effectiveInheritContext === "full" && parentMessages.length > 0) {
     const trimmed = trimLeadingNonUser(parentMessages);
     if (trimmed.length > 0) seedMessages = trimmed;
   }
@@ -844,6 +865,16 @@ export interface SpawnOptions {
    * boolean.
    */
   steerable?: boolean;
+  /**
+   * Item 12 candidate #3 — per-call `inherit_context` override from
+   * the `ensemble_spawn` LLM tool arg. Wins above the persona's
+   * already-merged frontmatter (project / user `personaOverrides`
+   * are folded into `persona.inheritContext` upstream by
+   * `resolvePersonas`). `undefined` (the default) falls back to
+   * `persona.inheritContext`. See `src/inherit-context.ts` for the
+   * resolver and `docs/backlog.md` item 12 for the witness.
+   */
+  inheritContextOverride?: ContextInheritance;
 }
 
 /**
@@ -1035,6 +1066,11 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // argv shape matches the runPiSubprocess `steerable` we pass
     // below. Both must agree or pi will boot with the wrong stdio.
     steerable: opts.steerable === true,
+    // Item 12 candidate #3 — thread the per-call inherit_context
+    // override into planSpawnPiArgs so the filter selection (filtered
+    // / filtered_compact / full / none) honors the LLM tool's per-call
+    // arg above the persona's frontmatter. See src/inherit-context.ts.
+    inheritContextOverride: opts.inheritContextOverride,
   });
   // When we seeded a session, populate run.sessionPath up-front so callers
   // (e.g. ensemble_send mid-run) can find it without waiting for finalize().

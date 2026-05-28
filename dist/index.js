@@ -942,6 +942,11 @@ function filterParentContextCompact(messages, opts = {}) {
   return [header, ...out];
 }
 
+// src/inherit-context.ts
+function resolveInheritContext(perCall, persona) {
+  return perCall ?? persona.inheritContext;
+}
+
 // src/session-seed.ts
 import { randomBytes } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -1730,10 +1735,14 @@ function filteredHistorySentinel() {
 function planSpawnPiArgs(opts) {
   const { persona, parentMessages = [], sessionDir, systemPrompt, prompt, cwd, model, thinking, skillPaths } = opts;
   const steerable = opts.steerable === true;
+  const effectiveInheritContext = resolveInheritContext(
+    opts.inheritContextOverride,
+    persona
+  );
   let seedMessages = null;
   let dropped = false;
-  if ((persona.inheritContext === "filtered" || persona.inheritContext === "filtered_compact") && parentMessages.length > 0) {
-    const filterFn = persona.inheritContext === "filtered_compact" ? filterParentContextCompact : filterParentContext;
+  if ((effectiveInheritContext === "filtered" || effectiveInheritContext === "filtered_compact") && parentMessages.length > 0) {
+    const filterFn = effectiveInheritContext === "filtered_compact" ? filterParentContextCompact : filterParentContext;
     const filtered = filterFn(parentMessages);
     dropped = filtered.length !== parentMessages.length;
     if (!dropped) {
@@ -1746,7 +1755,7 @@ function planSpawnPiArgs(opts) {
     }
     const trimmed = trimLeadingNonUser(filtered);
     if (trimmed.length > 0) seedMessages = trimmed;
-  } else if (persona.inheritContext === "full" && parentMessages.length > 0) {
+  } else if (effectiveInheritContext === "full" && parentMessages.length > 0) {
     const trimmed = trimLeadingNonUser(parentMessages);
     if (trimmed.length > 0) seedMessages = trimmed;
   }
@@ -1955,7 +1964,12 @@ function spawnRun(opts) {
     // v0.12 slice 4 — thread the cascade-collapsed steerable so the
     // argv shape matches the runPiSubprocess `steerable` we pass
     // below. Both must agree or pi will boot with the wrong stdio.
-    steerable: opts.steerable === true
+    steerable: opts.steerable === true,
+    // Item 12 candidate #3 — thread the per-call inherit_context
+    // override into planSpawnPiArgs so the filter selection (filtered
+    // / filtered_compact / full / none) honors the LLM tool's per-call
+    // arg above the persona's frontmatter. See src/inherit-context.ts.
+    inheritContextOverride: opts.inheritContextOverride
   });
   if (plan.seededSessionPath) run.sessionPath = plan.seededSessionPath;
   const done = runPiSubprocess(run, plan.piArgs, {
@@ -5163,6 +5177,19 @@ function registerSpawnTool(pi, opts) {
         Type.Boolean({
           description: "v0.12 steering opt-in. true \u2192 launch the sub-agent in `pi --mode rpc` so the conductor can `steer` / `follow_up` it mid-run via ensemble_send. false / omitted \u2192 today's `pi --mode json -p` print mode (no steering). Cascade per-call > project > user > built-in default false. Personas using ctx.ui.confirm/select must NOT be spawned with steerable=true (auto-cancelled on the conductor side)."
         })
+      ),
+      inherit_context: Type.Optional(
+        Type.Union(
+          [
+            Type.Literal("none"),
+            Type.Literal("filtered"),
+            Type.Literal("filtered_compact"),
+            Type.Literal("full")
+          ],
+          {
+            description: "Item 12 candidate #3 \u2014 per-call override for the persona's inherit_context frontmatter. Useful when the parent conductor's narration is contaminating the sub-agent's identity (see docs/backlog.md item 12 for the witnessed builder-4gsl bleed). Cascade: per-call > project config persona override > user config persona override > persona frontmatter. Default: persona frontmatter."
+          }
+        )
       )
     }),
     async execute(_id, params, signal, onUpdate) {
@@ -5210,6 +5237,11 @@ function registerSpawnTool(pi, opts) {
         killOnStall: params.kill_on_stall,
         softStallSeconds: params.stall_threshold_seconds,
         steerable,
+        // Item 12 candidate #3 — per-call inherit_context override.
+        // Wins above persona.inheritContext (which already merges
+        // project/user personaOverrides). Resolved in planSpawnPiArgs
+        // via resolveInheritContext. See src/inherit-context.ts.
+        inheritContextOverride: params.inherit_context,
         onUpdate: foreground ? () => {
         } : void 0,
         // foreground uses our own onUpdate below
@@ -5924,7 +5956,8 @@ var SpawnQueue = class {
       onComplete: opts.onComplete,
       killOnStall: opts.killOnStall,
       softStallSeconds: opts.softStallSeconds,
-      steerable: opts.steerable
+      steerable: opts.steerable,
+      inheritContextOverride: opts.inheritContextOverride
     };
     this.pending.push(pending);
     return {
@@ -5977,7 +6010,8 @@ var SpawnQueue = class {
         onComplete: next.onComplete,
         killOnStall: next.killOnStall,
         softStallSeconds: next.softStallSeconds,
-        steerable: next.steerable
+        steerable: next.steerable,
+        inheritContextOverride: next.inheritContextOverride
       });
     }
   }

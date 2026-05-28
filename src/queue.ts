@@ -16,7 +16,7 @@ import {
   type SpawnOptions,
 } from "./runs.ts";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Persona, Run, SpawnMode, ThinkingLevel } from "./types.ts";
+import type { ContextInheritance, Persona, Run, SpawnMode, ThinkingLevel } from "./types.ts";
 import { emptyUsage } from "./types.ts";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -55,6 +55,12 @@ export interface PendingSpawn {
    * through to spawnRun on dequeue. See `SpawnOptions.steerable`.
    */
   steerable?: boolean;
+  /**
+   * Item 12 candidate #3 — per-call `inherit_context` override from
+   * `ensemble_spawn`. Threaded through to spawnRun on dequeue. See
+   * `SpawnOptions.inheritContextOverride` and `src/inherit-context.ts`.
+   */
+  inheritContextOverride?: ContextInheritance;
 }
 
 export class SpawnQueue {
@@ -154,6 +160,7 @@ export class SpawnQueue {
       killOnStall: opts.killOnStall,
       softStallSeconds: opts.softStallSeconds,
       steerable: opts.steerable,
+      inheritContextOverride: opts.inheritContextOverride,
     };
     this.pending.push(pending);
     return {
@@ -220,6 +227,7 @@ export class SpawnQueue {
         killOnStall: next.killOnStall,
         softStallSeconds: next.softStallSeconds,
         steerable: next.steerable,
+        inheritContextOverride: next.inheritContextOverride,
       });
     }
   }
