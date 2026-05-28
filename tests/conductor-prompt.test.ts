@@ -531,10 +531,17 @@ test("buildConductorSystemPrompt: §10 — names the steer / follow_up / resume 
   // The plan locks these as the four behaviors (auto + 3 explicit). The
   // LLM must see the explicit verbs to invoke them; "auto" is the
   // default and need not be pinned.
+  //
+  // Pin the verbs at their canonical *value-list bullet* position
+  // (`- \`<verb>\` —`) rather than as bare-word matches: a bare
+  // `\bsteer\b` matches *any* occurrence in §10 (e.g. line 233's
+  // "rejects `steer` / `follow_up`" or the kill-switch reminder),
+  // so renaming the canonical bullet leaves the bare-word test green.
+  // Anchoring to the bullet shape kills that drift (slice-7 critic Note 1).
   const s = section10();
-  assert.match(s, /\bsteer\b/);
-  assert.match(s, /follow_up/);
-  assert.match(s, /\bresume\b/);
+  assert.match(s, /^\s*- `steer` —/m);
+  assert.match(s, /^\s*- `follow_up` —/m);
+  assert.match(s, /^\s*- `resume` —/m);
 });
 
 test("buildConductorSystemPrompt: §10 — names steerable: true per-spawn opt-in verbatim", () => {
@@ -544,11 +551,16 @@ test("buildConductorSystemPrompt: §10 — names steerable: true per-spawn opt-i
   assert.match(section10(), /steerable: true/);
 });
 
-test("buildConductorSystemPrompt: §10 — ensemble_spawn and ensemble_send still named in the addendum (no regression)", () => {
-  // The two tools that gain new v0.12 args. The addendum must reference
-  // them by name so the LLM connects steerable: true to ensemble_spawn
-  // and streaming_behavior to ensemble_send.
+test("buildConductorSystemPrompt: §10 — ensemble_spawn / ensemble_send / ensemble_kill still named in the addendum (no regression)", () => {
+  // The three tools that gain new v0.12 args or are referenced as
+  // kill-switch in the steering block. The addendum must reference
+  // them by name so the LLM connects steerable: true to ensemble_spawn,
+  // streaming_behavior to ensemble_send, and the kill-switch reminder
+  // to ensemble_kill. Slice-7 critic Note 3: ensemble_kill landed in
+  // §10 but had no regression pin; if a future refactor drops the
+  // kill-switch reminder bullet, no test catches it. Now pinned.
   const s = section10();
   assert.match(s, /ensemble_spawn/);
   assert.match(s, /ensemble_send/);
+  assert.match(s, /ensemble_kill/);
 });

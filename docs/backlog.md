@@ -233,7 +233,7 @@ The critic's own preamble at `docs/v0.12-slice7-critic.md` is self-aware: *"in-c
 
 ## Sub-agent completion envelope reporting accuracy — OPEN
 
-### 13. `<duration>` and `<cost>` in completion envelope are cumulative across `ensemble_send` resumes, not per-invocation (witnessed 2026-05-28, builder-501r long-loop session)
+### 15. `<duration>` and `<cost>` in completion envelope are cumulative across `ensemble_send` resumes, not per-invocation (witnessed 2026-05-28, builder-501r long-loop session)
 
 **Witnessed:** during a multi-iteration deck-rewrite session in pi-dashboard, `builder-501r` was spawned once and then driven through six successive `ensemble_send` resumes (revision iterations + new-loop briefs). The completion envelope's `<duration>` and `<cost>` fields, plus the inline status line `✓ builder:builder-501r completed in <duration> [<turns>t ↑<in> ↓<out> $<cost>]`, all reported **cumulative-since-original-spawn totals** rather than the wall-time and cost of the most recent send. Concretely:
 
