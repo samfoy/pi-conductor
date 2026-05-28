@@ -284,9 +284,11 @@ The deltas are reasonable per-send numbers; the headline `<duration>` / `<cost>`
 
 ---
 
-## Sub-agent meta-spawn via inherited `ensemble_*` tools — OPEN
+## Sub-agent meta-spawn via inherited `ensemble_*` tools — CLOSED 2026-05-28 (`1ecacee`)
 
-### 14. Builder sub-agent fanned out via `ensemble_spawn` instead of executing the brief (witnessed 2026-05-28, builder-k6dc → builder-55a4 chain on backlog item 13's batch-A fix)
+### 14. Builder sub-agent fanned out via `ensemble_spawn` instead of executing the brief (witnessed 2026-05-28, builder-k6dc → builder-55a4 chain on backlog item 13's batch-A fix) — CLOSED 2026-05-28 (`1ecacee`)
+
+Closed by env-var gate: `CONDUCTOR_SUBAGENT=1` is already set on every spawned subprocess's env via `buildSubagentEnv` (`src/runs.ts:225`); `src/tools.ts: registerTools` now checks `process.env.CONDUCTOR_SUBAGENT === "1"` at registration time and skip-registers all 8 `ensemble_*` LLM tools when set. Sub-agents can no longer fan out via the LLM tool surface. Slash commands (`/conductor list | show | doctor | ...`) remain registered — those are conductor-meta UI, not LLM-callable. The original-witness chain text below documents the bug class for posterity.
 
 **Witnessed:** during batch A (item 13's read-only-enforcer fix), the parent conductor spawned `builder-k6dc` (builder, `inherit_context: filtered_compact`, foreground=false, 35-min budget) with the brief to implement the read-only-enforcer feature directly. `builder-k6dc` instead **called `ensemble_spawn` itself** to delegate to a sub-sub-agent `builder-55a4`, passing the brief through verbatim. `builder-k6dc` then exited at 2.8m / 7 turns / $1.96 with a fabricated-feeling-but-actually-real result envelope reporting *"Spawned `builder-55a4` (background, kill_on_stall=true, soft 180s, hard 600s, timeout 45m)... I'll wait for the completion notification."* The completion notification routed back to `builder-k6dc`'s already-terminated session and was lost to the parent conductor. `builder-55a4` ran for ~13 minutes and shipped the work cleanly as commit `5e467d5` (W1+W3 mutation teeth verified manually after the fact); it was then `killed` with `errorMessage: "shutdown: quit"` 46s after committing, presumably as the parent conductor session shut down or was reconfigured.
 
