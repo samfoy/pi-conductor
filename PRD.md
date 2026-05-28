@@ -337,6 +337,32 @@ When any sub-agent ends — foreground or background — a folded summary card r
 
 Identical XML shape to team-mode's `<task-notification>`. The user has validated this pattern works for keeping the LLM aware of completions; we just additionally render it as a visible card instead of as raw XML.
 
+### Per-send semantics for `<duration>` / `<usage>` / `<cost>` (item 15)
+
+The top-level `<duration>` / `<usage>` / `<cost>` tags reflect the **most recent invocation only** — the initial spawn OR the most recent `ensemble_send` resume. They are NOT cumulative across resumes.
+
+When the run has been resumed at least once (`resumeCount >= 1`), the envelope additionally carries an optional `<lifetime>` block with the cumulative-since-original-spawn totals plus a `<resumes>N</resumes>` counter:
+
+```xml
+<sub-agent-completed>
+  <agent-id>builder-501r</agent-id>
+  <persona>builder</persona>
+  <status>completed</status>
+  <duration>12.0m</duration>
+  <usage><turns>8</turns><input>1400</input><output>3200</output><cost>3.4000</cost></usage>
+  <lifetime>
+    <duration>1.2h</duration>
+    <usage><turns>34</turns><input>5800</input><output>14000</output><cost>16.1900</cost></usage>
+    <cost>16.1900</cost>
+    <resumes>5</resumes>
+  </lifetime>
+  <result>…</result>
+  <transcript>…</transcript>
+</sub-agent-completed>
+```
+
+Initial-spawn runs (no resumes yet) omit the `<lifetime>` block — per-send IS the lifetime, no need to repeat. The human-readable header line and the inline status line `✓ persona:id completed in <duration> [<usage>]` follow the same convention, with an optional `· lifetime <duration> $<cost>` suffix when resumed. See `docs/backlog.md` item 15 for the witness (`builder-501r`).
+
 ## Orchestrator behavior
 
 When the extension is loaded **and** the env var `PI_CONDUCTOR_MODE=1` is set (or a slash command `/conductor on` is run), the parent session receives an additional system prompt that teaches it:

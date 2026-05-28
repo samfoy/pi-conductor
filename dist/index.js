@@ -104,7 +104,10 @@ function toRunRecord(r) {
     systemPrompt: r.systemPrompt,
     steerable: r.steerable,
     streamingMode: r.streamingMode,
-    hookResult: r.hookResult
+    hookResult: r.hookResult,
+    thisInvocationStartedAt: r.thisInvocationStartedAt,
+    thisInvocationUsageBaseline: r.thisInvocationUsageBaseline,
+    resumeCount: r.resumeCount
   };
 }
 var TERMINAL_STATUSES = [
@@ -1849,6 +1852,16 @@ function recordSpawnedProc(run, proc) {
   run.proc = proc;
   run.pid = proc.pid;
 }
+function snapshotInvocationMarkers(run) {
+  run.thisInvocationStartedAt = Date.now();
+  run.thisInvocationUsageBaseline = {
+    turns: run.usage.turns,
+    input: run.usage.input,
+    output: run.usage.output,
+    cost: run.usage.cost
+  };
+  run.resumeCount = (run.resumeCount ?? 0) + 1;
+}
 function stampSpawnStreamingMode(run, steerable) {
   run.steerable = steerable;
   run.streamingMode = steerable ? "rpc" : "print";
@@ -1884,6 +1897,15 @@ function spawnRun(opts) {
     // enforcer when persona.readOnly is true. Captured ONCE here so
     // resumes re-pass the already-prepended body without doubling it.
     systemPrompt: assemblePersonaSystemPrompt(opts.persona),
+    // Item 15: per-invocation markers. Initial spawn IS the start of
+    // the (sole, so far) invocation, so:
+    //   - thisInvocationStartedAt mirrors startTime
+    //   - thisInvocationUsageBaseline is zeros (delta from spawn-time = lifetime)
+    //   - resumeCount = 0 (no resumes yet)
+    // sendToRun re-stamps these on every resume BEFORE the subprocess fires.
+    thisInvocationStartedAt: Date.now(),
+    thisInvocationUsageBaseline: { turns: 0, input: 0, output: 0, cost: 0 },
+    resumeCount: 0,
     // v0.10 watchdog (Slice 3) per-spawn overrides; undefined falls
     // back to conductor-wide defaults at watchdog dispatch time.
     killOnStall: opts.killOnStall,
@@ -2299,6 +2321,7 @@ function sendToRun(run, message, opts) {
     const cmdType = decision.strategy.kind === "rpc-steer" ? "steer" : "follow_up";
     if (opts.killOnStall !== void 0) run.killOnStall = opts.killOnStall;
     if (opts.softStallSeconds !== void 0) run.softStallSeconds = opts.softStallSeconds;
+    snapshotInvocationMarkers(run);
     const result = enqueueRpcSendWithAck(run, cmdType, trimmed);
     if (result.kind === "epipe") {
       return { kind: "rejected", reason: result.reason };
@@ -2327,6 +2350,7 @@ function sendToRun(run, message, opts) {
   run.lastToolCall = void 0;
   run.lastEventAt = Date.now();
   run.stalledSince = void 0;
+  snapshotInvocationMarkers(run);
   if (opts.killOnStall !== void 0) run.killOnStall = opts.killOnStall;
   if (opts.softStallSeconds !== void 0) run.softStallSeconds = opts.softStallSeconds;
   opts.registry.notify(run);
@@ -4837,11 +4861,30 @@ ${tail}`;
 function renderForegroundSummary(run) {
   const glyph = STATUS_GLYPH[run.status] ?? "\xB7";
   const verb = run.status === "completed" ? "completed" : run.status === "killed" ? "killed" : run.status === "timeout" ? "timed out" : run.status;
-  const elapsed = elapsedStr(run.startTime, run.finishedAt);
-  const usage = formatUsage(run.usage);
+  const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
+  const baseline = run.thisInvocationUsageBaseline ?? {
+    turns: 0,
+    input: 0,
+    output: 0,
+    cost: 0
+  };
+  const elapsed = elapsedStr(perSendStart, run.finishedAt);
+  const perSendUsage = {
+    turns: Math.max(0, run.usage.turns - baseline.turns),
+    input: Math.max(0, run.usage.input - baseline.input),
+    output: Math.max(0, run.usage.output - baseline.output),
+    cost: Math.max(0, run.usage.cost - baseline.cost)
+  };
+  const usage = formatUsage(perSendUsage);
   const usagePart = usage ? ` [${usage}]` : "";
   const lines = [];
-  lines.push(`${glyph} ${run.persona}:${run.id} ${verb} in ${elapsed}${usagePart}`);
+  let headline = `${glyph} ${run.persona}:${run.id} ${verb} in ${elapsed}${usagePart}`;
+  if ((run.resumeCount ?? 0) >= 1) {
+    const lifetimeElapsed = elapsedStr(run.startTime, run.finishedAt);
+    const lifetimeCost = run.usage.cost ? ` $${run.usage.cost.toFixed(3)}` : "";
+    headline += ` \xB7 lifetime ${lifetimeElapsed}${lifetimeCost}`;
+  }
+  lines.push(headline);
   if (run.status === "completed") {
     const final = getFinalText(run.messages);
     if (final) {
@@ -6156,10 +6199,36 @@ function installCompactionHook(pi, opts = {}) {
 }
 
 // src/notifications.ts
+function perSendNumbers(run) {
+  const startedAt = run.thisInvocationStartedAt ?? run.startTime;
+  const finishedAt = run.finishedAt ?? Date.now();
+  const baseline = run.thisInvocationUsageBaseline ?? {
+    turns: 0,
+    input: 0,
+    output: 0,
+    cost: 0
+  };
+  return {
+    durationMs: Math.max(0, finishedAt - startedAt),
+    turns: Math.max(0, run.usage.turns - baseline.turns),
+    input: Math.max(0, run.usage.input - baseline.input),
+    output: Math.max(0, run.usage.output - baseline.output),
+    cost: Math.max(0, run.usage.cost - baseline.cost)
+  };
+}
 function formatCompletionNotification(run) {
   const finalText = getFinalText(run.messages);
-  const usageStr = formatUsage(run.usage);
-  const elapsed = elapsedStr(run.startTime, run.finishedAt);
+  const perSend = perSendNumbers(run);
+  const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
+  const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
+  const elapsed = elapsedStr(perSendStart, perSendEnd);
+  const usageStr = formatUsage({
+    turns: perSend.turns,
+    input: perSend.input,
+    output: perSend.output,
+    cost: perSend.cost
+  });
+  const resumed = (run.resumeCount ?? 0) >= 1;
   const lines = [];
   lines.push("```xml");
   lines.push("<sub-agent-completed>");
@@ -6168,8 +6237,19 @@ function formatCompletionNotification(run) {
   lines.push(`  <status>${run.status}</status>`);
   lines.push(`  <duration>${elapsed}</duration>`);
   lines.push(
-    `  <usage><turns>${run.usage.turns}</turns><input>${run.usage.input}</input><output>${run.usage.output}</output><cost>${run.usage.cost.toFixed(4)}</cost></usage>`
+    `  <usage><turns>${perSend.turns}</turns><input>${perSend.input}</input><output>${perSend.output}</output><cost>${perSend.cost.toFixed(4)}</cost></usage>`
   );
+  if (resumed) {
+    const lifetimeElapsed = elapsedStr(run.startTime, run.finishedAt);
+    lines.push("  <lifetime>");
+    lines.push(`    <duration>${lifetimeElapsed}</duration>`);
+    lines.push(
+      `    <usage><turns>${run.usage.turns}</turns><input>${run.usage.input}</input><output>${run.usage.output}</output><cost>${run.usage.cost.toFixed(4)}</cost></usage>`
+    );
+    lines.push(`    <cost>${run.usage.cost.toFixed(4)}</cost>`);
+    lines.push(`    <resumes>${run.resumeCount ?? 0}</resumes>`);
+    lines.push("  </lifetime>");
+  }
   if (run.errorMessage) {
     lines.push(`  <error>${escapeXml(run.errorMessage)}</error>`);
   }
@@ -6187,14 +6267,21 @@ function formatCompletionNotification(run) {
   lines.push("</sub-agent-completed>");
   lines.push("```");
   lines.push("");
-  const header = headerLine(run, elapsed, usageStr);
+  const header = headerLine(run, elapsed, usageStr, resumed);
   return [header, "", ...lines].join("\n");
 }
-function headerLine(run, elapsed, usageStr) {
+function headerLine(run, elapsed, usageStr, resumed) {
   const glyph = run.status === "completed" ? "\u2713" : run.status === "killed" ? "\u25A0" : run.status === "timeout" ? "\u23F1" : "\u2717";
   const verb = run.status === "completed" ? "completed" : run.status === "killed" ? "killed" : run.status === "timeout" ? "timed out" : "failed";
   const usagePart = usageStr ? `, ${usageStr}` : "";
-  return `## ${glyph} \`${run.persona}\` ${verb} (${elapsed}${usagePart}) \u2014 id \`${run.id}\``;
+  let line = `## ${glyph} \`${run.persona}\` ${verb} (${elapsed}${usagePart}) \u2014 id \`${run.id}\``;
+  if (resumed) {
+    const lifetimeElapsed = elapsedStr(run.startTime, run.finishedAt);
+    const lifetimeCost = run.usage.cost ? `$${run.usage.cost.toFixed(3)}` : "";
+    const suffix = lifetimeCost ? ` \xB7 lifetime ${lifetimeElapsed} ${lifetimeCost}` : ` \xB7 lifetime ${lifetimeElapsed}`;
+    line += suffix;
+  }
+  return line;
 }
 function escapeXml(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");

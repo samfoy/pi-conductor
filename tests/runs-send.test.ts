@@ -287,3 +287,110 @@ test("sendToRun reseeds lastEventAt to now", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── Item 15 — sendToRun resets per-invocation markers BEFORE the new turn fires ──
+//
+// Witness: `builder-501r` had cumulative-since-original-spawn duration
+// and cost in its completion envelopes after each `ensemble_send`.
+// Locked design: `sendToRun` re-stamps `thisInvocationStartedAt` and
+// `thisInvocationUsageBaseline` BEFORE the new pi subprocess fires, and
+// increments `resumeCount`. The completion envelope reads these to
+// compute per-send deltas.
+
+test(
+  "sendToRun: spawn-resume path stamps thisInvocationStartedAt to now() before subprocess fires",
+  () => {
+    const dir = tmpDir();
+    try {
+      const sessionFile = join(dir, "abc.jsonl");
+      writeFileSync(sessionFile, "{}\n");
+      const reg = new RunRegistry();
+      const t0 = 1_700_000_000_000;
+      const t1 = 1_700_000_005_000;
+      const run = makeRun({
+        status: "completed",
+        startTime: t0,
+        finishedAt: t1,
+        sessionPath: sessionFile,
+        thisInvocationStartedAt: t0, // initial-spawn baseline
+      });
+      reg.register(run);
+
+      const beforeSend = Date.now();
+      const result = sendToRun(run, "another", {
+        registry: reg,
+        timeoutMs: 60_000,
+      });
+      const afterSend = Date.now();
+      assert.equal(result.kind, "started");
+
+      // The new invocation's start anchor must have advanced from the
+      // pre-existing (initial-spawn) value to the wall-clock at
+      // resume-fire time.
+      assert.ok(
+        run.thisInvocationStartedAt !== undefined &&
+          run.thisInvocationStartedAt >= beforeSend &&
+          run.thisInvocationStartedAt <= afterSend,
+        `expected thisInvocationStartedAt in [${beforeSend}, ${afterSend}], got ${run.thisInvocationStartedAt}`,
+      );
+      // The original spawn timestamp must NOT be touched.
+      assert.equal(run.startTime, t0, "startTime must remain the original-spawn anchor");
+
+      try { run.proc?.kill("SIGKILL"); } catch { /* already gone */ }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "sendToRun: spawn-resume path captures usage baseline + increments resumeCount",
+  () => {
+    const dir = tmpDir();
+    try {
+      const sessionFile = join(dir, "abc.jsonl");
+      writeFileSync(sessionFile, "{}\n");
+      const reg = new RunRegistry();
+      const run = makeRun({
+        status: "completed",
+        sessionPath: sessionFile,
+        // Cumulative usage from one prior invocation:
+        usage: { input: 100, output: 200, cacheRead: 0, cacheWrite: 0, cost: 1.5, turns: 4 },
+        // Initial-spawn baseline (zeros).
+        thisInvocationUsageBaseline: { turns: 0, input: 0, output: 0, cost: 0 },
+        resumeCount: 0,
+      });
+      reg.register(run);
+
+      const result = sendToRun(run, "another", {
+        registry: reg,
+        timeoutMs: 60_000,
+      });
+      assert.equal(result.kind, "started");
+
+      // Baseline snapshot must equal the pre-resume cumulative usage so
+      // future delta computation in the completion envelope is correct.
+      assert.deepEqual(run.thisInvocationUsageBaseline, {
+        turns: 4,
+        input: 100,
+        output: 200,
+        cost: 1.5,
+      });
+      // resumeCount incremented by exactly 1.
+      assert.equal(run.resumeCount, 1);
+      // Cumulative usage must NOT be reset — the run's totals stay live.
+      assert.deepEqual(run.usage, {
+        input: 100,
+        output: 200,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: 1.5,
+        turns: 4,
+      });
+
+      try { run.proc?.kill("SIGKILL"); } catch { /* already gone */ }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);

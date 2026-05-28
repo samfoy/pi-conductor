@@ -847,6 +847,34 @@ export function recordSpawnedProc(run: Run, proc: ChildProcess): void {
 }
 
 /**
+ * Item 15: re-stamp the per-invocation markers used by the completion
+ * envelope to compute per-most-recent-send `<duration>` / `<usage>` /
+ * `<cost>`. Called by `sendToRun` BEFORE the new turn fires (RPC steer,
+ * RPC follow_up, or spawn-resume) so the next terminal close has a
+ * fresh anchor to delta against.
+ *
+ * Contract:
+ *   - `thisInvocationStartedAt` ← `Date.now()` (wall-clock at re-fire)
+ *   - `thisInvocationUsageBaseline` ← deep-copy snapshot of the
+ *     four delta-relevant fields of `run.usage` AS-OF call time
+ *   - `resumeCount` ← `(prev ?? 0) + 1`
+ *
+ * Cumulative `run.usage` is NOT mutated; the run's lifetime totals
+ * stay live and the optional `<lifetime>` block in the envelope reads
+ * them directly.
+ */
+export function snapshotInvocationMarkers(run: Run): void {
+  run.thisInvocationStartedAt = Date.now();
+  run.thisInvocationUsageBaseline = {
+    turns: run.usage.turns,
+    input: run.usage.input,
+    output: run.usage.output,
+    cost: run.usage.cost,
+  };
+  run.resumeCount = (run.resumeCount ?? 0) + 1;
+}
+
+/**
  * v0.12 slice 3 — stamp `Run.steerable` and `Run.streamingMode`
  * immediately after the subprocess spawn returns. Pure helper extracted
  * from `runPiSubprocess` so the smoke pin in
@@ -929,6 +957,15 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // enforcer when persona.readOnly is true. Captured ONCE here so
     // resumes re-pass the already-prepended body without doubling it.
     systemPrompt: assemblePersonaSystemPrompt(opts.persona),
+    // Item 15: per-invocation markers. Initial spawn IS the start of
+    // the (sole, so far) invocation, so:
+    //   - thisInvocationStartedAt mirrors startTime
+    //   - thisInvocationUsageBaseline is zeros (delta from spawn-time = lifetime)
+    //   - resumeCount = 0 (no resumes yet)
+    // sendToRun re-stamps these on every resume BEFORE the subprocess fires.
+    thisInvocationStartedAt: Date.now(),
+    thisInvocationUsageBaseline: { turns: 0, input: 0, output: 0, cost: 0 },
+    resumeCount: 0,
     // v0.10 watchdog (Slice 3) per-spawn overrides; undefined falls
     // back to conductor-wide defaults at watchdog dispatch time.
     killOnStall: opts.killOnStall,
@@ -1741,6 +1778,11 @@ export function sendToRun(
     // subprocess is alive throughout.
     if (opts.killOnStall !== undefined) run.killOnStall = opts.killOnStall;
     if (opts.softStallSeconds !== undefined) run.softStallSeconds = opts.softStallSeconds;
+    // Item 15: re-stamp per-invocation markers BEFORE we touch the
+    // queue. RPC steering re-uses the same subprocess but the
+    // operator still expects per-most-recent-send accounting in the
+    // completion envelope when the run eventually terminates.
+    snapshotInvocationMarkers(run);
     const result = enqueueRpcSendWithAck(run, cmdType, trimmed);
     if (result.kind === "epipe") {
       return { kind: "rejected", reason: result.reason };
@@ -1782,6 +1824,10 @@ export function sendToRun(
   // against the *previous turn's* lastEventAt (resume-race bug fix).
   run.lastEventAt = Date.now();
   run.stalledSince = undefined;
+  // Item 15: re-stamp per-invocation markers BEFORE the new pi
+  // subprocess fires. The completion envelope reads these to compute
+  // per-most-recent-send <duration> / <usage> / <cost>.
+  snapshotInvocationMarkers(run);
   // v0.10 watchdog (Slice 3) per-send overrides. Replace prior values
   // when provided; leave the spawn-time values alone otherwise.
   if (opts.killOnStall !== undefined) run.killOnStall = opts.killOnStall;

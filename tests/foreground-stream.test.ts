@@ -256,3 +256,57 @@ test("renderForegroundSummary: usage and elapsed appear in the headline", () => 
   assert.match(out, /3t/);
   assert.match(out, /1\.2k/);
 });
+
+// ── Item 15 — inline status line per-send / lifetime split ──
+//
+// Witness: `builder-501r`'s inline status line
+// `✓ builder:builder-501r completed in 1.2h [N t ↑X ↓Y $Z]` reported
+// cumulative-since-original-spawn rather than per-most-recent-send.
+// Locked design (`docs/backlog.md` item 15): per-send numbers in the
+// brackets; optional ` · lifetime <duration> $<cost>` suffix when the
+// run has been resumed at least once.
+
+test("renderForegroundSummary: initial spawn (no resumes) omits ' · lifetime' suffix", () => {
+  const now = Date.now();
+  const run = makeRun({
+    status: "completed",
+    startTime: now - 14_000,
+    finishedAt: now,
+    usage: { ...emptyUsage(), turns: 3, input: 1200, output: 800, cost: 0.012 },
+    // No resumeCount / thisInvocationStartedAt set.
+  });
+  const out = renderForegroundSummary(run);
+  assert.doesNotMatch(out, /· lifetime/);
+});
+
+test(
+  "renderForegroundSummary: after a resume, brackets carry per-send numbers and ' · lifetime' suffix is appended",
+  () => {
+    const now = Date.now();
+    const run = makeRun({
+      status: "completed",
+      startTime: now - 3_600_000, // original spawn 1h ago
+      thisInvocationStartedAt: now - 720_000, // most-recent send started 12m ago
+      finishedAt: now,
+      resumeCount: 5,
+      thisInvocationUsageBaseline: { turns: 20, input: 5000, output: 4000, cost: 12.79 },
+      // Cumulative usage post-most-recent-send: 28t, 6.4k input, 7.2k output, $16.19
+      usage: { ...emptyUsage(), turns: 28, input: 6400, output: 7200, cost: 16.19 },
+    });
+    const out = renderForegroundSummary(run);
+    // Headline first line
+    const headline = out.split("\n")[0]!;
+    // Per-send brackets: 8t ↑1.4k ↓3.2k $3.400
+    assert.match(headline, /completed in 12\.0m/);
+    assert.match(headline, /\[8t/);
+    assert.match(headline, /\$3\.400/);
+    // Lifetime suffix
+    assert.match(headline, /· lifetime 1\.0h/);
+    assert.match(headline, /\$16\.190/);
+    // Cumulative numbers must NOT appear before the lifetime split.
+    const [perSendHalf] = headline.split(" · lifetime ");
+    assert.doesNotMatch(perSendHalf!, /1\.0h/);
+    assert.doesNotMatch(perSendHalf!, /28t/);
+    assert.doesNotMatch(perSendHalf!, /\$16\.190/);
+  },
+);

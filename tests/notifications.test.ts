@@ -351,3 +351,151 @@ test("formatStallNotification: emits transcript path", () => {
   assert.match(out, /<transcript>\/tmp\/oracle-abcd\/transcript\.jsonl<\/transcript>/);
 });
 
+// ── Item 15 — per-send <duration>/<usage>/<cost> + optional <lifetime> ──
+//
+// Witness: `builder-501r` ran 6 successive `ensemble_send` resumes;
+// the envelope reported cumulative-since-original-spawn totals
+// (1.2h / $16.19 at iter 6) instead of per-send deltas (~12m / $3.40).
+// These tests pin the locked design from `docs/backlog.md` item 15:
+//   - Initial spawn (`resumeCount` undefined OR 0): no `<lifetime>`
+//     block; `<duration>` / `<usage>` / `<cost>` ARE the lifetime
+//     numbers (because per-send == lifetime on initial spawn).
+//   - After >= 1 resume: `<duration>` / `<usage>` / `<cost>` reflect
+//     ONLY the most-recent invocation; `<lifetime>` block emitted with
+//     cumulative numbers + `<resumes>N</resumes>`.
+
+test("formatCompletionNotification: initial spawn (no resumes) omits <lifetime> block", () => {
+  const run = makeRun({
+    usage: { input: 100, output: 200, cacheRead: 0, cacheWrite: 0, cost: 1.5, turns: 4 },
+    // No resumeCount / thisInvocationStartedAt set — simulates a
+    // fresh-spawn run that has never been resumed.
+  });
+  const out = formatCompletionNotification(run);
+  assert.doesNotMatch(out, /<lifetime>/);
+  assert.doesNotMatch(out, /<resumes>/);
+});
+
+test("formatCompletionNotification: initial spawn with resumeCount=0 explicit also omits <lifetime>", () => {
+  const run = makeRun({
+    usage: { input: 100, output: 200, cacheRead: 0, cacheWrite: 0, cost: 1.5, turns: 4 },
+    resumeCount: 0,
+    thisInvocationStartedAt: T0, // matches startTime
+    thisInvocationUsageBaseline: { turns: 0, input: 0, output: 0, cost: 0 },
+  });
+  const out = formatCompletionNotification(run);
+  assert.doesNotMatch(out, /<lifetime>/);
+});
+
+test(
+  "formatCompletionNotification: after a resume, <duration> reports per-send wall-clock (not lifetime)",
+  () => {
+    // Lifetime: T0 .. T0 + 1h (3_600_000ms) — the original spawn ran
+    // 30m, then a resume kicked in at T0+30m and ran another 30m.
+    // Per-send <duration> should be 30m; lifetime should be 1.0h.
+    const run = makeRun({
+      startTime: T0,
+      thisInvocationStartedAt: T0 + 1_800_000, // resume began 30m in
+      finishedAt: T0 + 3_600_000, // 1h total
+      resumeCount: 1,
+      thisInvocationUsageBaseline: { turns: 4, input: 100, output: 200, cost: 1.5 },
+      usage: { input: 200, output: 400, cacheRead: 0, cacheWrite: 0, cost: 3.0, turns: 8 },
+    });
+    const out = formatCompletionNotification(run);
+    // Per-send duration should be 30m ("30.0m"); not 1h ("1.0h").
+    // elapsedStr renders 60s..3600s as "M.Mm" so 30m == "30.0m".
+    assert.match(out, /<duration>30\.0m<\/duration>/);
+    // The TOP-LEVEL <duration> (before the <lifetime> block) must NOT
+    // be the cumulative "1.0h". The lifetime block legitimately
+    // contains "1.0h" as the cumulative figure — we only check the
+    // top-level tag here.
+    const beforeLifetime = out.split("<lifetime>")[0]!;
+    assert.doesNotMatch(beforeLifetime, /<duration>1\.0h<\/duration>/);
+  },
+);
+
+test(
+  "formatCompletionNotification: after a resume, <usage> + <cost> tags carry per-send deltas (not cumulative)",
+  () => {
+    const run = makeRun({
+      resumeCount: 1,
+      thisInvocationStartedAt: T0 + 1_000,
+      thisInvocationUsageBaseline: { turns: 4, input: 100, output: 200, cost: 1.5 },
+      // Cumulative usage post-resume: 8 turns, 200 in, 400 out, $3.00
+      // Per-send delta: 4 turns, 100 in, 200 out, $1.50
+      usage: { input: 200, output: 400, cacheRead: 0, cacheWrite: 0, cost: 3.0, turns: 8 },
+    });
+    const out = formatCompletionNotification(run);
+    // The first <usage> block is per-send (delta); the lifetime
+    // block (below) carries cumulative.
+    assert.match(
+      out,
+      /<usage><turns>4<\/turns><input>100<\/input><output>200<\/output><cost>1\.5000<\/cost><\/usage>/,
+    );
+    // Cumulative numbers must NOT appear in the per-send block.
+    assert.doesNotMatch(
+      out,
+      /<usage><turns>8<\/turns><input>200<\/input><output>400<\/output><cost>3\.0000<\/cost><\/usage>(?![\s\S]*<\/lifetime>)/,
+    );
+  },
+);
+
+test(
+  "formatCompletionNotification: after a resume, <lifetime> block emitted with cumulative + resume count",
+  () => {
+    const run = makeRun({
+      startTime: T0,
+      thisInvocationStartedAt: T0 + 1_800_000,
+      finishedAt: T0 + 3_600_000,
+      resumeCount: 3,
+      thisInvocationUsageBaseline: { turns: 4, input: 100, output: 200, cost: 1.5 },
+      usage: { input: 200, output: 400, cacheRead: 0, cacheWrite: 0, cost: 3.0, turns: 8 },
+    });
+    const out = formatCompletionNotification(run);
+    // <lifetime> block exists
+    assert.match(out, /<lifetime>/);
+    assert.match(out, /<\/lifetime>/);
+    // Lifetime <duration> = full T0..finishedAt = 1.0h
+    assert.match(out, /<lifetime>[\s\S]*<duration>1\.0h<\/duration>[\s\S]*<\/lifetime>/);
+    // Lifetime <usage> + <cost> = cumulative values
+    assert.match(
+      out,
+      /<lifetime>[\s\S]*<usage><turns>8<\/turns><input>200<\/input><output>400<\/output>[\s\S]*<cost>3\.0000<\/cost><\/usage>[\s\S]*<\/lifetime>/,
+    );
+    // <resumes>3</resumes>
+    assert.match(out, /<lifetime>[\s\S]*<resumes>3<\/resumes>[\s\S]*<\/lifetime>/);
+  },
+);
+
+test(
+  "formatCompletionNotification: header line on resumed run uses per-send numbers",
+  () => {
+    const run = makeRun({
+      startTime: T0,
+      thisInvocationStartedAt: T0 + 1_800_000, // resume began 30m in
+      finishedAt: T0 + 3_600_000, // 1h total
+      resumeCount: 2,
+      thisInvocationUsageBaseline: { turns: 4, input: 100, output: 200, cost: 1.5 },
+      usage: { input: 200, output: 400, cacheRead: 0, cacheWrite: 0, cost: 3.0, turns: 8 },
+    });
+    const out = formatCompletionNotification(run);
+    // Header: ## ✓ `oracle` completed (30.0m, 4t ↑100 ↓400 $1.500) — id `oracle-abcd` · lifetime 1.0h $3.000
+    // The leading header line carries the per-send duration + the
+    // per-send usage formatted via formatUsage; the optional · lifetime
+    // suffix carries cumulative numbers when resumeCount >= 1.
+    const header = out.split("\n")[0]!;
+    // Split the header at the lifetime suffix to isolate the per-send
+    // half. The cumulative numbers legitimately appear AFTER " · lifetime".
+    const [perSendHalf, lifetimeHalf = ""] = header.split(" · lifetime ");
+    assert.match(perSendHalf, /completed/);
+    assert.match(perSendHalf, /30\.0m/);
+    assert.match(perSendHalf, /4t/);
+    assert.match(perSendHalf, /\$1\.500/);
+    // Per-send half must NOT contain cumulative leakage.
+    assert.doesNotMatch(perSendHalf, /1\.0h/);
+    assert.doesNotMatch(perSendHalf, /\$3\.000/);
+    // Lifetime half must carry the cumulative numbers.
+    assert.match(lifetimeHalf, /1\.0h/);
+    assert.match(lifetimeHalf, /\$3\.000/);
+  },
+);
+

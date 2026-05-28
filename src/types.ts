@@ -312,6 +312,45 @@ export interface Run {
    * to it from the watchdog enforcer.
    */
   stalledSince?: number;
+
+  /**
+   * Item 15: ms-since-epoch when the CURRENT invocation began
+   * (initial spawn OR most recent `ensemble_send` resume).
+   * Re-stamped by `spawnRun` and `sendToRun`. Used by the completion
+   * envelope to compute per-send `<duration>`. Distinct from
+   * `Run.startTime`, which is the original-spawn timestamp (lifetime).
+   * Optional for back-compat with pre-item-15 test fixtures and for
+   * Run records persisted to disk before the schema bump; readers
+   * fall back to `startTime` when undefined.
+   */
+  thisInvocationStartedAt?: number;
+
+  /**
+   * Item 15: snapshot of `Run.usage` (the four delta-relevant fields)
+   * captured at the moment the CURRENT invocation began. Used to
+   * compute per-send `<turns>` / `<input>` / `<output>` / `<cost>`
+   * as `current - baseline`. Re-stamped by `spawnRun` (zeros) and
+   * `sendToRun` (deep-copy of current usage at resume time).
+   * Optional for back-compat; readers fall back to zeros (i.e.
+   * cumulative-equals-per-send, which matches initial-spawn
+   * semantics).
+   */
+  thisInvocationUsageBaseline?: {
+    turns: number;
+    input: number;
+    output: number;
+    cost: number;
+  };
+
+  /**
+   * Item 15: number of times this Run has been resumed via
+   * `ensemble_send` (NOT counting the initial spawn). Reset to 0 by
+   * `spawnRun`; incremented by `sendToRun` BEFORE the new turn fires.
+   * Surfaced as `<resumes>` inside the optional `<lifetime>` block of
+   * the completion envelope when `>= 1`. Optional for back-compat;
+   * readers default to 0.
+   */
+  resumeCount?: number;
   /**
    * v0.10 watchdog (Slice 3) per-spawn override. When `true`, the
    * watchdog auto-kills this run on hard-stall. When undefined, the
@@ -589,6 +628,31 @@ export interface RunRecord {
    * and history surfaces.
    */
   hookResult?: HookResult;
+
+  /**
+   * Item 15: see `Run.thisInvocationStartedAt`. Persisted so a doctor
+   * surface or post-mortem reading the on-disk record can reproduce
+   * the per-send / lifetime split. Optional for back-compat with
+   * records written before this slice.
+   */
+  thisInvocationStartedAt?: number;
+
+  /**
+   * Item 15: see `Run.thisInvocationUsageBaseline`. Persisted so the
+   * record-on-disk preserves the per-send semantics. Optional.
+   */
+  thisInvocationUsageBaseline?: {
+    turns: number;
+    input: number;
+    output: number;
+    cost: number;
+  };
+
+  /**
+   * Item 15: see `Run.resumeCount`. Persisted so the record-on-disk
+   * preserves the resume count. Optional; absence implies 0.
+   */
+  resumeCount?: number;
 }
 
 export function toRunRecord(r: Run): RunRecord {
@@ -619,6 +683,9 @@ export function toRunRecord(r: Run): RunRecord {
     steerable: r.steerable,
     streamingMode: r.streamingMode,
     hookResult: r.hookResult,
+    thisInvocationStartedAt: r.thisInvocationStartedAt,
+    thisInvocationUsageBaseline: r.thisInvocationUsageBaseline,
+    resumeCount: r.resumeCount,
   };
 }
 

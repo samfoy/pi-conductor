@@ -15,10 +15,63 @@ import { compactEnvelopeBlock } from "./compaction-hook.ts";
 import { elapsedStr, formatUsage, getFinalText } from "./runs.ts";
 import type { Run } from "./types.ts";
 
+/**
+ * Item 15: per-send vs lifetime accounting for the completion envelope.
+ *
+ * `Run` carries three optional fields for the per-send / lifetime split:
+ *   - `thisInvocationStartedAt` (ms-since-epoch when the current
+ *     invocation began — initial spawn or most-recent resume).
+ *   - `thisInvocationUsageBaseline` (snapshot of `Run.usage` at the
+ *     moment the current invocation began).
+ *   - `resumeCount` (number of `ensemble_send` resumes; 0 for an
+ *     initial spawn).
+ *
+ * Readers fall back defensively when the fields are unset — see
+ * `docs/backlog.md` item 15 for the witness and locked design.
+ */
+interface PerSendNumbers {
+  /** Wall-clock ms of the current invocation only. */
+  durationMs: number;
+  /** Delta usage of the current invocation only. */
+  turns: number;
+  input: number;
+  output: number;
+  cost: number;
+}
+
+function perSendNumbers(run: Run): PerSendNumbers {
+  const startedAt = run.thisInvocationStartedAt ?? run.startTime;
+  const finishedAt = run.finishedAt ?? Date.now();
+  const baseline = run.thisInvocationUsageBaseline ?? {
+    turns: 0,
+    input: 0,
+    output: 0,
+    cost: 0,
+  };
+  return {
+    durationMs: Math.max(0, finishedAt - startedAt),
+    turns: Math.max(0, run.usage.turns - baseline.turns),
+    input: Math.max(0, run.usage.input - baseline.input),
+    output: Math.max(0, run.usage.output - baseline.output),
+    cost: Math.max(0, run.usage.cost - baseline.cost),
+  };
+}
+
 export function formatCompletionNotification(run: Run): string {
   const finalText = getFinalText(run.messages);
-  const usageStr = formatUsage(run.usage);
-  const elapsed = elapsedStr(run.startTime, run.finishedAt);
+  const perSend = perSendNumbers(run);
+  // Per-send <duration>: render via elapsedStr against a synthetic
+  // start anchor so the same formatter is used (s/m/h conventions).
+  const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
+  const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
+  const elapsed = elapsedStr(perSendStart, perSendEnd);
+  const usageStr = formatUsage({
+    turns: perSend.turns,
+    input: perSend.input,
+    output: perSend.output,
+    cost: perSend.cost,
+  });
+  const resumed = (run.resumeCount ?? 0) >= 1;
 
   const lines: string[] = [];
   lines.push("```xml");
@@ -28,9 +81,21 @@ export function formatCompletionNotification(run: Run): string {
   lines.push(`  <status>${run.status}</status>`);
   lines.push(`  <duration>${elapsed}</duration>`);
   lines.push(
-    `  <usage><turns>${run.usage.turns}</turns><input>${run.usage.input}</input>` +
-      `<output>${run.usage.output}</output><cost>${run.usage.cost.toFixed(4)}</cost></usage>`,
+    `  <usage><turns>${perSend.turns}</turns><input>${perSend.input}</input>` +
+      `<output>${perSend.output}</output><cost>${perSend.cost.toFixed(4)}</cost></usage>`,
   );
+  if (resumed) {
+    const lifetimeElapsed = elapsedStr(run.startTime, run.finishedAt);
+    lines.push("  <lifetime>");
+    lines.push(`    <duration>${lifetimeElapsed}</duration>`);
+    lines.push(
+      `    <usage><turns>${run.usage.turns}</turns><input>${run.usage.input}</input>` +
+        `<output>${run.usage.output}</output><cost>${run.usage.cost.toFixed(4)}</cost></usage>`,
+    );
+    lines.push(`    <cost>${run.usage.cost.toFixed(4)}</cost>`);
+    lines.push(`    <resumes>${run.resumeCount ?? 0}</resumes>`);
+    lines.push("  </lifetime>");
+  }
   if (run.errorMessage) {
     lines.push(`  <error>${escapeXml(run.errorMessage)}</error>`);
   }
@@ -50,12 +115,17 @@ export function formatCompletionNotification(run: Run): string {
   lines.push("```");
   lines.push("");
 
-  // Human-readable header
-  const header = headerLine(run, elapsed, usageStr);
+  // Human-readable header (per-send numbers; lifetime suffix when resumed)
+  const header = headerLine(run, elapsed, usageStr, resumed);
   return [header, "", ...lines].join("\n");
 }
 
-function headerLine(run: Run, elapsed: string, usageStr: string): string {
+function headerLine(
+  run: Run,
+  elapsed: string,
+  usageStr: string,
+  resumed: boolean,
+): string {
   const glyph =
     run.status === "completed" ? "✓" :
     run.status === "killed"    ? "■" :
@@ -65,7 +135,16 @@ function headerLine(run: Run, elapsed: string, usageStr: string): string {
     run.status === "killed"    ? "killed" :
     run.status === "timeout"   ? "timed out" : "failed";
   const usagePart = usageStr ? `, ${usageStr}` : "";
-  return `## ${glyph} \`${run.persona}\` ${verb} (${elapsed}${usagePart}) — id \`${run.id}\``;
+  let line = `## ${glyph} \`${run.persona}\` ${verb} (${elapsed}${usagePart}) — id \`${run.id}\``;
+  if (resumed) {
+    const lifetimeElapsed = elapsedStr(run.startTime, run.finishedAt);
+    const lifetimeCost = run.usage.cost ? `$${run.usage.cost.toFixed(3)}` : "";
+    const suffix = lifetimeCost
+      ? ` · lifetime ${lifetimeElapsed} ${lifetimeCost}`
+      : ` · lifetime ${lifetimeElapsed}`;
+    line += suffix;
+  }
+  return line;
 }
 
 /**

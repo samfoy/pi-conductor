@@ -106,12 +106,35 @@ export function renderForegroundSummary(run: Run): string {
     run.status === "completed" ? "completed" :
     run.status === "killed" ? "killed" :
     run.status === "timeout" ? "timed out" : run.status;
-  const elapsed = elapsedStr(run.startTime, run.finishedAt);
-  const usage = formatUsage(run.usage);
+  // Item 15: per-send numbers in the brackets; optional ` · lifetime
+  // <duration> $<cost>` suffix when the run has been resumed at least
+  // once. Initial-spawn runs have resumeCount undefined or 0, in
+  // which case per-send IS the lifetime.
+  const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
+  const baseline = run.thisInvocationUsageBaseline ?? {
+    turns: 0,
+    input: 0,
+    output: 0,
+    cost: 0,
+  };
+  const elapsed = elapsedStr(perSendStart, run.finishedAt);
+  const perSendUsage = {
+    turns: Math.max(0, run.usage.turns - baseline.turns),
+    input: Math.max(0, run.usage.input - baseline.input),
+    output: Math.max(0, run.usage.output - baseline.output),
+    cost: Math.max(0, run.usage.cost - baseline.cost),
+  };
+  const usage = formatUsage(perSendUsage);
   const usagePart = usage ? ` [${usage}]` : "";
   const lines: string[] = [];
 
-  lines.push(`${glyph} ${run.persona}:${run.id} ${verb} in ${elapsed}${usagePart}`);
+  let headline = `${glyph} ${run.persona}:${run.id} ${verb} in ${elapsed}${usagePart}`;
+  if ((run.resumeCount ?? 0) >= 1) {
+    const lifetimeElapsed = elapsedStr(run.startTime, run.finishedAt);
+    const lifetimeCost = run.usage.cost ? ` $${run.usage.cost.toFixed(3)}` : "";
+    headline += ` · lifetime ${lifetimeElapsed}${lifetimeCost}`;
+  }
+  lines.push(headline);
 
   if (run.status === "completed") {
     const final = getFinalText(run.messages);
