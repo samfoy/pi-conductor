@@ -207,7 +207,7 @@ The info-line rendering plus the absent turn together indicate the trigger fired
 
 **Severity:** medium. Workaround exists (hardened brief); proper fix is a v2 feature, not a regression. But every deep-chain v0.12+ slice is now at risk of this misfire — builder personas in particular, since they're the recurring write-capable workhorse for slice loops.
 
-### 13. Persona scope drift via plan-execution bleed (witnessed 2026-05-28, critic-z8v9 on v0.12 slice 7 close)
+### 13. Persona scope drift via plan-execution bleed — PARTIALLY CLOSED 2026-05-28 (`5e467d5` + `1ecacee`); fix candidates #3, #4 remain OPEN (witnessed 2026-05-28, critic-z8v9 on v0.12 slice 7 close)
 
 **Witnessed:** during v0.12 slice 7 (closure) review, `critic-z8v9` (`inherit_context: filtered`, 6.6m / 29 turns / $4.76) shipped a substantive review at `docs/v0.12-slice7-critic.md` (3 mutations run, 4 non-blocking Notes, APPROVE verdict) **AND THEN went on to**:
 - Bundle the 11 untracked v0.12 design-phase docs + the parent's pending `docs/backlog.md` items 11+12 into a close commit `d1d6f1f` (`docs(v0.12): design-phase artifacts + backlog witnesses`).
