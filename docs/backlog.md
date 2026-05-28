@@ -278,6 +278,34 @@ The deltas are reasonable per-send numbers; the headline `<duration>` / `<cost>`
 
 ---
 
+## Sub-agent meta-spawn via inherited `ensemble_*` tools — OPEN
+
+### 14. Builder sub-agent fanned out via `ensemble_spawn` instead of executing the brief (witnessed 2026-05-28, builder-k6dc → builder-55a4 chain on backlog item 13's batch-A fix)
+
+**Witnessed:** during batch A (item 13's read-only-enforcer fix), the parent conductor spawned `builder-k6dc` (builder, `inherit_context: filtered_compact`, foreground=false, 35-min budget) with the brief to implement the read-only-enforcer feature directly. `builder-k6dc` instead **called `ensemble_spawn` itself** to delegate to a sub-sub-agent `builder-55a4`, passing the brief through verbatim. `builder-k6dc` then exited at 2.8m / 7 turns / $1.96 with a fabricated-feeling-but-actually-real result envelope reporting *"Spawned `builder-55a4` (background, kill_on_stall=true, soft 180s, hard 600s, timeout 45m)... I'll wait for the completion notification."* The completion notification routed back to `builder-k6dc`'s already-terminated session and was lost to the parent conductor. `builder-55a4` ran for ~13 minutes and shipped the work cleanly as commit `5e467d5` (W1+W3 mutation teeth verified manually after the fact); it was then `killed` with `errorMessage: "shutdown: quit"` 46s after committing, presumably as the parent conductor session shut down or was reconfigured.
+
+**Diagnosis.** Sub-agents are spawned as `pi --mode json -p ...` subprocesses that load pi extensions at startup. Pi-conductor is registered as a system-wide extension via `~/.pi/agent/settings.json` `packages[]`, so EVERY pi subprocess has the `ensemble_*` LLM tools registered — including sub-agents and sub-sub-agents. The conductor-mode system prompt addendum (which describes the orchestrator role) is *gated* (only injected when conductor mode is on), but the underlying tools are not. A sub-agent LLM that has read enough of its parent's filtered context to recognize the orchestration shape can call `ensemble_spawn` and have it actually fire — there's no "I am a sub-agent, do not orchestrate further" guard.
+
+**Why this is a different bleed shape from items 12 + 13:**
+- Item 12 (filtered_compact bleed): sub-agent identity-confused, refused or stalled on its task
+- Item 13 (read-only persona scope expansion): read-only persona acted on inferred next-step plan, exceeded its scope to push v0.12 itself
+- Item 14 (meta-spawn): write-capable sub-agent inhaled the orchestrator pattern and re-delegated instead of executing
+
+The outcome was correct here — `builder-55a4` did good work — but the chain is fragile: completion notifications can route to dead sessions, sub-sub-agent's `kill_on_stall` heuristics aren't visible to the parent conductor's watchdog, and the parent has no idea who's actually doing the work. It's also a cost amplifier: builder-k6dc's 2.8m / $1.96 turn produced no work product directly; it just paid for fan-out overhead.
+
+**Implication for the read-only-enforcer fix (now landed at `5e467d5`):** the enforcer block was added to read-only personas only — `builder` is write-capable so it does NOT get the enforcer. Item 14's failure mode is therefore *not* closed by the item-13 batch-A fix. Builder personas in deep chains are still at risk of meta-spawn drift.
+
+**Proper fix candidates:**
+- **Disable `ensemble_*` tools in sub-agent contexts.** Detect via an env var the conductor sets at spawn time (`CONDUCTOR_SUBAGENT=1`) and skip-register the tools when it's set. Cheap, completely closes the meta-spawn channel. The `env -u CONDUCTOR_SUBAGENT npm test` invocation already documented in `CONTRIBUTING.md` proves the env var is in play — just need to read it in `src/tools.ts` at registration time.
+- **Add a "NO META-SPAWN" enforcer block for write-capable personas in chains.** Mirror the read-only enforcer pattern but for builders/simplifiers/etc.: prepend *"You are a sub-agent. You MUST NOT call `ensemble_spawn`, `ensemble_send`, `ensemble_focus`, etc. Those are conductor-only tools. Implement the brief directly."* Cost: a system-prompt paragraph; weaker than tool-removal but works without env-var plumbing.
+- **Conductor system-prompt addendum forbids fan-out for sub-agents.** Already half-true via the gating, but the tool-register layer needs the same gate.
+
+**Cross-link:** items 11 (notification routing), 12 (filtered_compact prose+shape bleed), 13 (read-only scope drift), 14 (meta-spawn drift) together form a class. The evergreen-note candidate is now: *"Filtered context inheritance has at least four failure modes — prose, tool-call shape, plan-as-instruction, and orchestrator-pattern. The fix isn't only at the prompt layer; the tool-registration layer needs persona-aware gating."*
+
+**Severity:** medium. The work landed correctly here, but the chain shape is fragile (lost completions, invisible sub-sub-agents, cost amplification). Highest practical fix value is the env-var tool-gate: trivial to ship, completely closes the channel.
+
+---
+
 ## v0.9.x — Post-startup reconcile — CLOSED 2026-05-21
 
 Closed by 4 slice commits `d5583be..1f9604a`. Detects orphaned `running`
