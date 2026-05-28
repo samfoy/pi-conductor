@@ -559,18 +559,35 @@ function trimLeadingNonUser(messages: AgentMessage[]): AgentMessage[] {
 
 /**
  * Synthetic <filtered-history> sentinel prepended to seeded sessions when
- * `filterParentContext` actually removed parent content. v0.8.1 (b)-strengthen:
- * the body now names the role-identity failure mode (third-person prose about
- * the persona) and gives the persona a deterministic anchor (the LAST user
- * message). See docs/v0.8.1-item1-design.md §4.
+ * `filterParentContext` actually removed parent content.
+ *
+ * v0.8.1 (b)-strengthen: the body names the role-identity failure mode
+ * (third-person prose about the persona) and gives the persona a
+ * deterministic anchor (the LAST user message). See
+ * docs/v0.8.1-item1-design.md §4.
+ *
+ * 2026-05-28 strengthen (item 12 candidate #2): the body now opens with
+ * an explicit "YOU ARE A FRESH SUB-AGENT" identity declaration and cites
+ * the witnessed builder-4gsl failure mode (refused its task entirely
+ * after inhaling parent identity from filtered context). See
+ * `docs/items-11-12-inspector-map.md` §5.2 + §6 rec 1.
  */
 function filteredHistorySentinel(): AgentMessage {
   return {
     role: "user",
     content:
       "<filtered-history>\n" +
-      "You are reading a FILTERED slice of a parent conductor's conversation. Two " +
-      "things to know before you act:\n\n" +
+      "[YOU ARE A FRESH SUB-AGENT.]\n\n" +
+      "The transcript above is your PARENT conductor's history, filtered for " +
+      "context. You did not perform any of those file reads, tool calls, or " +
+      "commits — they happened before you existed. Your task is the LAST " +
+      "user-role message in this transcript; everything before it is background.\n\n" +
+      "Sub-agents have inhaled parent identity in the past (witness: " +
+      "docs/backlog.md item 12, builder-4gsl 2026-05-27, refused its task " +
+      "entirely). If you find yourself thinking \"I already shipped this\" or " +
+      "\"I shouldn't be a sub-agent\", STOP. The brief at the bottom IS your " +
+      "task. Execute it.\n\n" +
+      "Two further notes on the filtered transcript above:\n\n" +
       "1. **Your brief is the LAST user-role message in this transcript.** Earlier " +
       "user-role messages were the parent conductor talking to itself or to its " +
       "user; they are framing, not your task. Treat them as background context.\n\n" +

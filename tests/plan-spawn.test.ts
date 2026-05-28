@@ -438,6 +438,54 @@ test("planSpawnPiArgs: strengthened sentinel names role-identity drift and the l
   }
 });
 
+// 2026-05-28 — item 12 candidate #2 strengthen.
+// W3 character-precise pin on the new opening identity declaration.
+// The exact bracketed token `[YOU ARE A FRESH SUB-AGENT.]` is the
+// regression-proof anchor: any drift on capitalization, period, or
+// brackets breaks identity priming and reds this test.
+test("planSpawnPiArgs: sentinel opens with the [YOU ARE A FRESH SUB-AGENT.] identity declaration (W3 string-pin)", () => {
+  const dir = tmpSessionDir();
+  try {
+    const result = planSpawnPiArgs({
+      persona: persona({ inheritContext: "filtered" }),
+      parentMessages: [
+        user("hi"),
+        assistantToolCall("ensemble_spawn", "tc1", "spawning"),
+      ],
+      sessionDir: dir,
+      systemPrompt: "sys",
+      prompt: "go",
+      cwd: "/work",
+    });
+    assert.ok(result.seededSessionPath);
+    const lines = readFileSync(result.seededSessionPath!, "utf8").trim().split("\n");
+    const entries = lines.slice(1).map((l) => JSON.parse(l));
+    const sentinelText: string =
+      typeof entries[0].message.content === "string"
+        ? entries[0].message.content
+        : entries[0].message.content[0].text;
+    // Character-precise: includes brackets, exact case, period.
+    assert.ok(
+      sentinelText.includes("[YOU ARE A FRESH SUB-AGENT.]"),
+      `sentinel must contain literal '[YOU ARE A FRESH SUB-AGENT.]'; got first 200 chars: ${sentinelText.slice(0, 200)}`,
+    );
+    // Citation to the witness so future readers can find the failure mode.
+    assert.match(
+      sentinelText,
+      /builder-4gsl/,
+      "sentinel must cite the witnessed failure mode (builder-4gsl) so the persona understands why this header exists",
+    );
+    // Item-13-style 'STOP' priming on the inhaled-identity-cascade pattern.
+    assert.match(
+      sentinelText,
+      /"I already shipped this"|I already shipped this/,
+      "sentinel must surface the inhaled-identity-cascade thought pattern verbatim so the persona recognizes it",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("planSpawnPiArgs: strengthened sentinel still fires on filtered+dropped (no regression)", () => {
   // Pins that the new content is what fires when the existing trigger
   // (filtered.length !== parentMessages.length OR identity walk) detects
