@@ -217,6 +217,11 @@ function validateAndBuild(raw, source, sourcePath) {
   const worktree = optionalBoolean(frontmatter, "worktree") ?? false;
   const timeoutMinutes = optionalNumber(frontmatter, "timeout_minutes") ?? 60;
   const readOnly = optionalBoolean(frontmatter, "read_only") ?? false;
+  const onCompleteHook = optionalStringAllowEmpty(frontmatter, "on_complete_hook");
+  const onCompleteHookTimeoutSeconds = optionalPositiveInteger(
+    frontmatter,
+    "on_complete_hook_timeout_seconds"
+  );
   if (timeoutMinutes <= 0 || timeoutMinutes > 24 * 60) {
     throw new Error(`timeout_minutes must be in (0, 1440]; got ${timeoutMinutes}`);
   }
@@ -237,7 +242,9 @@ function validateAndBuild(raw, source, sourcePath) {
     systemPrompt,
     source,
     sourcePath,
-    readOnly
+    readOnly,
+    onCompleteHook,
+    onCompleteHookTimeoutSeconds
   };
 }
 function requireString(fm, key) {
@@ -286,6 +293,22 @@ function optionalStringList(fm, key) {
     throw new Error(`field "${key}" must be a list of strings`);
   }
   return v.map((s) => s.trim()).filter(Boolean);
+}
+function optionalStringAllowEmpty(fm, key) {
+  const v = fm[key];
+  if (v === void 0) return void 0;
+  if (typeof v !== "string") {
+    throw new Error(`field "${key}" must be a string; got ${typeof v}`);
+  }
+  return v;
+}
+function optionalPositiveInteger(fm, key) {
+  const v = fm[key];
+  if (v === void 0) return void 0;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 1) {
+    throw new Error(`field "${key}" must be a positive integer; got ${String(v)}`);
+  }
+  return v;
 }
 async function loadPersonasFromDir(dir, source) {
   const personas = [];

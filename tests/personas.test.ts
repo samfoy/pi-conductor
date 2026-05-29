@@ -14,6 +14,7 @@ import {
   resolveBuiltinPersonasDir,
   resolvePersonas,
 } from "../src/personas.ts";
+import { readdir } from "node:fs/promises";
 
 test("parseFrontmatter: empty body without frontmatter", () => {
   const r = parseFrontmatter("hello world");
@@ -472,5 +473,157 @@ test("personas: v0.12 schema accepts no `steerable` field (parser does not exten
   } finally {
     if (origHome === undefined) delete process.env.HOME;
     else process.env.HOME = origHome;
+  }
+});
+
+// ── v0.11 slice 4: on_complete_hook frontmatter parsing ─────────────────
+//
+// Slice 1a extended `Persona` with `onCompleteHook` /
+// `onCompleteHookTimeoutSeconds` (typed-only). Slice 4 wires the
+// frontmatter parser to populate them. Empty string is preserved
+// (cascade resolver treats it as the explicit-disable sentinel).
+
+test("parseFrontmatter: on_complete_hook string scalar parses", () => {
+  const r = parseFrontmatter(
+    `---
+name: gated
+description: gated persona
+on_complete_hook: "npm test"
+---
+body`,
+  );
+  assert.equal(r.frontmatter.on_complete_hook, "npm test");
+});
+
+test("parseFrontmatter: on_complete_hook_timeout_seconds number parses", () => {
+  const r = parseFrontmatter(
+    `---
+name: gated
+description: gated persona
+on_complete_hook: "npm test"
+on_complete_hook_timeout_seconds: 600
+---
+body`,
+  );
+  assert.equal(r.frontmatter.on_complete_hook_timeout_seconds, 600);
+});
+
+test("Persona: on_complete_hook surfaces from frontmatter via validateAndBuild", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "conductor-slice4-frontmatter-"));
+  mkdirSync(join(tempDir, ".pi", "conductor", "personas"), { recursive: true });
+  writeFileSync(
+    join(tempDir, ".pi", "conductor", "personas", "gated.md"),
+    `---
+name: gated
+description: gated persona
+on_complete_hook: "npm test"
+on_complete_hook_timeout_seconds: 600
+---
+
+You are gated.
+`,
+    "utf8",
+  );
+  const origHome = process.env.HOME;
+  process.env.HOME = tempDir;
+  try {
+    const resolved = await resolvePersonas({ cwd: tempDir });
+    const p = resolved.personas.get("gated");
+    assert.ok(p, "persona resolves");
+    assert.equal(p!.onCompleteHook, "npm test");
+    assert.equal(p!.onCompleteHookTimeoutSeconds, 600);
+  } finally {
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+  }
+});
+
+test("Persona: on_complete_hook=\"\" preserves empty string (disable sentinel)", async () => {
+  // The cascade resolver short-circuits on empty `command`. The
+  // frontmatter parser must not coerce `""` to undefined — doing so
+  // would silently fall through to lower cascade layers.
+  const tempDir = mkdtempSync(join(tmpdir(), "conductor-slice4-empty-"));
+  mkdirSync(join(tempDir, ".pi", "conductor", "personas"), { recursive: true });
+  writeFileSync(
+    join(tempDir, ".pi", "conductor", "personas", "disabled.md"),
+    `---
+name: disabled
+description: hook explicitly off
+on_complete_hook: ""
+---
+
+You are disabled.
+`,
+    "utf8",
+  );
+  const origHome = process.env.HOME;
+  process.env.HOME = tempDir;
+  try {
+    const resolved = await resolvePersonas({ cwd: tempDir });
+    const p = resolved.personas.get("disabled");
+    assert.ok(p);
+    assert.equal(p!.onCompleteHook, "");
+  } finally {
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+  }
+});
+
+test("Persona: on_complete_hook_timeout_seconds rejects zero", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "conductor-slice4-zero-"));
+  mkdirSync(join(tempDir, ".pi", "conductor", "personas"), { recursive: true });
+  writeFileSync(
+    join(tempDir, ".pi", "conductor", "personas", "bad.md"),
+    `---
+name: bad
+description: bad persona
+on_complete_hook_timeout_seconds: 0
+---
+
+body
+`,
+    "utf8",
+  );
+  const origHome = process.env.HOME;
+  process.env.HOME = tempDir;
+  try {
+    const resolved = await resolvePersonas({ cwd: tempDir });
+    // Validation failure surfaces as a load error, not a thrown call.
+    assert.equal(
+      resolved.personas.get("bad"),
+      undefined,
+      "degenerate persona must not load",
+    );
+    assert.ok(
+      resolved.errors.some((e) =>
+        /on_complete_hook_timeout_seconds/.test(e.reason ?? ""),
+      ),
+      "error mentions the offending field",
+    );
+  } finally {
+    if (origHome === undefined) delete process.env.HOME;
+    else process.env.HOME = origHome;
+  }
+});
+
+test("personas: no shipped persona declares an active on_complete_hook frontmatter field", async () => {
+  // Slice 4 ships type plumbing; slice 5 lands recommendation
+  // comments inside personas/*.md. No shipped persona declares a
+  // hook in v0.11. This regression catches accidental drift.
+  const dir = builtinPersonasDir();
+  const files = (await readdir(dir)).filter((f) => f.endsWith(".md"));
+  for (const f of files) {
+    const body = readFileSync(join(dir, f), "utf8");
+    // Match an UNCOMMENTED YAML key. A leading `# ` (recommendation
+    // comment) is allowed; bare `on_complete_hook:` at the start of
+    // a frontmatter line is the regression.
+    const offending = body
+      .split("\n")
+      .filter((line) => /^\s*on_complete_hook(_timeout_seconds)?\s*:/.test(line));
+    assert.equal(
+      offending.length,
+      0,
+      `${f} declares on_complete_hook frontmatter (forbidden in slice 4): ${offending.join(" | ")}`,
+    );
   }
 });

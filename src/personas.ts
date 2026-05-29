@@ -205,6 +205,15 @@ function validateAndBuild(
   // spawn-time prompt assembly prepends READ_ONLY_PERSONA_ENFORCER
   // (see src/runs.ts: assemblePersonaSystemPrompt).
   const readOnly = optionalBoolean(frontmatter, "read_only") ?? false;
+  // v0.11 slice 4 — on_complete_hook frontmatter parsing. The Persona
+  // type field shipped in slice 1a; this slice populates it from
+  // YAML. Empty string is preserved (cascade resolver treats it as
+  // the explicit-disable sentinel — see hook-cascade.ts).
+  const onCompleteHook = optionalStringAllowEmpty(frontmatter, "on_complete_hook");
+  const onCompleteHookTimeoutSeconds = optionalPositiveInteger(
+    frontmatter,
+    "on_complete_hook_timeout_seconds",
+  );
 
   if (timeoutMinutes <= 0 || timeoutMinutes > 24 * 60) {
     throw new Error(`timeout_minutes must be in (0, 1440]; got ${timeoutMinutes}`);
@@ -229,6 +238,8 @@ function validateAndBuild(
     source,
     sourcePath,
     readOnly,
+    onCompleteHook,
+    onCompleteHookTimeoutSeconds,
   };
 }
 
@@ -287,6 +298,42 @@ function optionalStringList(fm: Record<string, unknown>, key: string): string[] 
     throw new Error(`field "${key}" must be a list of strings`);
   }
   return v.map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * v0.11 slice 4 — like {@link optionalString} but preserves the empty
+ * string. Required because the on_complete_hook cascade treats `""`
+ * as the explicit-disable sentinel; coercing it to `undefined` would
+ * silently fall through to lower cascade layers.
+ */
+function optionalStringAllowEmpty(
+  fm: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const v = fm[key];
+  if (v === undefined) return undefined;
+  if (typeof v !== "string") {
+    throw new Error(`field "${key}" must be a string; got ${typeof v}`);
+  }
+  return v;
+}
+
+/**
+ * v0.11 slice 4 — number field that must be a positive integer when
+ * present. Mirrors `validateHookTimeoutSeconds` in `tools.ts` (per-call
+ * boundary); applies the same rule at the persona-frontmatter boundary
+ * so a degenerate value fails fast at load time, not at hook fire time.
+ */
+function optionalPositiveInteger(
+  fm: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const v = fm[key];
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 1) {
+    throw new Error(`field "${key}" must be a positive integer; got ${String(v)}`);
+  }
+  return v;
 }
 
 // ── Loader ────────────────────────────────────────────────────────────
