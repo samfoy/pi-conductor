@@ -180,7 +180,7 @@ Closed by adding the "Mutation discipline" section to `docs/wdd.md`.
 
 **Why this is its own line item:** v0.10's threshold model assumes a live process going silent. A dead process going silent is a different failure mode and arguably shouldn't need an opt-in to clean up.
 
-### 2. `kill_on_stall` default for write-capable persona spawns
+### 2. `kill_on_stall` default for write-capable persona spawns — CLOSED 2026-05-29 (`e1d6859`)
 
 **Witnessed:** same incident. Default `kill_on_stall: false` is conservative for read-only personas (oracle/inspector/etc. — losing 12 minutes of advisory time is annoying but cheap). For write-capable personas (builder/simplifier) the same default is harsher: a zombie holds the `m_w_c=1` write slot, blocking the entire chain.
 
@@ -227,7 +227,7 @@ The info-line rendering plus the absent turn together indicate the trigger fired
 
 ## Persona context-inheritance failure modes — OPEN
 
-### 12. `inherit_context: filtered_compact` admits parent-identity bleed via orchestration tool calls — PARTIALLY CLOSED 2026-05-28 (`d961fb0` candidate #2; `8fb8077` candidate #3); candidates #1, #4 remain OPEN (witnessed 2026-05-27, builder-4gsl)
+### 12. `inherit_context: filtered_compact` admits parent-identity bleed via orchestration tool calls — PARTIALLY CLOSED 2026-05-28 (`d961fb0` candidate #2; `8fb8077` candidate #3); candidate #1 CLOSED 2026-05-29 (`e1d6859`); candidate #4 remains OPEN
 
 **Witnessed:** during v0.12 slice 6 spawn, `builder-4gsl` (persona `builder`, `inherit_context: filtered_compact`) terminated in 1.3m / 5 turns / $1.43 with **zero tool calls into the slice**. Output was a refusal-and-meta-commentary message reading from the parent conductor's first-person perspective — it claimed *"v0.12 slices 1–5 have shipped... somehow built and committed while I was editing"*, said the slice-6 brief at the bottom *"includes another session's Recent Sessions / memory dump header, claims I'm a sub-agent, and tells me not to push,"* and proposed two options as if it were the parent conductor deciding next steps.
 
