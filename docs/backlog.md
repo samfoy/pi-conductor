@@ -2,6 +2,37 @@
 
 Seeded from v0.8.1 Item 1 close (commit `423f500`, finalizer `finalizer-7794` ruling 2026-05-15).
 
+## v0.11 — on_complete_hook quality gates — CLOSED 2026-05-29
+
+Closed by 6 slice commits on top of origin/master (which already contained v0.12). Harness-enforced quality gates per persona via the 4-layer `on_complete_hook` cascade. New `hook_failed` terminal `RunStatus`. Parent-side enforcer runs the resolved hook after natural exit, captures output, and applies idempotent terminal override. UX surfaces across notifications, history, widget, doctor, and conductor-prompt.
+
+### Sub-issue → SHA closure map
+
+| Slice | Description | SHA | Commit subject |
+|---|---|---|---|
+| 1a | `hook_failed` RunStatus + consumer-case audit | `31fb4bd` | `feat(hooks): add hook_failed RunStatus + consumer-case audit` |
+| 1b | Pure cascade resolver (`resolveOnCompleteHook`, 4-layer `HookCascadeInput`) | `bffa16f` | `feat(hooks): pure cascade resolver for on_complete_hook` |
+| 2 | Parent-side enforcer + `forceTerminate` hook-kill branch | `35f4dd3` | `feat(hooks): parent-side enforcer + forceTerminate hook-kill` |
+| 3 | Per-call args on `ensemble_spawn` / `ensemble_send` | `7b4b8b4` | `feat(hooks): per-call on_complete_hook args on ensemble_spawn/send` |
+| 4 | Persona frontmatter + config cascade layers | `bb2ac6a` | `feat(hooks): persona frontmatter + config cascade layers` |
+| 5 | UX surfaces + §11 prompt addendum | `35025f8` | `feat(hooks): UX surfaces + section 11 prompt addendum` |
+
+### Test-count delta
+
+973 (baseline `181b199`) → 1369 at HEAD `35025f8` (+396 net; includes v0.11 slice tests + intervening bug-bash commits). 11 skipped, 0 failing.
+
+### Decision log entries locked
+
+R8 (external `record.json` consumers must handle `hook_failed` as failure-class terminal) and R9 (`final.md` mtime precedes hook wall-time) locked in `PRD.md` decision log 2026-05-29.
+
+### Critic gates
+
+- Slice 5 scoped critic gate on `src/conductor-prompt.ts` §11 addendum: REJECTED once (W2 toothless — `≤3` regex matched pre-existing chain-diagram occurrences; tightened to `≤3-iteration loop semantics`). PASS on second run.
+
+### Verifier
+
+Manual verification 2026-05-29: 1369 tests / 0 fail / 11 skipped; `tsc --noEmit` clean; `hook_failed` in all required source files; no active frontmatter hooks in shipped personas.
+
 ## v0.10.x — Watchdog follow-ups — OPEN
 
 Captured 2026-05-21 during v0.11 slice 1a builder run (`builder-mtpt` zombie observation).
