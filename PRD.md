@@ -571,10 +571,19 @@ When `inherit_context: filtered`, before launching the sub-agent we serialize a 
 - User-facing: `/conductor send <agent-id> [--steer|--follow-up|--resume] <message>` slash command; the focused-stream overlay's existing `s` keybinding routes through the same surface, so a running steerable sub-agent now accepts inline sends.
 - 8 slice commits (`3f73d9d` slice 1 → v0.12 closure); 7 vertical slices total + this closure commit. Design `docs/v0.12-steering-design.md`; plan `docs/v0.12-steering-plan.md`. Closes PRD Open question #6's last open edge (mid-run conductor → sub-agent direction). Sub-agent → conductor mid-run messaging stays a v2 line item.
 
+### v0.13 — Worktree-per-persona isolation — _shipped_
+- `worktree: true` in persona frontmatter spawns the sub-agent in an isolated git worktree at `<gitRoot>/.worktrees/conductor-wt/<run-id>/`. The sub-agent’s `--cwd` is overridden to the worktree path; the parent working tree is untouched.
+- Non-git cwds fall back gracefully to shared cwd with a warning (no regression).
+- Brazil-safe placement: worktree is inside `<gitRoot>` which is inside the workspace root; `brazil-build`’s `find_workspace_directory_up` succeeds (proven by direct test against `/workplace/$USER/Rosie/`).
+- `finalize` removes the worktree best-effort on terminal; GC `delete` cleans up orphans via `RunRecord.worktreePath`.
+- `builder.md` and `simplifier.md` default to `worktree: true`.
+- New module `src/worktree.ts`; git env vars stripped from child processes to prevent pre-commit hook contamination.
+- 1 commit `3b45a28`; 28 new tests; design `docs/v0.13-worktree-design.md`.
+
 ### v0.10+ — v2 ideas — _planned_
 - Run-record GC (open question #12).
 - `inherit_skills: true` (port parent skill catalog into child prompt).
-- Worktree per persona (`worktree: true` in frontmatter).
+- Worktree per persona (`worktree: true` in frontmatter). **Shipped v0.13.**
 - Transient (in-process) runtime for read-only personas.
 - Project-shareable persona library (a "marketplace" of `.md` files).
 - Sub-agent → conductor mid-run messaging (analogous to pi-intercom).
