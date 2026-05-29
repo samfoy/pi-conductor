@@ -564,3 +564,28 @@ test("buildConductorSystemPrompt: §10 — ensemble_spawn / ensemble_send / ense
   assert.match(s, /ensemble_send/);
   assert.match(s, /ensemble_kill/);
 });
+
+
+// ── v0.11 slice 5: §11 hook_failed addendum ────────────────────────────
+
+function section11(): string {
+  const prompt = buildConductorSystemPrompt({ personas: [makePersona("oracle", "second opinion")], maxConcurrent: 4 });
+  const match = prompt.match(/§11[\s\S]*$/);
+  return match ? match[0] : "";
+}
+
+test("conductor-prompt: §11 contains hook_failed handling paragraph", () => {
+  assert.match(section11(), /hook_failed.*handling/i);
+  assert.match(section11(), /hook_failed/);
+});
+
+test("conductor-prompt: hook_failed paragraph references <=3-iteration loop cap", () => {
+  const s = section11();
+  assert.match(s, /≤3-iteration loop semantics|same.*≤3.*loop/i);
+  assert.match(s, /loop|iteration/i);
+});
+
+test("conductor-prompt: hook_failed paragraph forbids spawning fresh critic", () => {
+  const s = section11();
+  assert.match(s, /do not spawn.*critic|not.*spawn.*fresh.*critic/i);
+});

@@ -6,6 +6,7 @@
  */
 
 import { existsSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { resolvePersonas } from "./personas.ts";
@@ -14,6 +15,7 @@ import {
   projectConfigPath,
   userConfigPath,
 } from "./config.ts";
+import { resolveCloseHook } from "./runs.ts";
 import type { RunRegistry } from "./runs.ts";
 import type { SpawnQueue } from "./queue.ts";
 import type { PersonaResolution } from "./types.ts";
@@ -292,6 +294,36 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
   // v0.9.x Slice 4: post-startup reconcile section.
   lines.push("");
   lines.push("## Post-startup reconcile");
+
+  // v0.11 slice 5: Hooks section.
+  lines.push("");
+  lines.push("## Hooks");
+  if (resolved.personas.size === 0) {
+    lines.push("  (no personas — nothing to check)");
+  } else {
+    let anyHook = false;
+    for (const [, p] of resolved.personas) {
+      const hookSpec = p.onCompleteHook !== undefined
+        ? { command: p.onCompleteHook, timeoutSeconds: p.onCompleteHookTimeoutSeconds }
+        : undefined;
+      const hook = resolveCloseHook(opts.cwd, p.name, undefined, hookSpec);
+      if (hook) {
+        anyHook = true;
+        const timeoutStr = hook.timeoutSeconds !== undefined ? ` (timeout: ${hook.timeoutSeconds}s)` : "";
+        const sourceStr = hook.source ? ` [${hook.source}]` : "";
+        const pathOk = isBinaryOnPath(hook.command);
+        const pathWarn = pathOk ? "" : " ⚠️ binary not found on PATH";
+        lines.push(`  ${p.name}: ${hook.command}${timeoutStr}${sourceStr}${pathWarn}`);
+      } else {
+        lines.push(`  ${p.name}: (none)`);
+      }
+    }
+    if (!anyHook) {
+      lines.push("  no hooks configured (all personas: none)");
+    }
+  }
+
+  lines.push("");
   if (opts.lastReconcile === undefined) {
     lines.push("  last run:              never (no reconcile this session)");
   } else {
@@ -385,4 +417,23 @@ function formatBytes(n: number): string {
   if (mb < 1024) return `${mb.toFixed(1)} MB`;
   const gb = mb / 1024;
   return `${gb.toFixed(2)} GB`;
+}
+
+/**
+ * v0.11 slice 5 — lightweight PATH probe for the first whitespace-
+ * delimited token of a hook command. Uses `command -v` (POSIX) rather
+ * than `which` (not always present). Returns `true` when the check
+ * passes (binary found) or is indeterminate (shell built-in, piped
+ * command, `execSync` error). Only returns `false` when the probe
+ * definitively reports the binary is NOT on PATH.
+ */
+function isBinaryOnPath(command: string): boolean {
+  const bin = command.trim().split(/\s+/)[0];
+  if (!bin || bin.startsWith("/")) return true; // absolute path — no PATH check needed
+  try {
+    execSync(`command -v ${JSON.stringify(bin)}`, { stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
 }

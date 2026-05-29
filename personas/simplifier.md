@@ -89,3 +89,20 @@ If the SHAs don't match, a sibling write-capable spawn (builder or simplifier) c
 ## Source
 
 Adapted from autoloop's `autosimplify/simplifier` and `autosimplify/scoper` roles, merged. Stripped event emissions; kept the scope-discipline-as-contract rule and the behavior-preservation-or-revert rule.
+
+---
+
+## v0.11 on_complete_hook recommendation
+
+<!--
+Consider setting `on_complete_hook` in project config or user config for this persona:
+
+Cheap rerun (fast feedback, catches type errors):
+  personaOverrides.simplifier.onCompleteHook: "npx tsc --noEmit"
+
+Higher-confidence gate (full test + type check):
+  personaOverrides.simplifier.onCompleteHook: "npm test --silent && npx tsc --noEmit"
+
+Do NOT set `npm test` as the hook for this repo (pi-conductor itself) —
+the host pre-commit already runs `npm test`; running it twice wastes ~15s per slice.
+-->

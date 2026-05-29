@@ -2652,6 +2652,7 @@ function elapsedStr(start, end) {
 
 // src/doctor.ts
 import { existsSync as existsSync6 } from "node:fs";
+import { execSync } from "node:child_process";
 import { homedir as homedir4 } from "node:os";
 import { join as join7 } from "node:path";
 
@@ -3118,6 +3119,31 @@ async function buildDoctorReport(opts) {
   }
   lines.push("");
   lines.push("## Post-startup reconcile");
+  lines.push("");
+  lines.push("## Hooks");
+  if (resolved.personas.size === 0) {
+    lines.push("  (no personas \u2014 nothing to check)");
+  } else {
+    let anyHook = false;
+    for (const [, p] of resolved.personas) {
+      const hookSpec = p.onCompleteHook !== void 0 ? { command: p.onCompleteHook, timeoutSeconds: p.onCompleteHookTimeoutSeconds } : void 0;
+      const hook = resolveCloseHook(opts.cwd, p.name, void 0, hookSpec);
+      if (hook) {
+        anyHook = true;
+        const timeoutStr = hook.timeoutSeconds !== void 0 ? ` (timeout: ${hook.timeoutSeconds}s)` : "";
+        const sourceStr = hook.source ? ` [${hook.source}]` : "";
+        const pathOk = isBinaryOnPath(hook.command);
+        const pathWarn = pathOk ? "" : " \u26A0\uFE0F binary not found on PATH";
+        lines.push(`  ${p.name}: ${hook.command}${timeoutStr}${sourceStr}${pathWarn}`);
+      } else {
+        lines.push(`  ${p.name}: (none)`);
+      }
+    }
+    if (!anyHook) {
+      lines.push("  no hooks configured (all personas: none)");
+    }
+  }
+  lines.push("");
   if (opts.lastReconcile === void 0) {
     lines.push("  last run:              never (no reconcile this session)");
   } else {
@@ -3184,6 +3210,16 @@ function formatBytes(n) {
   const gb = mb / 1024;
   return `${gb.toFixed(2)} GB`;
 }
+function isBinaryOnPath(command) {
+  const bin = command.trim().split(/\s+/)[0];
+  if (!bin || bin.startsWith("/")) return true;
+  try {
+    execSync(`command -v ${JSON.stringify(bin)}`, { stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // src/history.ts
 var EXCERPT_MAX_CHARS = 120;
@@ -3227,6 +3263,9 @@ function buildHistoryReport(deps, opts) {
         const excerpt = truncate(collapseWhitespace(final), EXCERPT_MAX_CHARS);
         lines.push(`      \u2192 "${excerpt}"`);
       }
+    } else if (r.status === "hook_failed") {
+      const hfMsg = r.hookResult ? `hook_failed: ${r.hookResult.command} exit ${r.hookResult.exitCode ?? "signal"}` : "hook_failed";
+      lines.push(`      \u2192 ${truncate(collapseWhitespace(hfMsg), EXCERPT_MAX_CHARS)}`);
     } else if (r.errorMessage) {
       const msg = r.errorMessage;
       const isOrphan = msg.startsWith("orphaned:");
@@ -6174,7 +6213,7 @@ function formatRow(r, theme, nowMs, wdCfg) {
   const glyph = statusGlyph(r.status, theme);
   const name = theme.fg("accent", r.persona) + theme.fg("dim", `:${r.id.split("-").pop() ?? r.id}`);
   const elapsed = theme.fg("dim", elapsedStr(r.startTime, r.finishedAt));
-  const activity = r.status === "queued" ? theme.fg("dim", " (queued)") : r.status === "paused" ? theme.fg("warning", " (paused)") : r.lastToolCall ? theme.fg("dim", ` \u2192 ${r.lastToolCall}`) : r.status === "running" ? theme.fg("dim", " starting\u2026") : "";
+  const activity = r.status === "queued" ? theme.fg("dim", " (queued)") : r.status === "paused" ? theme.fg("warning", " (paused)") : r.hookExecuting ? theme.fg("warning", " \xB7 hook") : r.lastToolCall ? theme.fg("dim", ` \u2192 ${r.lastToolCall}`) : r.status === "running" ? theme.fg("dim", " starting\u2026") : "";
   const usage = r.usage.turns > 0 ? theme.fg("muted", ` [${formatUsage(r.usage)}]`) : "";
   const stall = formatStallSegment(r, theme, nowMs, wdCfg);
   return `${glyph} ${name} ${elapsed}${activity}${stall}${usage}`;
@@ -6379,6 +6418,21 @@ function formatCompletionNotification(run) {
   if (run.errorMessage) {
     lines.push(`  <error>${escapeXml(run.errorMessage)}</error>`);
   }
+  if (run.hookResult) {
+    const h = run.hookResult;
+    const hookElapsed = elapsedStr(run.finishedAt - h.durationMs, run.finishedAt);
+    lines.push("  <hook>");
+    lines.push(`    <command>${escapeXml(h.command)}</command>`);
+    lines.push(`    <exit-code>${h.exitCode ?? "signal"}</exit-code>`);
+    lines.push(`    <duration>${hookElapsed}</duration>`);
+    lines.push(`    <log-path>${escapeXml(h.logPath)}</log-path>`);
+    if (h.tailText.trim()) {
+      lines.push(
+        `    <tail bytes="${h.tailBytes}" lines="${h.tailLines}">${escapeXml(h.tailText)}</tail>`
+      );
+    }
+    lines.push("  </hook>");
+  }
   if (run.nonSubstantiveFinal) {
     lines.push(
       `  <warning reason="${run.nonSubstantiveFinal.reason}">${escapeXml(run.nonSubstantiveFinal.message)}</warning>`
@@ -6397,8 +6451,8 @@ function formatCompletionNotification(run) {
   return [header, "", ...lines].join("\n");
 }
 function headerLine(run, elapsed, usageStr, resumed) {
-  const glyph = run.status === "completed" ? "\u2713" : run.status === "killed" ? "\u25A0" : run.status === "timeout" ? "\u23F1" : "\u2717";
-  const verb = run.status === "completed" ? "completed" : run.status === "killed" ? "killed" : run.status === "timeout" ? "timed out" : "failed";
+  const glyph = run.status === "completed" ? "\u2713" : run.status === "killed" ? "\u25A0" : run.status === "timeout" ? "\u23F1" : run.status === "hook_failed" ? "\u2297" : "\u2717";
+  const verb = run.status === "completed" ? "completed" : run.status === "killed" ? "killed" : run.status === "timeout" ? "timed out" : run.status === "hook_failed" ? "hook failed" : "failed";
   const usagePart = usageStr ? `, ${usageStr}` : "";
   let line = `## ${glyph} \`${run.persona}\` ${verb} (${elapsed}${usagePart}) \u2014 id \`${run.id}\``;
   if (resumed) {
@@ -6776,6 +6830,8 @@ Review-only
 
 **Verifier briefs MUST be self-contained.** \`verifier\` runs with \`inherit_context: none\` (Q#16 audit, v0.8.1) \u2014 it boots with no parent transcript, no inherited file reads, no diff visibility. A brief like *"verify the previous slice"* or *"verify the claim"* is unrunnable; the verifier will return CANNOT VERIFY. Every verifier brief MUST explicitly include: (1) **the claim** being verified, stated concretely and testably (e.g. *"adds NaN guard to \`add()\`; returns 0 if either operand is NaN"*); (2) **the files changed**, with paths and ideally the commit SHA or inline diff; (3) **the strongest existing check the producer ran** (test command, lint command, build target) so verifier can re-run it; (4) **acceptance criteria** the verifier should weigh the claim against. The same self-containment requirement applies to any \`inherit_context: none\` persona (\`oracle\` is the other one) \u2014 see \xA76 \u2014 but verifier is the recurring closer in \xA711's bug-fix and perf chains, so the rule is pinned here.
 
+
+**\`hook_failed\` handling.** When a sub-agent terminates with \`<status>hook_failed</status>\`, the conductor's recorded \`<hook><exit-code>\` and \`<tail>\` carry the harness-enforced gate result. Default routing: \`ensemble_send(producer_id, "hook failed with: <tail>; revise per these results")\`, capped at the same \u22643-iteration loop semantics as \`builder \u21C4 critic\`. Do NOT spawn a fresh \`critic\` \u2014 the hook is a stronger, mechanically-grounded signal than a critic review. After 3 hook_failed iterations, escalate to the user with the failing command and tail, the same way you\u2019d escalate a stuck critic loop.
 **Breaking the chain.** Default chains are not laws. Depart from them \u2014 *with explicit acknowledgment* \u2014 only when:
 
 - **Single-paragraph user question.** No chain; answer from meta-docs and orientation bash.

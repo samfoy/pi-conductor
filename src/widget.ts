@@ -114,7 +114,7 @@ export function mountEnsembleWidget(
   };
 }
 
-function formatRow(
+export function formatRow(
   r: Run,
   theme: any,
   nowMs?: number,
@@ -128,11 +128,13 @@ function formatRow(
       ? theme.fg("dim", " (queued)")
       : r.status === "paused"
         ? theme.fg("warning", " (paused)")
-        : r.lastToolCall
-          ? theme.fg("dim", ` → ${r.lastToolCall}`)
-          : r.status === "running"
-            ? theme.fg("dim", " starting…")
-            : "";
+        : r.hookExecuting
+          ? theme.fg("warning", " · hook") // v0.11 slice 5: in-flight hook glyph
+          : r.lastToolCall
+            ? theme.fg("dim", ` → ${r.lastToolCall}`)
+            : r.status === "running"
+              ? theme.fg("dim", " starting…")
+              : "";
   const usage =
     r.usage.turns > 0 ? theme.fg("muted", ` [${formatUsage(r.usage)}]`) : "";
   // v0.10 Slice 4: stall indicator. Sourced from classifyStall (pure)

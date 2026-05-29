@@ -94,6 +94,13 @@ export function buildHistoryReport(deps: HistoryDeps, opts: HistoryOpts): string
         const excerpt = truncate(collapseWhitespace(final), EXCERPT_MAX_CHARS);
         lines.push(`      → "${excerpt}"`);
       }
+    } else if (r.status === "hook_failed") {
+      // v0.11 slice 5 — distinct label so hook_failed is not confused
+      // with `failed` (pi subprocess crash) in history listings.
+      const hfMsg = r.hookResult
+        ? `hook_failed: ${r.hookResult.command} exit ${r.hookResult.exitCode ?? "signal"}`
+        : "hook_failed";
+      lines.push(`      → ${truncate(collapseWhitespace(hfMsg), EXCERPT_MAX_CHARS)}`);
     } else if (r.errorMessage) {
       const msg = r.errorMessage;
       // v0.9.x Slice 4: orphaned: prefix gets a distinct glyph so users

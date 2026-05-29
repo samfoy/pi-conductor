@@ -326,3 +326,42 @@ test("buildHistoryReport: killed run with non-orphan errorMessage does NOT rende
   assert.ok(!out.includes("⎘"), `did not expect orphan glyph in:\n${out}`);
   assert.match(out, /user requested/);
 });
+
+
+// ── v0.11 slice 5: hook_failed row format ────────────────────────────────
+
+test("history: hook_failed runs render distinct row with hook_failed label", () => {
+  const r = rec({
+    id: "builder-hook1",
+    persona: "builder",
+    status: "hook_failed",
+    hookResult: {
+      passed: false,
+      command: "npm test",
+      exitCode: 2,
+      durationMs: 4_000,
+      logPath: "/tmp/hook.log",
+      tailText: "2 failed",
+      tailBytes: 8,
+      tailLines: 1,
+      failureKind: "exited",
+    },
+  });
+  const deps = makeDeps([{ id: r.id, record: r }]);
+  const out = buildHistoryReport(deps, { limit: 10 });
+  assert.match(out, /hook_failed/);
+  assert.match(out, /npm test/);
+  assert.match(out, /exit 2/);
+  assert.doesNotMatch(out, /→ "/);
+});
+
+test("history: hook_failed row without hookResult still labels correctly", () => {
+  const r = rec({
+    id: "builder-hook2",
+    persona: "builder",
+    status: "hook_failed",
+  });
+  const deps = makeDeps([{ id: r.id, record: r }]);
+  const out = buildHistoryReport(deps, { limit: 10 });
+  assert.match(out, /hook_failed/);
+});

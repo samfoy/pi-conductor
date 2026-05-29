@@ -687,3 +687,62 @@ test("buildDoctorReport: post-startup reconcile lists per-record errors and unre
     teardown(fx);
   }
 });
+
+// ── v0.11 slice 5: Hooks section in doctor ───────────────────────────────
+
+test("doctor: lists resolved hooks per persona with cascade source", async () => {
+  const fx = setup();
+  try {
+    // Write a project config that declares a hook for the "oracle" persona.
+    writeFileSync(
+      join(fx.projectDir, ".pi", "conductor.json"),
+      JSON.stringify({
+        personaOverrides: {
+          oracle: { onCompleteHook: "echo gate-passed", onCompleteHookTimeoutSeconds: 30 },
+        },
+      }),
+    );
+    const reg = new RunRegistry();
+    const q = new SpawnQueue(reg, 4);
+    const out = await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: q,
+      conductorMode: false,
+    });
+    assert.match(out, /## Hooks/);
+    // oracle should show the hook with source tag
+    assert.match(out, /oracle.*echo gate-passed/);
+    assert.match(out, /\[project\]/);
+    // Some other persona (e.g. inspector) has no hook — shows (none)
+    assert.match(out, /inspector.*\(none\)/);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("doctor: warns when hook binary not on PATH", async () => {
+  const fx = setup();
+  try {
+    writeFileSync(
+      join(fx.projectDir, ".pi", "conductor.json"),
+      JSON.stringify({
+        personaOverrides: {
+          oracle: { onCompleteHook: "definitely-not-a-real-binary-xyz --flag" },
+        },
+      }),
+    );
+    const reg = new RunRegistry();
+    const q = new SpawnQueue(reg, 4);
+    const out = await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: q,
+      conductorMode: false,
+    });
+    // PATH warning present for the unknown binary
+    assert.match(out, /binary not found on PATH|not found on PATH/i);
+  } finally {
+    teardown(fx);
+  }
+});

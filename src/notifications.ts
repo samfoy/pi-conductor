@@ -99,6 +99,23 @@ export function formatCompletionNotification(run: Run): string {
   if (run.errorMessage) {
     lines.push(`  <error>${escapeXml(run.errorMessage)}</error>`);
   }
+  // v0.11 slice 5 — <hook> block. Present when the run had a hook
+  // (passed or failed); absent when no hook ran.
+  if (run.hookResult) {
+    const h = run.hookResult;
+    const hookElapsed = elapsedStr(run.finishedAt! - h.durationMs, run.finishedAt);
+    lines.push("  <hook>");
+    lines.push(`    <command>${escapeXml(h.command)}</command>`);
+    lines.push(`    <exit-code>${h.exitCode ?? "signal"}</exit-code>`);
+    lines.push(`    <duration>${hookElapsed}</duration>`);
+    lines.push(`    <log-path>${escapeXml(h.logPath)}</log-path>`);
+    if (h.tailText.trim()) {
+      lines.push(
+        `    <tail bytes="${h.tailBytes}" lines="${h.tailLines}">${escapeXml(h.tailText)}</tail>`,
+      );
+    }
+    lines.push("  </hook>");
+  }
   if (run.nonSubstantiveFinal) {
     lines.push(
       `  <warning reason="${run.nonSubstantiveFinal.reason}">` +
@@ -129,11 +146,13 @@ function headerLine(
   const glyph =
     run.status === "completed" ? "✓" :
     run.status === "killed"    ? "■" :
-    run.status === "timeout"   ? "⏱" : "✗";
+    run.status === "timeout"   ? "⏱" :
+    run.status === "hook_failed" ? "⊗" : "✗";
   const verb =
     run.status === "completed" ? "completed" :
     run.status === "killed"    ? "killed" :
-    run.status === "timeout"   ? "timed out" : "failed";
+    run.status === "timeout"   ? "timed out" :
+    run.status === "hook_failed" ? "hook failed" : "failed";
   const usagePart = usageStr ? `, ${usageStr}` : "";
   let line = `## ${glyph} \`${run.persona}\` ${verb} (${elapsed}${usagePart}) — id \`${run.id}\``;
   if (resumed) {

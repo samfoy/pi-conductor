@@ -10,7 +10,7 @@ This applies equally to humans, subagents, autoloop runs, and any other automate
 
 ### The TDD loop
 
-1. **Red.** Write the smallest failing test that captures the behavior you intend to change. Run `npm test` and confirm it fails for the reason you expect — not because of a typo or a missing import.
+1. **Red.** Write the smallest failing test that captures the behavior you intend to change. Run `npm test` and confirm it fails for the reason you expect - not because of a typo or a missing import.
 2. **Green.** Make the smallest code change that passes the test. Resist the urge to "while I'm here" anything else.
 3. **Refactor.** With tests green, clean up. Tests must still pass after the refactor.
 4. **Repeat.** Each commit on a feature branch should map to one or more red-green-refactor cycles.
@@ -25,7 +25,7 @@ This applies equally to humans, subagents, autoloop runs, and any other automate
 
 ### Coverage targets
 
-We don't enforce a numeric coverage gate. The expected outcome of "every change ships with a test" is that meaningful behavior is exercised. If you find yourself writing a test that's hard to write because the code resists it, **that's a refactoring signal** — file an issue or refactor the code in a separate commit.
+We don't enforce a numeric coverage gate. The expected outcome of "every change ships with a test" is that meaningful behavior is exercised. If you find yourself writing a test that's hard to write because the code resists it, **that's a refactoring signal** - file an issue or refactor the code in a separate commit.
 
 ### Bugs caught by tests > bugs caught in production
 
@@ -33,7 +33,7 @@ If a bug ships, the regression test for it is part of the fix. The PR descriptio
 
 ## Pre-commit hook
 
-The repo ships a pre-commit hook at `hooks/pre-commit` that runs `npm test` and rejects the commit if any test fails. When the staged change touches `src/`, the hook also runs `npm run build` and auto-stages `dist/index.js` + `dist/index.js.map` — `dist/` is a tracked artifact whose only legitimate state is "matches src/", so the rebuild is automatic and contributors don't need to remember it. The hook also runs `scripts/check-no-mutation-markers.sh`, which rejects commits with residual WDD `// MUTATION:` / `// MUTATE:` comment markers staged in `src/*.ts` (defense against a builder killed mid-verification leaving mutated production code behind). Activate the hook once per clone:
+The repo ships a pre-commit hook at `hooks/pre-commit` that runs `npm test` and rejects the commit if any test fails. When the staged change touches `src/`, the hook also runs `npm run build` and auto-stages `dist/index.js` + `dist/index.js.map` - `dist/` is a tracked artifact whose only legitimate state is "matches src/", so the rebuild is automatic and contributors don't need to remember it. The hook also runs `scripts/check-no-mutation-markers.sh`, which rejects commits with residual WDD `// MUTATION:` / `// MUTATE:` comment markers staged in `src/*.ts` (defense against a builder killed mid-verification leaving mutated production code behind). Activate the hook once per clone:
 
 ```bash
 git config core.hooksPath hooks
@@ -51,14 +51,14 @@ To skip the hook for a true emergency (almost never appropriate), pass `--no-ver
 
 `pi.extensions` loads the bundled `dist/index.js`, not `src/`, so any `src/` change must be rebuilt before the parent pi session can see it. Two ways to keep the bundle current during development:
 
-- **`npm run dev`** — esbuild in watch mode. Run it as a background process; every save in `src/` regenerates `dist/index.js` in ~30ms. Pair with the host's `/reload` slash command in the parent pi session and changes pick up without a full pi restart.
+- **`npm run dev`** - esbuild in watch mode. Run it as a background process; every save in `src/` regenerates `dist/index.js` in ~30ms. Pair with the host's `/reload` slash command in the parent pi session and changes pick up without a full pi restart.
 - **The pre-commit hook is the safety net.** If `npm run dev` wasn't running (or crashed), the hook rebuilds + auto-stages `dist/` whenever staged files include `src/`. You don't need to remember `npm run build` before commit.
 
 ### What `/reload` preserves
 
 As of `1c72856` (`fix(lifecycle): preserve runs on /reload`), the conductor's `session_shutdown` handler is reload-aware:
 
-- **Preserved across `/reload`:** chat history, conductor brief, scratchpad notes (`note set`/`note get`), the `pi.on("context", …)` sanitizer hook (re-registers cleanly on the new runtime).
+- **Preserved across `/reload`:** chat history, conductor brief, scratchpad notes (`note set`/`note get`), the `pi.on("context", ...)` sanitizer hook (re-registers cleanly on the new runtime).
 - **Not preserved:** in-flight sub-agent registry entries. Surviving sub-agents keep running as separate processes and write their `final.md` / `record.json` to disk, but the new runtime won't fire `<sub-agent-completed>` notifications for runs that started under the old one. Wait for them to finish naturally and read the on-disk record, or check `~/.pi/agent/conductor/runs/<persona>-<id>/`.
 
 ### Recommended loop
@@ -79,7 +79,9 @@ npm run typecheck             # tsc --noEmit
 
 Target wall time for the unit suite: **under 5 seconds**. If a single test pushes that over, mark it `{ skip: true }` with a justification or move it into a gated suite.
 
-**Tests that fork real subprocesses must set an explicit timeout** (either `--test-timeout=<ms>` on the runner or `{ timeout: <ms> }` on the test) — tsx defaults to `--test-timeout=0` (no timeout), so a buggy helper that never resolves hangs the runner indefinitely. See `personas/builder.md` “Test discipline.”
+**Tests that fork real subprocesses must set an explicit timeout** (either `--test-timeout=<ms>` on the runner or `{ timeout: <ms> }` on the test) — tsx defaults to `--test-timeout=0` (no timeout), so a buggy helper that never resolves hangs the runner indefinitely. See `personas/builder.md` "Test discipline."
+
+**v0.11 dogfood note:** do not set `npm test` as the `on_complete_hook` for this repo — the host pre-commit already runs `npm test`, so setting it as the hook would run the full suite twice per commit and waste ~15 s per slice.
 
 ## Coding standards
 
@@ -99,10 +101,10 @@ Target wall time for the unit suite: **under 5 seconds**. If a single test pushe
 Some legitimate cases where TDD is awkward:
 
 - **TUI rendering.** Test the model that drives the render, not the rendered output.
-- **Subprocess spawning.** Test the argv builders, the JSON parser, the lifecycle state machine — separately from spawning.
+- **Subprocess spawning.** Test the argv builders, the JSON parser, the lifecycle state machine - separately from spawning.
 - **Time-based logic.** Inject a clock or use a fake timer; never assert on `Date.now()`.
 
-If you can't find a way to test something cleanly within these constraints, write the change anyway, then file an issue ("untested: X — refactor needed for testability") and link it from the commit message.
+If you can't find a way to test something cleanly within these constraints, write the change anyway, then file an issue ("untested: X - refactor needed for testability") and link it from the commit message.
 
 ## v0.12 dogfood (steerable sub-agents)
 
@@ -121,7 +123,7 @@ branches, or the `/conductor send` slash command):
    to land slice 6+). The conductor sub-agent extension reads
    `CONDUCTOR_SUBAGENT` to suppress its own loading, but child pi
    processes spawned by the live integration tests inherit the
-   var and refuse to act as steerable sub-agents themselves —
+   var and refuse to act as steerable sub-agents themselves -
    `tests/integration-rpc-spawn.test.ts` then sees zero
    `agent_event` lines and times out. Strip the var and the live
    tests work normally. Outside a sub-agent shell the prefix is
@@ -132,7 +134,7 @@ branches, or the `/conductor send` slash command):
    `tests/integration-rpc-spawn.test.ts` (initial-prompt injection,
    mid-turn steer, mid-turn follow_up, mid-turn forceTerminate) and
    the 1 case in `tests/integration-rpc-extension-ui.test.ts`
-   (`ctx.ui.confirm` auto-cancel) total ~50–60s wall clock.
+   (`ctx.ui.confirm` auto-cancel) total ~50-60s wall clock.
 2. **Manually steer a real builder.** Spawn a steerable builder
    from a parent pi session:
    ```

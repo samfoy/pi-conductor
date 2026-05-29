@@ -119,3 +119,24 @@ test("formatStallSegment: still in grace window → '' (60s old run, default 30s
   });
   assert.equal(formatStallSegment(r, stubTheme, T0, CFG), "");
 });
+
+// ── v0.11 slice 5: · hook in-flight glyph ───────────────────────────────
+
+import { formatRow } from "../src/widget.ts";
+
+test("widget: shows · hook glyph when run.hookExecuting === true", () => {
+  const r = runFx({ status: "running", hookExecuting: true });
+  const out = formatRow(r, stubTheme);
+  // The activity segment uses the "warning" theme slot and " · hook" text.
+  assert.match(out, /warning.*·.*hook|· hook/);
+});
+
+test("widget: · hook glyph absent when run.hookExecuting !== true", () => {
+  const r = runFx({ status: "running", hookExecuting: false });
+  const out = formatRow(r, stubTheme);
+  assert.doesNotMatch(out, /· hook/);
+  // And a run with hookExecuting undefined (never set)
+  const r2 = runFx({ status: "running" });
+  const out2 = formatRow(r2, stubTheme);
+  assert.doesNotMatch(out2, /· hook/);
+});

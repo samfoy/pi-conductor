@@ -17,7 +17,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { formatCompletionNotification, formatCompletionNotificationCompact } from "../src/notifications.ts";
-import { emptyUsage, type Run, type RunStatus } from "../src/types.ts";
+import { emptyUsage, type HookResult, type Run, type RunStatus } from "../src/types.ts";
 
 const T0 = 1_700_000_000_000; // fixed epoch ms
 
@@ -499,3 +499,67 @@ test(
   },
 );
 
+// ── v0.11 slice 5: <hook> block in completion envelope ─────────────────
+
+test(
+  "formatCompletionNotification: hook_failed run renders <hook> block with command, exit-code, duration, log-path, tail",
+  () => {
+    const hookResult: HookResult = {
+      passed: false,
+      command: "npm test --silent",
+      exitCode: 1,
+      durationMs: 5_000,
+      logPath: "/tmp/oracle-abcd/hook.log",
+      tailText: "FAIL src/foo.test.ts\nTests: 1 failed",
+      tailBytes: 38,
+      tailLines: 2,
+      failureKind: "exited",
+    };
+    const run = makeRun({ status: "hook_failed", hookResult });
+    const out = formatCompletionNotification(run);
+    // Header glyph + verb
+    const header = out.split("\n")[0]!;
+    assert.match(header, /⊗.*hook failed/);
+    // Hook block present with required elements
+    assert.match(out, /<hook>/);
+    assert.match(out, /<command>npm test --silent<\/command>/);
+    assert.match(out, /<exit-code>1<\/exit-code>/);
+    assert.match(out, /<duration>/);
+    assert.match(out, /<log-path>\/tmp\/oracle-abcd\/hook\.log<\/log-path>/);
+    assert.match(out, /<tail bytes="38" lines="2">/);
+    assert.match(out, /FAIL src\/foo\.test\.ts/);
+    assert.match(out, /<\/hook>/);
+  },
+);
+
+test(
+  "formatCompletionNotification: completed run with passed hook renders <hook> block",
+  () => {
+    const hookResult: HookResult = {
+      passed: true,
+      command: "npx tsc --noEmit",
+      exitCode: 0,
+      durationMs: 3_000,
+      logPath: "/tmp/oracle-abcd/hook.log",
+      tailText: "",
+      tailBytes: 0,
+      tailLines: 0,
+    };
+    const run = makeRun({ status: "completed", hookResult });
+    const out = formatCompletionNotification(run);
+    assert.match(out, /<hook>/);
+    assert.match(out, /<command>npx tsc --noEmit<\/command>/);
+    assert.match(out, /<exit-code>0<\/exit-code>/);
+    // Empty tail — <tail> element absent
+    assert.doesNotMatch(out, /<tail/);
+    assert.match(out, /<\/hook>/);
+  },
+);
+
+test(
+  "formatCompletionNotification: completed run with no hook does NOT render <hook> block",
+  () => {
+    const out = formatCompletionNotification(makeRun({ status: "completed" }));
+    assert.doesNotMatch(out, /<hook>/);
+  },
+);

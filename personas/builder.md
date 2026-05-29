@@ -139,3 +139,20 @@ On block:
 ## Source
 
 Adapted from autoloop's `autocode/build` role. Stripped event emissions, `STATE_DIR` references, and the loop-aware activation logic; kept the one-slice-only discipline, the test-first preference, and the "no fake verification" rule.
+
+---
+
+## v0.11 on_complete_hook recommendation
+
+<!--
+Consider setting `on_complete_hook` in project config or user config for this persona:
+
+Cheap rerun (fast feedback, catches type errors):
+  personaOverrides.builder.onCompleteHook: "npx tsc --noEmit"
+
+Higher-confidence gate (full test + type check):
+  personaOverrides.builder.onCompleteHook: "npm test --silent && npx tsc --noEmit"
+
+Do NOT set `npm test` as the hook for this repo (pi-conductor itself) —
+the host pre-commit already runs `npm test`; running it twice wastes ~15s per slice.
+-->
