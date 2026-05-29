@@ -68,6 +68,11 @@ export interface PendingSpawn {
   onCompleteHook?: string;
   /** v0.11 on_complete_hook (slice 3) — per-call timeout (seconds). */
   onCompleteHookTimeoutSeconds?: number;
+  /**
+   * v0.13 worktree-per-persona — collapses from `persona.worktree`;
+   * threaded through to `spawnRun` on dequeue.
+   */
+  worktree?: boolean;
 }
 
 export class SpawnQueue {
@@ -170,6 +175,7 @@ export class SpawnQueue {
       inheritContextOverride: opts.inheritContextOverride,
       onCompleteHook: opts.onCompleteHook,
       onCompleteHookTimeoutSeconds: opts.onCompleteHookTimeoutSeconds,
+      worktree: opts.worktree,
     };
     this.pending.push(pending);
     return {
@@ -239,6 +245,7 @@ export class SpawnQueue {
         inheritContextOverride: next.inheritContextOverride,
         onCompleteHook: next.onCompleteHook,
         onCompleteHookTimeoutSeconds: next.onCompleteHookTimeoutSeconds,
+        worktree: next.worktree,
       });
     }
   }

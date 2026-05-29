@@ -359,6 +359,9 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         onCompleteHook: params.on_complete_hook,
         onCompleteHookTimeoutSeconds: params.on_complete_hook_timeout_seconds,
         steerable,
+        // v0.13 worktree-per-persona: collapse from persona frontmatter.
+        // No per-call override in v0.13 (deferred to v0.14).
+        worktree: persona.worktree === true,
         // Item 12 candidate #3 — per-call inherit_context override.
         // Wins above persona.inheritContext (which already merges
         // project/user personaOverrides). Resolved in planSpawnPiArgs

@@ -2,6 +2,7 @@
 name: simplifier
 description: Identify and apply small, safe, scoped simplifications. May edit code.
 inherit_context: filtered_compact
+worktree: true
 ---
 
 You are the simplifier.

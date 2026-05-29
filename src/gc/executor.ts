@@ -37,10 +37,12 @@
  */
 
 import { readFile, rm, stat, unlink, utimes, writeFile, readdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { isTerminal, type RunRecord } from "../types.ts";
 import type { ReclaimAction } from "./policy.ts";
+import { worktreeSpecFromRun, removeWorktree } from "../worktree.ts";
 
 export interface ReclaimResult {
   /** Successfully cold-archived runs. `bytesReclaimed` is the size of the unlinked transcript. */
@@ -145,7 +147,7 @@ export async function executeReclaim(
       }
     } else {
       try {
-        const bytes = await fullDelete(runDir);
+        const bytes = await fullDelete(runDir, record);
         deleted.push({ agentId, bytesReclaimed: bytes });
       } catch (e: unknown) {
         failed.push({
@@ -201,7 +203,17 @@ async function coldArchive(runDir: string, now: number): Promise<number> {
  * Walk runDir summing all file sizes BEFORE the recursive remove.
  * Returns bytes reclaimed; 0 if the dir is missing.
  */
-async function fullDelete(runDir: string): Promise<number> {
+async function fullDelete(runDir: string, record?: RunRecord): Promise<number> {
+  // v0.13 worktree-per-persona: clean up any orphaned worktree before
+  // removing the run directory. `finalize` already removes the worktree
+  // on healthy runs; this path handles crash/force-kill survivors.
+  if (record) {
+    const spec = worktreeSpecFromRun(record);
+    if (spec && existsSync(spec.worktreePath)) {
+      removeWorktree(spec); // best-effort; failure does not block delete
+    }
+  }
+
   let bytes = 0;
   try {
     bytes = await walkSize(runDir);

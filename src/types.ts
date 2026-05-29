@@ -399,6 +399,18 @@ export interface Run {
    */
   onCompleteHookTimeoutSeconds?: number;
 
+  /**
+   * v0.13 worktree-per-persona: absolute path to the isolated git worktree
+   * created for this run (in-memory counterpart of `RunRecord.worktreePath`).
+   * Cleared by `finalize` after successful `removeWorktree`.
+   */
+  worktreePath?: string;
+  /**
+   * v0.13 worktree-per-persona: git branch for the worktree
+   * (e.g. `"conductor-wt/builder-abc1"`). Cleared with `worktreePath`.
+   */
+  worktreeBranch?: string;
+
   // ── v0.12 steering (slice 1 types) ───────────────────────────────────────
   // Slice 1 declares these optional fields; slice 2 wires the RPC
   // subprocess plumbing that consumes them; slice 4 wires the
@@ -653,6 +665,21 @@ export interface RunRecord {
   hookResult?: HookResult;
 
   /**
+   * v0.13 worktree-per-persona: absolute path to the isolated git
+   * worktree created for this run. Set by `spawnRun` when
+   * `persona.worktree === true` and `resolveWorktreeSpec` succeeds.
+   * Cleared by `finalize` after successful `removeWorktree`; left set
+   * on removal failure so the GC `delete` path can find and clean up
+   * the orphan. Optional for back-compat with pre-v0.13 records.
+   */
+  worktreePath?: string;
+  /**
+   * v0.13 worktree-per-persona: git branch name for the worktree
+   * (e.g. `"conductor-wt/builder-abc1"`). Cleared with `worktreePath`.
+   */
+  worktreeBranch?: string;
+
+  /**
    * Item 15: see `Run.thisInvocationStartedAt`. Persisted so a doctor
    * surface or post-mortem reading the on-disk record can reproduce
    * the per-send / lifetime split. Optional for back-compat with
@@ -706,6 +733,8 @@ export function toRunRecord(r: Run): RunRecord {
     steerable: r.steerable,
     streamingMode: r.streamingMode,
     hookResult: r.hookResult,
+    worktreePath: r.worktreePath,
+    worktreeBranch: r.worktreeBranch,
     thisInvocationStartedAt: r.thisInvocationStartedAt,
     thisInvocationUsageBaseline: r.thisInvocationUsageBaseline,
     resumeCount: r.resumeCount,

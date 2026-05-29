@@ -11,7 +11,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, statSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, statSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -325,3 +325,133 @@ test("executeReclaim: cold-archive on missing runDir collects to failed[] (F-S3.
     "error message identifies the vanished-run cause",
   );
 });
+
+// ── v0.13 worktree-per-persona: GC delete cleans up orphaned worktree ─
+
+import { execSync } from "node:child_process";
+
+function cleanGitEnvForTest(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const k of Object.keys(env)) { if (k.startsWith("GIT_") && k !== "GIT_EDITOR") delete env[k]; }
+  return env;
+}
+
+function tmpGitRepoForGC(): string {
+  const dir = mkdtempSync(join(tmpdir(), "conductor-gc-wt-"));
+  const gitOpts = { cwd: dir, stdio: "pipe" as const, env: cleanGitEnvForTest() };
+  execSync("git init", gitOpts);
+  execSync("git config user.email test@test.com", gitOpts);
+  execSync("git config user.name Test", gitOpts);
+  writeFileSync(join(dir, "README.md"), "init\n");
+  execSync("git add README.md", gitOpts);
+  execSync("git commit -m init", gitOpts);
+  return dir;
+}
+
+test(
+  "executeReclaim: delete action removes orphaned worktree when worktreePath set in record",
+  { timeout: 15_000 },
+  async () => {
+    const runsRoot = makeTempRunsRoot();
+    const gitRoot = tmpGitRepoForGC();
+    try {
+      // Create a real worktree that simulates a crash-orphaned one
+      const runId = "builder-orphan1";
+      const worktreePath = join(gitRoot, ".worktrees", "conductor-wt", runId);
+      const branch = `conductor-wt/${runId}`;
+
+      mkdirSync(join(gitRoot, ".worktrees", "conductor-wt"), { recursive: true });
+      execSync(`git worktree add ${JSON.stringify(worktreePath)} -b ${JSON.stringify(branch)} HEAD`, {
+        cwd: gitRoot,
+        stdio: "pipe",
+        env: cleanGitEnvForTest(),
+      });
+      assert.ok(existsSync(worktreePath), "orphaned worktree exists before GC");
+
+      // Make a run dir with a record that has worktreePath + worktreeBranch set
+      const runDir = join(runsRoot, runId);
+      mkdirSync(runDir, { recursive: true });
+      const record = {
+        id: runId,
+        persona: "builder",
+        task: "test",
+        mode: "background",
+        status: "completed",
+        startTime: Date.now() - 60_000,
+        finishedAt: Date.now() - 30_000,
+        usage: { turns: 1, input: 10, output: 100, cacheRead: 0, cacheWrite: 0, cost: 0 },
+        cwd: gitRoot,
+        recordPath: join(runDir, "record.json"),
+        transcriptPath: join(runDir, "transcript.jsonl"),
+        finalPath: join(runDir, "final.md"),
+        worktreePath,
+        worktreeBranch: branch,
+      };
+      writeFileSync(record.recordPath, JSON.stringify(record, null, 2));
+      writeFileSync(record.transcriptPath, "{}\n");
+      writeFileSync(record.finalPath, "# Final\n");
+
+      // Run GC delete
+      const result = await executeReclaim(
+        [deleteAction(runId, 1000)],
+        runsRoot,
+        new Set(),
+        Date.now(),
+      );
+      assert.equal(result.failed.length, 0, "no GC failures");
+      assert.equal(result.deleted.length, 1, "one run deleted");
+
+      // Worktree should be removed
+      assert.ok(!existsSync(worktreePath), "orphaned worktree removed by GC delete");
+
+      // Run dir should also be gone
+      assert.ok(!existsSync(runDir), "run dir removed by GC delete");
+    } finally {
+      execSync(`git worktree prune`, { cwd: gitRoot, stdio: "pipe", env: cleanGitEnvForTest() }).toString();
+      rmSync(runsRoot, { recursive: true, force: true });
+      rmSync(gitRoot, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "executeReclaim: delete action succeeds when worktreePath in record but path already gone",
+  { timeout: 10_000 },
+  async () => {
+    // Simulates a run where finalize already cleaned up the worktree
+    // but worktreePath was NOT cleared (e.g. record written before clear).
+    const runsRoot = makeTempRunsRoot();
+    const runId = "builder-already-cleaned";
+    const runDir = join(runsRoot, runId);
+    mkdirSync(runDir, { recursive: true });
+    const record = {
+      id: runId,
+      persona: "builder",
+      task: "test",
+      mode: "background",
+      status: "completed",
+      startTime: Date.now() - 60_000,
+      finishedAt: Date.now() - 30_000,
+      usage: { turns: 1, input: 10, output: 100, cacheRead: 0, cacheWrite: 0, cost: 0 },
+      cwd: "/tmp",
+      recordPath: join(runDir, "record.json"),
+      transcriptPath: join(runDir, "transcript.jsonl"),
+      finalPath: join(runDir, "final.md"),
+      // Path that does NOT exist — simulates already-cleaned worktree
+      worktreePath: "/tmp/nonexistent-wt-abc123/tree",
+      worktreeBranch: "conductor-wt/builder-already-cleaned",
+    };
+    writeFileSync(record.recordPath, JSON.stringify(record, null, 2));
+    writeFileSync(record.transcriptPath, "{}\n");
+    writeFileSync(record.finalPath, "# Final\n");
+
+    try {
+      const result = await executeReclaim([deleteAction(runId, 500)], runsRoot, new Set(), Date.now());
+      // Should succeed even though worktreePath is set but missing
+      assert.equal(result.failed.length, 0, "no failures when worktree path already gone");
+      assert.equal(result.deleted.length, 1, "run deleted successfully");
+    } finally {
+      rmSync(runsRoot, { recursive: true, force: true });
+    }
+  },
+);

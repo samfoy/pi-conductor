@@ -33,6 +33,7 @@ import { isNonSubstantiveFinalMessage } from "./substance-check.ts";
 import { resolveOnCompleteHook, type HookCascadeInput } from "./hook-cascade.ts";
 import { runHook, defaultKillGroup } from "./hook-runner.ts";
 import { loadConfigWithErrors } from "./config.ts";
+import { resolveWorktreeSpec, createWorktree, removeWorktree } from "./worktree.ts";
 import { readProcessStartTime } from "./reconcile-startup.ts";
 import {
   emptyUsage,
@@ -566,6 +567,13 @@ export interface PlanSpawnOptions {
    * compact filtering to reliably strip. `undefined` disables the cap.
    */
   siblingRunCount?: number;
+  /**
+   * v0.13 worktree-per-persona. When `true` and `persona.worktree` is
+   * `true`, `spawnRun` calls `resolveWorktreeSpec` + `createWorktree`
+   * and sets `Run.worktreePath` / `Run.worktreeBranch`. Collapses from
+   * `persona.worktree` upstream in `tools.ts`.
+   */
+  worktree?: boolean;
 }
 
 export interface PlanSpawnResult {
@@ -921,6 +929,14 @@ export interface SpawnOptions {
    * `onCompleteHook`; only meaningful when the per-call layer wins.
    */
   onCompleteHookTimeoutSeconds?: number;
+  /**
+   * v0.13 worktree-per-persona. When `true`, `spawnRun` calls
+   * `resolveWorktreeSpec` + `createWorktree` and sets
+   * `Run.worktreePath` / `Run.worktreeBranch`. Non-git cwds fall back
+   * gracefully to shared cwd with a warning. Collapses from
+   * `persona.worktree` upstream in `tools.ts`.
+   */
+  worktree?: boolean;
 }
 
 /**
@@ -1084,6 +1100,32 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     steerable: opts.steerable === true,
   };
   opts.registry.register(run);
+
+  // v0.13 worktree-per-persona: create an isolated git worktree when
+  // opts.worktree is true. resolveWorktreeSpec returns null for non-git
+  // cwds — fall back to shared cwd with a warning rather than failing.
+  let effectiveCwd = opts.cwd;
+  if (opts.worktree) {
+    const spec = resolveWorktreeSpec(opts.cwd, run.id);
+    if (spec === null) {
+      process.stderr.write(
+        `[conductor] worktree: true but ${opts.cwd} is not inside a git repo; ` +
+          `falling back to shared cwd for run ${run.id}\n`,
+      );
+    } else {
+      try {
+        createWorktree(spec);
+        run.worktreePath = spec.worktreePath;
+        run.worktreeBranch = spec.branch;
+        effectiveCwd = spec.worktreePath;
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(`[conductor] worktree creation failed for ${run.id}: ${msg}\n`);
+        // Non-fatal: fall back to shared cwd rather than killing the chain.
+      }
+    }
+  }
+
   void writeRecord(run);
 
   // Construct prompt + args. When the persona has inherit_context=filtered
@@ -1134,7 +1176,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
 
   const done = runPiSubprocess(run, plan.piArgs, {
     registry: opts.registry,
-    cwd: opts.cwd,
+    cwd: effectiveCwd, // v0.13: worktree path when worktree was created, else opts.cwd
     timeoutMs: opts.timeoutMs,
     onUpdate: opts.onUpdate,
     onComplete: opts.onComplete,
@@ -1453,6 +1495,27 @@ function runPiSubprocess(
     applySubstanceCheck(run, terminal);
     discoverSessionPathIfMissing(run, opts.sessionDir);
     run.proc = undefined;
+    // v0.13 worktree-per-persona: remove the worktree on terminal.
+    // Best-effort: failure is logged but does NOT block finalize.
+    // worktreePath is cleared only on success so the GC delete path
+    // can find and clean up orphaned worktrees.
+    if (run.worktreePath && run.worktreeBranch) {
+      const wtSpec = {
+        // Reconstruct gitRoot: <gitRoot>/.worktrees/conductor-wt/<run-id> → 3 levels up
+        gitRoot: dirname(dirname(dirname(run.worktreePath))),
+        worktreePath: run.worktreePath,
+        branch: run.worktreeBranch,
+      };
+      const removed = removeWorktree(wtSpec);
+      if (removed) {
+        run.worktreePath = undefined;
+        run.worktreeBranch = undefined;
+      } else {
+        process.stderr.write(
+          `[conductor] worktree removal failed for ${run.id}; GC will clean up\n`,
+        );
+      }
+    }
     opts.registry.notify(run);
     try {
       proc.kill();

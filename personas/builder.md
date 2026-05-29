@@ -2,6 +2,7 @@
 name: builder
 description: Implement exactly one slice with verification + commit. Returns evidence — what changed, what was verified, the commit hash.
 inherit_context: filtered_compact
+worktree: true
 default_reads:
   - context.md
   - plan.md
