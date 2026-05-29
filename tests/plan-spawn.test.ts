@@ -585,3 +585,77 @@ test("planSpawnPiArgs: per-call inherit_context absent → falls back to persona
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── Backlog item 12 candidate #4: chain-depth filtered_compact downgrade ──
+
+import { FILTERED_COMPACT_CHAIN_DEPTH_CAP } from "../src/runs.ts";
+
+test("planSpawnPiArgs: filtered_compact is preserved when siblingRunCount is below the cap", () => {
+  const dir = tmpSessionDir();
+  try {
+    const p = persona({ inheritContext: "filtered_compact" });
+    const msgs: AgentMessage[] = [
+      { role: "user", content: [{ type: "text", text: "brief" }], timestamp: 0 } as AgentMessage,
+    ];
+    const result = planSpawnPiArgs({
+      persona: p,
+      parentMessages: msgs,
+      sessionDir: dir,
+      systemPrompt: "you are a builder",
+      prompt: "do the work",
+      cwd: "/tmp",
+      siblingRunCount: FILTERED_COMPACT_CHAIN_DEPTH_CAP - 1,
+    });
+    // Under the cap: should use filtered_compact (seeded session)
+    assert.ok(result.seededSessionPath, "seeded session expected (filtered_compact)");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("planSpawnPiArgs: filtered_compact auto-downgrades to none when siblingRunCount >= cap (LOAD-BEARING — W1 item 12 #4)", () => {
+  // Mutation: replacing the downgrade branch with a no-op (always use
+  // resolvedInheritContext) takes this test from green to red.
+  const dir = tmpSessionDir();
+  try {
+    const p = persona({ inheritContext: "filtered_compact" });
+    const msgs: AgentMessage[] = [
+      { role: "user", content: [{ type: "text", text: "brief" }], timestamp: 0 } as AgentMessage,
+    ];
+    const result = planSpawnPiArgs({
+      persona: p,
+      parentMessages: msgs,
+      sessionDir: dir,
+      systemPrompt: "you are a builder",
+      prompt: "do the work",
+      cwd: "/tmp",
+      siblingRunCount: FILTERED_COMPACT_CHAIN_DEPTH_CAP,
+    });
+    // At the cap: should downgrade to none (fresh session, no inheritance)
+    assert.equal(result.seededSessionPath, undefined, "no seeded session when downgraded to none");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("planSpawnPiArgs: filtered_compact with no siblingRunCount (undefined) is NOT downgraded", () => {
+  const dir = tmpSessionDir();
+  try {
+    const p = persona({ inheritContext: "filtered_compact" });
+    const msgs: AgentMessage[] = [
+      { role: "user", content: [{ type: "text", text: "brief" }], timestamp: 0 } as AgentMessage,
+    ];
+    const result = planSpawnPiArgs({
+      persona: p,
+      parentMessages: msgs,
+      sessionDir: dir,
+      systemPrompt: "you are a builder",
+      prompt: "do the work",
+      cwd: "/tmp",
+      // siblingRunCount not passed — cap is opt-in
+    });
+    assert.ok(result.seededSessionPath, "no siblingRunCount = no downgrade");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

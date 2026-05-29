@@ -589,3 +589,18 @@ test("conductor-prompt: hook_failed paragraph forbids spawning fresh critic", ()
   const s = section11();
   assert.match(s, /do not spawn.*critic|not.*spawn.*fresh.*critic/i);
 });
+
+// ── Item 13 #4: don't-narrate-next-step prompt rule ──────────────────────
+
+test("conductor-prompt: §11 contains don't-narrate-next-step rule", () => {
+  // W1: dropping the paragraph takes this from green to red.
+  const s = section11();
+  assert.match(s, /narrat|next.step|before spawning/i);
+});
+
+test("conductor-prompt: narrate-next-step rule mentions scratchpad as safe alternative", () => {
+  // The rule should point conductors toward scratchpad tool calls (which
+  // filterParentContext drops) rather than silent suppression.
+  const s = section11();
+  assert.match(s, /scratchpad/i);
+});

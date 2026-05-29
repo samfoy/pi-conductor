@@ -282,6 +282,18 @@ const SUBAGENT_NESTING_GUARD = [
  * character of this constant reds that test — update the test in
  * lockstep when intentionally rewording.
  */
+
+/**
+ * Backlog item 12 candidate #4 — chain-depth cap for `filtered_compact`
+ * auto-downgrade to `none`. When the parent conductor has already spawned
+ * ≥ this many sibling runs, `filtered_compact` is too likely to leak
+ * orchestration identity signal; downgrade to `none` (no inherited context)
+ * instead. Value of 6 chosen as a reasonable threshold: a greenfield chain
+ * (oracle → designer → planner → builder → critic → finalizer) has 6 sub-agents;
+ * chains deeper than that have accumulated enough orchestration to bleed.
+ */
+export const FILTERED_COMPACT_CHAIN_DEPTH_CAP = 6;
+
 export const READ_ONLY_PERSONA_ENFORCER = [
   "[READ-ONLY PERSONA ENFORCER]",
   "You are a read-only persona. You MAY: read files, run tests",
@@ -545,6 +557,15 @@ export interface PlanSpawnOptions {
    * See `docs/backlog.md` item 12 for the witness.
    */
   inheritContextOverride?: ContextInheritance;
+  /**
+   * Backlog item 12 candidate #4 — number of sibling runs the parent
+   * conductor has already spawned this session (terminal + active,
+   * excluding this spawn). When ≥ {@link FILTERED_COMPACT_CHAIN_DEPTH_CAP},
+   * `filtered_compact` is auto-downgraded to `none` on the theory that
+   * a long chain has accumulated too much orchestration signal for
+   * compact filtering to reliably strip. `undefined` disables the cap.
+   */
+  siblingRunCount?: number;
 }
 
 export interface PlanSpawnResult {
@@ -650,10 +671,20 @@ export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
   // personaOverrides upstream via resolvePersonas). resolveInheritContext
   // is a one-liner mirroring resolveKillOnStall / resolveSteerable shape;
   // see src/inherit-context.ts.
-  const effectiveInheritContext = resolveInheritContext(
+  const resolvedInheritContext = resolveInheritContext(
     opts.inheritContextOverride,
     persona,
   );
+  // Item 12 candidate #4: auto-downgrade filtered_compact → none when
+  // the parent chain is deep. A long chain has accumulated too much
+  // orchestration signal for compact filtering to reliably strip identity
+  // bleed; falling back to none (no inherited context) is safer.
+  const effectiveInheritContext: ContextInheritance =
+    resolvedInheritContext === "filtered_compact" &&
+    opts.siblingRunCount !== undefined &&
+    opts.siblingRunCount >= FILTERED_COMPACT_CHAIN_DEPTH_CAP
+      ? "none"
+      : resolvedInheritContext;
 
   let seedMessages: AgentMessage[] | null = null;
   // Did filtering actually remove anything? If yes, prepend a sentinel
@@ -1091,6 +1122,11 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // / filtered_compact / full / none) honors the LLM tool's per-call
     // arg above the persona's frontmatter. See src/inherit-context.ts.
     inheritContextOverride: opts.inheritContextOverride,
+    // Item 12 candidate #4 — pass the current registry size so
+    // planSpawnPiArgs can auto-downgrade filtered_compact → none when
+    // the chain is deep. Excludes the run we just registered (it is
+    // already in the registry at this point) to count only siblings.
+    siblingRunCount: opts.registry.list().length - 1,
   });
   // When we seeded a session, populate run.sessionPath up-front so callers
   // (e.g. ensemble_send mid-run) can find it without waiting for finalize().

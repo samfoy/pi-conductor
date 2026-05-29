@@ -1705,6 +1705,7 @@ var SUBAGENT_NESTING_GUARD = [
   "further sub-agents (no calls to ensemble_spawn, subagent, agent, delegate, etc).",
   "Complete the entire task yourself and return your findings."
 ].join(" ");
+var FILTERED_COMPACT_CHAIN_DEPTH_CAP = 6;
 var READ_ONLY_PERSONA_ENFORCER = [
   "[READ-ONLY PERSONA ENFORCER]",
   "You are a read-only persona. You MAY: read files, run tests",
@@ -1799,10 +1800,11 @@ function filteredHistorySentinel() {
 function planSpawnPiArgs(opts) {
   const { persona, parentMessages = [], sessionDir, systemPrompt, prompt, cwd, model, thinking, skillPaths } = opts;
   const steerable = opts.steerable === true;
-  const effectiveInheritContext = resolveInheritContext(
+  const resolvedInheritContext = resolveInheritContext(
     opts.inheritContextOverride,
     persona
   );
+  const effectiveInheritContext = resolvedInheritContext === "filtered_compact" && opts.siblingRunCount !== void 0 && opts.siblingRunCount >= FILTERED_COMPACT_CHAIN_DEPTH_CAP ? "none" : resolvedInheritContext;
   let seedMessages = null;
   let dropped = false;
   if ((effectiveInheritContext === "filtered" || effectiveInheritContext === "filtered_compact") && parentMessages.length > 0) {
@@ -2038,7 +2040,12 @@ function spawnRun(opts) {
     // override into planSpawnPiArgs so the filter selection (filtered
     // / filtered_compact / full / none) honors the LLM tool's per-call
     // arg above the persona's frontmatter. See src/inherit-context.ts.
-    inheritContextOverride: opts.inheritContextOverride
+    inheritContextOverride: opts.inheritContextOverride,
+    // Item 12 candidate #4 — pass the current registry size so
+    // planSpawnPiArgs can auto-downgrade filtered_compact → none when
+    // the chain is deep. Excludes the run we just registered (it is
+    // already in the registry at this point) to count only siblings.
+    siblingRunCount: opts.registry.list().length - 1
   });
   if (plan.seededSessionPath) run.sessionPath = plan.seededSessionPath;
   const done = runPiSubprocess(run, plan.piArgs, {
@@ -6873,6 +6880,8 @@ Review-only
 - **You do not review.** Inside a loop your job is routing findings, not substituting your own opinion. If you think the reviewer is wrong, spawn a *second* reviewer (\`redteam\` or a different \`oracle\`) for an independent check. Don't arbitrate alone \u2014 that's the slip from \xA71.5 wearing a different hat. When you spawn a second reviewer for an independent check, write its brief from the *first reviewer's findings* (which you already have in the completion envelope), not from re-reading the diff yourself. Re-reading the diff is the slip from \xA71.5 wearing a different hat.
 
 **No parallel write-capable spawns.** Run \`builder\` and \`simplifier\` strictly serially \u2014 even on disjoint files. The git working tree and history are shared, so two write-capable personas can collide on \`git commit --amend\`, pre-commit hook test runs, and tree state. The 4-slot concurrency cap is for parallel *reviews* (oracle/redteam/critic/etc.), not parallel *builds*.
+
+**Don't narrate your next step before spawning.** When you write *"After APPROVE I'll do X"* or *"Once this lands, I'll run Y"* in conversation prose immediately before spawning a sub-agent, that sentence becomes part of the inherited context the sub-agent sees \u2014 and it reads it as an instruction. Witnessed: a critic that read the conductor's *"after APPROVE: I'll batch-commit and push"* narration then committed and pushed the work itself (docs/backlog.md item 13). Rule: decide what comes next *after* the sub-agent completes, not before. If you need to keep track of the planned follow-up, use a scratchpad tool call (which \`filterParentContext\` drops from inherited context) rather than prose.
 
 **Verifier briefs MUST be self-contained.** \`verifier\` runs with \`inherit_context: none\` (Q#16 audit, v0.8.1) \u2014 it boots with no parent transcript, no inherited file reads, no diff visibility. A brief like *"verify the previous slice"* or *"verify the claim"* is unrunnable; the verifier will return CANNOT VERIFY. Every verifier brief MUST explicitly include: (1) **the claim** being verified, stated concretely and testably (e.g. *"adds NaN guard to \`add()\`; returns 0 if either operand is NaN"*); (2) **the files changed**, with paths and ideally the commit SHA or inline diff; (3) **the strongest existing check the producer ran** (test command, lint command, build target) so verifier can re-run it; (4) **acceptance criteria** the verifier should weigh the claim against. The same self-containment requirement applies to any \`inherit_context: none\` persona (\`oracle\` is the other one) \u2014 see \xA76 \u2014 but verifier is the recurring closer in \xA711's bug-fix and perf chains, so the rule is pinned here.
 
