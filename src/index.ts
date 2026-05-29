@@ -48,7 +48,8 @@ import { resolveInitialConductorMode } from "./conductor-mode.ts";
 import { installCompactionHook } from "./compaction-hook.ts";
 import { installSanitizerHook } from "./sanitizer-hook.ts";
 import { handleSessionShutdown } from "./shutdown.ts";
-import { Watchdog, resolveKillOnStall } from "./watchdog.ts";
+import { Watchdog, resolveKillOnStall, resolveKillOnStallForPersona } from "./watchdog.ts";
+import { isWriteCapable } from "./personas.ts";
 import { formatStallNotification } from "./notifications.ts";
 import { executePromptAndSend } from "./prompt-and-send.ts";
 
@@ -494,12 +495,17 @@ export default function (pi: ExtensionAPI): void {
         kill: (run, reason) => {
           forceTerminate(run, reason, registry);
         },
-        // v0.10 Slice 3: per-run `kill_on_stall` overrides the
-        // conductor-wide default. The lambda delegates to
-        // `resolveKillOnStall` (exported, witness-pinned by
-        // `tests/watchdog-enforcer.test.ts`) so a regression in the
-        // formula is caught by the W1 mutation witness.
-        isKillOnStall: (run) => resolveKillOnStall(run, cfg.watchdog.defaultKillOnStall),
+        // v0.10 Slice 3 + backlog item 2: per-run `kill_on_stall` overrides the
+        // conductor-wide default. `resolveKillOnStallForPersona` adds a
+        // persona-class-aware built-in: write-capable personas default to
+        // `true` (zombie holds the m_w_c=1 write slot; auto-kill unblocks the
+        // chain). Read-only personas keep `false`.
+        isKillOnStall: (run) =>
+          resolveKillOnStallForPersona(
+            run,
+            cfg.watchdog.defaultKillOnStall,
+            isWriteCapable(run.persona),
+          ),
         isEnabled: () => cfg.watchdog.enabled,
       });
       watchdogDispose = wd.start();

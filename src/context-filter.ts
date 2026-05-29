@@ -63,6 +63,86 @@ function matchesAnyPrefix(name: string, prefixes: string[]): boolean {
 }
 
 /**
+ * Backlog item 12 candidate #1 — strip the pi session-primer preamble from
+ * a user message. The primer block (`## Recent Sessions`, `<memory>`, and
+ * `<available_skills>` sections) is injected by pi into the first user
+ * message of every conductor session as context for the orchestrator. It has
+ * no value to a sub-agent and is the primary source of identity-bleed
+ * (the sub-agent infers "I am inside a conductor session" from the preamble
+ * and either refuses or expands scope).
+ *
+ * Heuristic: if the first text block in a user message starts with
+ * `## Recent Sessions` or contains `<memory>` followed by `</memory>`, we
+ * strip the leading preamble lines up to the first blank line that follows
+ * the last recognised preamble section marker. We are conservative: if the
+ * message has no text blocks or does not match the pattern, it is returned
+ * unchanged.
+ *
+ * Pure: no I/O, deterministic on input, does not mutate.
+ */
+function stripSessionPrimerPreamble(msg: AgentMessage): AgentMessage {
+  const content = (msg as any).content;
+  if (!Array.isArray(content)) return msg;
+  let changed = false;
+  const newContent = content.map((block: any) => {
+    if (block?.type !== "text" || typeof block.text !== "string") return block;
+    const stripped = stripPrimerText(block.text);
+    if (stripped === block.text) return block;
+    changed = true;
+    return { ...block, text: stripped };
+  });
+  if (!changed) return msg;
+  return { ...(msg as any), content: newContent } as AgentMessage;
+}
+
+/** Inner text-level strip. Returns the input unchanged if no primer found. */
+function stripPrimerText(text: string): string {
+  // Recognise the primer by its leading section headers.
+  // Patterns seen in the wild:
+  //   ## Recent Sessions (this project)\n
+  //   <memory>\n  (a large XML block)
+  //   ## /project CONTEXT\n (pi injects this too)
+  const PRIMER_STARTS = [
+    /^## Recent Sessions/m,
+    /^<memory>/m,
+    /^## \/project CONTEXT/m,
+    /^\[Note for agent/m,
+  ];
+  const hasPrimer = PRIMER_STARTS.some((re) => re.test(text));
+  if (!hasPrimer) return text;
+
+  // Split into lines and walk until we're past the preamble.
+  // The preamble ends when we see a line that starts a real message
+  // (non-blank, not a known preamble-section continuation).
+  // Heuristic: find the LAST occurrence of a preamble-section header
+  // and skip all lines until the next blank line after that.
+  const lines = text.split("\n");
+  let lastPrimerHeaderIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (
+      line.startsWith("## Recent Sessions") ||
+      line.startsWith("<memory>") ||
+      line.startsWith("## /project CONTEXT") ||
+      line.startsWith("[Note for agent")
+    ) {
+      lastPrimerHeaderIdx = i;
+    }
+  }
+  if (lastPrimerHeaderIdx < 0) return text;
+
+  // From lastPrimerHeaderIdx, advance until a blank line is seen
+  // (or end of string), then skip that blank line too.
+  let endIdx = lastPrimerHeaderIdx;
+  while (endIdx < lines.length && lines[endIdx] !== "") endIdx++;
+  // Skip the blank separator line itself.
+  if (endIdx < lines.length && lines[endIdx] === "") endIdx++;
+
+  const remaining = lines.slice(endIdx).join("\n").trimStart();
+  return remaining || text; // fall back to original if nothing remains
+}
+
+/**
  * Filter parent messages into the slice the sub-agent should inherit.
  *
  * Returns a new array (does not mutate input). Assistant messages whose tool
@@ -130,7 +210,7 @@ export function filterParentContext(
     const role = (msg as any).role;
     switch (role) {
       case "user":
-        out.push(msg);
+        out.push(stripSessionPrimerPreamble(msg));
         break;
       case "assistant": {
         // (a') v0.8.1: any assistant message whose content array contained

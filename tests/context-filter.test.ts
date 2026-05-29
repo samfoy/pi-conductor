@@ -977,3 +977,70 @@ test(
     assert.ok(sawReadResult, "read toolResult preserved");
   },
 );
+
+// ── Backlog item 12 candidate #1: session-primer preamble stripping ────────
+
+function userWithBlocks(text: string): AgentMessage {
+  return {
+    role: "user",
+    content: [{ type: "text", text }],
+    timestamp: 0,
+  } as AgentMessage;
+}
+
+test("filterParentContext: strips ## Recent Sessions preamble from first user message", () => {
+  const primer = `## Recent Sessions (this project)
+- **1d ago**: some session title
+- **2d ago**: another session
+
+go write the tests`;
+  const msgs = [userWithBlocks(primer)];
+  const out = filterParentContext(msgs);
+  assert.equal(out.length, 1);
+  const text = (out[0] as any).content[0].text;
+  assert.doesNotMatch(text, /## Recent Sessions/);
+  assert.match(text, /go write the tests/);
+});
+
+test("filterParentContext: strips <memory> preamble block", () => {
+  const primer = `<memory>
+## User Preferences
+- some preference (5d ago)
+</memory>
+
+please review this diff`;
+  const msgs = [userWithBlocks(primer)];
+  const out = filterParentContext(msgs);
+  const text = (out[0] as any).content[0].text;
+  assert.doesNotMatch(text, /<memory>/);
+  assert.match(text, /please review this diff/);
+});
+
+test("filterParentContext: user message with no primer passes through unchanged", () => {
+  const msgs = [userWithBlocks("implement slice 3")];
+  const out = filterParentContext(msgs);
+  assert.equal((out[0] as any).content[0].text, "implement slice 3");
+});
+
+test("filterParentContext: strips [Note for agent] preamble (resume-session primer)", () => {
+  const primer = `[Note for agent: you are RESUMING an existing conversation]
+
+ok continue where we left off`;
+  const msgs = [userWithBlocks(primer)];
+  const out = filterParentContext(msgs);
+  const text = (out[0] as any).content[0].text;
+  assert.doesNotMatch(text, /Note for agent/);
+  assert.match(text, /ok continue where we left off/);
+});
+
+test("filterParentContextCompact: also strips session-primer preamble", () => {
+  const primer = `## Recent Sessions (this project)
+- **1d ago**: some session
+
+implement the slice`;
+  const msgs = [userWithBlocks(primer)];
+  const out = filterParentContextCompact(msgs);
+  const text = (out[0] as any).content[0].text;
+  assert.doesNotMatch(text, /## Recent Sessions/);
+  assert.match(text, /implement the slice/);
+});

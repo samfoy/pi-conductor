@@ -289,6 +289,33 @@ export function resolveKillOnStall(run: Run, defaultKillOnStall: boolean): boole
 }
 
 /**
+ * Backlog item 2: persona-class-aware `kill_on_stall` resolution.
+ *
+ * Same precedence as {@link resolveKillOnStall} but with a smarter
+ * built-in default: when the per-run override is absent, write-capable
+ * personas (`builder`, `simplifier`) default to `true` — a zombie
+ * holding the `m_w_c=1` write slot blocks the entire chain, so
+ * auto-kill is the right failure mode. Read-only personas keep
+ * `false` (advisory-only) as their built-in default.
+ *
+ * Override precedence: per-call tool arg > conductor config default >
+ * persona-class built-in.
+ *
+ * Pure: deterministic on (run, defaultKillOnStall, isWriteCapable).
+ * Separate from `resolveKillOnStall` so existing W1 witness stays
+ * green and the new behaviour has its own pinned test.
+ */
+export function resolveKillOnStallForPersona(
+  run: Run,
+  defaultKillOnStall: boolean,
+  isWriteCapablePersona: boolean,
+): boolean {
+  if (run.killOnStall !== undefined) return run.killOnStall; // per-call wins
+  if (defaultKillOnStall !== false) return defaultKillOnStall; // explicit cfg default
+  return isWriteCapablePersona; // write-capable: true; read-only: false
+}
+
+/**
  * v0.10 Slice 4: render-time stall classification used by the widget,
  * the transcript header `deriveActivity`, and the `/conductor watchdog
  * status` table. Pure: no I/O, deterministic on (run, nowMs, defaults).

@@ -536,3 +536,34 @@ test("Watchdog.tick: resumed run WITHOUT lastEventAt reseed triggers spurious so
   assert.equal(log.warns.length, 1, "stale lastEventAt causes spurious soft-stall");
 });
 
+// ── Backlog item 2: persona-class-aware kill_on_stall default ──────────────
+
+import { resolveKillOnStallForPersona } from "../src/watchdog.ts";
+
+test("resolveKillOnStallForPersona: per-call override wins for write-capable personas", () => {
+  const r = (v: boolean | undefined) => runFx({ killOnStall: v });
+  assert.equal(resolveKillOnStallForPersona(r(false), false, true), false);
+  assert.equal(resolveKillOnStallForPersona(r(true), false, false), true);
+});
+
+test("resolveKillOnStallForPersona: write-capable persona defaults true when per-call absent and cfg default false (LOAD-BEARING — W1 backlog item 2)", () => {
+  // Mutation: replacing the isWriteCapablePersona branch with \`return false\`
+  // takes this test from green to red.
+  const r = runFx({ killOnStall: undefined });
+  assert.equal(
+    resolveKillOnStallForPersona(r, false, true),
+    true,
+    "write-capable + cfg false + no override → true",
+  );
+  assert.equal(
+    resolveKillOnStallForPersona(r, false, false),
+    false,
+    "read-only + cfg false + no override → false",
+  );
+});
+
+test("resolveKillOnStallForPersona: explicit cfg default true wins over persona-class built-in", () => {
+  const r = runFx({ killOnStall: undefined });
+  assert.equal(resolveKillOnStallForPersona(r, true, false), true);
+  assert.equal(resolveKillOnStallForPersona(r, true, true), true);
+});

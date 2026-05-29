@@ -126,6 +126,9 @@ var WRITE_CAPABLE_PERSONAS = /* @__PURE__ */ new Set([
   "builder",
   "simplifier"
 ]);
+function isWriteCapable(personaName) {
+  return WRITE_CAPABLE_PERSONAS.has(personaName);
+}
 function resolveBuiltinPersonasDir(metaUrl) {
   const here = realpathSync(fileURLToPath(metaUrl));
   return resolve(dirname(here), "..", "personas");
@@ -819,6 +822,44 @@ function matchesAnyPrefix(name, prefixes) {
   }
   return false;
 }
+function stripSessionPrimerPreamble(msg) {
+  const content = msg.content;
+  if (!Array.isArray(content)) return msg;
+  let changed = false;
+  const newContent = content.map((block) => {
+    if (block?.type !== "text" || typeof block.text !== "string") return block;
+    const stripped = stripPrimerText(block.text);
+    if (stripped === block.text) return block;
+    changed = true;
+    return { ...block, text: stripped };
+  });
+  if (!changed) return msg;
+  return { ...msg, content: newContent };
+}
+function stripPrimerText(text) {
+  const PRIMER_STARTS = [
+    /^## Recent Sessions/m,
+    /^<memory>/m,
+    /^## \/project CONTEXT/m,
+    /^\[Note for agent/m
+  ];
+  const hasPrimer = PRIMER_STARTS.some((re) => re.test(text));
+  if (!hasPrimer) return text;
+  const lines = text.split("\n");
+  let lastPrimerHeaderIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.startsWith("## Recent Sessions") || line.startsWith("<memory>") || line.startsWith("## /project CONTEXT") || line.startsWith("[Note for agent")) {
+      lastPrimerHeaderIdx = i;
+    }
+  }
+  if (lastPrimerHeaderIdx < 0) return text;
+  let endIdx = lastPrimerHeaderIdx;
+  while (endIdx < lines.length && lines[endIdx] !== "") endIdx++;
+  if (endIdx < lines.length && lines[endIdx] === "") endIdx++;
+  const remaining = lines.slice(endIdx).join("\n").trimStart();
+  return remaining || text;
+}
 function filterParentContext(messages, opts = {}) {
   const excludeToolPrefixes = opts.excludeToolPrefixes ?? DEFAULT_TOOL_PREFIXES;
   const excludeCustomTypePrefixes = opts.excludeCustomTypePrefixes ?? DEFAULT_CUSTOM_TYPE_PREFIXES;
@@ -854,7 +895,7 @@ function filterParentContext(messages, opts = {}) {
     const role = msg.role;
     switch (role) {
       case "user":
-        out.push(msg);
+        out.push(stripSessionPrimerPreamble(msg));
         break;
       case "assistant": {
         if (droppedAssistantIndices.has(i)) break;
@@ -3670,6 +3711,11 @@ function effectiveConfig(run, defaults) {
 }
 function resolveKillOnStall(run, defaultKillOnStall) {
   return run.killOnStall ?? defaultKillOnStall;
+}
+function resolveKillOnStallForPersona(run, defaultKillOnStall, isWriteCapablePersona) {
+  if (run.killOnStall !== void 0) return run.killOnStall;
+  if (defaultKillOnStall !== false) return defaultKillOnStall;
+  return isWriteCapablePersona;
 }
 function classifyStall(run, nowMs, defaults) {
   if (run.status !== "running") return null;
@@ -8226,12 +8272,16 @@ function index_default(pi) {
         kill: (run, reason) => {
           forceTerminate(run, reason, registry);
         },
-        // v0.10 Slice 3: per-run `kill_on_stall` overrides the
-        // conductor-wide default. The lambda delegates to
-        // `resolveKillOnStall` (exported, witness-pinned by
-        // `tests/watchdog-enforcer.test.ts`) so a regression in the
-        // formula is caught by the W1 mutation witness.
-        isKillOnStall: (run) => resolveKillOnStall(run, cfg.watchdog.defaultKillOnStall),
+        // v0.10 Slice 3 + backlog item 2: per-run `kill_on_stall` overrides the
+        // conductor-wide default. `resolveKillOnStallForPersona` adds a
+        // persona-class-aware built-in: write-capable personas default to
+        // `true` (zombie holds the m_w_c=1 write slot; auto-kill unblocks the
+        // chain). Read-only personas keep `false`.
+        isKillOnStall: (run) => resolveKillOnStallForPersona(
+          run,
+          cfg.watchdog.defaultKillOnStall,
+          isWriteCapable(run.persona)
+        ),
         isEnabled: () => cfg.watchdog.enabled
       });
       watchdogDispose = wd.start();
