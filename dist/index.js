@@ -1923,6 +1923,11 @@ function spawnRun(opts) {
     // back to conductor-wide defaults at watchdog dispatch time.
     killOnStall: opts.killOnStall,
     softStallSeconds: opts.softStallSeconds,
+    // v0.11 on_complete_hook (slice 3) per-call layer. Stamp onto Run
+    // so the spawn-resume path of `ensemble_send` can re-resolve the
+    // hook with the same per-call winner unless explicitly replaced.
+    onCompleteHook: opts.onCompleteHook,
+    onCompleteHookTimeoutSeconds: opts.onCompleteHookTimeoutSeconds,
     // Ownership scoping: persist the conductor host pid (and Linux
     // start-time fingerprint) so sibling pi sessions reading the
     // global runs/ root can skip-foreign records they don't own.
@@ -1999,7 +2004,7 @@ function spawnRun(opts) {
     resolvedHook: resolveCloseHook(
       opts.cwd,
       opts.persona.name,
-      void 0,
+      hookSpecFromOpts(opts.onCompleteHook, opts.onCompleteHookTimeoutSeconds),
       // per-call (slice 3)
       hookSpecFromPersona(opts.persona)
     )
@@ -2036,6 +2041,10 @@ function hookSpecFromPersona(persona) {
     command: persona.onCompleteHook,
     timeoutSeconds: persona.onCompleteHookTimeoutSeconds
   };
+}
+function hookSpecFromOpts(command, timeoutSeconds) {
+  if (command === void 0) return void 0;
+  return { command, timeoutSeconds };
 }
 function runPiSubprocess(run, piArgs, opts) {
   const invocation = getPiInvocation(piArgs);
@@ -2339,6 +2348,9 @@ function sendToRun(run, message, opts) {
     const cmdType = decision.strategy.kind === "rpc-steer" ? "steer" : "follow_up";
     if (opts.killOnStall !== void 0) run.killOnStall = opts.killOnStall;
     if (opts.softStallSeconds !== void 0) run.softStallSeconds = opts.softStallSeconds;
+    if (opts.onCompleteHook !== void 0) run.onCompleteHook = opts.onCompleteHook;
+    if (opts.onCompleteHookTimeoutSeconds !== void 0)
+      run.onCompleteHookTimeoutSeconds = opts.onCompleteHookTimeoutSeconds;
     snapshotInvocationMarkers(run);
     const result = enqueueRpcSendWithAck(run, cmdType, trimmed);
     if (result.kind === "epipe") {
@@ -2371,6 +2383,9 @@ function sendToRun(run, message, opts) {
   snapshotInvocationMarkers(run);
   if (opts.killOnStall !== void 0) run.killOnStall = opts.killOnStall;
   if (opts.softStallSeconds !== void 0) run.softStallSeconds = opts.softStallSeconds;
+  if (opts.onCompleteHook !== void 0) run.onCompleteHook = opts.onCompleteHook;
+  if (opts.onCompleteHookTimeoutSeconds !== void 0)
+    run.onCompleteHookTimeoutSeconds = opts.onCompleteHookTimeoutSeconds;
   opts.registry.notify(run);
   const sessionPath = run.sessionPath;
   const piArgs = buildResumePiArgs(run, trimmed);
@@ -2396,8 +2411,13 @@ function sendToRun(run, message, opts) {
     // v0.11 on_complete_hook (slice 2): re-resolve at every terminal
     // transition so config changes between spawn and re-fire are
     // honored (§4.6: each terminal is a fresh gate). Per-call layer
-    // wires in slice 3; persona-frontmatter layer in slice 4.
-    resolvedHook: resolveCloseHook(run.cwd, run.persona)
+    // (slice 3) reads from `Run.onCompleteHook` — stamped at spawn time
+    // by `spawnRun` and replaceable by per-send overrides above.
+    resolvedHook: resolveCloseHook(
+      run.cwd,
+      run.persona,
+      hookSpecFromOpts(run.onCompleteHook, run.onCompleteHookTimeoutSeconds)
+    )
   });
   return { kind: "started", run, done };
 }
@@ -5173,6 +5193,17 @@ function registerSpawnTool(pi, opts) {
           description: "v0.10 watchdog soft-stall threshold for this spawn, in seconds (\u2265 30). Hard threshold scales with the same ratio as conductor defaults (typically 5\xD7). Override when the persona's expected tool calls are legitimately slow (npm install, brazil-build, large test suites). Default: 120s."
         })
       ),
+      on_complete_hook: Type.Optional(
+        Type.String({
+          description: 'v0.11 quality-gate hook. Shell command run after the sub-agent reaches a terminal status; non-zero exit flips the run to `hook_failed`. Empty string (`""`) is the explicit-disable sentinel \u2014 short-circuits the cascade so this spawn runs no hook even if project / user config or persona frontmatter declares one. Cascade: per-call > project > user > persona-frontmatter.'
+        })
+      ),
+      on_complete_hook_timeout_seconds: Type.Optional(
+        Type.Integer({
+          minimum: 1,
+          description: "v0.11 quality-gate hook timeout (seconds). Read paired with `on_complete_hook`; a runaway hook past this budget is killed and the run flips to `hook_failed`. Default 300 when omitted."
+        })
+      ),
       steerable: Type.Optional(
         Type.Boolean({
           description: "v0.12 steering opt-in. true \u2192 launch the sub-agent in `pi --mode rpc` so the conductor can `steer` / `follow_up` it mid-run via ensemble_send. false / omitted \u2192 today's `pi --mode json -p` print mode (no steering). Cascade per-call > project > user > built-in default false. Personas using ctx.ui.confirm/select must NOT be spawned with steerable=true (auto-cancelled on the conductor side)."
@@ -5197,6 +5228,10 @@ function registerSpawnTool(pi, opts) {
       if (tmRange) return errorResult(tmRange);
       const stallRange = validateStallThresholdSeconds(params.stall_threshold_seconds);
       if (stallRange) return errorResult(stallRange);
+      const hookTimeoutRange = validateHookTimeoutSeconds(
+        params.on_complete_hook_timeout_seconds
+      );
+      if (hookTimeoutRange) return errorResult(hookTimeoutRange);
       const cwd = opts.getCwd();
       const cfg = loadConfig(cwd);
       const resolved = await resolvePersonas({ cwd, personaOverrides: cfg.personaOverrides });
@@ -5236,6 +5271,9 @@ function registerSpawnTool(pi, opts) {
         // conductor default (off / 120s soft).
         killOnStall: params.kill_on_stall,
         softStallSeconds: params.stall_threshold_seconds,
+        // v0.11 on_complete_hook (slice 3) per-call layer.
+        onCompleteHook: params.on_complete_hook,
+        onCompleteHookTimeoutSeconds: params.on_complete_hook_timeout_seconds,
         steerable,
         // Item 12 candidate #3 — per-call inherit_context override.
         // Wins above persona.inheritContext (which already merges
@@ -5394,6 +5432,17 @@ function registerSendTool(pi, opts) {
           description: "v0.10 watchdog soft-stall threshold for the resumed turn, in seconds (\u2265 30). Hard threshold scales with the same ratio as conductor defaults. Replaces the original spawn's value."
         })
       ),
+      on_complete_hook: Type.Optional(
+        Type.String({
+          description: "v0.11 quality-gate hook for the resumed turn. Replaces the original spawn's per-call hook (and persists for subsequent sends until next override). Empty string disables for this resume only."
+        })
+      ),
+      on_complete_hook_timeout_seconds: Type.Optional(
+        Type.Integer({
+          minimum: 1,
+          description: "v0.11 quality-gate hook timeout (seconds) for the resumed turn. Replaces the original spawn's per-call timeout."
+        })
+      ),
       streaming_behavior: Type.Optional(
         Type.Union(
           [
@@ -5436,6 +5485,10 @@ function registerSendTool(pi, opts) {
         // the run's existing values.
         killOnStall: params.kill_on_stall,
         softStallSeconds: params.stall_threshold_seconds,
+        // v0.11 on_complete_hook (slice 3) per-send override. Undefined →
+        // keep the run's existing per-call hook (set at spawn time).
+        onCompleteHook: params.on_complete_hook,
+        onCompleteHookTimeoutSeconds: params.on_complete_hook_timeout_seconds,
         // v0.12 slice 4: drive resolveSendStrategy. Undefined → "auto".
         streamingBehavior: params.streaming_behavior
       });
@@ -5870,6 +5923,13 @@ function validateStallThresholdSeconds(s) {
   }
   return void 0;
 }
+function validateHookTimeoutSeconds(s) {
+  if (s === void 0) return void 0;
+  if (!Number.isFinite(s) || !Number.isInteger(s) || s < 1) {
+    return `on_complete_hook_timeout_seconds must be a positive integer; got ${s}`;
+  }
+  return void 0;
+}
 function isTerminalStatus(s) {
   return s === "completed" || s === "failed" || s === "killed" || s === "timeout" || s === "hook_failed";
 }
@@ -5957,7 +6017,9 @@ var SpawnQueue = class {
       killOnStall: opts.killOnStall,
       softStallSeconds: opts.softStallSeconds,
       steerable: opts.steerable,
-      inheritContextOverride: opts.inheritContextOverride
+      inheritContextOverride: opts.inheritContextOverride,
+      onCompleteHook: opts.onCompleteHook,
+      onCompleteHookTimeoutSeconds: opts.onCompleteHookTimeoutSeconds
     };
     this.pending.push(pending);
     return {
@@ -6011,7 +6073,9 @@ var SpawnQueue = class {
         killOnStall: next.killOnStall,
         softStallSeconds: next.softStallSeconds,
         steerable: next.steerable,
-        inheritContextOverride: next.inheritContextOverride
+        inheritContextOverride: next.inheritContextOverride,
+        onCompleteHook: next.onCompleteHook,
+        onCompleteHookTimeoutSeconds: next.onCompleteHookTimeoutSeconds
       });
     }
   }

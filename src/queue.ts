@@ -61,6 +61,13 @@ export interface PendingSpawn {
    * `SpawnOptions.inheritContextOverride` and `src/inherit-context.ts`.
    */
   inheritContextOverride?: ContextInheritance;
+  /**
+   * v0.11 on_complete_hook (slice 3) — per-call layer threaded through
+   * to spawnRun on dequeue. See `SpawnOptions.onCompleteHook`.
+   */
+  onCompleteHook?: string;
+  /** v0.11 on_complete_hook (slice 3) — per-call timeout (seconds). */
+  onCompleteHookTimeoutSeconds?: number;
 }
 
 export class SpawnQueue {
@@ -161,6 +168,8 @@ export class SpawnQueue {
       softStallSeconds: opts.softStallSeconds,
       steerable: opts.steerable,
       inheritContextOverride: opts.inheritContextOverride,
+      onCompleteHook: opts.onCompleteHook,
+      onCompleteHookTimeoutSeconds: opts.onCompleteHookTimeoutSeconds,
     };
     this.pending.push(pending);
     return {
@@ -228,6 +237,8 @@ export class SpawnQueue {
         softStallSeconds: next.softStallSeconds,
         steerable: next.steerable,
         inheritContextOverride: next.inheritContextOverride,
+        onCompleteHook: next.onCompleteHook,
+        onCompleteHookTimeoutSeconds: next.onCompleteHookTimeoutSeconds,
       });
     }
   }

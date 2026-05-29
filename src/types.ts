@@ -376,6 +376,29 @@ export interface Run {
    */
   softStallSeconds?: number;
 
+  /**
+   * v0.11 on_complete_hook (slice 3): per-call hook command captured at
+   * spawn time from the `ensemble_spawn` LLM tool arg. Stored on the Run
+   * so the spawn-resume path of `ensemble_send` can re-resolve the hook
+   * with the same per-call layer for the second-pass terminal
+   * (design §4.6: each terminal is a fresh gate; the per-call winner
+   * persists unless an `ensemble_send` arg replaces it).
+   *
+   * Empty string is the explicit-disable sentinel from slice 1b's
+   * cascade resolver — short-circuits to `undefined`. Plain `undefined`
+   * means "no per-call layer; cascade falls through to project/user/
+   * persona-frontmatter".
+   */
+  onCompleteHook?: string;
+  /**
+   * v0.11 on_complete_hook (slice 3): per-call hook timeout (seconds)
+   * captured at spawn time. Read paired with `onCompleteHook` — only
+   * meaningful when `onCompleteHook` is a non-empty string. The
+   * cascade resolver pulls timeout from the same layer the command
+   * came from; this field carries the per-call layer's timeout.
+   */
+  onCompleteHookTimeoutSeconds?: number;
+
   // ── v0.12 steering (slice 1 types) ───────────────────────────────────────
   // Slice 1 declares these optional fields; slice 2 wires the RPC
   // subprocess plumbing that consumes them; slice 4 wires the

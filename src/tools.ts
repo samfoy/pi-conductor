@@ -256,6 +256,19 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
             "v0.10 watchdog soft-stall threshold for this spawn, in seconds (≥ 30). Hard threshold scales with the same ratio as conductor defaults (typically 5×). Override when the persona's expected tool calls are legitimately slow (npm install, brazil-build, large test suites). Default: 120s.",
         }),
       ),
+      on_complete_hook: Type.Optional(
+        Type.String({
+          description:
+            "v0.11 quality-gate hook. Shell command run after the sub-agent reaches a terminal status; non-zero exit flips the run to `hook_failed`. Empty string (`\"\"`) is the explicit-disable sentinel — short-circuits the cascade so this spawn runs no hook even if project / user config or persona frontmatter declares one. Cascade: per-call > project > user > persona-frontmatter.",
+        }),
+      ),
+      on_complete_hook_timeout_seconds: Type.Optional(
+        Type.Integer({
+          minimum: 1,
+          description:
+            "v0.11 quality-gate hook timeout (seconds). Read paired with `on_complete_hook`; a runaway hook past this budget is killed and the run flips to `hook_failed`. Default 300 when omitted.",
+        }),
+      ),
       steerable: Type.Optional(
         Type.Boolean({
           description:
@@ -282,6 +295,10 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       if (tmRange) return errorResult(tmRange);
       const stallRange = validateStallThresholdSeconds(params.stall_threshold_seconds);
       if (stallRange) return errorResult(stallRange);
+      const hookTimeoutRange = validateHookTimeoutSeconds(
+        params.on_complete_hook_timeout_seconds,
+      );
+      if (hookTimeoutRange) return errorResult(hookTimeoutRange);
 
       const cwd = opts.getCwd();
       const cfg = loadConfig(cwd);
@@ -338,6 +355,9 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         // conductor default (off / 120s soft).
         killOnStall: params.kill_on_stall,
         softStallSeconds: params.stall_threshold_seconds,
+        // v0.11 on_complete_hook (slice 3) per-call layer.
+        onCompleteHook: params.on_complete_hook,
+        onCompleteHookTimeoutSeconds: params.on_complete_hook_timeout_seconds,
         steerable,
         // Item 12 candidate #3 — per-call inherit_context override.
         // Wins above persona.inheritContext (which already merges
@@ -541,6 +561,19 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
             "v0.10 watchdog soft-stall threshold for the resumed turn, in seconds (≥ 30). Hard threshold scales with the same ratio as conductor defaults. Replaces the original spawn's value.",
         }),
       ),
+      on_complete_hook: Type.Optional(
+        Type.String({
+          description:
+            "v0.11 quality-gate hook for the resumed turn. Replaces the original spawn's per-call hook (and persists for subsequent sends until next override). Empty string disables for this resume only.",
+        }),
+      ),
+      on_complete_hook_timeout_seconds: Type.Optional(
+        Type.Integer({
+          minimum: 1,
+          description:
+            "v0.11 quality-gate hook timeout (seconds) for the resumed turn. Replaces the original spawn's per-call timeout.",
+        }),
+      ),
       streaming_behavior: Type.Optional(
         Type.Union(
           [
@@ -597,6 +630,10 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         // the run's existing values.
         killOnStall: params.kill_on_stall,
         softStallSeconds: params.stall_threshold_seconds,
+        // v0.11 on_complete_hook (slice 3) per-send override. Undefined →
+        // keep the run's existing per-call hook (set at spawn time).
+        onCompleteHook: params.on_complete_hook,
+        onCompleteHookTimeoutSeconds: params.on_complete_hook_timeout_seconds,
         // v0.12 slice 4: drive resolveSendStrategy. Undefined → "auto".
         streamingBehavior: params.streaming_behavior,
       });
@@ -1129,6 +1166,21 @@ function validateStallThresholdSeconds(s: number | undefined): string | undefine
   if (s === undefined) return undefined;
   if (!Number.isFinite(s) || !Number.isInteger(s) || s < 30) {
     return `stall_threshold_seconds must be an integer ≥ 30; got ${s}`;
+  }
+  return undefined;
+}
+
+/**
+ * v0.11 slice 3 — validate a per-call `on_complete_hook_timeout_seconds`
+ * tool argument. Mirrors {@link validateStallThresholdSeconds}; minimum is
+ * 1 (the cascade resolver's default kicks in when the field is omitted, not
+ * when it's zero — a zero value would be a degenerate hook that times out
+ * before it could run).
+ */
+function validateHookTimeoutSeconds(s: number | undefined): string | undefined {
+  if (s === undefined) return undefined;
+  if (!Number.isFinite(s) || !Number.isInteger(s) || s < 1) {
+    return `on_complete_hook_timeout_seconds must be a positive integer; got ${s}`;
   }
   return undefined;
 }

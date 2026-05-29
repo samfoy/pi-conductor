@@ -875,6 +875,21 @@ export interface SpawnOptions {
    * resolver and `docs/backlog.md` item 12 for the witness.
    */
   inheritContextOverride?: ContextInheritance;
+  /**
+   * v0.11 on_complete_hook (slice 3) — per-call hook command from the
+   * `ensemble_spawn` LLM tool arg. Stamped onto `Run.onCompleteHook` and
+   * fed as the per-call layer of {@link resolveCloseHook} at spawn time.
+   * Empty string is the explicit-disable sentinel (slice 1b cascade).
+   * Undefined falls through to project / user / persona-frontmatter
+   * layers.
+   */
+  onCompleteHook?: string;
+  /**
+   * v0.11 on_complete_hook (slice 3) — per-call timeout in seconds.
+   * Stamped onto `Run.onCompleteHookTimeoutSeconds`. Read paired with
+   * `onCompleteHook`; only meaningful when the per-call layer wins.
+   */
+  onCompleteHookTimeoutSeconds?: number;
 }
 
 /**
@@ -1018,6 +1033,11 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // back to conductor-wide defaults at watchdog dispatch time.
     killOnStall: opts.killOnStall,
     softStallSeconds: opts.softStallSeconds,
+    // v0.11 on_complete_hook (slice 3) per-call layer. Stamp onto Run
+    // so the spawn-resume path of `ensemble_send` can re-resolve the
+    // hook with the same per-call winner unless explicitly replaced.
+    onCompleteHook: opts.onCompleteHook,
+    onCompleteHookTimeoutSeconds: opts.onCompleteHookTimeoutSeconds,
     // Ownership scoping: persist the conductor host pid (and Linux
     // start-time fingerprint) so sibling pi sessions reading the
     // global runs/ root can skip-foreign records they don't own.
@@ -1103,7 +1123,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     resolvedHook: resolveCloseHook(
       opts.cwd,
       opts.persona.name,
-      undefined, // per-call (slice 3)
+      hookSpecFromOpts(opts.onCompleteHook, opts.onCompleteHookTimeoutSeconds), // per-call (slice 3)
       hookSpecFromPersona(opts.persona),
     ),
   });
@@ -1210,6 +1230,22 @@ function hookSpecFromPersona(persona: Persona): HookSpec | undefined {
     command: persona.onCompleteHook,
     timeoutSeconds: persona.onCompleteHookTimeoutSeconds,
   };
+}
+
+/**
+ * v0.11 on_complete_hook (slice 3) helper — build a {@link HookSpec}
+ * from the per-call SpawnOptions / SendToRunOptions fields. Returns
+ * `undefined` when no per-call command was supplied (so the cascade
+ * falls through to project / user / persona). Empty string is a valid
+ * command value (the explicit-disable sentinel) and IS forwarded to
+ * the resolver, which short-circuits.
+ */
+function hookSpecFromOpts(
+  command: string | undefined,
+  timeoutSeconds: number | undefined,
+): HookSpec | undefined {
+  if (command === undefined) return undefined;
+  return { command, timeoutSeconds };
 }
 
 /**
@@ -1481,6 +1517,19 @@ export interface SendToRunOptions {
    * (seconds). When provided, replaces `Run.softStallSeconds`.
    */
   softStallSeconds?: number;
+  /**
+   * v0.11 on_complete_hook (slice 3) per-send override. When provided,
+   * replaces `Run.onCompleteHook` for the resumed terminal (and
+   * onward sends, until next override). Empty string is the explicit-
+   * disable sentinel — disables for this resume; replace with a fresh
+   * non-empty command on a later send to re-arm.
+   */
+  onCompleteHook?: string;
+  /**
+   * v0.11 on_complete_hook (slice 3) per-send timeout override
+   * (seconds). Replaces `Run.onCompleteHookTimeoutSeconds`.
+   */
+  onCompleteHookTimeoutSeconds?: number;
   /**
    * v0.12 slice 4 — LLM-facing `streaming_behavior` arg. Drives
    * {@link resolveSendStrategy} to pick `rpc-steer` /
@@ -1831,6 +1880,12 @@ export function sendToRun(
     // subprocess is alive throughout.
     if (opts.killOnStall !== undefined) run.killOnStall = opts.killOnStall;
     if (opts.softStallSeconds !== undefined) run.softStallSeconds = opts.softStallSeconds;
+    // v0.11 on_complete_hook (slice 3) per-send overrides apply on
+    // RPC paths too: when this RPC turn eventually terminates, the
+    // close handler reads the latest values.
+    if (opts.onCompleteHook !== undefined) run.onCompleteHook = opts.onCompleteHook;
+    if (opts.onCompleteHookTimeoutSeconds !== undefined)
+      run.onCompleteHookTimeoutSeconds = opts.onCompleteHookTimeoutSeconds;
     // Item 15: re-stamp per-invocation markers BEFORE we touch the
     // queue. RPC steering re-uses the same subprocess but the
     // operator still expects per-most-recent-send accounting in the
@@ -1885,6 +1940,13 @@ export function sendToRun(
   // when provided; leave the spawn-time values alone otherwise.
   if (opts.killOnStall !== undefined) run.killOnStall = opts.killOnStall;
   if (opts.softStallSeconds !== undefined) run.softStallSeconds = opts.softStallSeconds;
+  // v0.11 on_complete_hook (slice 3) per-send overrides. Replace the
+  // run's stored per-call layer when provided; leave the spawn-time
+  // values alone otherwise (§4.6: per-call winner persists across
+  // terminals unless explicitly replaced).
+  if (opts.onCompleteHook !== undefined) run.onCompleteHook = opts.onCompleteHook;
+  if (opts.onCompleteHookTimeoutSeconds !== undefined)
+    run.onCompleteHookTimeoutSeconds = opts.onCompleteHookTimeoutSeconds;
   opts.registry.notify(run);
 
   // resolveSendStrategy guarantees sessionPath is set on spawn-resume,
@@ -1915,8 +1977,13 @@ export function sendToRun(
     // v0.11 on_complete_hook (slice 2): re-resolve at every terminal
     // transition so config changes between spawn and re-fire are
     // honored (§4.6: each terminal is a fresh gate). Per-call layer
-    // wires in slice 3; persona-frontmatter layer in slice 4.
-    resolvedHook: resolveCloseHook(run.cwd, run.persona),
+    // (slice 3) reads from `Run.onCompleteHook` — stamped at spawn time
+    // by `spawnRun` and replaceable by per-send overrides above.
+    resolvedHook: resolveCloseHook(
+      run.cwd,
+      run.persona,
+      hookSpecFromOpts(run.onCompleteHook, run.onCompleteHookTimeoutSeconds),
+    ),
   });
   return { kind: "started", run, done };
 }

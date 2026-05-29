@@ -99,6 +99,8 @@ function captureQueue(reg: RunRegistry) {
     timeoutMs?: number;
     killOnStall?: boolean;
     softStallSeconds?: number;
+    onCompleteHook?: string;
+    onCompleteHookTimeoutSeconds?: number;
     called: boolean;
   } = { called: false };
   const fakeQueue = {
@@ -107,6 +109,8 @@ function captureQueue(reg: RunRegistry) {
       captured.timeoutMs = opts.timeoutMs;
       captured.killOnStall = opts.killOnStall;
       captured.softStallSeconds = opts.softStallSeconds;
+      captured.onCompleteHook = opts.onCompleteHook;
+      captured.onCompleteHookTimeoutSeconds = opts.onCompleteHookTimeoutSeconds;
       const placeholder = makeRun(`fake-${Math.random().toString(36).slice(2, 6)}`, {
         status: "queued",
         persona: opts.persona.name,
@@ -468,17 +472,135 @@ test("ensemble_send: stall_threshold_seconds=20 is rejected (sub-30 floor)", asy
   }
 });
 
-test("DEFAULT_CONFIG: watchdog defaults are present and default-off for kill_on_stall", () => {
-  // Pin the design's chosen defaults so a careless config refactor
-  // doesn't silently drop the watchdog. defaultKillOnStall is OFF by
-  // design (advisory-only); autonomous chains opt in.
-  assert.equal(DEFAULT_CONFIG.watchdog.enabled, true);
-  assert.equal(DEFAULT_CONFIG.watchdog.defaultSoftSeconds, 120);
-  assert.equal(DEFAULT_CONFIG.watchdog.defaultHardSeconds, 600);
-  assert.equal(DEFAULT_CONFIG.watchdog.graceSeconds, 30);
-  assert.equal(
-    DEFAULT_CONFIG.watchdog.defaultKillOnStall,
-    false,
-    "default-off guards against surprise auto-kills",
+test(
+  "DEFAULT_CONFIG: watchdog defaults are present and default-off for kill_on_stall",
+  () => {
+    // Pin the design's chosen defaults so a careless config refactor
+    // doesn't silently drop the watchdog. defaultKillOnStall is OFF by
+    // design (advisory-only); autonomous chains opt in.
+    assert.equal(DEFAULT_CONFIG.watchdog.enabled, true);
+    assert.equal(DEFAULT_CONFIG.watchdog.defaultSoftSeconds, 120);
+    assert.equal(DEFAULT_CONFIG.watchdog.defaultHardSeconds, 600);
+    assert.equal(DEFAULT_CONFIG.watchdog.graceSeconds, 30);
+    assert.equal(
+      DEFAULT_CONFIG.watchdog.defaultKillOnStall,
+      false,
+      "default-off guards against surprise auto-kills",
+    );
+  },
+);
+
+// ── v0.11 Slice 3: on_complete_hook + on_complete_hook_timeout_seconds ───
+//
+// Mirrors the v0.10 slice 3 pattern: schema pinning, propagation through
+// the queue capture, and tool-level range validation. The cascade
+// resolution itself is exercised in tests/hook-cascade.test.ts; the
+// re-fire-on-resume wiring is in tests/runs-resume-hook.test.ts.
+
+test("ensemble_spawn schema: on_complete_hook accepted as string", () => {
+  const { spawnTool } = setup();
+  const props = spawnTool.parameters?.properties;
+  assert.ok(props.on_complete_hook, "on_complete_hook is in the schema");
+  const required: string[] = spawnTool.parameters.required ?? [];
+  assert.ok(!required.includes("on_complete_hook"), "on_complete_hook is optional");
+  assert.equal(props.on_complete_hook.type, "string");
+  assert.match(
+    String(props.on_complete_hook.description ?? ""),
+    /cascade|hook|terminal/i,
   );
+});
+
+test("ensemble_spawn schema: on_complete_hook_timeout_seconds accepted as number", () => {
+  const { spawnTool } = setup();
+  const props = spawnTool.parameters?.properties;
+  assert.ok(
+    props.on_complete_hook_timeout_seconds,
+    "on_complete_hook_timeout_seconds is in the schema",
+  );
+  const required: string[] = spawnTool.parameters.required ?? [];
+  assert.ok(!required.includes("on_complete_hook_timeout_seconds"));
+  assert.equal(props.on_complete_hook_timeout_seconds.minimum, 1);
+});
+
+test("ensemble_send schema: on_complete_hook accepted", () => {
+  const { sendTool } = setup();
+  const props = sendTool.parameters?.properties;
+  assert.ok(props.on_complete_hook, "on_complete_hook is in the send schema");
+  const required: string[] = sendTool.parameters.required ?? [];
+  assert.ok(!required.includes("on_complete_hook"));
+  assert.equal(props.on_complete_hook.type, "string");
+  assert.ok(
+    props.on_complete_hook_timeout_seconds,
+    "on_complete_hook_timeout_seconds is in the send schema",
+  );
+  assert.equal(props.on_complete_hook_timeout_seconds.minimum, 1);
+});
+
+test("ensemble_spawn: on_complete_hook propagates to queue opts.onCompleteHook", async () => {
+  const { spawnTool, captured } = setupWithCaptureQueue();
+  await spawnTool.execute("call-och-1", {
+    persona: "inspector",
+    task: "noop",
+    foreground: false,
+    on_complete_hook: "echo gate",
+    on_complete_hook_timeout_seconds: 60,
+  });
+  assert.equal(captured.called, true);
+  assert.equal(captured.onCompleteHook, "echo gate");
+  assert.equal(captured.onCompleteHookTimeoutSeconds, 60);
+});
+
+test('ensemble_spawn: on_complete_hook="" (disable) propagates as empty string', async () => {
+  // Empty string is the explicit-disable sentinel — must reach the
+  // resolver as `""`, not get coerced to undefined at the tool boundary.
+  // The cascade resolver short-circuits on empty `command` (slice 1b).
+  const { spawnTool, captured } = setupWithCaptureQueue();
+  await spawnTool.execute("call-och-empty", {
+    persona: "inspector",
+    task: "noop",
+    foreground: false,
+    on_complete_hook: "",
+  });
+  assert.equal(captured.called, true);
+  assert.equal(captured.onCompleteHook, "");
+});
+
+test("ensemble_spawn: omitting on_complete_hook leaves opts.onCompleteHook undefined (cascade falls through)", async () => {
+  const { spawnTool, captured } = setupWithCaptureQueue();
+  await spawnTool.execute("call-och-omit", {
+    persona: "inspector",
+    task: "noop",
+    foreground: false,
+  });
+  assert.equal(captured.called, true);
+  assert.equal(captured.onCompleteHook, undefined);
+  assert.equal(captured.onCompleteHookTimeoutSeconds, undefined);
+});
+
+test("ensemble_spawn: on_complete_hook_timeout_seconds=0 is rejected", async () => {
+  const { spawnTool, captured } = setupWithCaptureQueue();
+  const result = await spawnTool.execute("call-och-zero", {
+    persona: "inspector",
+    task: "noop",
+    foreground: false,
+    on_complete_hook: "echo ok",
+    on_complete_hook_timeout_seconds: 0,
+  });
+  assert.equal(captured.called, false, "validation runs before queue dispatch");
+  const text = result.content.map((c: any) => c.text).join("\n");
+  assert.match(text, /on_complete_hook_timeout_seconds/i);
+});
+
+test("ensemble_spawn: on_complete_hook_timeout_seconds=-5 is rejected", async () => {
+  const { spawnTool, captured } = setupWithCaptureQueue();
+  const result = await spawnTool.execute("call-och-neg", {
+    persona: "inspector",
+    task: "noop",
+    foreground: false,
+    on_complete_hook: "echo ok",
+    on_complete_hook_timeout_seconds: -5,
+  });
+  assert.equal(captured.called, false);
+  const text = result.content.map((c: any) => c.text).join("\n");
+  assert.match(text, /on_complete_hook_timeout_seconds/i);
 });
