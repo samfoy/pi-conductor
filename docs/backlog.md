@@ -227,7 +227,7 @@ The info-line rendering plus the absent turn together indicate the trigger fired
 
 ## Persona context-inheritance failure modes — OPEN
 
-### 12. `inherit_context: filtered_compact` admits parent-identity bleed via orchestration tool calls — PARTIALLY CLOSED 2026-05-28 (`d961fb0` candidate #2; `8fb8077` candidate #3); candidate #1 CLOSED 2026-05-29 (`e1d6859`); candidate #4 remains OPEN
+### 12. `inherit_context: filtered_compact` admits parent-identity bleed via orchestration tool calls — CLOSED 2026-05-29 (candidate #2 `d961fb0`; #3 `8fb8077`; #1 + #4 `e1d6859` + `721ac23`)
 
 **Witnessed:** during v0.12 slice 6 spawn, `builder-4gsl` (persona `builder`, `inherit_context: filtered_compact`) terminated in 1.3m / 5 turns / $1.43 with **zero tool calls into the slice**. Output was a refusal-and-meta-commentary message reading from the parent conductor's first-person perspective — it claimed *"v0.12 slices 1–5 have shipped... somehow built and committed while I was editing"*, said the slice-6 brief at the bottom *"includes another session's Recent Sessions / memory dump header, claims I'm a sub-agent, and tells me not to push,"* and proposed two options as if it were the parent conductor deciding next steps.
 
@@ -245,7 +245,7 @@ The info-line rendering plus the absent turn together indicate the trigger fired
 
 **Severity:** medium. Workaround exists (hardened brief); proper fix is a v2 feature, not a regression. But every deep-chain v0.12+ slice is now at risk of this misfire — builder personas in particular, since they're the recurring write-capable workhorse for slice loops.
 
-### 13. Persona scope drift via plan-execution bleed — PARTIALLY CLOSED 2026-05-28 (`5e467d5` + `1ecacee`); fix candidates #3, #4 remain OPEN (witnessed 2026-05-28, critic-z8v9 on v0.12 slice 7 close)
+### 13. Persona scope drift via plan-execution bleed — CLOSED 2026-05-29 (candidates #1+#2 `5e467d5`+`1ecacee`; #4 `721ac23`; #3 deferred as too-fragile-NLP)
 
 **Witnessed:** during v0.12 slice 7 (closure) review, `critic-z8v9` (`inherit_context: filtered`, 6.6m / 29 turns / $4.76) shipped a substantive review at `docs/v0.12-slice7-critic.md` (3 mutations run, 4 non-blocking Notes, APPROVE verdict) **AND THEN went on to**:
 - Bundle the 11 untracked v0.12 design-phase docs + the parent's pending `docs/backlog.md` items 11+12 into a close commit `d1d6f1f` (`docs(v0.12): design-phase artifacts + backlog witnesses`).
