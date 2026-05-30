@@ -4,7 +4,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -361,7 +361,8 @@ test("resolveBuiltinPersonasDir: canonicalizes through legacy symlink layout", (
   // at <pkg>/dist/index.js. Without realpathSync, walking `..` from the
   // symlink path lands on ~/.pi/agent/extensions/, which has no
   // personas/ dir, so 0 personas resolve.
-  const root = mkdtempSync(join(tmpdir(), "conductor-symlink-test-"));
+  // Use realpathSync on root so macOS /var→/private/var symlink doesn't cause mismatches.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "conductor-symlink-test-")));
   // Real package layout: <root>/pkg/{dist/index.js, personas/<name>.md}
   const pkgDir = join(root, "pkg");
   const distDir = join(pkgDir, "dist");
@@ -393,7 +394,8 @@ test("resolveBuiltinPersonasDir: canonicalizes through legacy symlink layout", (
 test("resolveBuiltinPersonasDir: passes through non-symlink paths unchanged", () => {
   // Sanity: realpathSync on a real file is a no-op (modulo absolute-path
   // canonicalization). The walk still lands on <pkg>/personas/.
-  const root = mkdtempSync(join(tmpdir(), "conductor-realpath-test-"));
+  // Use realpathSync on root so macOS /var→/private/var symlink doesn't cause mismatches.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "conductor-realpath-test-")));
   const distDir = join(root, "dist");
   const personasDir = join(root, "personas");
   mkdirSync(distDir, { recursive: true });
