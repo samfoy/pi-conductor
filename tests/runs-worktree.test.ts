@@ -362,3 +362,204 @@ test(
     result.run.status = "completed";
   },
 );
+
+
+// ── Slice 5: tools.ts merge_strategy → mergeStrategy cascade ─────────────────
+
+test(
+  "ensemble_spawn: merge_strategy per-call passes through to queue.mergeStrategy",
+  async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "conductor-wt-ms-"));
+    try {
+      mkdirSync(projectPersonasDir(cwd), { recursive: true });
+      writeFileSync(
+        join(projectPersonasDir(cwd), "wt-builder2.md"),
+        `---\nname: wt-builder2\ndescription: merge strategy test\nworktree: true\n---\n\nYou are wt-builder2.\n`,
+        "utf8",
+      );
+
+      const reg = new RunRegistry();
+      const capturedFull: { mergeStrategy?: string } = {};
+      const fakeQueue = {
+        enqueueOrSpawn(opts: any) {
+          capturedFull.mergeStrategy = opts.mergeStrategy;
+          const placeholder = makeRun(`fake-ms`, { status: "queued", persona: opts.persona.name });
+          reg.register(placeholder);
+          return {
+            kind: "queued" as const,
+            pending: { id: placeholder.id } as any,
+            placeholderRun: placeholder,
+            downgraded: false,
+            queuePosition: 1,
+          };
+        },
+      };
+      const model = new FocusedStreamModel(reg);
+      const tools: RegisteredTool[] = [];
+      registerTools(
+        { registerTool: (t: RegisteredTool) => tools.push(t) } as any,
+        {
+          getCwd: () => cwd,
+          getRegistry: () => reg,
+          getQueue: () => fakeQueue as any,
+          getModel: () => model,
+          getParentMessages: () => [],
+          openFocusedOverlay: () => {},
+          registerForegroundDetach: () => ({
+            detachSignal: new Promise<void>(() => {}),
+            unregister: () => {},
+          }),
+          pushCompletionNotification: () => {},
+        },
+      );
+      const spawnTool = tools.find((t) => t.name === "ensemble_spawn")!;
+
+      // Per-call "merge" should override built-in "squash" for builder
+      await spawnTool.execute("call-ms-1", {
+        persona: "wt-builder2",
+        task: "noop",
+        foreground: false,
+        merge_strategy: "merge",
+      });
+      assert.equal(
+        capturedFull.mergeStrategy,
+        "merge",
+        "per-call merge_strategy must flow through to queue opts",
+      );
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "ensemble_spawn: merge_strategy defaults to squash for write-capable persona with worktree",
+  async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "conductor-wt-ms-default-"));
+    try {
+      mkdirSync(projectPersonasDir(cwd), { recursive: true });
+      writeFileSync(
+        join(projectPersonasDir(cwd), "wt-builder3.md"),
+        `---\nname: wt-builder3\ndescription: builder with worktree\nworktree: true\n---\n\nYou are wt-builder3.\n`,
+        "utf8",
+      );
+
+      const reg = new RunRegistry();
+      const capturedFull: { mergeStrategy?: string } = {};
+      const fakeQueue = {
+        enqueueOrSpawn(opts: any) {
+          capturedFull.mergeStrategy = opts.mergeStrategy;
+          const placeholder = makeRun(`fake-ms2`, { status: "queued", persona: opts.persona.name });
+          reg.register(placeholder);
+          return {
+            kind: "queued" as const,
+            pending: { id: placeholder.id } as any,
+            placeholderRun: placeholder,
+            downgraded: false,
+            queuePosition: 1,
+          };
+        },
+      };
+      const model = new FocusedStreamModel(reg);
+      const tools2: RegisteredTool[] = [];
+      registerTools(
+        { registerTool: (t: RegisteredTool) => tools2.push(t) } as any,
+        {
+          getCwd: () => cwd,
+          getRegistry: () => reg,
+          getQueue: () => fakeQueue as any,
+          getModel: () => model,
+          getParentMessages: () => [],
+          openFocusedOverlay: () => {},
+          registerForegroundDetach: () => ({
+            detachSignal: new Promise<void>(() => {}),
+            unregister: () => {},
+          }),
+          pushCompletionNotification: () => {},
+        },
+      );
+      const spawnTool2 = tools2.find((t) => t.name === "ensemble_spawn")!;
+
+      // No merge_strategy arg → built-in default for "wt-builder3" is "none"
+      // (it's not named "builder" or "simplifier").
+      // But if we name it "builder": would be "squash".
+      // Here persona name is "wt-builder3" → default "none".
+      await spawnTool2.execute("call-ms-2", {
+        persona: "wt-builder3",
+        task: "noop",
+        foreground: false,
+      });
+      assert.equal(
+        capturedFull.mergeStrategy,
+        "none",
+        "non-write-capable persona name defaults to none",
+      );
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "ensemble_spawn: mergeStrategy undefined when persona has no worktree",
+  async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "conductor-wt-ms-nowt-"));
+    try {
+      mkdirSync(projectPersonasDir(cwd), { recursive: true });
+      writeFileSync(
+        join(projectPersonasDir(cwd), "oracle2.md"),
+        `---\nname: oracle2\ndescription: oracle no worktree\nworktree: false\n---\n\nYou are oracle2.\n`,
+        "utf8",
+      );
+
+      const reg = new RunRegistry();
+      const capturedFull: { mergeStrategy?: string } = {};
+      const fakeQueue = {
+        enqueueOrSpawn(opts: any) {
+          capturedFull.mergeStrategy = opts.mergeStrategy;
+          const placeholder = makeRun(`fake-nowt`, { status: "queued", persona: opts.persona.name });
+          reg.register(placeholder);
+          return {
+            kind: "queued" as const,
+            pending: { id: placeholder.id } as any,
+            placeholderRun: placeholder,
+            downgraded: false,
+            queuePosition: 1,
+          };
+        },
+      };
+      const model = new FocusedStreamModel(reg);
+      const tools3: RegisteredTool[] = [];
+      registerTools(
+        { registerTool: (t: RegisteredTool) => tools3.push(t) } as any,
+        {
+          getCwd: () => cwd,
+          getRegistry: () => reg,
+          getQueue: () => fakeQueue as any,
+          getModel: () => model,
+          getParentMessages: () => [],
+          openFocusedOverlay: () => {},
+          registerForegroundDetach: () => ({
+            detachSignal: new Promise<void>(() => {}),
+            unregister: () => {},
+          }),
+          pushCompletionNotification: () => {},
+        },
+      );
+      const spawnTool3 = tools3.find((t) => t.name === "ensemble_spawn")!;
+
+      await spawnTool3.execute("call-ms-3", {
+        persona: "oracle2",
+        task: "noop",
+        foreground: false,
+      });
+      assert.equal(
+        capturedFull.mergeStrategy,
+        undefined,
+        "mergeStrategy must be undefined when persona has no worktree",
+      );
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  },
+);

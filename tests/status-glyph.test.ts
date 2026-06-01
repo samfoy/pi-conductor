@@ -42,6 +42,13 @@ test("STATUS_GLYPH: hook_failed entry is ⊗", () => {
   assert.equal(STATUS_GLYPH.hook_failed, "⊗");
 });
 
+test("STATUS_GLYPH: merge_conflict is ⊘", () => {
+  // v0.14: merge_conflict is a post-success terminal status. Glyph ⋘ chosen
+  // as visually close to ⊗ (hook_failed) but distinct — both indicate
+  // "completed but something went wrong in post-processing".
+  assert.equal(STATUS_GLYPH.merge_conflict, "\u2298");
+});
+
 test("STATUS_GLYPH: covers every RunStatus key (no holes)", () => {
   // Surfaces drift if RunStatus gains a member without STATUS_GLYPH being updated.
   const keys = Object.keys(STATUS_GLYPH).sort();
@@ -50,6 +57,7 @@ test("STATUS_GLYPH: covers every RunStatus key (no holes)", () => {
     "failed",
     "hook_failed",
     "killed",
+    "merge_conflict",
     "paused",
     "queued",
     "running",

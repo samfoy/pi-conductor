@@ -189,6 +189,7 @@ function statusColorSlot(s: RunStatus): string {
     case "killed":
     case "timeout":
     case "hook_failed":
+    case "merge_conflict":
       return "error";
   }
 }

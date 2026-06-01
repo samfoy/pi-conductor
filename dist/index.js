@@ -15,7 +15,9 @@ var STATUS_GLYPH = {
   failed: "\u2717",
   killed: "\u25A0",
   timeout: "\u23F1",
-  hook_failed: "\u2297"
+  hook_failed: "\u2297",
+  merge_conflict: "\u2298"
+  // v0.14: post-success conflict — ⊘ distinct from ⊗ (hook_failed)
 };
 
 // src/personas.ts
@@ -75,6 +77,7 @@ var DEFAULT_CONFIG = {
   // flipping it. Slice 1 ships the field; slice 4 wires per-call.
   defaultSteerable: false
 };
+var WRITE_CAPABLE_PERSONAS = /* @__PURE__ */ new Set(["builder", "simplifier"]);
 function emptyUsage() {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
 }
@@ -126,12 +129,12 @@ function isTerminal(s) {
 }
 
 // src/personas.ts
-var WRITE_CAPABLE_PERSONAS = /* @__PURE__ */ new Set([
+var WRITE_CAPABLE_PERSONAS2 = /* @__PURE__ */ new Set([
   "builder",
   "simplifier"
 ]);
 function isWriteCapable(personaName) {
-  return WRITE_CAPABLE_PERSONAS.has(personaName);
+  return WRITE_CAPABLE_PERSONAS2.has(personaName);
 }
 function resolveBuiltinPersonasDir(metaUrl) {
   const here = realpathSync(fileURLToPath(metaUrl));
@@ -1454,6 +1457,9 @@ function worktreeSpecFromRun(record) {
     worktreePath: record.worktreePath,
     branch: record.worktreeBranch
   };
+}
+function resolveMergeStrategy(opts) {
+  return opts.perCall ?? opts.projectOverride ?? opts.userOverride ?? opts.personaFrontmatter ?? (WRITE_CAPABLE_PERSONAS.has(opts.personaName) ? "squash" : "none");
 }
 var MAX_COMMIT_MSG_LENGTH = 72;
 function buildMergeCommitMessage(persona, runId, task) {
@@ -5184,7 +5190,7 @@ function padOrTruncate(left, right, width) {
 }
 
 // src/transcript-classify.ts
-var HEADER_GLYPHS = /* @__PURE__ */ new Set(["\u25CC", "\u25CF", "\u23F8", "\u2713", "\u2717", "\u25A0", "\u23F1", "\u2297"]);
+var HEADER_GLYPHS = /* @__PURE__ */ new Set(["\u25CC", "\u25CF", "\u23F8", "\u2713", "\u2717", "\u25A0", "\u23F1", "\u2297", "\u2298"]);
 function classifyLine(line) {
   if (line.length > 0 && /^─+$/.test(line)) {
     return { kind: "ruler" };
@@ -5233,6 +5239,7 @@ function statusColorSlot(status) {
     case "killed":
     case "timeout":
     case "hook_failed":
+    case "merge_conflict":
       return "error";
     case "paused":
       return "warning";
@@ -5612,6 +5619,14 @@ function registerSpawnTool(pi, opts) {
           description: "v0.11 quality-gate hook timeout (seconds). Read paired with `on_complete_hook`; a runaway hook past this budget is killed and the run flips to `hook_failed`. Default 300 when omitted."
         })
       ),
+      merge_strategy: Type.Optional(
+        Type.Union(
+          [Type.Literal("squash"), Type.Literal("merge"), Type.Literal("none")],
+          {
+            description: 'v0.14 worktree auto-merge strategy. When set (and the persona has a worktree), the worktree branch is merged back to the base branch on `completed`. `"squash"` squashes all commits into one; `"merge"` creates a merge commit; `"none"` skips merge-back. Cascade: per-call > project > user > persona-frontmatter > built-in default (`"squash"` for builder/simplifier, `"none"` for others). Omit to use the cascade.'
+          }
+        )
+      ),
       steerable: Type.Optional(
         Type.Boolean({
           description: "v0.12 steering opt-in. true \u2192 launch the sub-agent in `pi --mode rpc` so the conductor can `steer` / `follow_up` it mid-run via ensemble_send. false / omitted \u2192 today's `pi --mode json -p` print mode (no steering). Cascade per-call > project > user > built-in default false. Personas using ctx.ui.confirm/select must NOT be spawned with steerable=true (auto-cancelled on the conductor side)."
@@ -5684,8 +5699,17 @@ function registerSpawnTool(pi, opts) {
         onCompleteHookTimeoutSeconds: params.on_complete_hook_timeout_seconds,
         steerable,
         // v0.13 worktree-per-persona: collapse from persona frontmatter.
-        // No per-call override in v0.13 (deferred to v0.14).
         worktree: persona.worktree === true,
+        // v0.14 worktree auto-merge: resolve the merge strategy cascade.
+        // Cascade: per-call > project > user > persona-frontmatter > built-in class default.
+        mergeStrategy: persona.worktree === true ? resolveMergeStrategy({
+          perCall: params.merge_strategy,
+          projectOverride: cfg.personaOverrides[persona.name]?.mergeStrategy,
+          userOverride: void 0,
+          // user config merged into cfg.personaOverrides at load time
+          personaFrontmatter: persona.mergeStrategy,
+          personaName: persona.name
+        }) : void 0,
         // Item 12 candidate #3 — per-call inherit_context override.
         // Wins above persona.inheritContext (which already merges
         // project/user personaOverrides). Resolved in planSpawnPiArgs
@@ -6237,7 +6261,8 @@ function groupByStatus(runs) {
     failed: [],
     killed: [],
     timeout: [],
-    hook_failed: []
+    hook_failed: [],
+    merge_conflict: []
   };
   for (const r of runs) g[r.status].push(r);
   return g;
@@ -6383,8 +6408,8 @@ var SpawnQueue = class {
   enqueueOrSpawn(opts) {
     const registry = opts.registry ?? this.registry;
     const slotsFree = this.maxConcurrent - registry.countActive();
-    const writeCapable = WRITE_CAPABLE_PERSONAS.has(opts.persona.name);
-    const writeSlotsFree = this.maxConcurrentWriteCapable - registry.countActiveBy(WRITE_CAPABLE_PERSONAS);
+    const writeCapable = WRITE_CAPABLE_PERSONAS2.has(opts.persona.name);
+    const writeSlotsFree = this.maxConcurrentWriteCapable - registry.countActiveBy(WRITE_CAPABLE_PERSONAS2);
     const canSpawnNow = slotsFree > 0 && (!writeCapable || writeSlotsFree > 0);
     if (canSpawnNow) {
       const result = spawnRun({ ...opts, registry });
@@ -6459,8 +6484,8 @@ var SpawnQueue = class {
       const next = this.pending[i];
       const slotsFree = this.maxConcurrent - this.registry.countActive();
       if (slotsFree <= 0) return;
-      const writeCapable = WRITE_CAPABLE_PERSONAS.has(next.persona.name);
-      const writeSlotsFree = this.maxConcurrentWriteCapable - this.registry.countActiveBy(WRITE_CAPABLE_PERSONAS);
+      const writeCapable = WRITE_CAPABLE_PERSONAS2.has(next.persona.name);
+      const writeSlotsFree = this.maxConcurrentWriteCapable - this.registry.countActiveBy(WRITE_CAPABLE_PERSONAS2);
       if (writeCapable && writeSlotsFree <= 0) {
         i++;
         continue;
@@ -6597,6 +6622,7 @@ function statusColorSlot2(s) {
     case "killed":
     case "timeout":
     case "hook_failed":
+    case "merge_conflict":
       return "error";
   }
 }

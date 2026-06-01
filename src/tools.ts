@@ -9,12 +9,13 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import type { Persona, PersonaOverride, Run, RunStatus, ThinkingLevel } from "./types.ts";
+import type { Persona, PersonaOverride, Run, RunStatus, ThinkingLevel, MergeStrategy } from "./types.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
 import { collapseSteerableCascade } from "./steerable.ts";
 import { elapsedStr, forceTerminate, formatUsage, getFinalText, pauseRun, resolveTimeoutMs, resumeRun, sendToRun, type RunRegistry } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
+import { resolveMergeStrategy } from "./worktree.ts";
 import {
   awaitOrDetach,
   countToolResultMessages,
@@ -269,6 +270,15 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
             "v0.11 quality-gate hook timeout (seconds). Read paired with `on_complete_hook`; a runaway hook past this budget is killed and the run flips to `hook_failed`. Default 300 when omitted.",
         }),
       ),
+      merge_strategy: Type.Optional(
+        Type.Union(
+          [Type.Literal("squash"), Type.Literal("merge"), Type.Literal("none")],
+          {
+            description:
+              "v0.14 worktree auto-merge strategy. When set (and the persona has a worktree), the worktree branch is merged back to the base branch on `completed`. `\"squash\"` squashes all commits into one; `\"merge\"` creates a merge commit; `\"none\"` skips merge-back. Cascade: per-call > project > user > persona-frontmatter > built-in default (`\"squash\"` for builder/simplifier, `\"none\"` for others). Omit to use the cascade.",
+          },
+        ),
+      ),
       steerable: Type.Optional(
         Type.Boolean({
           description:
@@ -360,8 +370,18 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         onCompleteHookTimeoutSeconds: params.on_complete_hook_timeout_seconds,
         steerable,
         // v0.13 worktree-per-persona: collapse from persona frontmatter.
-        // No per-call override in v0.13 (deferred to v0.14).
         worktree: persona.worktree === true,
+        // v0.14 worktree auto-merge: resolve the merge strategy cascade.
+        // Cascade: per-call > project > user > persona-frontmatter > built-in class default.
+        mergeStrategy: (persona.worktree === true)
+          ? resolveMergeStrategy({
+              perCall: params.merge_strategy as MergeStrategy | undefined,
+              projectOverride: (cfg.personaOverrides[persona.name] as any)?.mergeStrategy,
+              userOverride: undefined, // user config merged into cfg.personaOverrides at load time
+              personaFrontmatter: (persona as any).mergeStrategy,
+              personaName: persona.name,
+            })
+          : undefined,
         // Item 12 candidate #3 — per-call inherit_context override.
         // Wins above persona.inheritContext (which already merges
         // project/user personaOverrides). Resolved in planSpawnPiArgs
@@ -1046,6 +1066,7 @@ interface StatusGroups {
   killed: Run[];
   timeout: Run[];
   hook_failed: Run[];
+  merge_conflict: Run[];
 }
 
 function groupByStatus(runs: Run[]): StatusGroups {
@@ -1058,6 +1079,7 @@ function groupByStatus(runs: Run[]): StatusGroups {
     killed: [],
     timeout: [],
     hook_failed: [],
+    merge_conflict: [],
   };
   for (const r of runs) g[r.status].push(r);
   return g;

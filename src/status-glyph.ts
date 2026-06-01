@@ -19,4 +19,5 @@ export const STATUS_GLYPH: Record<RunStatus, string> = {
   killed: "■",
   timeout: "⏱",
   hook_failed: "⊗",
+  merge_conflict: "⊘", // v0.14: post-success conflict — ⊘ distinct from ⊗ (hook_failed)
 };
