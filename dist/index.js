@@ -1455,6 +1455,99 @@ function worktreeSpecFromRun(record) {
     branch: record.worktreeBranch
   };
 }
+var MAX_COMMIT_MSG_LENGTH = 72;
+function buildMergeCommitMessage(persona, runId, task) {
+  const prefix = `${persona}(${runId}): `;
+  const budget = MAX_COMMIT_MSG_LENGTH - prefix.length;
+  const body = task.length <= budget ? task : task.slice(0, budget - 1) + "\u2026";
+  return prefix + body;
+}
+async function mergeWorktree(spec, opts) {
+  const env = gitEnv();
+  const execOpts = { cwd: spec.gitRoot, stdio: "pipe", env };
+  try {
+    execSync(`git checkout ${opts.baseBranch}`, execOpts);
+  } catch (err) {
+    return {
+      success: false,
+      errorMessage: `Failed to checkout base branch ${opts.baseBranch}: ${err.message}`
+    };
+  }
+  if (opts.strategy === "squash") {
+    try {
+      execSync(`git merge --squash ${spec.branch}`, execOpts);
+    } catch {
+      const conflicts = collectConflictFiles(spec.gitRoot, env);
+      try {
+        execSync("git merge --abort", execOpts);
+      } catch {
+      }
+      try {
+        execSync("git reset --merge", execOpts);
+      } catch {
+      }
+      return { success: false, conflicts };
+    }
+    const statusOut = execSyncStr("git status --porcelain --untracked-files=no", spec.gitRoot, env);
+    if (!statusOut.trim()) {
+      return { success: true, nothingToCommit: true };
+    }
+    try {
+      execSync(`git commit -m ${shellQuote(opts.commitMessage)}`, execOpts);
+      return { success: true };
+    } catch (commitErr) {
+      try {
+        execSync("git reset --merge", execOpts);
+      } catch {
+      }
+      return {
+        success: false,
+        errorMessage: `Commit failed after squash merge: ${commitErr.message}`
+      };
+    }
+  }
+  try {
+    execSync(
+      `git merge --no-ff ${spec.branch} -m ${shellQuote(opts.commitMessage)}`,
+      execOpts
+    );
+    return { success: true };
+  } catch {
+    const conflicts = collectConflictFiles(spec.gitRoot, env);
+    if (conflicts.length > 0) {
+      try {
+        execSync("git merge --abort", execOpts);
+      } catch {
+      }
+      return { success: false, conflicts };
+    }
+    return {
+      success: false,
+      errorMessage: "Merge failed"
+    };
+  }
+}
+function execSyncStr(cmd, cwd, env) {
+  try {
+    return execSync(cmd, { cwd, stdio: "pipe", env, encoding: "utf8" });
+  } catch {
+    return "";
+  }
+}
+function collectConflictFiles(gitRoot, env) {
+  const out = execSyncStr("git status --porcelain", gitRoot, env);
+  const files = [];
+  for (const line of out.split("\n")) {
+    const xy = line.slice(0, 2);
+    if (/^(UU|AA|DD|AU|UA|DU|UD)/.test(xy)) {
+      files.push(line.slice(3).trim());
+    }
+  }
+  return files;
+}
+function shellQuote(s) {
+  return "'" + s.replace(/'/g, "'\\''") + "'";
+}
 
 // src/reconcile-startup.ts
 import { readFile as readFile2, readdir as readdir2, stat as stat2, writeFile } from "node:fs/promises";
@@ -2353,6 +2446,13 @@ function runPiSubprocess(run, piArgs, opts) {
     applySubstanceCheck(run, terminal);
     discoverSessionPathIfMissing(run, opts.sessionDir);
     run.proc = void 0;
+    if (run.worktreePath && run.mergeStrategy && run.mergeStrategy !== "none") {
+      const gitRoot = dirname5(dirname5(dirname5(run.worktreePath)));
+      terminal = await applyMergeToTerminal(run, gitRoot, terminal);
+      if (terminal === "merge_conflict") {
+        run.status = terminal;
+      }
+    }
     if (run.worktreePath && run.worktreeBranch) {
       const wtSpec = {
         // Reconstruct gitRoot: <gitRoot>/.worktrees/conductor-wt/<run-id> → 3 levels up
@@ -2667,6 +2767,31 @@ function applySubstanceCheck(run, terminal) {
   if (check.warn && check.reason && check.message) {
     run.nonSubstantiveFinal = { reason: check.reason, message: check.message };
   }
+}
+async function applyMergeToTerminal(run, gitRoot, terminal) {
+  if (terminal !== "completed" || !run.worktreePath || !run.worktreeBranch || !run.mergeStrategy || run.mergeStrategy === "none") {
+    return terminal;
+  }
+  const baseBranch = run.worktreeBaseBranch ?? "master";
+  const commitMessage = buildMergeCommitMessage(
+    run.persona,
+    run.id,
+    run.task
+  );
+  const result = await mergeWorktree(
+    { gitRoot, worktreePath: run.worktreePath, branch: run.worktreeBranch },
+    { strategy: run.mergeStrategy, baseBranch, commitMessage }
+  );
+  run.mergeResult = result;
+  if (result.success) {
+    run.worktreePath = void 0;
+    run.worktreeBranch = void 0;
+    return terminal;
+  }
+  const conflictList = result.conflicts?.join(", ") ?? "(unknown)";
+  const hint = `resolve manually: cd ${gitRoot} && git merge ${run.worktreeBranch}`;
+  run.errorMessage = result.conflicts ? `merge conflict in: ${conflictList}; worktree preserved at ${run.worktreePath}; ${hint}` : result.errorMessage ?? "merge failed";
+  return "merge_conflict";
 }
 async function applyHookToTerminal(run, resolvedHook, terminal, deps = {}) {
   try {

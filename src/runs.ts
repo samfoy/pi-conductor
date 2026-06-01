@@ -33,7 +33,7 @@ import { isNonSubstantiveFinalMessage } from "./substance-check.ts";
 import { resolveOnCompleteHook, type HookCascadeInput } from "./hook-cascade.ts";
 import { runHook, defaultKillGroup } from "./hook-runner.ts";
 import { loadConfigWithErrors } from "./config.ts";
-import { resolveWorktreeSpec, createWorktree, removeWorktree } from "./worktree.ts";
+import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage } from "./worktree.ts";
 import { readProcessStartTime } from "./reconcile-startup.ts";
 import {  emptyUsage,
   isTerminal,
@@ -1522,10 +1522,25 @@ function runPiSubprocess(
     applySubstanceCheck(run, terminal);
     discoverSessionPathIfMissing(run, opts.sessionDir);
     run.proc = undefined;
+    // v0.14 worktree auto-merge: call mergeWorktree on `completed` runs
+    // with a real merge strategy. On conflict, terminal flips to
+    // `merge_conflict` and worktreePath is intentionally kept so the
+    // user can resolve manually. applyMergeToTerminal clears worktreePath
+    // on success so the removeWorktree block below is a no-op.
+    if (run.worktreePath && run.mergeStrategy && run.mergeStrategy !== "none") {
+      const gitRoot = dirname(dirname(dirname(run.worktreePath)));
+      terminal = await applyMergeToTerminal(run, gitRoot, terminal);
+      // Re-apply the terminal to the run record now that merge may have flipped it.
+      if (terminal === "merge_conflict") {
+        run.status = terminal;
+      }
+    }
     // v0.13 worktree-per-persona: remove the worktree on terminal.
     // Best-effort: failure is logged but does NOT block finalize.
     // worktreePath is cleared only on success so the GC delete path
     // can find and clean up orphaned worktrees.
+    // Note: on merge_conflict, worktreePath is preserved by applyMergeToTerminal
+    // and we skip removal here intentionally.
     if (run.worktreePath && run.worktreeBranch) {
       const wtSpec = {
         // Reconstruct gitRoot: <gitRoot>/.worktrees/conductor-wt/<run-id> → 3 levels up
@@ -2172,6 +2187,75 @@ export function applySubstanceCheck(run: Run, terminal: RunStatus): void {
   if (check.warn && check.reason && check.message) {
     run.nonSubstantiveFinal = { reason: check.reason, message: check.message };
   }
+}
+
+/**
+ * v0.14 worktree auto-merge. Called in `finalize` between the hook gate
+ * and worktree removal when the run completed successfully.
+ *
+ * Behaviour:
+ *   - Returns `terminal` unchanged when any guard condition is not met:
+ *     terminal !== "completed", no worktreePath, no mergeStrategy, or
+ *     mergeStrategy === "none".
+ *   - Calls `mergeWorktree` with the stored spec + strategy.
+ *   - On success: clears `run.worktreePath` / `run.worktreeBranch` so the
+ *     normal removeWorktree path in finalize is skipped (no double-remove).
+ *   - On conflict or error: sets `run.status` to `"merge_conflict"`, sets
+ *     `run.errorMessage` with conflict file list and recovery hint, and
+ *     returns `"merge_conflict"` (worktreePath is intentionally preserved).
+ *
+ * The `gitRoot` argument is the repository root (derived from
+ * `run.worktreePath` in production; injected in tests).
+ *
+ * Exported for unit-test access; production callsite is the `finalize`
+ * closure inside `attachLifecycleHandlers`.
+ */
+export async function applyMergeToTerminal(
+  run: Run,
+  gitRoot: string,
+  terminal: RunStatus,
+): Promise<RunStatus> {
+  // Guard: only merge on `completed` with a real strategy and a worktree.
+  if (
+    terminal !== "completed" ||
+    !run.worktreePath ||
+    !run.worktreeBranch ||
+    !run.mergeStrategy ||
+    run.mergeStrategy === "none"
+  ) {
+    return terminal;
+  }
+
+  const baseBranch = run.worktreeBaseBranch ?? "master";
+  const commitMessage = buildMergeCommitMessage(
+    run.persona,
+    run.id,
+    run.task,
+  );
+
+  const result = await mergeWorktree(
+    { gitRoot, worktreePath: run.worktreePath, branch: run.worktreeBranch },
+    { strategy: run.mergeStrategy as Exclude<typeof run.mergeStrategy, "none">, baseBranch, commitMessage },
+  );
+
+  run.mergeResult = result;
+
+  if (result.success) {
+    // Worktree will be removed by the normal removeWorktree step in finalize.
+    // Clear the path fields here so the removal uses the already-set spec,
+    // and GC knows the work is done.
+    run.worktreePath = undefined;
+    run.worktreeBranch = undefined;
+    return terminal;
+  }
+
+  // Conflict or unexpected error — preserve worktree for manual resolution.
+  const conflictList = result.conflicts?.join(", ") ?? "(unknown)";
+  const hint = `resolve manually: cd ${gitRoot} && git merge ${run.worktreeBranch}`;
+  run.errorMessage = result.conflicts
+    ? `merge conflict in: ${conflictList}; worktree preserved at ${run.worktreePath}; ${hint}`
+    : (result.errorMessage ?? "merge failed");
+  return "merge_conflict";
 }
 
 /**
