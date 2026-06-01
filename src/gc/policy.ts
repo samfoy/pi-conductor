@@ -41,7 +41,11 @@ function ttlDaysFor(entry: InventoryEntry, config: GcConfig): number {
   if (typeof personaOverride === "number" && personaOverride > 0) {
     return personaOverride;
   }
-  return entry.status === "completed" ? config.completedTtlDays : config.failedTtlDays;
+  return entry.status === "completed"
+    ? config.completedTtlDays
+    : entry.status === "merge_conflict"
+      ? (config.mergeConflictTtlDays ?? config.failedTtlDays)
+      : config.failedTtlDays;
 }
 
 function transcriptCapFor(_entry: InventoryEntry, config: GcConfig): number {

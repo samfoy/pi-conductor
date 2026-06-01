@@ -505,3 +505,49 @@ test("policy.ts: zero imports from node:fs, node:fs/promises, or runs.ts (pure)"
     "policy.ts must not import from runs.ts (inventory is the only registry consumer)",
   );
 });
+
+test("planReclaim: merge_conflict-status archived run uses mergeConflictTtlDays", () => {
+  // merge_conflict TTL (14d) is shorter than failedTtlDays (60d).
+  // 20d old: merge_conflict → delete; failed → keep.
+  const config = defaultGcConfig({
+    completedTtlDays: 30,
+    failedTtlDays: 60,
+    mergeConflictTtlDays: 14,
+  });
+  const archivedAt = NOW - 20 * DAY_MS;
+  const mc = makeEntry({
+    id: "mc-aaaa",
+    status: "merge_conflict",
+    archived: true,
+    archivedAt,
+  });
+  const failed = makeEntry({
+    id: "failed-bbbb",
+    status: "failed",
+    archived: true,
+    archivedAt,
+  });
+  const plan = planReclaim([mc, failed], config, NOW);
+  const byId = Object.fromEntries(plan.actions.map((a) => [a.id, a]));
+  assert.equal(byId["mc-aaaa"]!.kind, "delete", "merge_conflict beyond mergeConflictTtlDays should delete");
+  assert.equal(byId["failed-bbbb"]!.kind, "keep", "failed within failedTtlDays should keep");
+});
+
+test("planReclaim: merge_conflict within mergeConflictTtlDays → keep", () => {
+  const config = defaultGcConfig({
+    completedTtlDays: 30,
+    failedTtlDays: 60,
+    mergeConflictTtlDays: 14,
+  });
+  // 10d old — within 14d TTL
+  const archivedAt = NOW - 10 * DAY_MS;
+  const mc = makeEntry({
+    id: "mc-bbbb",
+    status: "merge_conflict",
+    archived: true,
+    archivedAt,
+  });
+  const plan = planReclaim([mc], config, NOW);
+  const byId = Object.fromEntries(plan.actions.map((a) => [a.id, a]));
+  assert.equal(byId["mc-bbbb"]!.kind, "keep");
+});
