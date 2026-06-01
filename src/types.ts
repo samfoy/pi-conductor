@@ -714,6 +714,14 @@ export interface RunRecord {
    * (e.g. `"conductor-wt/builder-abc1"`). Cleared with `worktreePath`.
    */
   worktreeBranch?: string;
+  /** v0.14 worktree auto-merge: base branch at spawn time. */
+  worktreeBaseBranch?: string;
+  /** v0.14 worktree auto-merge: resolved merge strategy. */
+  mergeStrategy?: MergeStrategy;
+  /** v0.14 worktree auto-merge: result of the merge attempt. */
+  mergeResult?: MergeResult;
+  /** Last event timestamp (ms since epoch). Persisted for run history display. */
+  lastEventAt?: number;
 
   /**
    * Item 15: see `Run.thisInvocationStartedAt`. Persisted so a doctor
@@ -771,6 +779,10 @@ export function toRunRecord(r: Run): RunRecord {
     hookResult: r.hookResult,
     worktreePath: r.worktreePath,
     worktreeBranch: r.worktreeBranch,
+    worktreeBaseBranch: r.worktreeBaseBranch,
+    mergeStrategy: r.mergeStrategy,
+    mergeResult: r.mergeResult,
+    lastEventAt: r.lastEventAt,
     thisInvocationStartedAt: r.thisInvocationStartedAt,
     thisInvocationUsageBaseline: r.thisInvocationUsageBaseline,
     resumeCount: r.resumeCount,

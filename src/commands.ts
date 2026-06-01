@@ -19,7 +19,7 @@
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import type { PersonaResolution, Run, RunRecord, RunStatus } from "./types.ts";
 import { STATUS_GLYPH } from "./status-glyph.ts";
 import { resolvePersonas } from "./personas.ts";
@@ -50,6 +50,8 @@ import { runGc, type RunGcResult } from "./gc/index.ts";
 import { walkInventory } from "./gc/inventory.ts";
 import { planReclaim, type ReclaimAction } from "./gc/policy.ts";
 import { classifyStall, resolveKillOnStall } from "./watchdog.ts";
+import { worktreeSpecFromRun, mergeWorktree, buildMergeCommitMessage } from "./worktree.ts";
+import { isTerminal } from "./types.ts";
 
 interface RegisterCommandsOpts {
   getCwd: () => string;
@@ -89,6 +91,7 @@ const SUBCOMMANDS = [
   "reconcile",
   "watchdog",
   "send",
+  "worktree",
 ];
 
 export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): void {
@@ -165,6 +168,9 @@ export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): 
           return;
         case "send":
           await runSendCmd(opts, ctx, subRest);
+          return;
+        case "worktree":
+          await runWorktreeCmd(opts, ctx, subRest);
           return;
         default:
           ctx.ui.notify(
@@ -1209,4 +1215,157 @@ export function buildWatchdogStatusReport(args: {
     );
   }
   return lines.join("\n");
+}
+
+// ── /conductor worktree ─────────────────────────────────────────────────────
+
+type WorktreeCommandDeps = Pick<RegisterCommandsOpts, "getRegistry" | "getCwd">;
+
+/**
+ * v0.14 `/conductor worktree <sub>` command.
+ *
+ * Subcommands:
+ *   - `list`           — show all in-memory runs that have a worktree
+ *   - `merge <run-id>` — re-attempt merge on a `merge_conflict` run
+ *   - `clean`          — removeWorktree for terminal (non-merge_conflict) runs
+ *
+ * Exported for unit-test access.
+ */
+export async function runWorktreeCmd(
+  opts: WorktreeCommandDeps,
+  ctx: ExtensionCommandContext,
+  subRest: string,
+): Promise<void> {
+  const [sub, ...subArgs] = (subRest ?? "").trim().split(/\s+/);
+
+  switch (sub ?? "list") {
+    case "list": {
+      const runs = opts.getRegistry().list();
+      const withWt = runs.filter((r: Run) => r.worktreePath);
+      if (withWt.length === 0) {
+        ctx.ui.notify("No active worktrees.", "info");
+        return;
+      }
+      const lines = [
+        `┌─ ${withWt.length} worktree${withWt.length > 1 ? "s" : ""} ────────────────────`,
+      ];
+      for (const r of withWt) {
+        const branch = r.worktreeBranch ?? "(unknown branch)";
+        const path = r.worktreePath ?? "";
+        lines.push(`│ ${r.status.padEnd(14)} ${r.id.padEnd(24)} ${branch}`);
+        lines.push(`│                           path: ${path}`);
+      }
+      ctx.ui.notify(lines.join("\n"), "info");
+      return;
+    }
+
+    case "merge": {
+      const runId = subArgs[0];
+      if (!runId) {
+        ctx.ui.notify("Usage: /conductor worktree merge <run-id>", "warning");
+        return;
+      }
+      const run = opts.getRegistry().get(runId);
+      if (!run) {
+        ctx.ui.notify(
+          `Run "${runId}" not found. Use /conductor worktree list to see runs with worktrees.`,
+          "error",
+        );
+        return;
+      }
+      if (run.status !== "merge_conflict") {
+        ctx.ui.notify(
+          `Run ${runId} is not in merge_conflict status (current: ${run.status}). Only merge_conflict runs can be re-merged.`,
+          "warning",
+        );
+        return;
+      }
+      if (!run.worktreePath || !run.worktreeBranch) {
+        ctx.ui.notify(
+          `Run ${runId} has no worktree path. It may have already been cleaned up.`,
+          "error",
+        );
+        return;
+      }
+
+      const gitRoot = dirname(dirname(dirname(run.worktreePath)));
+      const baseBranch = run.worktreeBaseBranch ?? "master";
+      const strategy = (run.mergeStrategy && run.mergeStrategy !== "none")
+        ? run.mergeStrategy as "squash" | "merge"
+        : "squash" as const;
+      const commitMessage = buildMergeCommitMessage(run.persona, run.id, run.task);
+
+      ctx.ui.notify(
+        `Attempting ${strategy} merge of ${run.worktreeBranch} → ${baseBranch}…`,
+        "info",
+      );
+
+      try {
+        const result = await mergeWorktree(
+          { gitRoot, worktreePath: run.worktreePath, branch: run.worktreeBranch },
+          { strategy, baseBranch, commitMessage },
+        );
+        if (result.success) {
+          run.status = "completed";
+          run.mergeResult = result;
+          run.worktreePath = undefined;
+          run.worktreeBranch = undefined;
+          ctx.ui.notify(
+            `✔ Merged ${run.id} → ${baseBranch}. Run is now completed.`,
+            "info",
+          );
+        } else {
+          const conflictList = result.conflicts?.join(", ") ?? "(unknown)";
+          ctx.ui.notify(
+            `✖ Merge still has conflicts: ${conflictList}\nResolve manually in the worktree and run /conductor worktree merge ${runId} again.`,
+            "warning",
+          );
+        }
+      } catch (err) {
+        ctx.ui.notify(
+          `Merge failed unexpectedly: ${(err as Error).message}`,
+          "error",
+        );
+      }
+      return;
+    }
+
+    case "clean": {
+      const runs = opts.getRegistry().list();
+      const toClean = runs.filter(
+        (r: Run) =>
+          r.worktreePath &&
+          r.worktreeBranch &&
+          isTerminal(r.status) &&
+          r.status !== "merge_conflict",
+      );
+      if (toClean.length === 0) {
+        ctx.ui.notify("0 worktrees to clean (only merge_conflict runs keep their worktrees).", "info");
+        return;
+      }
+      let cleaned = 0;
+      for (const r of toClean) {
+        const spec = worktreeSpecFromRun(r);
+        if (!spec) continue;
+        const { removeWorktree } = await import("./worktree.ts");
+        const removed = removeWorktree(spec);
+        if (removed) {
+          r.worktreePath = undefined;
+          r.worktreeBranch = undefined;
+          cleaned++;
+        }
+      }
+      ctx.ui.notify(
+        `Cleaned ${cleaned} worktree${cleaned !== 1 ? "s" : ""}.`,
+        "info",
+      );
+      return;
+    }
+
+    default:
+      ctx.ui.notify(
+        `Unknown worktree subcommand: ${sub}. Available: list, merge <run-id>, clean.`,
+        "warning",
+      );
+  }
 }

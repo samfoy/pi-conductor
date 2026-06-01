@@ -1,83 +1,14 @@
-// src/index.ts
-import { buildSessionContext } from "@earendil-works/pi-coding-agent";
-import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
-
-// src/commands.ts
-import { existsSync as existsSync10, readdirSync as readdirSync2, readFileSync as readFileSync4, statSync as statSync3 } from "node:fs";
-import { join as join12 } from "node:path";
-
-// src/status-glyph.ts
-var STATUS_GLYPH = {
-  queued: "\u25CC",
-  running: "\u25CF",
-  paused: "\u23F8",
-  completed: "\u2713",
-  failed: "\u2717",
-  killed: "\u25A0",
-  timeout: "\u23F1",
-  hook_failed: "\u2297",
-  merge_conflict: "\u2298"
-  // v0.14: post-success conflict — ⊘ distinct from ⊗ (hook_failed)
+var __defProp = Object.defineProperty;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __esm = (fn, res) => function __init() {
+  return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
 };
-
-// src/personas.ts
-import { readdir, readFile, stat } from "node:fs/promises";
-import { existsSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
 
 // src/types.ts
-var THINKING_LEVELS = [
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh"
-];
-var CONTEXT_INHERITANCE = [
-  "none",
-  "filtered",
-  "filtered_compact",
-  "full"
-];
-var DEFAULT_CONFIG = {
-  defaultTimeoutMinutes: 60,
-  maxConcurrent: 4,
-  maxConcurrentWriteCapable: 1,
-  queueOnConcurrencyCap: true,
-  autoOpenFocusOnSpawn: false,
-  defaultSpawnMode: "foreground",
-  defaultMode: "off",
-  personaOverrides: {},
-  conductorPromptPath: null,
-  gc: {
-    enabled: true,
-    completedTtlDays: 30,
-    failedTtlDays: 60,
-    mergeConflictTtlDays: 14,
-    totalSizeBudgetBytes: 5 * 1024 * 1024 * 1024,
-    transcriptSizeCapBytes: 100 * 1024 * 1024,
-    orphanReconcileAfterHours: 24,
-    autoOnSessionStart: true,
-    autoDebounceHours: 6,
-    perPersonaTtlDays: {}
-  },
-  watchdog: {
-    enabled: true,
-    defaultSoftSeconds: 120,
-    defaultHardSeconds: 600,
-    graceSeconds: 30,
-    tickIntervalSeconds: 30,
-    defaultKillOnStall: false
-  },
-  // v0.12 steering: built-in default OFF — mirrors v0.10 kill_on_stall
-  // posture (PRD.md:517). No autonomous-chain field data justifies
-  // flipping it. Slice 1 ships the field; slice 4 wires per-call.
-  defaultSteerable: false
-};
-var WRITE_CAPABLE_PERSONAS = /* @__PURE__ */ new Set(["builder", "simplifier"]);
 function emptyUsage() {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
 }
@@ -111,24 +42,342 @@ function toRunRecord(r) {
     hookResult: r.hookResult,
     worktreePath: r.worktreePath,
     worktreeBranch: r.worktreeBranch,
+    worktreeBaseBranch: r.worktreeBaseBranch,
+    mergeStrategy: r.mergeStrategy,
+    mergeResult: r.mergeResult,
+    lastEventAt: r.lastEventAt,
     thisInvocationStartedAt: r.thisInvocationStartedAt,
     thisInvocationUsageBaseline: r.thisInvocationUsageBaseline,
     resumeCount: r.resumeCount
   };
 }
-var TERMINAL_STATUSES = [
-  "completed",
-  "failed",
-  "killed",
-  "timeout",
-  "hook_failed",
-  "merge_conflict"
-];
 function isTerminal(s) {
   return TERMINAL_STATUSES.includes(s);
 }
+var THINKING_LEVELS, CONTEXT_INHERITANCE, DEFAULT_CONFIG, WRITE_CAPABLE_PERSONAS, TERMINAL_STATUSES;
+var init_types = __esm({
+  "src/types.ts"() {
+    "use strict";
+    THINKING_LEVELS = [
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh"
+    ];
+    CONTEXT_INHERITANCE = [
+      "none",
+      "filtered",
+      "filtered_compact",
+      "full"
+    ];
+    DEFAULT_CONFIG = {
+      defaultTimeoutMinutes: 60,
+      maxConcurrent: 4,
+      maxConcurrentWriteCapable: 1,
+      queueOnConcurrencyCap: true,
+      autoOpenFocusOnSpawn: false,
+      defaultSpawnMode: "foreground",
+      defaultMode: "off",
+      personaOverrides: {},
+      conductorPromptPath: null,
+      gc: {
+        enabled: true,
+        completedTtlDays: 30,
+        failedTtlDays: 60,
+        mergeConflictTtlDays: 14,
+        totalSizeBudgetBytes: 5 * 1024 * 1024 * 1024,
+        transcriptSizeCapBytes: 100 * 1024 * 1024,
+        orphanReconcileAfterHours: 24,
+        autoOnSessionStart: true,
+        autoDebounceHours: 6,
+        perPersonaTtlDays: {}
+      },
+      watchdog: {
+        enabled: true,
+        defaultSoftSeconds: 120,
+        defaultHardSeconds: 600,
+        graceSeconds: 30,
+        tickIntervalSeconds: 30,
+        defaultKillOnStall: false
+      },
+      // v0.12 steering: built-in default OFF — mirrors v0.10 kill_on_stall
+      // posture (PRD.md:517). No autonomous-chain field data justifies
+      // flipping it. Slice 1 ships the field; slice 4 wires per-call.
+      defaultSteerable: false
+    };
+    WRITE_CAPABLE_PERSONAS = /* @__PURE__ */ new Set(["builder", "simplifier"]);
+    TERMINAL_STATUSES = [
+      "completed",
+      "failed",
+      "killed",
+      "timeout",
+      "hook_failed",
+      "merge_conflict"
+    ];
+  }
+});
+
+// src/worktree.ts
+var worktree_exports = {};
+__export(worktree_exports, {
+  buildMergeCommitMessage: () => buildMergeCommitMessage,
+  createWorktree: () => createWorktree,
+  detectBrazilWorkspaceRoot: () => detectBrazilWorkspaceRoot,
+  ensureWorktreeGitignore: () => ensureWorktreeGitignore,
+  mergeWorktree: () => mergeWorktree,
+  removeWorktree: () => removeWorktree,
+  resolveMergeStrategy: () => resolveMergeStrategy,
+  resolveWorktreeSpec: () => resolveWorktreeSpec,
+  worktreeSpecFromRun: () => worktreeSpecFromRun
+});
+import { execSync } from "node:child_process";
+import { existsSync as existsSync3, appendFileSync, readFileSync as readFileSync2, realpathSync as realpathSync2 } from "node:fs";
+import { mkdirSync as mkdirSync3 } from "node:fs";
+import { join as join3, dirname as dirname4 } from "node:path";
+function gitEnv() {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("GIT_") && key !== "GIT_EDITOR" && key !== "GIT_AUTHOR_NAME" && key !== "GIT_AUTHOR_EMAIL") {
+      delete env[key];
+    }
+  }
+  return env;
+}
+function gitExec(args, cwd) {
+  return execSync(args, { cwd, encoding: "utf-8", stdio: "pipe", env: gitEnv() }).trim();
+}
+function tryGitExec(args, cwd) {
+  try {
+    return gitExec(args, cwd);
+  } catch {
+    return null;
+  }
+}
+function resolveWorktreeSpec(cwd, runId) {
+  const rawRoot = tryGitExec("git rev-parse --show-toplevel", cwd);
+  if (rawRoot === null) return null;
+  let gitRoot;
+  try {
+    gitRoot = realpathSync2(rawRoot);
+  } catch {
+    gitRoot = rawRoot;
+  }
+  const branch = `conductor-wt/${runId}`;
+  const worktreePath = join3(gitRoot, ".worktrees", "conductor-wt", runId);
+  return { gitRoot, worktreePath, branch };
+}
+function createWorktree(spec, opts = {}) {
+  if (!opts.skipGitignore) {
+    ensureWorktreeGitignore(spec.gitRoot);
+  }
+  mkdirSync3(dirname4(spec.worktreePath), { recursive: true });
+  try {
+    execSync(
+      `git worktree add ${JSON.stringify(spec.worktreePath)} -b ${JSON.stringify(spec.branch)} HEAD`,
+      { cwd: spec.gitRoot, stdio: "pipe", env: gitEnv() }
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const stderr = err && typeof err === "object" && "stderr" in err ? String(err.stderr).trim() : "";
+    throw new Error(
+      `git worktree add failed for ${spec.worktreePath}: ${stderr || msg}`
+    );
+  }
+}
+function removeWorktree(spec) {
+  let ok = true;
+  try {
+    execSync(
+      `git worktree remove --force ${JSON.stringify(spec.worktreePath)}`,
+      { cwd: spec.gitRoot, stdio: "pipe", env: gitEnv() }
+    );
+  } catch {
+    ok = false;
+  }
+  try {
+    execSync(
+      `git branch -D ${JSON.stringify(spec.branch)}`,
+      { cwd: spec.gitRoot, stdio: "pipe", env: gitEnv() }
+    );
+  } catch {
+    ok = false;
+  }
+  try {
+    execSync("git worktree prune", { cwd: spec.gitRoot, stdio: "pipe", env: gitEnv() });
+  } catch {
+  }
+  return ok;
+}
+function ensureWorktreeGitignore(gitRoot) {
+  const ignorePath = join3(gitRoot, ".gitignore");
+  const pattern = ".worktrees/";
+  if (existsSync3(ignorePath)) {
+    const content = readFileSync2(ignorePath, "utf-8");
+    if (content.split("\n").some((line) => line.trim() === pattern.trim())) {
+      return;
+    }
+    const prefix = content.endsWith("\n") ? "" : "\n";
+    appendFileSync(ignorePath, `${prefix}${pattern}
+`, "utf-8");
+  } else {
+    appendFileSync(ignorePath, `${pattern}
+`, "utf-8");
+  }
+}
+function detectBrazilWorkspaceRoot(cwd) {
+  let dir = cwd;
+  for (let i = 0; i < 32; i++) {
+    if (existsSync3(join3(dir, ".brazil"))) return dir;
+    const parent = dirname4(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+  return null;
+}
+function worktreeSpecFromRun(record) {
+  if (!record.worktreePath || !record.worktreeBranch) return void 0;
+  const gitRoot = dirname4(dirname4(dirname4(record.worktreePath)));
+  return {
+    gitRoot,
+    worktreePath: record.worktreePath,
+    branch: record.worktreeBranch
+  };
+}
+function resolveMergeStrategy(opts) {
+  return opts.perCall ?? opts.projectOverride ?? opts.userOverride ?? opts.personaFrontmatter ?? (WRITE_CAPABLE_PERSONAS.has(opts.personaName) ? "squash" : "none");
+}
+function buildMergeCommitMessage(persona, runId, task) {
+  const prefix = `${persona}(${runId}): `;
+  const budget = MAX_COMMIT_MSG_LENGTH - prefix.length;
+  const body = task.length <= budget ? task : task.slice(0, budget - 1) + "\u2026";
+  return prefix + body;
+}
+async function mergeWorktree(spec, opts) {
+  const env = gitEnv();
+  const execOpts = { cwd: spec.gitRoot, stdio: "pipe", env };
+  try {
+    execSync(`git checkout ${opts.baseBranch}`, execOpts);
+  } catch (err) {
+    return {
+      success: false,
+      errorMessage: `Failed to checkout base branch ${opts.baseBranch}: ${err.message}`
+    };
+  }
+  if (opts.strategy === "squash") {
+    try {
+      execSync(`git merge --squash ${spec.branch}`, execOpts);
+    } catch {
+      const conflicts = collectConflictFiles(spec.gitRoot, env);
+      try {
+        execSync("git merge --abort", execOpts);
+      } catch {
+      }
+      try {
+        execSync("git reset --merge", execOpts);
+      } catch {
+      }
+      return { success: false, conflicts };
+    }
+    const statusOut = execSyncStr("git status --porcelain --untracked-files=no", spec.gitRoot, env);
+    if (!statusOut.trim()) {
+      return { success: true, nothingToCommit: true };
+    }
+    try {
+      execSync(`git commit -m ${shellQuote(opts.commitMessage)}`, execOpts);
+      return { success: true };
+    } catch (commitErr) {
+      try {
+        execSync("git reset --merge", execOpts);
+      } catch {
+      }
+      return {
+        success: false,
+        errorMessage: `Commit failed after squash merge: ${commitErr.message}`
+      };
+    }
+  }
+  try {
+    execSync(
+      `git merge --no-ff ${spec.branch} -m ${shellQuote(opts.commitMessage)}`,
+      execOpts
+    );
+    return { success: true };
+  } catch {
+    const conflicts = collectConflictFiles(spec.gitRoot, env);
+    if (conflicts.length > 0) {
+      try {
+        execSync("git merge --abort", execOpts);
+      } catch {
+      }
+      return { success: false, conflicts };
+    }
+    return {
+      success: false,
+      errorMessage: "Merge failed"
+    };
+  }
+}
+function execSyncStr(cmd, cwd, env) {
+  try {
+    return execSync(cmd, { cwd, stdio: "pipe", env, encoding: "utf8" });
+  } catch {
+    return "";
+  }
+}
+function collectConflictFiles(gitRoot, env) {
+  const out = execSyncStr("git status --porcelain", gitRoot, env);
+  const files = [];
+  for (const line of out.split("\n")) {
+    const xy = line.slice(0, 2);
+    if (/^(UU|AA|DD|AU|UA|DU|UD)/.test(xy)) {
+      files.push(line.slice(3).trim());
+    }
+  }
+  return files;
+}
+function shellQuote(s) {
+  return "'" + s.replace(/'/g, "'\\''") + "'";
+}
+var MAX_COMMIT_MSG_LENGTH;
+var init_worktree = __esm({
+  "src/worktree.ts"() {
+    "use strict";
+    init_types();
+    MAX_COMMIT_MSG_LENGTH = 72;
+  }
+});
+
+// src/index.ts
+import { buildSessionContext } from "@earendil-works/pi-coding-agent";
+import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
+
+// src/commands.ts
+import { existsSync as existsSync10, readdirSync as readdirSync2, readFileSync as readFileSync4, statSync as statSync3 } from "node:fs";
+import { join as join12, dirname as dirname7 } from "node:path";
+
+// src/status-glyph.ts
+var STATUS_GLYPH = {
+  queued: "\u25CC",
+  running: "\u25CF",
+  paused: "\u23F8",
+  completed: "\u2713",
+  failed: "\u2717",
+  killed: "\u25A0",
+  timeout: "\u23F1",
+  hook_failed: "\u2297",
+  merge_conflict: "\u2298"
+  // v0.14: post-success conflict — ⊘ distinct from ⊗ (hook_failed)
+};
 
 // src/personas.ts
+init_types();
+import { readdir, readFile, stat } from "node:fs/promises";
+import { existsSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 var WRITE_CAPABLE_PERSONAS2 = /* @__PURE__ */ new Set([
   "builder",
   "simplifier"
@@ -382,6 +631,7 @@ async function resolvePersonas(opts) {
 }
 
 // src/config.ts
+init_types();
 import { existsSync as existsSync2, readFileSync } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { join as join2 } from "node:path";
@@ -1354,208 +1604,11 @@ function renderTail(lines) {
   return lines.join("\n");
 }
 
-// src/worktree.ts
-import { execSync } from "node:child_process";
-import { existsSync as existsSync3, appendFileSync, readFileSync as readFileSync2, realpathSync as realpathSync2 } from "node:fs";
-import { mkdirSync as mkdirSync3 } from "node:fs";
-import { join as join3, dirname as dirname4 } from "node:path";
-function gitEnv() {
-  const env = { ...process.env };
-  for (const key of Object.keys(env)) {
-    if (key.startsWith("GIT_") && key !== "GIT_EDITOR" && key !== "GIT_AUTHOR_NAME" && key !== "GIT_AUTHOR_EMAIL") {
-      delete env[key];
-    }
-  }
-  return env;
-}
-function gitExec(args, cwd) {
-  return execSync(args, { cwd, encoding: "utf-8", stdio: "pipe", env: gitEnv() }).trim();
-}
-function tryGitExec(args, cwd) {
-  try {
-    return gitExec(args, cwd);
-  } catch {
-    return null;
-  }
-}
-function resolveWorktreeSpec(cwd, runId) {
-  const rawRoot = tryGitExec("git rev-parse --show-toplevel", cwd);
-  if (rawRoot === null) return null;
-  let gitRoot;
-  try {
-    gitRoot = realpathSync2(rawRoot);
-  } catch {
-    gitRoot = rawRoot;
-  }
-  const branch = `conductor-wt/${runId}`;
-  const worktreePath = join3(gitRoot, ".worktrees", "conductor-wt", runId);
-  return { gitRoot, worktreePath, branch };
-}
-function createWorktree(spec, opts = {}) {
-  if (!opts.skipGitignore) {
-    ensureWorktreeGitignore(spec.gitRoot);
-  }
-  mkdirSync3(dirname4(spec.worktreePath), { recursive: true });
-  try {
-    execSync(
-      `git worktree add ${JSON.stringify(spec.worktreePath)} -b ${JSON.stringify(spec.branch)} HEAD`,
-      { cwd: spec.gitRoot, stdio: "pipe", env: gitEnv() }
-    );
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    const stderr = err && typeof err === "object" && "stderr" in err ? String(err.stderr).trim() : "";
-    throw new Error(
-      `git worktree add failed for ${spec.worktreePath}: ${stderr || msg}`
-    );
-  }
-}
-function removeWorktree(spec) {
-  let ok = true;
-  try {
-    execSync(
-      `git worktree remove --force ${JSON.stringify(spec.worktreePath)}`,
-      { cwd: spec.gitRoot, stdio: "pipe", env: gitEnv() }
-    );
-  } catch {
-    ok = false;
-  }
-  try {
-    execSync(
-      `git branch -D ${JSON.stringify(spec.branch)}`,
-      { cwd: spec.gitRoot, stdio: "pipe", env: gitEnv() }
-    );
-  } catch {
-    ok = false;
-  }
-  try {
-    execSync("git worktree prune", { cwd: spec.gitRoot, stdio: "pipe", env: gitEnv() });
-  } catch {
-  }
-  return ok;
-}
-function ensureWorktreeGitignore(gitRoot) {
-  const ignorePath = join3(gitRoot, ".gitignore");
-  const pattern = ".worktrees/";
-  if (existsSync3(ignorePath)) {
-    const content = readFileSync2(ignorePath, "utf-8");
-    if (content.split("\n").some((line) => line.trim() === pattern.trim())) {
-      return;
-    }
-    const prefix = content.endsWith("\n") ? "" : "\n";
-    appendFileSync(ignorePath, `${prefix}${pattern}
-`, "utf-8");
-  } else {
-    appendFileSync(ignorePath, `${pattern}
-`, "utf-8");
-  }
-}
-function worktreeSpecFromRun(record) {
-  if (!record.worktreePath || !record.worktreeBranch) return void 0;
-  const gitRoot = dirname4(dirname4(dirname4(record.worktreePath)));
-  return {
-    gitRoot,
-    worktreePath: record.worktreePath,
-    branch: record.worktreeBranch
-  };
-}
-function resolveMergeStrategy(opts) {
-  return opts.perCall ?? opts.projectOverride ?? opts.userOverride ?? opts.personaFrontmatter ?? (WRITE_CAPABLE_PERSONAS.has(opts.personaName) ? "squash" : "none");
-}
-var MAX_COMMIT_MSG_LENGTH = 72;
-function buildMergeCommitMessage(persona, runId, task) {
-  const prefix = `${persona}(${runId}): `;
-  const budget = MAX_COMMIT_MSG_LENGTH - prefix.length;
-  const body = task.length <= budget ? task : task.slice(0, budget - 1) + "\u2026";
-  return prefix + body;
-}
-async function mergeWorktree(spec, opts) {
-  const env = gitEnv();
-  const execOpts = { cwd: spec.gitRoot, stdio: "pipe", env };
-  try {
-    execSync(`git checkout ${opts.baseBranch}`, execOpts);
-  } catch (err) {
-    return {
-      success: false,
-      errorMessage: `Failed to checkout base branch ${opts.baseBranch}: ${err.message}`
-    };
-  }
-  if (opts.strategy === "squash") {
-    try {
-      execSync(`git merge --squash ${spec.branch}`, execOpts);
-    } catch {
-      const conflicts = collectConflictFiles(spec.gitRoot, env);
-      try {
-        execSync("git merge --abort", execOpts);
-      } catch {
-      }
-      try {
-        execSync("git reset --merge", execOpts);
-      } catch {
-      }
-      return { success: false, conflicts };
-    }
-    const statusOut = execSyncStr("git status --porcelain --untracked-files=no", spec.gitRoot, env);
-    if (!statusOut.trim()) {
-      return { success: true, nothingToCommit: true };
-    }
-    try {
-      execSync(`git commit -m ${shellQuote(opts.commitMessage)}`, execOpts);
-      return { success: true };
-    } catch (commitErr) {
-      try {
-        execSync("git reset --merge", execOpts);
-      } catch {
-      }
-      return {
-        success: false,
-        errorMessage: `Commit failed after squash merge: ${commitErr.message}`
-      };
-    }
-  }
-  try {
-    execSync(
-      `git merge --no-ff ${spec.branch} -m ${shellQuote(opts.commitMessage)}`,
-      execOpts
-    );
-    return { success: true };
-  } catch {
-    const conflicts = collectConflictFiles(spec.gitRoot, env);
-    if (conflicts.length > 0) {
-      try {
-        execSync("git merge --abort", execOpts);
-      } catch {
-      }
-      return { success: false, conflicts };
-    }
-    return {
-      success: false,
-      errorMessage: "Merge failed"
-    };
-  }
-}
-function execSyncStr(cmd, cwd, env) {
-  try {
-    return execSync(cmd, { cwd, stdio: "pipe", env, encoding: "utf8" });
-  } catch {
-    return "";
-  }
-}
-function collectConflictFiles(gitRoot, env) {
-  const out = execSyncStr("git status --porcelain", gitRoot, env);
-  const files = [];
-  for (const line of out.split("\n")) {
-    const xy = line.slice(0, 2);
-    if (/^(UU|AA|DD|AU|UA|DU|UD)/.test(xy)) {
-      files.push(line.slice(3).trim());
-    }
-  }
-  return files;
-}
-function shellQuote(s) {
-  return "'" + s.replace(/'/g, "'\\''") + "'";
-}
+// src/runs.ts
+init_worktree();
 
 // src/reconcile-startup.ts
+init_types();
 import { readFile as readFile2, readdir as readdir2, stat as stat2, writeFile } from "node:fs/promises";
 import { readFileSync as readFileSync3 } from "node:fs";
 import { join as join4 } from "node:path";
@@ -1817,6 +1870,7 @@ async function checkSessionResumability(record, result) {
 }
 
 // src/runs.ts
+init_types();
 function runsRoot() {
   return join5(homedir3(), ".pi", "agent", "conductor", "runs");
 }
@@ -3022,6 +3076,7 @@ function writeLastGcMtime(runsRoot2, now) {
 }
 
 // src/gc/inventory.ts
+init_types();
 import { readdir as readdir3, readFile as readFile3, stat as stat3 } from "node:fs/promises";
 import { existsSync as existsSync6 } from "node:fs";
 import { join as join7 } from "node:path";
@@ -3133,6 +3188,7 @@ async function buildEntry(id, runDir2, registry) {
 }
 
 // src/gc/policy.ts
+init_types();
 var HOUR_MS = 60 * 60 * 1e3;
 var DAY_MS = 24 * HOUR_MS;
 function ttlDaysFor(entry, config) {
@@ -3703,6 +3759,8 @@ async function reconcileOrphans(actions, runsRoot2, now) {
 }
 
 // src/gc/executor.ts
+init_types();
+init_worktree();
 import { readFile as readFile5, rm, stat as stat5, unlink as unlink2, utimes, writeFile as writeFile5, readdir as readdir4 } from "node:fs/promises";
 import { existsSync as existsSync9 } from "node:fs";
 import { join as join11 } from "node:path";
@@ -4200,6 +4258,8 @@ var Watchdog = class {
 };
 
 // src/commands.ts
+init_worktree();
+init_types();
 var SUBCOMMANDS = [
   "list",
   "show",
@@ -4218,7 +4278,8 @@ var SUBCOMMANDS = [
   "gc",
   "reconcile",
   "watchdog",
-  "send"
+  "send",
+  "worktree"
 ];
 function registerCommands(pi, opts) {
   pi.registerCommand("conductor", {
@@ -4293,6 +4354,9 @@ function registerCommands(pi, opts) {
           return;
         case "send":
           await runSendCmd(opts, ctx, subRest);
+          return;
+        case "worktree":
+          await runWorktreeCmd(opts, ctx, subRest);
           return;
         default:
           ctx.ui.notify(
@@ -4951,6 +5015,128 @@ function buildWatchdogStatusReport(args) {
   }
   return lines.join("\n");
 }
+async function runWorktreeCmd(opts, ctx, subRest) {
+  const [sub, ...subArgs] = (subRest ?? "").trim().split(/\s+/);
+  switch (sub ?? "list") {
+    case "list": {
+      const runs = opts.getRegistry().list();
+      const withWt = runs.filter((r) => r.worktreePath);
+      if (withWt.length === 0) {
+        ctx.ui.notify("No active worktrees.", "info");
+        return;
+      }
+      const lines = [
+        `\u250C\u2500 ${withWt.length} worktree${withWt.length > 1 ? "s" : ""} \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`
+      ];
+      for (const r of withWt) {
+        const branch = r.worktreeBranch ?? "(unknown branch)";
+        const path = r.worktreePath ?? "";
+        lines.push(`\u2502 ${r.status.padEnd(14)} ${r.id.padEnd(24)} ${branch}`);
+        lines.push(`\u2502                           path: ${path}`);
+      }
+      ctx.ui.notify(lines.join("\n"), "info");
+      return;
+    }
+    case "merge": {
+      const runId = subArgs[0];
+      if (!runId) {
+        ctx.ui.notify("Usage: /conductor worktree merge <run-id>", "warning");
+        return;
+      }
+      const run = opts.getRegistry().get(runId);
+      if (!run) {
+        ctx.ui.notify(
+          `Run "${runId}" not found. Use /conductor worktree list to see runs with worktrees.`,
+          "error"
+        );
+        return;
+      }
+      if (run.status !== "merge_conflict") {
+        ctx.ui.notify(
+          `Run ${runId} is not in merge_conflict status (current: ${run.status}). Only merge_conflict runs can be re-merged.`,
+          "warning"
+        );
+        return;
+      }
+      if (!run.worktreePath || !run.worktreeBranch) {
+        ctx.ui.notify(
+          `Run ${runId} has no worktree path. It may have already been cleaned up.`,
+          "error"
+        );
+        return;
+      }
+      const gitRoot = dirname7(dirname7(dirname7(run.worktreePath)));
+      const baseBranch = run.worktreeBaseBranch ?? "master";
+      const strategy = run.mergeStrategy && run.mergeStrategy !== "none" ? run.mergeStrategy : "squash";
+      const commitMessage = buildMergeCommitMessage(run.persona, run.id, run.task);
+      ctx.ui.notify(
+        `Attempting ${strategy} merge of ${run.worktreeBranch} \u2192 ${baseBranch}\u2026`,
+        "info"
+      );
+      try {
+        const result = await mergeWorktree(
+          { gitRoot, worktreePath: run.worktreePath, branch: run.worktreeBranch },
+          { strategy, baseBranch, commitMessage }
+        );
+        if (result.success) {
+          run.status = "completed";
+          run.mergeResult = result;
+          run.worktreePath = void 0;
+          run.worktreeBranch = void 0;
+          ctx.ui.notify(
+            `\u2714 Merged ${run.id} \u2192 ${baseBranch}. Run is now completed.`,
+            "info"
+          );
+        } else {
+          const conflictList = result.conflicts?.join(", ") ?? "(unknown)";
+          ctx.ui.notify(
+            `\u2716 Merge still has conflicts: ${conflictList}
+Resolve manually in the worktree and run /conductor worktree merge ${runId} again.`,
+            "warning"
+          );
+        }
+      } catch (err) {
+        ctx.ui.notify(
+          `Merge failed unexpectedly: ${err.message}`,
+          "error"
+        );
+      }
+      return;
+    }
+    case "clean": {
+      const runs = opts.getRegistry().list();
+      const toClean = runs.filter(
+        (r) => r.worktreePath && r.worktreeBranch && isTerminal(r.status) && r.status !== "merge_conflict"
+      );
+      if (toClean.length === 0) {
+        ctx.ui.notify("0 worktrees to clean (only merge_conflict runs keep their worktrees).", "info");
+        return;
+      }
+      let cleaned = 0;
+      for (const r of toClean) {
+        const spec = worktreeSpecFromRun(r);
+        if (!spec) continue;
+        const { removeWorktree: removeWorktree2 } = await Promise.resolve().then(() => (init_worktree(), worktree_exports));
+        const removed = removeWorktree2(spec);
+        if (removed) {
+          r.worktreePath = void 0;
+          r.worktreeBranch = void 0;
+          cleaned++;
+        }
+      }
+      ctx.ui.notify(
+        `Cleaned ${cleaned} worktree${cleaned !== 1 ? "s" : ""}.`,
+        "info"
+      );
+      return;
+    }
+    default:
+      ctx.ui.notify(
+        `Unknown worktree subcommand: ${sub}. Available: list, merge <run-id>, clean.`,
+        "warning"
+      );
+  }
+}
 
 // src/tools.ts
 import { Type } from "@sinclair/typebox";
@@ -4959,6 +5145,9 @@ import { Type } from "@sinclair/typebox";
 function collapseSteerableCascade(inputs) {
   return inputs.perCall ?? inputs.project ?? inputs.user ?? inputs.defaultValue;
 }
+
+// src/tools.ts
+init_worktree();
 
 // src/transcript.ts
 import { truncateToWidth, visibleWidth as visibleWidth2, wrapTextWithAnsi } from "@earendil-works/pi-tui";
@@ -5188,6 +5377,9 @@ function padOrTruncate(left, right, width) {
   const pad = width - leftW - rightW;
   return left + " ".repeat(pad) + right;
 }
+
+// src/foreground-stream.ts
+init_types();
 
 // src/transcript-classify.ts
 var HEADER_GLYPHS = /* @__PURE__ */ new Set(["\u25CC", "\u25CF", "\u23F8", "\u2713", "\u2717", "\u25A0", "\u23F1", "\u2297", "\u2298"]);
@@ -6371,6 +6563,7 @@ function isTerminalStatus(s) {
 }
 
 // src/queue.ts
+init_types();
 import { mkdirSync as mkdirSync5 } from "node:fs";
 import { join as join13 } from "node:path";
 var SpawnQueue = class {
