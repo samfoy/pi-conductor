@@ -54,6 +54,7 @@ var DEFAULT_CONFIG = {
     enabled: true,
     completedTtlDays: 30,
     failedTtlDays: 60,
+    mergeConflictTtlDays: 14,
     totalSizeBudgetBytes: 5 * 1024 * 1024 * 1024,
     transcriptSizeCapBytes: 100 * 1024 * 1024,
     orphanReconcileAfterHours: 24,
@@ -117,7 +118,8 @@ var TERMINAL_STATUSES = [
   "failed",
   "killed",
   "timeout",
-  "hook_failed"
+  "hook_failed",
+  "merge_conflict"
 ];
 function isTerminal(s) {
   return TERMINAL_STATUSES.includes(s);

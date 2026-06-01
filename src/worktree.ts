@@ -1,22 +1,27 @@
 /**
- * pi-conductor — git worktree management for v0.13 worktree-per-persona.
+ * pi-conductor — git worktree management for v0.13 worktree-per-persona
+ * and v0.14 worktree auto-merge.
  *
  * Provides pure-resolution + imperative-action separation:
- *   - `resolveWorktreeSpec`  — path computation + git root detection (I/O: git CLI only)
- *   - `createWorktree`       — `git worktree add` + `ensureWorktreeGitignore`
- *   - `removeWorktree`       — `git worktree remove --force` + `git branch -D` (best-effort)
+ *   - `resolveWorktreeSpec`    — path computation + git root detection (I/O: git CLI only)
+ *   - `createWorktree`         — `git worktree add` + `ensureWorktreeGitignore`
+ *   - `removeWorktree`         — `git worktree remove --force` + `git branch -D` (best-effort)
  *   - `ensureWorktreeGitignore` — idempotent `.gitignore` append
  *   - `detectBrazilWorkspaceRoot` — walks up dir tree looking for `.brazil` marker
- *   - `worktreeSpecFromRun`  — reconstruct spec from a persisted RunRecord (for GC)
+ *   - `worktreeSpecFromRun`    — reconstruct spec from a persisted RunRecord (for GC)
+ *   - `resolveMergeStrategy`   — v0.14 cascade resolver
+ *   - `buildMergeCommitMessage` — v0.14 Conventional-Commit message builder
+ *   - `mergeWorktree`          — v0.14 merge-back implementation
  *
- * Design: docs/v0.13-worktree-design.md
+ * Design: docs/v0.13-worktree-design.md, docs/v0.14-worktree-merge-design.md
  */
 
 import { execSync } from "node:child_process";
 import { existsSync, appendFileSync, readFileSync, realpathSync } from "node:fs";
 import { mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
-import type { RunRecord } from "./types.ts";
+import type { RunRecord, MergeStrategy, MergeResult } from "./types.ts";
+import { WRITE_CAPABLE_PERSONAS } from "./types.ts";
 
 /**
  * Strip git environment variables that git passes to hooks (GIT_INDEX_FILE,
@@ -229,4 +234,171 @@ export function worktreeSpecFromRun(record: RunRecord): WorktreeSpec | undefined
   };
 }
 
-// ── Internal helpers — none (gitExec / tryGitExec above cover all cases) ──────
+// ── v0.14 worktree auto-merge ─────────────────────────────────────────────────
+
+/**
+ * Input to `resolveMergeStrategy`. Each layer is `undefined` when absent.
+ * Cascade: per-call > project > user > frontmatter > built-in class default.
+ */
+export interface ResolveMergeStrategyOpts {
+  perCall?: MergeStrategy;
+  projectOverride?: MergeStrategy;
+  userOverride?: MergeStrategy;
+  personaFrontmatter?: MergeStrategy;
+  personaName: string;
+}
+
+/**
+ * Resolve the effective merge strategy for a run, following the same
+ * cascade pattern as `on_complete_hook` (v0.11).
+ *
+ * Built-in defaults: `WRITE_CAPABLE_PERSONAS` \u2192 `"squash"`, all others \u2192 `"none"`.
+ */
+export function resolveMergeStrategy(opts: ResolveMergeStrategyOpts): MergeStrategy {
+  return (
+    opts.perCall ??
+    opts.projectOverride ??
+    opts.userOverride ??
+    opts.personaFrontmatter ??
+    (WRITE_CAPABLE_PERSONAS.has(opts.personaName) ? "squash" : "none")
+  );
+}
+
+/** Max total length of a merge commit message (Conventional Commit convention). */
+const MAX_COMMIT_MSG_LENGTH = 72;
+
+/**
+ * Build a Conventional-Commit-shaped merge commit message:
+ *   `<persona>(<runId>): <task>`
+ * The task is truncated with `\u2026` so the total stays \u2264 72 chars.
+ */
+export function buildMergeCommitMessage(
+  persona: string,
+  runId: string,
+  task: string,
+): string {
+  const prefix = `${persona}(${runId}): `;
+  const budget = MAX_COMMIT_MSG_LENGTH - prefix.length;
+  const body = task.length <= budget ? task : task.slice(0, budget - 1) + "\u2026";
+  return prefix + body;
+}
+
+export interface MergeWorktreeOpts {
+  /** Merge strategy to apply. */
+  strategy: Exclude<MergeStrategy, "none">;
+  /** Branch that was HEAD in the main checkout at spawn time. */
+  baseBranch: string;
+  /** Commit message for the squash/merge commit. */
+  commitMessage: string;
+}
+
+/**
+ * Merge a worktree branch back to `baseBranch` in the main checkout.
+ *
+ * Steps for `"squash"`:
+ *   1. `git checkout <baseBranch>` in gitRoot
+ *   2. `git merge --squash <branch>`
+ *   3. If nothing to commit: return `{ success: true, nothingToCommit: true }`
+ *   4. `git commit -m <commitMessage>`
+ *
+ * Steps for `"merge"`:
+ *   1. `git checkout <baseBranch>` in gitRoot
+ *   2. `git merge --no-ff <branch> -m <commitMessage>`
+ *
+ * On conflict: abort and restore clean state, then return
+ * `{ success: false, conflicts: [...files] }`.
+ *
+ * Serialization: callers must serialize per-gitRoot
+ * (docs/v0.14-worktree-merge-design.md \u00a7R1b). This function is NOT
+ * internally locked \u2014 the finalize path in `runs.ts` is responsible.
+ */
+export async function mergeWorktree(
+  spec: WorktreeSpec,
+  opts: MergeWorktreeOpts,
+): Promise<MergeResult> {
+  const env = gitEnv();
+  const execOpts = { cwd: spec.gitRoot, stdio: "pipe" as const, env };
+
+  try {
+    execSync(`git checkout ${opts.baseBranch}`, execOpts);
+  } catch (err) {
+    return {
+      success: false,
+      errorMessage: `Failed to checkout base branch ${opts.baseBranch}: ${(err as Error).message}`,
+    };
+  }
+
+  if (opts.strategy === "squash") {
+    try {
+      execSync(`git merge --squash ${spec.branch}`, execOpts);
+    } catch {
+      const conflicts = collectConflictFiles(spec.gitRoot, env);
+      try { execSync("git merge --abort", execOpts); } catch { /* ignore */ }
+      try { execSync("git reset --merge", execOpts); } catch { /* ignore */ }
+      return { success: false, conflicts };
+    }
+
+    const statusOut = execSyncStr("git status --porcelain --untracked-files=no", spec.gitRoot, env);
+    if (!statusOut.trim()) {
+      return { success: true, nothingToCommit: true };
+    }
+
+    try {
+      execSync(`git commit -m ${shellQuote(opts.commitMessage)}`, execOpts);
+      return { success: true };
+    } catch (commitErr) {
+      try { execSync("git reset --merge", execOpts); } catch { /* ignore */ }
+      return {
+        success: false,
+        errorMessage: `Commit failed after squash merge: ${(commitErr as Error).message}`,
+      };
+    }
+  }
+
+  // strategy === "merge"
+  try {
+    execSync(
+      `git merge --no-ff ${spec.branch} -m ${shellQuote(opts.commitMessage)}`,
+      execOpts,
+    );
+    return { success: true };
+  } catch {
+    const conflicts = collectConflictFiles(spec.gitRoot, env);
+    if (conflicts.length > 0) {
+      try { execSync("git merge --abort", execOpts); } catch { /* ignore */ }
+      return { success: false, conflicts };
+    }
+    return {
+      success: false,
+      errorMessage: "Merge failed",
+    };
+  }
+}
+
+// ── Private helpers ────────────────────────────────────────────────────────────
+
+function execSyncStr(cmd: string, cwd: string, env: NodeJS.ProcessEnv): string {
+  try {
+    return execSync(cmd, { cwd, stdio: "pipe", env, encoding: "utf8" }) as unknown as string;
+  } catch {
+    return "";
+  }
+}
+
+/** Parse `git status --porcelain` to extract conflicting file paths. */
+function collectConflictFiles(gitRoot: string, env: NodeJS.ProcessEnv): string[] {
+  const out = execSyncStr("git status --porcelain", gitRoot, env);
+  const files: string[] = [];
+  for (const line of out.split("\n")) {
+    const xy = line.slice(0, 2);
+    if (/^(UU|AA|DD|AU|UA|DU|UD)/.test(xy)) {
+      files.push(line.slice(3).trim());
+    }
+  }
+  return files;
+}
+
+/** Shell-quote a string for use as a git commit message argument. */
+function shellQuote(s: string): string {
+  return "'" + s.replace(/'/g, "'\\''") + "'";
+}

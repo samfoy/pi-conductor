@@ -260,7 +260,7 @@ test(
     const def = m![0];
     // Allowed members: queued, running, paused, completed, failed,
     // killed, timeout (v0.10), hook_failed (v0.11). v0.12 fix #3 forbids
-    // any further additions for the steering milestone.
+    // arbitrary additions; v0.14 adds merge_conflict for worktree auto-merge.
     const allowed = [
       "queued",
       "running",
@@ -270,6 +270,7 @@ test(
       "killed",
       "timeout",
       "hook_failed",
+      "merge_conflict", // v0.14: worktree auto-merge conflict terminal status
     ];
     for (const s of allowed) {
       assert.match(def, new RegExp(`"${s}"`), `RunStatus must include "${s}"`);

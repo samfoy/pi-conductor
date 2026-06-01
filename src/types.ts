@@ -174,6 +174,14 @@ export interface GcConfig {
   completedTtlDays: number;
   /** Age (days) for `failed`/`killed`/`timeout` runs. Diagnostic-gold; kept longer. */
   failedTtlDays: number;
+  /**
+   * v0.14 worktree auto-merge: age (days) for `merge_conflict` runs.
+   * These runs keep their worktree alive for manual resolution, so a
+   * shorter TTL than `failedTtlDays` prevents disk accumulation from
+   * large (Brazil package) worktrees sitting unresolved for 60 days.
+   * Default: 14 days.
+   */
+  mergeConflictTtlDays: number;
   /** Total disk budget across all runs. Above this, largest non-pinned non-archived runs cold-archive first. */
   totalSizeBudgetBytes: number;
   /** Per-transcript cap. A single transcript exceeding this cold-archives regardless of age. */
@@ -222,6 +230,7 @@ export const DEFAULT_CONFIG: ConductorConfig = {
     enabled: true,
     completedTtlDays: 30,
     failedTtlDays: 60,
+    mergeConflictTtlDays: 14,
     totalSizeBudgetBytes: 5 * 1024 * 1024 * 1024,
     transcriptSizeCapBytes: 100 * 1024 * 1024,
     orphanReconcileAfterHours: 24,
@@ -245,6 +254,23 @@ export const DEFAULT_CONFIG: ConductorConfig = {
 
 // ── Run lifecycle types (v0.2) ────────────────────────────────────────
 
+/** v0.14 worktree auto-merge: strategy for merging a worktree branch back to base. */
+export type MergeStrategy = "squash" | "merge" | "none";
+
+/** v0.14 worktree auto-merge: outcome of a `mergeWorktree` call. */
+export interface MergeResult {
+  success: boolean;
+  /** Set when the worktree had no new commits vs the base — merge was a no-op. */
+  nothingToCommit?: boolean;
+  /** Conflicting file paths when `success === false` due to merge conflicts. */
+  conflicts?: string[];
+  /** Human-readable error message for non-conflict failures. */
+  errorMessage?: string;
+}
+
+/** v0.14: personas that write code and should default to `"squash"` merge strategy. */
+export const WRITE_CAPABLE_PERSONAS: ReadonlySet<string> = new Set(["builder", "simplifier"]);
+
 export type RunStatus =
   | "queued"
   | "running"
@@ -253,7 +279,8 @@ export type RunStatus =
   | "failed"
   | "killed"
   | "timeout"
-  | "hook_failed";
+  | "hook_failed"
+  | "merge_conflict"; // v0.14: worktree merged cleanly but conflicts prevent fast-forward
 
 export type SpawnMode = "foreground" | "background";
 
@@ -410,6 +437,15 @@ export interface Run {
    * (e.g. `"conductor-wt/builder-abc1"`). Cleared with `worktreePath`.
    */
   worktreeBranch?: string;
+  /**
+   * v0.14 worktree auto-merge: git branch that was HEAD at spawn time.
+   * Stored so `mergeWorktree` always targets the correct base.
+   */
+  worktreeBaseBranch?: string;
+  /** v0.14 worktree auto-merge: resolved merge strategy. */
+  mergeStrategy?: MergeStrategy;
+  /** v0.14 worktree auto-merge: result of the merge attempt on terminal. */
+  mergeResult?: MergeResult;
 
   // ── v0.12 steering (slice 1 types) ───────────────────────────────────────
   // Slice 1 declares these optional fields; slice 2 wires the RPC
@@ -801,6 +837,7 @@ export const TERMINAL_STATUSES: RunStatus[] = [
   "killed",
   "timeout",
   "hook_failed",
+  "merge_conflict",
 ];
 export function isTerminal(s: RunStatus): boolean {
   return TERMINAL_STATUSES.includes(s);
