@@ -7,6 +7,9 @@
  *   - persona.worktree=true is picked up by tools.ts and passed to queue
  *   - run.worktreePath is stamped when worktree creation succeeds
  *   - non-git cwd falls back to shared cwd (no failure)
+ * v0.14 additions:
+ *   - run.mergeStrategy is stamped from SpawnRunOpts.mergeStrategy
+ *   - run.worktreeBaseBranch is captured at worktree creation time
  */
 
 import test from "node:test";
@@ -108,6 +111,24 @@ function setupWithCaptureQueue() {
   return {
     captured,
     spawnTool: tools.find((t) => t.name === "ensemble_spawn")!,
+  };
+}
+
+/** Full Persona shape required by buildSubAgentPrompt. */
+function mkPersona(name: string, overrides: Partial<Persona> = {}): Persona {
+  return {
+    name,
+    description: "test",
+    inheritContext: "none",
+    inheritSkills: false,
+    defaultReads: [],
+    worktree: false,
+    timeoutMinutes: 1,
+    systemPrompt: `You are ${name}.`,
+    source: "builtin",
+    sourcePath: "/dev/null",
+    readOnly: false,
+    ...overrides,
   };
 }
 
@@ -225,34 +246,8 @@ test(
     // /tmp is not a git repo — resolveWorktreeSpec returns null.
     // spawnRun should proceed with shared cwd, NOT set run.worktreePath.
     const reg = new RunRegistry();
-    const persona: Persona = {
-      name: "builder",
-      description: "test",
-      inheritContext: "none",
-      inheritSkills: false,
-      defaultReads: [],
-      worktree: true,
-      timeoutMinutes: 1,
-      systemPrompt: "you are builder",
-      source: "builtin",
-      sourcePath: "/dev/null",
-      readOnly: false,
-    };
+    const persona = mkPersona("builder", { worktree: true });
 
-    // Use a fake subprocess that exits immediately
-    let capturedCwd: string | undefined;
-    const fakeRunPiSubprocess = (run: Run, piArgs: string[], opts: any) => {
-      capturedCwd = opts.cwd;
-      // Don't actually spawn; just resolve the done promise
-      run.status = "completed";
-      run.finishedAt = Date.now();
-      void Promise.resolve().then(() => opts.onComplete?.(run));
-      return Promise.resolve(run);
-    };
-
-    // We can't easily inject fakeRunPiSubprocess without refactoring spawnRun.
-    // Instead, verify the fallback by checking run.worktreePath is undefined
-    // after a background spawn with worktree:true in /tmp.
     // The run will fail quickly (pi not found) but worktreePath should not be set.
     const result = spawnRun({
       registry: reg,
@@ -271,5 +266,99 @@ test(
       undefined,
       "worktreePath must be undefined for non-git cwd fallback",
     );
+  },
+);
+
+// ── Slice 2: worktreeBaseBranch + mergeStrategy stamping ──────────────────────
+
+test(
+  "spawnRun: mergeStrategy stamped on run when provided",
+  () => {
+    const reg = new RunRegistry();
+    const result = spawnRun({
+      registry: reg,
+      persona: mkPersona("builder"),
+      task: "test",
+      mode: "background",
+      cwd: "/tmp",
+      timeoutMs: 200,
+      mergeStrategy: "squash",
+    });
+    assert.equal(
+      result.run.mergeStrategy,
+      "squash",
+      "mergeStrategy must be stamped onto run from opts",
+    );
+    result.run.status = "completed";
+  },
+);
+
+test(
+  "spawnRun: mergeStrategy undefined when not provided",
+  () => {
+    const reg = new RunRegistry();
+    const result = spawnRun({
+      registry: reg,
+      persona: mkPersona("oracle", { readOnly: true }),
+      task: "test",
+      mode: "background",
+      cwd: "/tmp",
+      timeoutMs: 200,
+    });
+    assert.equal(
+      result.run.mergeStrategy,
+      undefined,
+      "mergeStrategy must be undefined when not in opts",
+    );
+    result.run.status = "completed";
+  },
+);
+
+test(
+  "spawnRun: worktreeBaseBranch stamped when worktree=true and cwd is a git repo",
+  { timeout: 10_000 },
+  () => {
+    const dir = tmpGitRepo();
+    try {
+      const reg = new RunRegistry();
+      const result = spawnRun({
+        registry: reg,
+        persona: mkPersona("builder", { worktree: true }),
+        task: "test",
+        mode: "background",
+        cwd: dir,
+        timeoutMs: 200,
+        worktree: true,
+      });
+      assert.ok(
+        typeof result.run.worktreeBaseBranch === "string" &&
+          result.run.worktreeBaseBranch.length > 0,
+        `worktreeBaseBranch should be a non-empty string, got: ${result.run.worktreeBaseBranch}`,
+      );
+      result.run.status = "completed";
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "spawnRun: worktreeBaseBranch NOT stamped when worktree=false",
+  () => {
+    const reg = new RunRegistry();
+    const result = spawnRun({
+      registry: reg,
+      persona: mkPersona("oracle", { readOnly: true }),
+      task: "test",
+      mode: "background",
+      cwd: "/tmp",
+      timeoutMs: 200,
+    });
+    assert.equal(
+      result.run.worktreeBaseBranch,
+      undefined,
+      "worktreeBaseBranch must not be set when worktree=false",
+    );
+    result.run.status = "completed";
   },
 );

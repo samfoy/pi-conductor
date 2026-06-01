@@ -17,7 +17,7 @@
  * may be called either directly (slot available) or by the queue draining.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { mkdir, writeFile, appendFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -35,8 +35,7 @@ import { runHook, defaultKillGroup } from "./hook-runner.ts";
 import { loadConfigWithErrors } from "./config.ts";
 import { resolveWorktreeSpec, createWorktree, removeWorktree } from "./worktree.ts";
 import { readProcessStartTime } from "./reconcile-startup.ts";
-import {
-  emptyUsage,
+import {  emptyUsage,
   isTerminal,
   toRunRecord,
   type ConductorConfig,
@@ -52,6 +51,7 @@ import {
   type SpawnMode,
   type StreamingBehavior,
   type ThinkingLevel,
+  type MergeStrategy,
 } from "./types.ts";
 
 // ── Storage paths ─────────────────────────────────────────────────────
@@ -574,6 +574,11 @@ export interface PlanSpawnOptions {
    * `persona.worktree` upstream in `tools.ts`.
    */
   worktree?: boolean;
+  /**
+   * v0.14 worktree auto-merge. Resolved merge strategy for this run.
+   * Passed through from `tools.ts` → `SpawnQueue` → `spawnRun`.
+   */
+  mergeStrategy?: MergeStrategy;
 }
 
 export interface PlanSpawnResult {
@@ -937,6 +942,13 @@ export interface SpawnOptions {
    * `persona.worktree` upstream in `tools.ts`.
    */
   worktree?: boolean;
+  /**
+   * v0.14 worktree auto-merge. Resolved merge strategy for this run.
+   * Stamped onto `Run.mergeStrategy` at spawn time so finalize can
+   * merge the worktree branch back to base on `completed`.
+   * `"none"` and `undefined` both mean no merge-back.
+   */
+  mergeStrategy?: MergeStrategy;
 }
 
 /**
@@ -1098,6 +1110,8 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // up; setting it here means resolveSendStrategy and the watchdog
     // see a consistent shape during the brief pre-spawn window.
     steerable: opts.steerable === true,
+    // v0.14 worktree auto-merge: stamp resolved merge strategy at spawn time.
+    mergeStrategy: opts.mergeStrategy,
   };
   opts.registry.register(run);
 
@@ -1114,9 +1128,22 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
       );
     } else {
       try {
+        // v0.14: capture the base branch before creating the worktree.
+        // git rev-parse --abbrev-ref HEAD gives us the branch name at spawn time.
+        let baseBranch: string | undefined;
+        try {
+          baseBranch = execSync("git rev-parse --abbrev-ref HEAD", {
+            cwd: spec.gitRoot,
+            encoding: "utf8",
+            stdio: "pipe",
+          }).trim();
+        } catch {
+          // Non-fatal: fallback leaves worktreeBaseBranch undefined.
+        }
         createWorktree(spec);
         run.worktreePath = spec.worktreePath;
         run.worktreeBranch = spec.branch;
+        if (baseBranch) run.worktreeBaseBranch = baseBranch;
         effectiveCwd = spec.worktreePath;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);

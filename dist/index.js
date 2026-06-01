@@ -497,7 +497,7 @@ function loadConfig(cwd) {
 }
 
 // src/runs.ts
-import { spawn } from "node:child_process";
+import { spawn, execSync as execSync2 } from "node:child_process";
 import { existsSync as existsSync4, mkdirSync as mkdirSync4, readdirSync, statSync } from "node:fs";
 import { mkdir, writeFile as writeFile2, appendFile } from "node:fs/promises";
 import { homedir as homedir3 } from "node:os";
@@ -2115,7 +2115,9 @@ function spawnRun(opts) {
     // `stampSpawnStreamingMode` (idempotent) once the subprocess is
     // up; setting it here means resolveSendStrategy and the watchdog
     // see a consistent shape during the brief pre-spawn window.
-    steerable: opts.steerable === true
+    steerable: opts.steerable === true,
+    // v0.14 worktree auto-merge: stamp resolved merge strategy at spawn time.
+    mergeStrategy: opts.mergeStrategy
   };
   opts.registry.register(run);
   let effectiveCwd = opts.cwd;
@@ -2128,9 +2130,19 @@ function spawnRun(opts) {
       );
     } else {
       try {
+        let baseBranch;
+        try {
+          baseBranch = execSync2("git rev-parse --abbrev-ref HEAD", {
+            cwd: spec.gitRoot,
+            encoding: "utf8",
+            stdio: "pipe"
+          }).trim();
+        } catch {
+        }
         createWorktree(spec);
         run.worktreePath = spec.worktreePath;
         run.worktreeBranch = spec.branch;
+        if (baseBranch) run.worktreeBaseBranch = baseBranch;
         effectiveCwd = spec.worktreePath;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -2849,7 +2861,7 @@ function elapsedStr(start, end) {
 
 // src/doctor.ts
 import { existsSync as existsSync7 } from "node:fs";
-import { execSync as execSync2 } from "node:child_process";
+import { execSync as execSync3 } from "node:child_process";
 import { homedir as homedir4 } from "node:os";
 import { join as join8 } from "node:path";
 
@@ -3411,7 +3423,7 @@ function isBinaryOnPath(command) {
   const bin = command.trim().split(/\s+/)[0];
   if (!bin || bin.startsWith("/")) return true;
   try {
-    execSync2(`command -v ${JSON.stringify(bin)}`, { stdio: "pipe" });
+    execSync3(`command -v ${JSON.stringify(bin)}`, { stdio: "pipe" });
     return true;
   } catch {
     return false;
