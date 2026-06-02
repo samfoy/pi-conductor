@@ -310,6 +310,85 @@ test(
 );
 
 test(
+  "mergeWorktree squash: builder committed to base — branch not ahead, nothingToCommit",
+  { timeout: 15_000 },
+  async () => {
+    const root = tmpDir();
+    try {
+      initRepo(root);
+      // Create worktree branch, then commit *to base branch* (mainline) directly
+      // simulating a builder that bypassed the worktree branch.
+      const env = cleanEnv();
+      const wtPath = join(root, ".worktrees", "conductor-wt", "builder-t-direct");
+      mkdirSync(wtPath, { recursive: true });
+      execSync(
+        `git worktree add -b conductor-wt/builder-t-direct ${wtPath}`,
+        { cwd: root, stdio: "pipe", env },
+      );
+      // Commit directly to mainline in the main checkout.
+      writeFileSync(join(root, "direct.ts"), "direct\n");
+      const opts = { cwd: root, stdio: "pipe" as const, env };
+      execSync("git add direct.ts", opts);
+      execSync('git commit -m "feat: direct"', opts);
+      const before = execSync("git rev-parse mainline", {
+        cwd: root, env, encoding: "utf8",
+      }).trim();
+      const result = await mergeWorktree(
+        { gitRoot: root, worktreePath: wtPath, branch: "conductor-wt/builder-t-direct" },
+        { strategy: "squash", baseBranch: "mainline", commitMessage: "builder(builder-t-direct): noop" },
+      );
+      assert.ok(result.success, `expected success, got: ${JSON.stringify(result)}`);
+      assert.ok(result.nothingToCommit === true, "expected nothingToCommit when branch not ahead");
+      const after = execSync("git rev-parse mainline", {
+        cwd: root, env, encoding: "utf8",
+      }).trim();
+      assert.equal(before, after, "mainline should not move when branch not ahead");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "mergeWorktree squash: branch ahead but squash stages nothing — returns failure (no silent loss)",
+  { timeout: 15_000 },
+  async () => {
+    const root = tmpDir();
+    try {
+      initRepo(root);
+      // Build a worktree branch with a real commit, then independently commit
+      // the same content on mainline (different SHA, different parent). Branch is
+      // "ahead" by SHA but `git merge --squash` stages nothing — the spurious case.
+      const wtPath = makeWorktreeBranch(
+        root, "conductor-wt/builder-t-spurious", "ghost.ts", "ghost\n",
+      );
+      const env = cleanEnv();
+      writeFileSync(join(root, "ghost.ts"), "ghost\n");
+      const opts = { cwd: root, stdio: "pipe" as const, env };
+      execSync("git add ghost.ts", opts);
+      execSync('git commit -m "feat: ghost on mainline"', opts);
+      // Sanity: branch IS ahead by SHA…
+      const ahead = execSync(
+        "git log mainline..conductor-wt/builder-t-spurious --oneline",
+        { cwd: root, env, encoding: "utf8" },
+      ).trim();
+      assert.ok(ahead.length > 0, "branch should be ahead by SHA after cherry-pick");
+      const result = await mergeWorktree(
+        { gitRoot: root, worktreePath: wtPath, branch: "conductor-wt/builder-t-spurious" },
+        { strategy: "squash", baseBranch: "mainline", commitMessage: "builder(builder-t-spurious): ghost" },
+      );
+      assert.equal(result.success, false, `expected failure, got: ${JSON.stringify(result)}`);
+      assert.ok(
+        result.errorMessage?.includes("squash staged nothing"),
+        `expected diagnostic errorMessage, got: ${result.errorMessage}`,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   "mergeWorktree merge strategy: success — merge commit appears on base",
   { timeout: 15_000 },
   async () => {

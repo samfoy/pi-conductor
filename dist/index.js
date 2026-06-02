@@ -266,6 +266,14 @@ async function mergeWorktree(spec, opts) {
     };
   }
   if (opts.strategy === "squash") {
+    const aheadOut = execSyncStr(
+      `git log ${opts.baseBranch}..${spec.branch} --oneline`,
+      spec.gitRoot,
+      env
+    );
+    if (!aheadOut.trim()) {
+      return { success: true, nothingToCommit: true };
+    }
     try {
       execSync(`git merge --squash ${spec.branch}`, execOpts);
     } catch {
@@ -282,7 +290,14 @@ async function mergeWorktree(spec, opts) {
     }
     const statusOut = execSyncStr("git status --porcelain --untracked-files=no", spec.gitRoot, env);
     if (!statusOut.trim()) {
-      return { success: true, nothingToCommit: true };
+      try {
+        execSync("git reset --merge", execOpts);
+      } catch {
+      }
+      return {
+        success: false,
+        errorMessage: `squash staged nothing despite ${spec.branch} being ahead of ${opts.baseBranch} \u2014 refusing to drop commits silently`
+      };
     }
     try {
       execSync(`git commit -m ${shellQuote(opts.commitMessage)}`, execOpts);

@@ -297,9 +297,14 @@ export interface MergeWorktreeOpts {
  *
  * Steps for `"squash"`:
  *   1. `git checkout <baseBranch>` in gitRoot
- *   2. `git merge --squash <branch>`
- *   3. If nothing to commit: return `{ success: true, nothingToCommit: true }`
- *   4. `git commit -m <commitMessage>`
+ *   2. Pre-check: if `<branch>` has no commits ahead of `<baseBranch>`,
+ *      return `{ success: true, nothingToCommit: true }` (builder committed
+ *      directly to base, or nothing was committed).
+ *   3. `git merge --squash <branch>`
+ *   4. If status is still empty here — squash staged nothing despite the
+ *      branch being ahead — fail loudly with `errorMessage` rather than
+ *      silently dropping commits.
+ *   5. `git commit -m <commitMessage>`
  *
  * Steps for `"merge"`:
  *   1. `git checkout <baseBranch>` in gitRoot
@@ -329,6 +334,21 @@ export async function mergeWorktree(
   }
 
   if (opts.strategy === "squash") {
+    // Pre-check: is the worktree branch ahead of baseBranch at all?
+    // If not, the builder committed directly to base (or never committed) —
+    // the work is already there (or there is none) and there's nothing to merge.
+    // This must be checked BEFORE `git merge --squash`, otherwise we cannot
+    // distinguish "safe no-op" from "squash spuriously staged nothing" —
+    // both leave the index empty. (See PRD bugfix log.)
+    const aheadOut = execSyncStr(
+      `git log ${opts.baseBranch}..${spec.branch} --oneline`,
+      spec.gitRoot,
+      env,
+    );
+    if (!aheadOut.trim()) {
+      return { success: true, nothingToCommit: true };
+    }
+
     try {
       execSync(`git merge --squash ${spec.branch}`, execOpts);
     } catch {
@@ -340,7 +360,14 @@ export async function mergeWorktree(
 
     const statusOut = execSyncStr("git status --porcelain --untracked-files=no", spec.gitRoot, env);
     if (!statusOut.trim()) {
-      return { success: true, nothingToCommit: true };
+      // Branch was ahead but squash staged nothing — unexpected. Fail loudly
+      // rather than silently dropping commits that exist on the branch ref.
+      try { execSync("git reset --merge", execOpts); } catch { /* ignore */ }
+      return {
+        success: false,
+        errorMessage:
+          `squash staged nothing despite ${spec.branch} being ahead of ${opts.baseBranch} — refusing to drop commits silently`,
+      };
     }
 
     try {
