@@ -366,6 +366,7 @@ var init_worktree = __esm({
 
 // src/index.ts
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
+import { existsSync as existsSync11, unlinkSync } from "node:fs";
 import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
 
 // src/commands.ts
@@ -7402,7 +7403,11 @@ Review-only
 
 **Oracle is the opener.** Every non-trivial chain starts with \`oracle\` reviewing the goal and inherited context. If the user's prose is too vague for oracle to form a baseline contract, run \`clarifier\` first.
 
+**Builder pre-spawn gate.** Before spawning \`builder\` or \`simplifier\` on a non-trivial task, verify that the front-end steps have run: \`oracle\` (understanding the goal) and \`planner\` (breaking down the work). The common slip is jumping straight from an \`inspector\` investigation to \`builder\` \u2014 the investigation feels like enough clarification, but unresolved design questions (triggering conditions, schema shape, deferred scope, sub-agent architecture) surface mid-implementation instead of up front. If \`oracle\` and \`planner\` haven't run for this request, run them before proceeding to \`builder\`. Exception: the \`Bug fix\` chain omits \`planner\` by design \u2014 \`oracle \u2192 investigator \u2192 builder\` is intentionally shorter.
+
 **\`finalizer\` is the closer.** Even small chains need the whole-task gate before declaring the user's request done. The single exception is \`Bug fix\`, where \`verifier\` plays the closer role for single-slice work.
+
+**Completion gate (critic check before reporting done).** When \`builder\` or \`simplifier\` returns \u2014 even with all tests passing \u2014 do NOT synthesize final results and notify the user yet. Ask: *did \`critic\` run against this builder output?* If not, spawn \`critic\` now before proceeding. Passing tests \u2260 critic approval. The common slip: \`builder\` returns clean \u2192 conductor synthesizes \u2192 user is told it's done \u2192 critic is skipped entirely. The \`builder \u21C4 critic\` loop in the chain diagrams above is not optional; it is a gate. The only exception is when the task qualifies as a tiny direct action (\xA71.5) and you used the \`builder \u2192 critic\` mini-chain explicitly.
 
 **Loop semantics.** When a producer-reviewer pair is in a loop (\`\u21C4\`):
 
@@ -8663,7 +8668,9 @@ function index_default(pi) {
       });
       let unsubInput = null;
       const ctx = ctxRef;
-      if (ctx && ctx.hasUI) {
+      const runMode = ctx?.mode;
+      const isTui = runMode === "tui" || runMode === void 0 && !!ctx?.hasUI;
+      if (ctx && isTui) {
         unsubInput = ctx.ui.onTerminalInput((data) => {
           if (overlayOpen) return void 0;
           if (matchesKey2(data, "escape")) {
@@ -8672,6 +8679,25 @@ function index_default(pi) {
           }
           return void 0;
         });
+      } else {
+        const detachFilePath = `/tmp/pi-conductor-detach-${process.pid}`;
+        const pollTimer = setInterval(() => {
+          if (existsSync11(detachFilePath)) {
+            try {
+              unlinkSync(detachFilePath);
+            } catch {
+            }
+            resolveDetach();
+            clearInterval(pollTimer);
+          }
+        }, 200);
+        unsubInput = () => {
+          clearInterval(pollTimer);
+          try {
+            if (existsSync11(detachFilePath)) unlinkSync(detachFilePath);
+          } catch {
+          }
+        };
       }
       const unregister = () => {
         if (unsubInput) {

@@ -1149,6 +1149,20 @@ regression test in `tests/commands-gc.test.ts` (or wherever
 `/conductor gc` is exercised today) that pins `dispatch("gc", ...)`
 resolves to `runGcCmd`. ≤30 LOC.
 
+### Chain enforcement slip patterns — CLOSED 2026-06-17 (conductor-prompt §11 addendum)
+
+Witnessed during DI-298 feature build in conductor mode:
+
+1. **Front-end chain skipped.** Conductor jumped `inspector → builder` without running `oracle → planner` first. Design questions (triggering conditions, sub-agent architecture, schema changes, deferred scope) surfaced mid-implementation instead of up front.
+
+2. **Post-builder critic skipped.** Builder returned with all 768 tests passing; conductor synthesized and reported completion without running `critic`. Critic later found two real blockers.
+
+Fix applied: two new named callout paragraphs added to §11 of `src/conductor-prompt.ts`:
+- **Builder pre-spawn gate** — explicitly requires oracle + planner to have run before spawning builder on a non-trivial task; names the common slip (inspector → builder shortcut).
+- **Completion gate (critic check before reporting done)** — explicitly requires critic to run after every builder return before synthesizing final results; names the common slip (passing tests ≠ critic approval).
+
+No code change needed — both are prompt-side rules. Closed by `feat(prompt): add builder pre-spawn gate and completion gate to §11`.
+
 ### Watchdog default soft threshold tuning from field data
 
 Observed during slices 3–4: legitimate slow operations (npm test 3x

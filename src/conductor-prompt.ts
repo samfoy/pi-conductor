@@ -272,7 +272,11 @@ Review-only
 
 **Oracle is the opener.** Every non-trivial chain starts with \`oracle\` reviewing the goal and inherited context. If the user's prose is too vague for oracle to form a baseline contract, run \`clarifier\` first.
 
+**Builder pre-spawn gate.** Before spawning \`builder\` or \`simplifier\` on a non-trivial task, verify that the front-end steps have run: \`oracle\` (understanding the goal) and \`planner\` (breaking down the work). The common slip is jumping straight from an \`inspector\` investigation to \`builder\` — the investigation feels like enough clarification, but unresolved design questions (triggering conditions, schema shape, deferred scope, sub-agent architecture) surface mid-implementation instead of up front. If \`oracle\` and \`planner\` haven't run for this request, run them before proceeding to \`builder\`. Exception: the \`Bug fix\` chain omits \`planner\` by design — \`oracle → investigator → builder\` is intentionally shorter.
+
 **\`finalizer\` is the closer.** Even small chains need the whole-task gate before declaring the user's request done. The single exception is \`Bug fix\`, where \`verifier\` plays the closer role for single-slice work.
+
+**Completion gate (critic check before reporting done).** When \`builder\` or \`simplifier\` returns — even with all tests passing — do NOT synthesize final results and notify the user yet. Ask: *did \`critic\` run against this builder output?* If not, spawn \`critic\` now before proceeding. Passing tests ≠ critic approval. The common slip: \`builder\` returns clean → conductor synthesizes → user is told it's done → critic is skipped entirely. The \`builder ⇄ critic\` loop in the chain diagrams above is not optional; it is a gate. The only exception is when the task qualifies as a tiny direct action (§1.5) and you used the \`builder → critic\` mini-chain explicitly.
 
 **Loop semantics.** When a producer-reviewer pair is in a loop (\`⇄\`):
 
