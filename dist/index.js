@@ -8604,6 +8604,34 @@ var ConductorEventEmitter = class {
   }
 };
 
+// src/rpc-detach.ts
+import { existsSync as existsSync12, unlinkSync } from "node:fs";
+function createRpcDetach(filePath, intervalMs = 200) {
+  let resolveDetach = () => {
+  };
+  const detachSignal = new Promise((res) => {
+    resolveDetach = res;
+  });
+  const pollTimer = setInterval(() => {
+    if (existsSync12(filePath)) {
+      try {
+        unlinkSync(filePath);
+      } catch {
+      }
+      resolveDetach();
+      clearInterval(pollTimer);
+    }
+  }, intervalMs);
+  const unregister = () => {
+    clearInterval(pollTimer);
+    try {
+      if (existsSync12(filePath)) unlinkSync(filePath);
+    } catch {
+    }
+  };
+  return { detachSignal, unregister };
+}
+
 // src/prompt-and-send.ts
 async function executePromptAndSend(deps, agentId, presuppliedText) {
   const ctx = deps.getCtx();
@@ -8820,7 +8848,9 @@ function index_default(pi) {
       });
       let unsubInput = null;
       const ctx = ctxRef;
-      if (ctx && ctx.hasUI) {
+      const runMode = ctx?.mode;
+      const isTui = runMode === "tui" || runMode === void 0 && !!ctx?.hasUI;
+      if (ctx && isTui) {
         unsubInput = ctx.ui.onTerminalInput((data) => {
           if (overlayOpen) return void 0;
           if (matchesKey2(data, "escape")) {
@@ -8829,6 +8859,11 @@ function index_default(pi) {
           }
           return void 0;
         });
+      } else {
+        const detachFilePath = `/tmp/pi-conductor-detach-${process.pid}`;
+        const handle = createRpcDetach(detachFilePath);
+        void handle.detachSignal.then(resolveDetach);
+        unsubInput = handle.unregister;
       }
       const unregister = () => {
         if (unsubInput) {

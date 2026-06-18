@@ -52,6 +52,7 @@ import { Watchdog, resolveKillOnStall, resolveKillOnStallForPersona } from "./wa
 import { isWriteCapable } from "./personas.ts";
 import { formatStallNotification } from "./notifications.ts";
 import { ConductorEventEmitter } from "./conductor-events.ts";
+import { createRpcDetach } from "./rpc-detach.ts";
 import { executePromptAndSend } from "./prompt-and-send.ts";
 
 export default function (pi: ExtensionAPI): void {
@@ -302,9 +303,23 @@ export default function (pi: ExtensionAPI): void {
       // contexts (e.g. RPC mode) the listener is a no-op and detach
       // simply never fires — the foreground spawn returns its summary
       // when the run completes, exactly as before.
+      //
+      // NOTE: gate on run mode, NOT `ctx.hasUI`. In pi 0.78+ RPC mode
+      // (pi-dashboard) supplies a non-noop uiContext so `hasUI` is true,
+      // but its `onTerminalInput` is a no-op stub that never delivers
+      // keystrokes. Gating on hasUI sent RPC down the terminal-input
+      // branch and never installed the sentinel-file poller below, so
+      // the dashboard's detach button/Esc did nothing.
+      //
+      // `ctx.mode` was added to ExtensionContext in pi 0.75+. The pinned
+      // devDep (0.74) doesn't type it, hence the cast; fall back to the
+      // old `hasUI` semantics when mode is absent (pre-0.75 runtime,
+      // where RPC correctly reported hasUI=false).
       let unsubInput: (() => void) | null = null;
       const ctx = ctxRef;
-      if (ctx && ctx.hasUI) {
+      const runMode = (ctx as { mode?: string } | null)?.mode;
+      const isTui = runMode === "tui" || (runMode === undefined && !!ctx?.hasUI);
+      if (ctx && isTui) {
         unsubInput = ctx.ui.onTerminalInput((data) => {
           // Don't hijack Esc when an overlay is open — the overlay's
           // own Esc-to-close binding takes priority.
@@ -315,6 +330,15 @@ export default function (pi: ExtensionAPI): void {
           }
           return undefined;
         });
+      } else {
+        // RPC/headless mode (e.g. pi-dashboard): poll for a sentinel file
+        // created by the dashboard's conductor-detach endpoint. Using the
+        // pi process PID as the scope — uniquely identifies this process
+        // and is known to the dashboard (pi-manager tracks proc.pid).
+        const detachFilePath = `/tmp/pi-conductor-detach-${process.pid}`;
+        const handle = createRpcDetach(detachFilePath);
+        void handle.detachSignal.then(resolveDetach);
+        unsubInput = handle.unregister;
       }
       const unregister = () => {
         if (unsubInput) {
