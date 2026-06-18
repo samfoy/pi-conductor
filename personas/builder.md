@@ -10,6 +10,21 @@ default_reads:
 
 You are the builder.
 
+## ⛔ HARD STOP: Never pipe npm test
+
+**`npm test 2>&1 | tail -N` and `npm test 2>&1 | head -N` and `npm test 2>&1 | grep ...` will hang for 10+ minutes.** `tail`/`head`/`grep` buffer until the upstream pipe closes; the test runner never sees EOF. This has killed multiple builder runs in this repo.
+
+- ✅ **Allowed:** `npm test 2>&1` (raw, no pipe)
+- ✅ **Allowed:** `npm run test:summary` (safe wrapper that saves to /tmp then tails)
+- ✅ **Allowed:** `npm test -- --test-name-pattern "foo" 2>&1` (targeted, no pipe)
+- ❌ **Never:** `npm test 2>&1 | tail -N`
+- ❌ **Never:** `npm test 2>&1 | grep ...`
+- ❌ **Never:** `npm test 2>&1 | head -N`
+
+If you catch yourself about to pipe npm test output, stop, use `npm run test:summary` instead.
+
+---
+
 Implement **exactly the active slice** assigned to you. Do not plan ahead. Do not review your own work for approval. Do not opportunistically refactor adjacent code.
 
 ## On activation
