@@ -373,7 +373,6 @@ var init_worktree = __esm({
 
 // src/index.ts
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
-import { existsSync as existsSync12, unlinkSync } from "node:fs";
 import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
 
 // src/commands.ts
@@ -5992,8 +5991,11 @@ function registerSpawnTool(pi, opts) {
           queue,
           cwd,
           pushNotification: opts.pushCompletionNotification,
-          getParentMessages: opts.getParentMessages
-        })
+          getParentMessages: opts.getParentMessages,
+          events: opts.getEvents?.()
+        }),
+        // v0.16 event bus: thread the adapter so emit sites in spawnRun/finalize fire.
+        events: opts.getEvents?.()
       });
       if (result.kind === "queued") {
         const p = result.placeholderRun;
@@ -6200,7 +6202,9 @@ function registerSendTool(pi, opts) {
         onCompleteHook: params.on_complete_hook,
         onCompleteHookTimeoutSeconds: params.on_complete_hook_timeout_seconds,
         // v0.12 slice 4: drive resolveSendStrategy. Undefined → "auto".
-        streamingBehavior: params.streaming_behavior
+        streamingBehavior: params.streaming_behavior,
+        // v0.16 event bus: thread through for emitSteered / emitCompleted / emitFailed.
+        events: opts.getEvents?.()
       });
       if (result.kind === "rejected") {
         return errorResult(result.reason);
@@ -6680,8 +6684,9 @@ function buildOnChainCallback(args) {
       thinking: resolveThinking(chainPersona, baseOv),
       timeoutMs: chainTimeoutMs,
       parentMessages: args.getParentMessages(),
-      onComplete: (run) => args.pushNotification(run)
+      onComplete: (run) => args.pushNotification(run),
       // no onChain: depth-1 cap (chain-spawned runs do not chain further)
+      events: args.events
     });
   };
 }
@@ -8565,6 +8570,40 @@ function handleSessionShutdown(event, deps) {
   deps.resetSanitizer();
 }
 
+// src/conductor-events.ts
+var CHANNEL = {
+  created: "conductor:agent:created",
+  started: "conductor:agent:started",
+  completed: "conductor:agent:completed",
+  failed: "conductor:agent:failed",
+  steered: "conductor:agent:steered",
+  compacted: "conductor:agent:compacted"
+};
+var ConductorEventEmitter = class {
+  events;
+  constructor(events) {
+    this.events = events;
+  }
+  emitCreated(payload) {
+    this.events?.emit(CHANNEL.created, payload);
+  }
+  emitStarted(payload) {
+    this.events?.emit(CHANNEL.started, payload);
+  }
+  emitCompleted(payload) {
+    this.events?.emit(CHANNEL.completed, payload);
+  }
+  emitFailed(payload) {
+    this.events?.emit(CHANNEL.failed, payload);
+  }
+  emitSteered(payload) {
+    this.events?.emit(CHANNEL.steered, payload);
+  }
+  emitCompacted(payload) {
+    this.events?.emit(CHANNEL.compacted, payload);
+  }
+};
+
 // src/prompt-and-send.ts
 async function executePromptAndSend(deps, agentId, presuppliedText) {
   const ctx = deps.getCtx();
@@ -8628,6 +8667,7 @@ function index_default(pi) {
   const registry = new RunRegistry();
   const queue = new SpawnQueue(registry, 4, 1);
   const focusModel = new FocusedStreamModel(registry);
+  const conductorEvents = new ConductorEventEmitter(pi.events);
   let overlayOpen = false;
   let tuiRef = null;
   let unsubFocusedShortcut = null;
@@ -8761,6 +8801,8 @@ function index_default(pi) {
      * back to plain output in that case.
      */
     getTheme: () => ctxRef?.ui.theme,
+    /** v0.16 event bus adapter constructed at init. */
+    getEvents: () => conductorEvents,
     /**
      * One-shot detach slot for the active foreground spawn. Listens to
      * raw terminal input via ctx.ui.onTerminalInput (interactive mode
@@ -8778,9 +8820,7 @@ function index_default(pi) {
       });
       let unsubInput = null;
       const ctx = ctxRef;
-      const runMode = ctx?.mode;
-      const isTui = runMode === "tui" || runMode === void 0 && !!ctx?.hasUI;
-      if (ctx && isTui) {
+      if (ctx && ctx.hasUI) {
         unsubInput = ctx.ui.onTerminalInput((data) => {
           if (overlayOpen) return void 0;
           if (matchesKey2(data, "escape")) {
@@ -8789,25 +8829,6 @@ function index_default(pi) {
           }
           return void 0;
         });
-      } else {
-        const detachFilePath = `/tmp/pi-conductor-detach-${process.pid}`;
-        const pollTimer = setInterval(() => {
-          if (existsSync12(detachFilePath)) {
-            try {
-              unlinkSync(detachFilePath);
-            } catch {
-            }
-            resolveDetach();
-            clearInterval(pollTimer);
-          }
-        }, 200);
-        unsubInput = () => {
-          clearInterval(pollTimer);
-          try {
-            if (existsSync12(detachFilePath)) unlinkSync(detachFilePath);
-          } catch {
-          }
-        };
       }
       const unregister = () => {
         if (unsubInput) {

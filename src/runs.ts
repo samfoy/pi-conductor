@@ -35,6 +35,7 @@ import { runHook, defaultKillGroup } from "./hook-runner.ts";
 import { loadConfigWithErrors } from "./config.ts";
 import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage } from "./worktree.ts";
 import { readProcessStartTime } from "./reconcile-startup.ts";
+import { ConductorEventEmitter } from "./conductor-events.ts";
 import {  emptyUsage,
   isTerminal,
   toRunRecord,
@@ -958,6 +959,12 @@ export interface SpawnOptions {
    * must not crash the parent run's finalize path.
    */
   onChain?: (run: Run) => void;
+  /**
+   * v0.16 event bus adapter. When provided, lifecycle events are emitted
+   * via `pi.events` for companion extensions. `undefined` means no events
+   * are emitted (no-op fallback).
+   */
+  events?: ConductorEventEmitter;
 }
 
 /**
@@ -1697,6 +1704,12 @@ export interface SendToRunOptions {
    * `spawn-resume` for terminal runs.
    */
   streamingBehavior?: StreamingBehavior;
+  /**
+   * v0.16 event bus adapter. Passed through to the resumed run's finalize
+   * path so `completed`/`failed`/`steered` events fire correctly on resumed
+   * sessions. `undefined` means no events emitted.
+   */
+  events?: ConductorEventEmitter;
 }
 
 export type SendToRunResult =

@@ -51,6 +51,7 @@ import { handleSessionShutdown } from "./shutdown.ts";
 import { Watchdog, resolveKillOnStall, resolveKillOnStallForPersona } from "./watchdog.ts";
 import { isWriteCapable } from "./personas.ts";
 import { formatStallNotification } from "./notifications.ts";
+import { ConductorEventEmitter } from "./conductor-events.ts";
 import { executePromptAndSend } from "./prompt-and-send.ts";
 
 export default function (pi: ExtensionAPI): void {
@@ -62,6 +63,10 @@ export default function (pi: ExtensionAPI): void {
   const registry = new RunRegistry();
   const queue = new SpawnQueue(registry, 4, 1);
   const focusModel = new FocusedStreamModel(registry);
+  // v0.16 event bus: construct once at extension init; `pi.events` is the
+  // shared cross-extension EventBus. The `?.` in each emit* method makes
+  // this gracefully degrade on older pi versions.
+  const conductorEvents = new ConductorEventEmitter(pi.events);
 
   // Track whether an overlay is already open so multiple opens don't stack.
   let overlayOpen = false;
@@ -277,6 +282,8 @@ export default function (pi: ExtensionAPI): void {
      * back to plain output in that case.
      */
     getTheme: () => ctxRef?.ui.theme,
+    /** v0.16 event bus adapter constructed at init. */
+    getEvents: () => conductorEvents,
     /**
      * One-shot detach slot for the active foreground spawn. Listens to
      * raw terminal input via ctx.ui.onTerminalInput (interactive mode

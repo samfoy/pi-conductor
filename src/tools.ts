@@ -14,9 +14,10 @@ import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
 import { resolveChain, buildChainTask } from "./chain.ts";
 import { collapseSteerableCascade } from "./steerable.ts";
-import { elapsedStr, forceTerminate, formatUsage, getFinalText, pauseRun, resolveTimeoutMs, resumeRun, sendToRun, type RunRegistry, type SpawnOptions } from "./runs.ts";
+import { elapsedStr, forceTerminate, formatUsage, getFinalText, pauseRun, resolveTimeoutMs, resumeRun, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
 import { resolveMergeStrategy } from "./worktree.ts";
+import { ConductorEventEmitter } from "./conductor-events.ts";
 import {
   awaitOrDetach,
   countToolResultMessages,
@@ -80,6 +81,8 @@ interface RegisterToolsOpts {
    * in headless tests, in which case the stream renders plain.
    */
   getTheme?: () => ThemeFg | undefined;
+  /** v0.16 event bus adapter — threaded into SpawnOptions/SendToRunOptions. */
+  getEvents?: () => ConductorEventEmitter;
 }
 
 export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
@@ -409,7 +412,10 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           cwd,
           pushNotification: opts.pushCompletionNotification,
           getParentMessages: opts.getParentMessages,
+          events: opts.getEvents?.(),
         }),
+        // v0.16 event bus: thread the adapter so emit sites in spawnRun/finalize fire.
+        events: opts.getEvents?.(),
       });
 
       if (result.kind === "queued") {
@@ -678,6 +684,8 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         onCompleteHookTimeoutSeconds: params.on_complete_hook_timeout_seconds,
         // v0.12 slice 4: drive resolveSendStrategy. Undefined → "auto".
         streamingBehavior: params.streaming_behavior,
+        // v0.16 event bus: thread through for emitSteered / emitCompleted / emitFailed.
+        events: opts.getEvents?.(),
       });
 
       if (result.kind === "rejected") {
@@ -1243,6 +1251,7 @@ interface OnChainCallbackOpts {
   cwd: string;
   pushNotification: (run: Run) => void;
   getParentMessages: () => AgentMessage[];
+  events?: ConductorEventEmitter;
 }
 
 /**
@@ -1298,6 +1307,7 @@ function buildOnChainCallback(
       parentMessages: args.getParentMessages(),
       onComplete: (run) => args.pushNotification(run),
       // no onChain: depth-1 cap (chain-spawned runs do not chain further)
+      events: args.events,
     } as SpawnOptions);
   };
 }
