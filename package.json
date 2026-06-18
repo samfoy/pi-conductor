@@ -29,8 +29,8 @@
   ],
   "type": "module",
   "scripts": {
-    "test": "node --test --import tsx tests/*.test.ts",
-    "test:summary": "node --test --import tsx tests/*.test.ts > /tmp/pi-test-out.txt 2>&1; tail -10 /tmp/pi-test-out.txt",
+    "test": "env -u CONDUCTOR_SUBAGENT node --test --import tsx tests/*.test.ts",
+    "test:summary": "env -u CONDUCTOR_SUBAGENT node --test --import tsx tests/*.test.ts > /tmp/pi-test-out.txt 2>&1; tail -10 /tmp/pi-test-out.txt",
     "typecheck": "tsc --noEmit",
     "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --sourcemap --packages=external --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-agent-core --external:@earendil-works/pi-tui --external:@sinclair/typebox",
     "check": "tsc --noEmit",
