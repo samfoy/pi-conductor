@@ -18,6 +18,7 @@ import {
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ContextInheritance, Persona, Run, SpawnMode, ThinkingLevel } from "./types.ts";
 import { emptyUsage } from "./types.ts";
+import { ConductorEventEmitter } from "./conductor-events.ts";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { runDir } from "./runs.ts";
@@ -73,6 +74,12 @@ export interface PendingSpawn {
    * threaded through to `spawnRun` on dequeue.
    */
   worktree?: boolean;
+  /**
+   * v0.16-S2 event bus adapter. Threaded through to spawnRun on dequeue so
+   * emitStarted fires at drain time. emitCreated fires immediately in
+   * enqueueOrSpawn when the placeholder is created.
+   */
+  events?: ConductorEventEmitter;
 }
 
 export class SpawnQueue {
@@ -176,7 +183,16 @@ export class SpawnQueue {
       onCompleteHook: opts.onCompleteHook,
       onCompleteHookTimeoutSeconds: opts.onCompleteHookTimeoutSeconds,
       worktree: opts.worktree,
+      events: opts.events,
     };
+    // v0.16-S2: emit emitCreated at queue time (before the run actually starts).
+    // emitStarted will fire in spawnRun when drain dequeues this entry.
+    opts.events?.emitCreated({
+      id,
+      persona: opts.persona.name,
+      description: opts.task,
+      isBackground: true, // queued runs are always promoted as background
+    });
     this.pending.push(pending);
     return {
       kind: "queued",
@@ -246,6 +262,8 @@ export class SpawnQueue {
         onCompleteHook: next.onCompleteHook,
         onCompleteHookTimeoutSeconds: next.onCompleteHookTimeoutSeconds,
         worktree: next.worktree,
+        // v0.16-S2: thread events so emitStarted fires at drain time.
+        events: next.events,
       });
     }
   }

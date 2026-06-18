@@ -2305,6 +2305,19 @@ function spawnRun(opts) {
     mergeStrategy: opts.mergeStrategy
   };
   opts.registry.register(run);
+  if (!opts.preAllocatedId) {
+    opts.events?.emitCreated({
+      id: run.id,
+      persona: run.persona,
+      description: run.task,
+      isBackground: run.mode === "background"
+    });
+  }
+  opts.events?.emitStarted({
+    id: run.id,
+    persona: run.persona,
+    description: run.task
+  });
   let effectiveCwd = opts.cwd;
   if (opts.worktree) {
     const spec = resolveWorktreeSpec(opts.cwd, run.id);
@@ -2408,7 +2421,9 @@ function spawnRun(opts) {
       hookSpecFromPersona(opts.persona)
     ),
     // v0.15 chains: thread the callback from spawnRun opts.
-    onChain: opts.onChain
+    onChain: opts.onChain,
+    // v0.16-S3: thread the event bus adapter so finalize can emit lifecycle events.
+    events: opts.events
   });
   return { run, done };
 }
@@ -2531,6 +2546,7 @@ function runPiSubprocess(run, piArgs, opts) {
         proc.kill();
       } catch {
       }
+      emitFinalizeEvent(run, opts.events);
       donePromiseResolve(run);
       return;
     }
@@ -2579,6 +2595,7 @@ function runPiSubprocess(run, piArgs, opts) {
         }
       }
       applyChainIfPresent(run, run.status, opts.onChain);
+      emitFinalizeEvent(run, opts.events);
       donePromiseResolve(run);
     });
   };
@@ -2791,6 +2808,7 @@ function sendToRun(run, message, opts) {
         }
       });
     });
+    opts.events?.emitSteered({ id: run.id, message: trimmed });
     return { kind: "started", run, done: done2, ack: result.ack };
   }
   if (run.sessionPath && !existsSync4(run.sessionPath)) {
@@ -2844,9 +2862,31 @@ function sendToRun(run, message, opts) {
       run.cwd,
       run.persona,
       hookSpecFromOpts(run.onCompleteHook, run.onCompleteHookTimeoutSeconds)
-    )
+    ),
+    // v0.16-S3: thread event bus so finalize on the resumed run can emit.
+    events: opts.events
   });
   return { kind: "started", run, done };
+}
+function emitFinalizeEvent(run, events) {
+  if (!events) return;
+  const durationMs = (run.finishedAt ?? Date.now()) - run.startTime;
+  const base = {
+    id: run.id,
+    persona: run.persona,
+    durationMs,
+    toolUses: run.usage.turns,
+    tokens: { input: run.usage.input, output: run.usage.output, cost: run.usage.cost }
+  };
+  if (run.status === "completed") {
+    events.emitCompleted(base);
+  } else {
+    events.emitFailed({
+      ...base,
+      status: run.status,
+      errorMessage: run.errorMessage
+    });
+  }
 }
 function applyCloseHandlerTerminal(run, terminal, exitCode) {
   if (isTerminal(run.status)) return false;
@@ -6778,8 +6818,16 @@ var SpawnQueue = class {
       inheritContextOverride: opts.inheritContextOverride,
       onCompleteHook: opts.onCompleteHook,
       onCompleteHookTimeoutSeconds: opts.onCompleteHookTimeoutSeconds,
-      worktree: opts.worktree
+      worktree: opts.worktree,
+      events: opts.events
     };
+    opts.events?.emitCreated({
+      id,
+      persona: opts.persona.name,
+      description: opts.task,
+      isBackground: true
+      // queued runs are always promoted as background
+    });
     this.pending.push(pending);
     return {
       kind: "queued",
@@ -6835,7 +6883,9 @@ var SpawnQueue = class {
         inheritContextOverride: next.inheritContextOverride,
         onCompleteHook: next.onCompleteHook,
         onCompleteHookTimeoutSeconds: next.onCompleteHookTimeoutSeconds,
-        worktree: next.worktree
+        worktree: next.worktree,
+        // v0.16-S2: thread events so emitStarted fires at drain time.
+        events: next.events
       });
     }
   }

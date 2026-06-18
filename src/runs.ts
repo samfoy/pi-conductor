@@ -1131,6 +1131,26 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
   };
   opts.registry.register(run);
 
+  // v0.16-S2: emit lifecycle events at spawn time.
+  // - Direct spawn (no preAllocatedId): run goes straight to "running" — fire both
+  //   emitCreated and emitStarted.
+  // - Drain path (preAllocatedId set): emitCreated already fired in
+  //   SpawnQueue.enqueueOrSpawn at queue time — only fire emitStarted here to
+  //   signal the queued→running transition.
+  if (!opts.preAllocatedId) {
+    opts.events?.emitCreated({
+      id: run.id,
+      persona: run.persona,
+      description: run.task,
+      isBackground: run.mode === "background",
+    });
+  }
+  opts.events?.emitStarted({
+    id: run.id,
+    persona: run.persona,
+    description: run.task,
+  });
+
   // v0.13 worktree-per-persona: create an isolated git worktree when
   // opts.worktree is true. resolveWorktreeSpec returns null for non-git
   // cwds — fall back to shared cwd with a warning rather than failing.
@@ -1249,6 +1269,8 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     ),
     // v0.15 chains: thread the callback from spawnRun opts.
     onChain: opts.onChain,
+    // v0.16-S3: thread the event bus adapter so finalize can emit lifecycle events.
+    events: opts.events,
   });
   return { run, done };
 }
@@ -1305,6 +1327,12 @@ interface RunPiSubprocessOpts {
    * `completed`. See {@link applyChainIfPresent}.
    */
   onChain?: (run: Run) => void;
+  /**
+   * v0.16 event bus adapter. Threaded from SpawnOptions/SendToRunOptions into
+   * runPiSubprocess so the finalize closure can emit lifecycle events.
+   * Undefined means no events emitted.
+   */
+  events?: ConductorEventEmitter;
 }
 
 /**
@@ -1536,6 +1564,9 @@ function runPiSubprocess(
       } catch {
         // already dead
       }
+      // v0.16-S3: emit lifecycle event for force-terminated runs (run.status
+      // already set by forceTerminate; emit before resolving done).
+      emitFinalizeEvent(run, opts.events);
       donePromiseResolve(run);
       return;
     }
@@ -1601,6 +1632,8 @@ function runPiSubprocess(
         }
         // v0.15 chains: fire after writeFinal so {final} template can read finalPath.
         applyChainIfPresent(run, run.status as RunStatus, opts.onChain);
+        // v0.16-S3: emit completed/failed lifecycle event.
+        emitFinalizeEvent(run, opts.events);
         donePromiseResolve(run);
       });
   };
@@ -2080,6 +2113,9 @@ export function sendToRun(
         }
       });
     });
+    // v0.16-S3: emit steered event on RPC paths (steer/follow_up).
+    // NOT emitted on spawn-resume path (W4 witness).
+    opts.events?.emitSteered({ id: run.id, message: trimmed });
     return { kind: "started", run, done, ack: result.ack };
   }
 
@@ -2156,6 +2192,8 @@ export function sendToRun(
       run.persona,
       hookSpecFromOpts(run.onCompleteHook, run.onCompleteHookTimeoutSeconds),
     ),
+    // v0.16-S3: thread event bus so finalize on the resumed run can emit.
+    events: opts.events,
   });
   return { kind: "started", run, done };
 }
@@ -2188,6 +2226,41 @@ export function sendToRun(
  * the return value to gate the rest of finalize's work (errorMessage
  * fallback, session-file discovery, persistence writes, onComplete).
  */
+
+/**
+ * v0.16-S3: Build the completion/failure event payload and emit the
+ * appropriate lifecycle event.
+ *
+ * Called from the finalize closure in two places:
+ *   1. The normal path: after applyChainIfPresent resolves
+ *   2. The early-return path: when forceTerminate already settled the run
+ *
+ * Exported for unit-testing the payload shape without spawning real subprocesses.
+ */
+export function emitFinalizeEvent(
+  run: Run,
+  events: ConductorEventEmitter | undefined,
+): void {
+  if (!events) return;
+  const durationMs = (run.finishedAt ?? Date.now()) - run.startTime;
+  const base = {
+    id: run.id,
+    persona: run.persona,
+    durationMs,
+    toolUses: run.usage.turns,
+    tokens: { input: run.usage.input, output: run.usage.output, cost: run.usage.cost },
+  };
+  if (run.status === "completed") {
+    events.emitCompleted(base);
+  } else {
+    events.emitFailed({
+      ...base,
+      status: run.status as RunStatus,
+      errorMessage: run.errorMessage,
+    });
+  }
+}
+
 export function applyCloseHandlerTerminal(
   run: Run,
   terminal: RunStatus,
