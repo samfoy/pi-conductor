@@ -47,6 +47,11 @@ test("resolveChain: returns undefined when persona not in chains map", () => {
   assert.strictEqual(resolveChain("oracle", CHAINS), undefined);
 });
 
+test("resolveChain: returns undefined when then is empty string (disable sentinel)", () => {
+  const chains: Record<string, ChainStep> = { builder: { then: "" } };
+  assert.strictEqual(resolveChain("builder", chains), undefined);
+});
+
 // ── W2: resolveChain returns the step for a matching persona ────────────
 
 test("resolveChain: returns the configured step for a matching persona", () => {

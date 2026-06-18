@@ -105,7 +105,14 @@ var init_types = __esm({
       // v0.12 steering: built-in default OFF — mirrors v0.10 kill_on_stall
       // posture (PRD.md:517). No autonomous-chain field data justifies
       // flipping it. Slice 1 ships the field; slice 4 wires per-call.
-      defaultSteerable: false
+      defaultSteerable: false,
+      // v0.15 chains: builder and simplifier auto-chain to critic by default.
+      // Override at user or project level; use { then: "" } to disable a
+      // default chain without affecting others.
+      chains: {
+        builder: { then: "critic" },
+        simplifier: { then: "critic" }
+      }
     };
     WRITE_CAPABLE_PERSONAS = /* @__PURE__ */ new Set(["builder", "simplifier"]);
     TERMINAL_STATUSES = [
@@ -5184,7 +5191,9 @@ var DEFAULT_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nOrigina
 var FINAL_PLACEHOLDER = "(no final output)";
 function resolveChain(personaName, chains) {
   if (!chains) return void 0;
-  return chains[personaName];
+  const step = chains[personaName];
+  if (!step || !step.then) return void 0;
+  return step;
 }
 function buildChainTask(taskTemplate, context) {
   const template = taskTemplate ?? DEFAULT_TEMPLATE;

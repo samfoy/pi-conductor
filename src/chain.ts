@@ -24,7 +24,11 @@ export function resolveChain(
   chains: Record<string, ChainStep> | undefined,
 ): ChainStep | undefined {
   if (!chains) return undefined;
-  return chains[personaName];
+  const step = chains[personaName];
+  // Empty string `then` is the explicit-disable sentinel — mirrors
+  // `on_complete_hook`'s empty-string disable convention.
+  if (!step || !step.then) return undefined;
+  return step;
 }
 
 /**

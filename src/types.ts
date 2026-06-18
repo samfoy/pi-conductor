@@ -274,6 +274,13 @@ export const DEFAULT_CONFIG: ConductorConfig = {
   // posture (PRD.md:517). No autonomous-chain field data justifies
   // flipping it. Slice 1 ships the field; slice 4 wires per-call.
   defaultSteerable: false,
+  // v0.15 chains: builder and simplifier auto-chain to critic by default.
+  // Override at user or project level; use { then: "" } to disable a
+  // default chain without affecting others.
+  chains: {
+    builder: { then: "critic" },
+    simplifier: { then: "critic" },
+  },
 };
 
 // ── Run lifecycle types (v0.2) ────────────────────────────────────────

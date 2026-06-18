@@ -565,11 +565,31 @@ test("loadConfigWithErrors: missing project layer leaves project at defaults (no
 
 // ── v0.15 chains config ───────────────────────────────────────────────
 
-test("loadConfig: chains absent by default", () => {
+test("loadConfig: default chains include builder→critic and simplifier→critic", () => {
   const fx = setup();
   try {
     const cfg = loadConfig(fx.projectDir);
-    assert.strictEqual(cfg.chains, undefined);
+    assert.ok(cfg.chains, "default chains should be present");
+    assert.strictEqual(cfg.chains!["builder"]?.then, "critic");
+    assert.strictEqual(cfg.chains!["simplifier"]?.then, "critic");
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: empty-string then disables a default chain at project level", async () => {
+  const fx = setup();
+  try {
+    writeProjectConfig(fx, JSON.stringify({
+      chains: { builder: { then: "" } },
+    }));
+    const { loadConfig: lc } = await import("../src/config.ts");
+    const cfg = lc(fx.projectDir);
+    // builder chain disabled — resolveChain should return undefined for it
+    const { resolveChain } = await import("../src/chain.ts");
+    assert.strictEqual(resolveChain("builder", cfg.chains), undefined);
+    // simplifier default is preserved
+    assert.strictEqual(resolveChain("simplifier", cfg.chains), cfg.chains!["simplifier"]);
   } finally {
     teardown(fx);
   }
@@ -640,7 +660,8 @@ test("loadConfig: invalid chains value ignored (non-object)", async () => {
     writeUserConfig(fx, JSON.stringify({ chains: "not-an-object" }));
     const { loadConfig: lc } = await import("../src/config.ts");
     const cfg = lc(fx.projectDir);
-    assert.strictEqual(cfg.chains, undefined);
+    // Invalid value silently ignored — built-in defaults survive
+    assert.strictEqual(cfg.chains!["builder"]?.then, "critic");
   } finally {
     teardown(fx);
   }
