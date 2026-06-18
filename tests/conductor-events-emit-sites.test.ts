@@ -32,6 +32,7 @@ import {
 import {
   RunRegistry,
   spawnRun,
+  emitFinalizeEvent,
 } from "../src/runs.ts";
 import { SpawnQueue } from "../src/queue.ts";
 import { emptyUsage, type Persona, type Run } from "../src/types.ts";
@@ -219,3 +220,132 @@ test("S2-W2b: emitStarted NOT called at placeholder creation (queue full)", () =
     assert.strictEqual(started.length, 0, "emitStarted must NOT fire at placeholder creation");
   });
 });
+
+// ── S3 W1: emitCompleted payload has durationMs > 0 ──────────────────────
+//
+// Killing mutation: hardcode `durationMs: 0` in emitFinalizeEvent
+// → this test fails: durationMs === 0, not >= 1000.
+
+test("S3-W1: emitCompleted payload has durationMs >= 1000 when run lasted ~1s", () => {
+  const { bus, events } = makeFakeBus();
+  const emitter = new ConductorEventEmitter(bus);
+
+  const now = Date.now();
+  const run = makeRun("s3-w1", {
+    status: "completed",
+    startTime: now - 1000,
+    finishedAt: now,
+  });
+
+  emitFinalizeEvent(run, emitter);
+
+  const completed = events.filter((e) => e.channel === CHANNEL.completed);
+  assert.strictEqual(completed.length, 1, "emitCompleted must fire exactly once");
+  const payload = completed[0]!.data as { durationMs: number };
+  assert.ok(
+    payload.durationMs >= 1000,
+    `durationMs should be >= 1000 but got ${payload.durationMs}`,
+  );
+});
+
+// ── S3 W2: emitFailed payload .status equals actual run.status ───────────
+//
+// Killing mutation: hardcode `status: "failed"` in the emitFailed call inside
+// emitFinalizeEvent → W2 fails for "killed", "hook_failed", etc.
+
+test("S3-W2: emitFailed payload.status reflects actual run.status (not hardcoded)", () => {
+  const failureStatuses = ["killed", "hook_failed", "merge_conflict", "timeout"] as const;
+
+  for (const status of failureStatuses) {
+    const { bus, events } = makeFakeBus();
+    const emitter = new ConductorEventEmitter(bus);
+
+    const now = Date.now();
+    const run = makeRun(`s3-w2-${status}`, {
+      status,
+      startTime: now - 500,
+      finishedAt: now,
+    });
+
+    emitFinalizeEvent(run, emitter);
+
+    const failed = events.filter((e) => e.channel === CHANNEL.failed);
+    assert.strictEqual(failed.length, 1, `emitFailed must fire once for status=${status}`);
+    const payload = failed[0]!.data as { status: string };
+    assert.strictEqual(
+      payload.status,
+      status,
+      `payload.status should be "${status}" but got "${payload.status}"`,
+    );
+  }
+});
+
+// ── S3 W3: emitFailed fires (and emitCompleted does NOT) for all failure terminals
+//
+// Killing mutation: remove `emitFailed` call from emitFinalizeEvent
+// → W3 fails: failed.length === 0 instead of 1.
+
+test("S3-W3: emitFailed fires for all failure terminals; emitCompleted does not", () => {
+  const failureStatuses = ["killed", "hook_failed", "merge_conflict", "timeout"] as const;
+
+  for (const status of failureStatuses) {
+    const { bus, events } = makeFakeBus();
+    const emitter = new ConductorEventEmitter(bus);
+
+    const now = Date.now();
+    const run = makeRun(`s3-w3-${status}`, {
+      status,
+      startTime: now - 200,
+      finishedAt: now,
+    });
+
+    emitFinalizeEvent(run, emitter);
+
+    const failed = events.filter((e) => e.channel === CHANNEL.failed);
+    const completed = events.filter((e) => e.channel === CHANNEL.completed);
+
+    assert.strictEqual(
+      failed.length,
+      1,
+      `emitFailed must fire for status="${status}"`,
+    );
+    assert.strictEqual(
+      completed.length,
+      0,
+      `emitCompleted must NOT fire for status="${status}"`,
+    );
+  }
+});
+
+// ── S3 W4: emitSteered NOT called on spawn-resume path ───────────────────
+//
+// Structural witness: verify the emitSteered call site is inside the RPC
+// block (before the spawn-resume path), not at the function's return level.
+//
+// Killing mutation: move `opts.events?.emitSteered(...)` to after the
+// spawn-resume block → W4 fails (steeredIdx > spawnResumeIdx).
+
+test("S3-W4: emitSteered call is inside the RPC block, not on the spawn-resume path", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { join: pathJoin } = await import("node:path");
+  const src = readFileSync(
+    pathJoin(new URL("../src/runs.ts", import.meta.url).pathname),
+    "utf8",
+  );
+
+  const lines = src.split("\n");
+
+  // Find the line that calls emitSteered
+  const steeredIdx = lines.findIndex((l) => l.includes("emitSteered("));
+  assert.ok(steeredIdx >= 0, "emitSteered call must exist in src/runs.ts");
+
+  // The spawn-resume block starts with a comment "spawn-resume:" — find it.
+  const spawnResumeIdx = lines.findIndex((l) => l.includes("spawn-resume:"));
+  assert.ok(spawnResumeIdx >= 0, "spawn-resume: comment anchor must exist in src/runs.ts");
+
+  assert.ok(
+    steeredIdx < spawnResumeIdx,
+    `emitSteered (line ${steeredIdx + 1}) must appear before spawn-resume block (line ${spawnResumeIdx + 1})`,
+  );
+});
+
