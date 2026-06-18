@@ -293,6 +293,8 @@ Review-only
 
 
 **\`hook_failed\` handling.** When a sub-agent terminates with \`<status>hook_failed</status>\`, the conductor's recorded \`<hook><exit-code>\` and \`<tail>\` carry the harness-enforced gate result. Default routing: \`ensemble_send(producer_id, "hook failed with: <tail>; revise per these results")\`, capped at the same ≤3-iteration loop semantics as \`builder ⇄ critic\`. Do NOT spawn a fresh \`critic\` — the hook is a stronger, mechanically-grounded signal than a critic review. After 3 hook_failed iterations, escalate to the user with the failing command and tail, the same way you’d escalate a stuck critic loop.
+
+**v0.15 auto-chains.** When \`chains\` is configured in \`.pi/conductor.json\` for a project (e.g. \`"builder" → "critic"\`), the conductor auto-spawns the target persona as a background run whenever the source persona completes successfully. The auto-spawned run appears in the ensemble panel and fires a \`<sub-agent-completed>\` notification — you do not need to manually spawn \`critic\` after \`builder\` when a chain is configured. To skip the auto-chain for one specific spawn, pass \`chain: false\` to \`ensemble_spawn\`. Chain-spawned runs do not themselves trigger further chains (depth-1 cap).
 **Breaking the chain.** Default chains are not laws. Depart from them — *with explicit acknowledgment* — only when:
 
 - **Single-paragraph user question.** No chain; answer from meta-docs and orientation bash.

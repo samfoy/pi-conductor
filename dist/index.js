@@ -366,7 +366,7 @@ var init_worktree = __esm({
 
 // src/index.ts
 import { buildSessionContext } from "@earendil-works/pi-coding-agent";
-import { existsSync as existsSync11, unlinkSync } from "node:fs";
+import { existsSync as existsSync12, unlinkSync } from "node:fs";
 import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
 
 // src/commands.ts
@@ -710,6 +710,16 @@ function mergeConfig(base, raw) {
   }
   if (r.gc && typeof r.gc === "object") {
     out.gc = mergeGcConfig(out.gc, r.gc);
+  }
+  if (r.chains && typeof r.chains === "object" && !Array.isArray(r.chains)) {
+    const incoming = r.chains;
+    const merged = { ...out.chains ?? {} };
+    for (const [key, val] of Object.entries(incoming)) {
+      if (val && typeof val === "object") {
+        merged[key] = val;
+      }
+    }
+    out.chains = merged;
   }
   return out;
 }
@@ -2390,7 +2400,9 @@ function spawnRun(opts) {
       hookSpecFromOpts(opts.onCompleteHook, opts.onCompleteHookTimeoutSeconds),
       // per-call (slice 3)
       hookSpecFromPersona(opts.persona)
-    )
+    ),
+    // v0.15 chains: thread the callback from spawnRun opts.
+    onChain: opts.onChain
   });
   return { run, done };
 }
@@ -2560,6 +2572,7 @@ function runPiSubprocess(run, piArgs, opts) {
         } catch {
         }
       }
+      applyChainIfPresent(run, run.status, opts.onChain);
       donePromiseResolve(run);
     });
   };
@@ -2868,6 +2881,14 @@ async function applyMergeToTerminal(run, gitRoot, terminal) {
   const hint = `resolve manually: cd ${gitRoot} && git merge ${run.worktreeBranch}`;
   run.errorMessage = result.conflicts ? `merge conflict in: ${conflictList}; worktree preserved at ${run.worktreePath}; ${hint}` : result.errorMessage ?? "merge failed";
   return "merge_conflict";
+}
+function applyChainIfPresent(run, terminal, onChain) {
+  if (terminal !== "completed") return;
+  if (!onChain) return;
+  try {
+    onChain(run);
+  } catch {
+  }
 }
 async function applyHookToTerminal(run, resolvedHook, terminal, deps = {}) {
   try {
@@ -5157,6 +5178,26 @@ Resolve manually in the worktree and run /conductor worktree merge ${runId} agai
 // src/tools.ts
 import { Type } from "@sinclair/typebox";
 
+// src/chain.ts
+import { readFileSync as readFileSync5, existsSync as existsSync11 } from "node:fs";
+var DEFAULT_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nOriginal task:\n{task}\n\n---\nFinal output:\n{final}";
+var FINAL_PLACEHOLDER = "(no final output)";
+function resolveChain(personaName, chains) {
+  if (!chains) return void 0;
+  return chains[personaName];
+}
+function buildChainTask(taskTemplate, context) {
+  const template = taskTemplate ?? DEFAULT_TEMPLATE;
+  let finalContent = FINAL_PLACEHOLDER;
+  if (existsSync11(context.finalPath)) {
+    try {
+      finalContent = readFileSync5(context.finalPath, "utf-8");
+    } catch {
+    }
+  }
+  return template.replace(/\{persona\}/g, context.persona).replace(/\{runId\}/g, context.runId).replace(/\{task\}/g, context.task).replace(/\{final\}/g, finalContent);
+}
+
 // src/steerable.ts
 function collapseSteerableCascade(inputs) {
   return inputs.perCall ?? inputs.project ?? inputs.user ?? inputs.defaultValue;
@@ -5852,6 +5893,11 @@ function registerSpawnTool(pi, opts) {
             description: "Item 12 candidate #3 \u2014 per-call override for the persona's inherit_context frontmatter. Useful when the parent conductor's narration is contaminating the sub-agent's identity (see docs/backlog.md item 12 for the witnessed builder-4gsl bleed). Cascade: per-call > project config persona override > user config persona override > persona frontmatter. Default: persona frontmatter."
           }
         )
+      ),
+      chain: Type.Optional(
+        Type.Boolean({
+          description: "v0.15 chains: set to false to skip automatic chain spawns for this run even if a chain is configured in conductor.json for the persona. Default: true (chains apply when configured)."
+        })
       )
     }),
     async execute(_id, params, signal, onUpdate) {
@@ -5926,7 +5972,19 @@ function registerSpawnTool(pi, opts) {
         onUpdate: foreground ? () => {
         } : void 0,
         // foreground uses our own onUpdate below
-        onComplete: foreground ? void 0 : (run) => opts.pushCompletionNotification(run)
+        onComplete: foreground ? void 0 : (run) => opts.pushCompletionNotification(run),
+        // v0.15 chains: resolve the chain step and provide the onChain callback.
+        // Not provided when chain: false is passed, preventing the auto-spawn.
+        // Chain-spawned runs also don't receive onChain (no chain-of-chains).
+        onChain: buildOnChainCallback({
+          chainEnabled: params.chain !== false,
+          personaName: persona.name,
+          cfg,
+          queue,
+          cwd,
+          pushNotification: opts.pushCompletionNotification,
+          getParentMessages: opts.getParentMessages
+        })
       });
       if (result.kind === "queued") {
         const p = result.placeholderRun;
@@ -6576,6 +6634,47 @@ function validateHookTimeoutSeconds(s) {
 }
 function isTerminalStatus(s) {
   return s === "completed" || s === "failed" || s === "killed" || s === "timeout" || s === "hook_failed";
+}
+function buildOnChainCallback(args) {
+  if (!args.chainEnabled) return void 0;
+  const step = resolveChain(args.personaName, args.cfg.chains);
+  if (!step) return void 0;
+  return async (parentRun) => {
+    const chainCwd = parentRun.cwd;
+    const chainCfg = loadConfig(chainCwd);
+    const chainResolved = await resolvePersonas({
+      cwd: chainCwd,
+      personaOverrides: chainCfg.personaOverrides
+    });
+    const chainPersona = chainResolved.personas.get(step.then);
+    if (!chainPersona) {
+      process.stderr.write(
+        `[conductor] chain: persona "${step.then}" not found \u2014 skipping auto-spawn after ${parentRun.id}
+`
+      );
+      return;
+    }
+    const task = buildChainTask(step.taskTemplate, {
+      persona: parentRun.persona,
+      runId: parentRun.id,
+      task: parentRun.task,
+      finalPath: parentRun.finalPath
+    });
+    const baseOv = chainCfg.personaOverrides[chainPersona.name] ?? {};
+    const chainTimeoutMs = step.timeoutMinutes ? step.timeoutMinutes * 60 * 1e3 : resolveTimeoutMs(chainPersona, baseOv, chainCfg);
+    args.queue.enqueueOrSpawn({
+      persona: chainPersona,
+      task,
+      mode: "background",
+      cwd: chainCwd,
+      model: resolveModel(chainPersona, baseOv),
+      thinking: resolveThinking(chainPersona, baseOv),
+      timeoutMs: chainTimeoutMs,
+      parentMessages: args.getParentMessages(),
+      onComplete: (run) => args.pushNotification(run)
+      // no onChain: depth-1 cap (chain-spawned runs do not chain further)
+    });
+  };
 }
 
 // src/queue.ts
@@ -7424,6 +7523,8 @@ Review-only
 
 
 **\`hook_failed\` handling.** When a sub-agent terminates with \`<status>hook_failed</status>\`, the conductor's recorded \`<hook><exit-code>\` and \`<tail>\` carry the harness-enforced gate result. Default routing: \`ensemble_send(producer_id, "hook failed with: <tail>; revise per these results")\`, capped at the same \u22643-iteration loop semantics as \`builder \u21C4 critic\`. Do NOT spawn a fresh \`critic\` \u2014 the hook is a stronger, mechanically-grounded signal than a critic review. After 3 hook_failed iterations, escalate to the user with the failing command and tail, the same way you\u2019d escalate a stuck critic loop.
+
+**v0.15 auto-chains.** When \`chains\` is configured in \`.pi/conductor.json\` for a project (e.g. \`"builder" \u2192 "critic"\`), the conductor auto-spawns the target persona as a background run whenever the source persona completes successfully. The auto-spawned run appears in the ensemble panel and fires a \`<sub-agent-completed>\` notification \u2014 you do not need to manually spawn \`critic\` after \`builder\` when a chain is configured. To skip the auto-chain for one specific spawn, pass \`chain: false\` to \`ensemble_spawn\`. Chain-spawned runs do not themselves trigger further chains (depth-1 cap).
 **Breaking the chain.** Default chains are not laws. Depart from them \u2014 *with explicit acknowledgment* \u2014 only when:
 
 - **Single-paragraph user question.** No chain; answer from meta-docs and orientation bash.
@@ -8682,7 +8783,7 @@ function index_default(pi) {
       } else {
         const detachFilePath = `/tmp/pi-conductor-detach-${process.pid}`;
         const pollTimer = setInterval(() => {
-          if (existsSync11(detachFilePath)) {
+          if (existsSync12(detachFilePath)) {
             try {
               unlinkSync(detachFilePath);
             } catch {
@@ -8694,7 +8795,7 @@ function index_default(pi) {
         unsubInput = () => {
           clearInterval(pollTimer);
           try {
-            if (existsSync11(detachFilePath)) unlinkSync(detachFilePath);
+            if (existsSync12(detachFilePath)) unlinkSync(detachFilePath);
           } catch {
           }
         };

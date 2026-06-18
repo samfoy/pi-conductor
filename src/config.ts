@@ -127,6 +127,19 @@ function mergeConfig(base: ConductorConfig, raw: unknown): ConductorConfig {
     out.gc = mergeGcConfig(out.gc, r.gc as Record<string, unknown>);
   }
 
+  // v0.15 chains: key-level merge (project keys override user keys;
+  // keys not present in the incoming layer are preserved from base).
+  if (r.chains && typeof r.chains === "object" && !Array.isArray(r.chains)) {
+    const incoming = r.chains as Record<string, unknown>;
+    const merged: Record<string, unknown> = { ...(out.chains ?? {}) };
+    for (const [key, val] of Object.entries(incoming)) {
+      if (val && typeof val === "object") {
+        merged[key] = val;
+      }
+    }
+    out.chains = merged as ConductorConfig["chains"];
+  }
+
   return out;
 }
 

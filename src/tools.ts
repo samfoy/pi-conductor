@@ -12,8 +12,9 @@ import { Type } from "@sinclair/typebox";
 import type { Persona, PersonaOverride, Run, RunStatus, ThinkingLevel, MergeStrategy } from "./types.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
+import { resolveChain, buildChainTask } from "./chain.ts";
 import { collapseSteerableCascade } from "./steerable.ts";
-import { elapsedStr, forceTerminate, formatUsage, getFinalText, pauseRun, resolveTimeoutMs, resumeRun, sendToRun, type RunRegistry } from "./runs.ts";
+import { elapsedStr, forceTerminate, formatUsage, getFinalText, pauseRun, resolveTimeoutMs, resumeRun, sendToRun, type RunRegistry, type SpawnOptions } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
 import { resolveMergeStrategy } from "./worktree.ts";
 import {
@@ -299,6 +300,12 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           },
         ),
       ),
+      chain: Type.Optional(
+        Type.Boolean({
+          description:
+            "v0.15 chains: set to false to skip automatic chain spawns for this run even if a chain is configured in conductor.json for the persona. Default: true (chains apply when configured).",
+        }),
+      ),
     }),
     async execute(_id, params, signal, onUpdate) {
       const tmRange = validateTimeoutMinutes(params.timeout_minutes);
@@ -391,6 +398,18 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         onComplete: foreground
           ? undefined
           : (run) => opts.pushCompletionNotification(run),
+        // v0.15 chains: resolve the chain step and provide the onChain callback.
+        // Not provided when chain: false is passed, preventing the auto-spawn.
+        // Chain-spawned runs also don't receive onChain (no chain-of-chains).
+        onChain: buildOnChainCallback({
+          chainEnabled: params.chain !== false,
+          personaName: persona.name,
+          cfg,
+          queue,
+          cwd,
+          pushNotification: opts.pushCompletionNotification,
+          getParentMessages: opts.getParentMessages,
+        }),
       });
 
       if (result.kind === "queued") {
@@ -1212,4 +1231,73 @@ function validateHookTimeoutSeconds(s: number | undefined): string | undefined {
 
 function isTerminalStatus(s: RunStatus): boolean {
   return s === "completed" || s === "failed" || s === "killed" || s === "timeout" || s === "hook_failed";
+}
+
+// ── v0.15 chains ─────────────────────────────────────────────────────────
+
+interface OnChainCallbackOpts {
+  chainEnabled: boolean;
+  personaName: string;
+  cfg: ReturnType<typeof import("./config.ts").loadConfig>;
+  queue: SpawnQueue;
+  cwd: string;
+  pushNotification: (run: Run) => void;
+  getParentMessages: () => AgentMessage[];
+}
+
+/**
+ * Build the `onChain` callback for an `ensemble_spawn` call.
+ *
+ * Returns `undefined` when:
+ *   - `chainEnabled` is false (per-call `chain: false` opt-out)
+ *   - no chain step is configured for the persona in `cfg.chains`
+ *   - the target persona doesn’t exist in the resolved persona list
+ *
+ * Chain-spawned runs receive `onChain: undefined` to prevent
+ * chain-of-chains (depth-1 cap).
+ */
+function buildOnChainCallback(
+  args: OnChainCallbackOpts,
+): ((run: Run) => void) | undefined {
+  if (!args.chainEnabled) return undefined;
+  const step = resolveChain(args.personaName, args.cfg.chains);
+  if (!step) return undefined;
+
+  return async (parentRun: Run) => {
+    const chainCwd = parentRun.cwd;
+    const chainCfg = loadConfig(chainCwd);
+    const chainResolved = await resolvePersonas({
+      cwd: chainCwd,
+      personaOverrides: chainCfg.personaOverrides,
+    });
+    const chainPersona = chainResolved.personas.get(step.then);
+    if (!chainPersona) {
+      process.stderr.write(
+        `[conductor] chain: persona "${step.then}" not found — skipping auto-spawn after ${parentRun.id}\n`,
+      );
+      return;
+    }
+    const task = buildChainTask(step.taskTemplate, {
+      persona: parentRun.persona,
+      runId: parentRun.id,
+      task: parentRun.task,
+      finalPath: parentRun.finalPath,
+    });
+    const baseOv = chainCfg.personaOverrides[chainPersona.name] ?? {};
+    const chainTimeoutMs = step.timeoutMinutes
+      ? step.timeoutMinutes * 60 * 1000
+      : resolveTimeoutMs(chainPersona, baseOv, chainCfg);
+    args.queue.enqueueOrSpawn({
+      persona: chainPersona,
+      task,
+      mode: "background",
+      cwd: chainCwd,
+      model: resolveModel(chainPersona, baseOv),
+      thinking: resolveThinking(chainPersona, baseOv),
+      timeoutMs: chainTimeoutMs,
+      parentMessages: args.getParentMessages(),
+      onComplete: (run) => args.pushNotification(run),
+      // no onChain: depth-1 cap (chain-spawned runs do not chain further)
+    } as SpawnOptions);
+  };
 }

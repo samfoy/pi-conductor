@@ -949,6 +949,15 @@ export interface SpawnOptions {
    * `"none"` and `undefined` both mean no merge-back.
    */
   mergeStrategy?: MergeStrategy;
+  /**
+   * v0.15 chains: callback fired when the run reaches `completed`
+   * status (after hook + worktree merge, after writeFinal). The
+   * callback should trigger a background spawn of the chain target
+   * persona. Not provided for chain-spawned runs to prevent
+   * chain-of-chains. Exceptions are swallowed — chain spawn failures
+   * must not crash the parent run's finalize path.
+   */
+  onChain?: (run: Run) => void;
 }
 
 /**
@@ -1231,6 +1240,8 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
       hookSpecFromOpts(opts.onCompleteHook, opts.onCompleteHookTimeoutSeconds), // per-call (slice 3)
       hookSpecFromPersona(opts.persona),
     ),
+    // v0.15 chains: thread the callback from spawnRun opts.
+    onChain: opts.onChain,
   });
   return { run, done };
 }
@@ -1282,6 +1293,11 @@ interface RunPiSubprocessOpts {
    *     death does not double-flip `run.status`.
    */
   resolvedHook?: ResolvedHook;
+  /**
+   * v0.15 chains: callback fired after writeFinal when the run reaches
+   * `completed`. See {@link applyChainIfPresent}.
+   */
+  onChain?: (run: Run) => void;
 }
 
 /**
@@ -1576,6 +1592,8 @@ function runPiSubprocess(
             // never crash the spawner on listener errors
           }
         }
+        // v0.15 chains: fire after writeFinal so {final} template can read finalPath.
+        applyChainIfPresent(run, run.status as RunStatus, opts.onChain);
         donePromiseResolve(run);
       });
   };
@@ -2256,6 +2274,30 @@ export async function applyMergeToTerminal(
     ? `merge conflict in: ${conflictList}; worktree preserved at ${run.worktreePath}; ${hint}`
     : (result.errorMessage ?? "merge failed");
   return "merge_conflict";
+}
+
+/**
+ * v0.15 chains: call the `onChain` callback when `terminal === "completed"`.
+ *
+ * Fires after `writeFinal` so the callback can read `run.finalPath`.
+ * Swallows any exception thrown by the callback — chain spawn failures
+ * must not crash the parent run's finalize path.
+ *
+ * Exported for unit-test access; production callsite is the `finalize`
+ * `.finally()` block inside `attachLifecycleHandlers`.
+ */
+export function applyChainIfPresent(
+  run: Run,
+  terminal: RunStatus,
+  onChain: ((run: Run) => void) | undefined,
+): void {
+  if (terminal !== "completed") return;
+  if (!onChain) return;
+  try {
+    onChain(run);
+  } catch {
+    // never crash the finalize path on chain errors
+  }
 }
 
 /**

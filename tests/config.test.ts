@@ -562,3 +562,86 @@ test("loadConfigWithErrors: missing project layer leaves project at defaults (no
     teardown(fx);
   }
 });
+
+// ── v0.15 chains config ───────────────────────────────────────────────
+
+test("loadConfig: chains absent by default", () => {
+  const fx = setup();
+  try {
+    const cfg = loadConfig(fx.projectDir);
+    assert.strictEqual(cfg.chains, undefined);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: user-level chains loaded", async () => {
+  const fx = setup();
+  try {
+    writeUserConfig(fx, JSON.stringify({
+      chains: { builder: { then: "critic" } },
+    }));
+    const { loadConfig: lc } = await import("../src/config.ts");
+    const cfg = lc(fx.projectDir);
+    assert.ok(cfg.chains, "chains should be present");
+    assert.strictEqual(cfg.chains!["builder"]?.then, "critic");
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: project chains override user chains at key level", async () => {
+  const fx = setup();
+  try {
+    writeUserConfig(fx, JSON.stringify({
+      chains: {
+        builder: { then: "critic" },
+        planner: { then: "designer" },
+      },
+    }));
+    writeProjectConfig(fx, JSON.stringify({
+      chains: {
+        builder: { then: "qa-tester" },
+      },
+    }));
+    const { loadConfig: lc } = await import("../src/config.ts");
+    const cfg = lc(fx.projectDir);
+    assert.ok(cfg.chains, "chains should be present");
+    assert.strictEqual(cfg.chains!["builder"]?.then, "qa-tester");
+    assert.strictEqual(cfg.chains!["planner"]?.then, "designer");
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: chain step with taskTemplate and timeoutMinutes", async () => {
+  const fx = setup();
+  try {
+    writeUserConfig(fx, JSON.stringify({
+      chains: {
+        builder: { then: "critic", taskTemplate: "review: {task}", timeoutMinutes: 15 },
+      },
+    }));
+    const { loadConfig: lc } = await import("../src/config.ts");
+    const cfg = lc(fx.projectDir);
+    const step = cfg.chains!["builder"];
+    assert.ok(step, "expected builder chain step");
+    assert.strictEqual(step.then, "critic");
+    assert.strictEqual(step.taskTemplate, "review: {task}");
+    assert.strictEqual(step.timeoutMinutes, 15);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: invalid chains value ignored (non-object)", async () => {
+  const fx = setup();
+  try {
+    writeUserConfig(fx, JSON.stringify({ chains: "not-an-object" }));
+    const { loadConfig: lc } = await import("../src/config.ts");
+    const cfg = lc(fx.projectDir);
+    assert.strictEqual(cfg.chains, undefined);
+  } finally {
+    teardown(fx);
+  }
+});

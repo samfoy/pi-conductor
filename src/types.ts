@@ -101,6 +101,23 @@ export interface PersonaLoadError {
   reason: string;
 }
 
+/**
+ * v0.15 chains: one step in a persona chain. When a persona completes
+ * successfully, the conductor auto-spawns `then` as a background run.
+ */
+export interface ChainStep {
+  /** Persona name to spawn after the source persona completes. */
+  then: string;
+  /**
+   * Task template for the chained run. Supports {persona}, {runId},
+   * {task}, {final} substitutions. Defaults to a generic review prompt
+   * that embeds the parent run's final.md content.
+   */
+  taskTemplate?: string;
+  /** Timeout override (minutes) for the chained run. */
+  timeoutMinutes?: number;
+}
+
 export interface ConductorConfig {
   defaultTimeoutMinutes: number;
   maxConcurrent: number;
@@ -142,6 +159,13 @@ export interface ConductorConfig {
    * these (slice 3). See docs/v0.10-watchdog-design.md.
    */
   watchdog: WatchdogConfigDefaults;
+  /**
+   * v0.15 chains: map from source persona name to the chain step that
+   * fires when that persona completes successfully. Project config
+   * overrides user config at the individual key level (key-level merge).
+   * Empty by default — no auto-chaining unless configured.
+   */
+  chains?: Record<string, ChainStep>;
 }
 
 /**
