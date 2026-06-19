@@ -2710,6 +2710,11 @@ function runPiSubprocess(run, piArgs, opts) {
       opts.registry.notify(run);
       if (opts.onUpdate) opts.onUpdate(run);
     }
+    checkTurnLimit(
+      run,
+      opts.registry,
+      (r, reason) => forceTerminate(r, reason, opts.registry, opts.onComplete)
+    );
   };
   proc.stdout?.on("data", (data) => {
     buffer += data.toString();
@@ -3070,6 +3075,30 @@ async function applyHookToTerminal(run, resolvedHook, terminal, deps = {}) {
   } finally {
     run.hookExecuting = false;
     run.hookProc = void 0;
+  }
+}
+var GRACE_MESSAGE = "You have reached your turn limit. Wrap up immediately \u2014 provide your final answer now.";
+var defaultGraceEnqueue = (run, message) => {
+  enqueueRpcSendWithAck(run, "follow_up", message);
+};
+function checkTurnLimit(run, registry, terminateFn, enqueueGraceMsg = defaultGraceEnqueue) {
+  if (!run.maxTurns || isTerminal(run.status)) return;
+  const { turns } = run.usage;
+  const graceTurns = run.graceTurns ?? 5;
+  if (run.gracePeriodActive && run.gracePeriodStartTurn !== void 0 && turns >= run.gracePeriodStartTurn + graceTurns) {
+    terminateFn(run, "aborted");
+    return;
+  }
+  if (!run.gracePeriodActive && turns >= run.maxTurns) {
+    if (run.streamingMode === "rpc") {
+      run.gracePeriodActive = true;
+      run.gracePeriodStartTurn = turns;
+      enqueueGraceMsg(run, GRACE_MESSAGE);
+    } else {
+      run.errorMessage = "turn limit reached (non-steerable: no grace period)";
+      terminateFn(run, "aborted");
+    }
+    return;
   }
 }
 function forceTerminate(run, reason, registry, onComplete, killGroup = defaultKillGroup) {

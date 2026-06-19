@@ -1720,6 +1720,11 @@ function runPiSubprocess(
       opts.registry.notify(run);
       if (opts.onUpdate) opts.onUpdate(run);
     }
+
+    // v0.17-S4: turn-limit enforcement — checked after every event.
+    checkTurnLimit(run, opts.registry, (r, reason) =>
+      forceTerminate(r, reason, opts.registry, opts.onComplete),
+    );
   };
 
   proc.stdout?.on("data", (data: Buffer) => {
@@ -2549,6 +2554,83 @@ export async function applyHookToTerminal(
   } finally {
     run.hookExecuting = false;
     run.hookProc = undefined;
+  }
+}
+
+// ── v0.17-S4: Turn-limit enforcement ──────────────────────────────────────
+
+/**
+ * The wrap-up message injected into steerable runs when they hit their turn
+ * limit. Exported so tests can pin the exact string (WDD W1/W2).
+ */
+export const GRACE_MESSAGE =
+  "You have reached your turn limit. Wrap up immediately — provide your final answer now.";
+
+/**
+ * Callback signature for `checkTurnLimit`'s injectable terminate function.
+ * Callers pass a closure over `forceTerminate`; tests pass a spy.
+ */
+export type TurnLimitTerminateFn = (run: Run, reason: TerminationReason) => void;
+
+/**
+ * Callback signature for `checkTurnLimit`'s injectable grace-message enqueue
+ * function. The default implementation calls `enqueueRpcSendWithAck` (which
+ * allocates a pending ack with a real timer). Tests inject a plain spy to
+ * avoid dangling ack timers firing after the test ends.
+ */
+export type GraceEnqueueFn = (run: Run, message: string) => void;
+
+const defaultGraceEnqueue: GraceEnqueueFn = (run, message) => {
+  enqueueRpcSendWithAck(run, "follow_up", message);
+};
+
+/**
+ * Turn-limit enforcement check — called in `processLine` after every
+ * `applyEvent` call. Encapsulated as a named export for testability.
+ *
+ * State machine:
+ *   1. No maxTurns / already terminal → no-op.
+ *   2. turns >= maxTurns AND !gracePeriodActive:
+ *      - Steerable: inject grace message via `enqueueGraceMsg`, set gracePeriodActive + gracePeriodStartTurn.
+ *      - Non-steerable: set errorMessage, call terminateFn("aborted") immediately.
+ *   3. gracePeriodActive AND turns >= gracePeriodStartTurn + graceTurns:
+ *      - Call terminateFn("aborted") — grace period exhausted.
+ */
+export function checkTurnLimit(
+  run: Run,
+  registry: RunRegistry,
+  terminateFn: TurnLimitTerminateFn,
+  enqueueGraceMsg: GraceEnqueueFn = defaultGraceEnqueue,
+): void {
+  // No limit configured or run is already terminal → strict no-op.
+  if (!run.maxTurns || isTerminal(run.status)) return;
+
+  const { turns } = run.usage;
+  const graceTurns = run.graceTurns ?? 5;
+
+  // ── Grace escalation: grace period started and budget exhausted ──────
+  if (
+    run.gracePeriodActive &&
+    run.gracePeriodStartTurn !== undefined &&
+    turns >= run.gracePeriodStartTurn + graceTurns
+  ) {
+    terminateFn(run, "aborted");
+    return;
+  }
+
+  // ── Grace entry: hit maxTurns for the first time ──────────────────────
+  if (!run.gracePeriodActive && turns >= run.maxTurns) {
+    if (run.streamingMode === "rpc") {
+      // Steerable: inject wrap-up message, enter grace period.
+      run.gracePeriodActive = true;
+      run.gracePeriodStartTurn = turns;
+      enqueueGraceMsg(run, GRACE_MESSAGE);
+    } else {
+      // Non-steerable: no grace period possible; abort immediately.
+      run.errorMessage = "turn limit reached (non-steerable: no grace period)";
+      terminateFn(run, "aborted");
+    }
+    return;
   }
 }
 
