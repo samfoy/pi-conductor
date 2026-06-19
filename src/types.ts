@@ -85,6 +85,19 @@ export interface Persona {
    * parser.
    */
   onCompleteHookTimeoutSeconds?: number;
+  /**
+   * v0.17 turn limits — persona frontmatter (`max_turns`). Maximum number
+   * of turns before the graceful-abort sequence fires. Undefined = no
+   * limit. S2 wires the cascade resolver; S3 stamps the value on Run
+   * at spawn time; S4 enforces it.
+   */
+  maxTurns?: number;
+  /**
+   * v0.17 turn limits — persona frontmatter (`grace_turns`). Extra turns
+   * to allow after a wrap-up message is injected (steerable runs only).
+   * Default resolved by `resolveGraceTurns` to 5. 0 = immediate abort.
+   */
+  graceTurns?: number;
 }
 
 export interface PersonaResolution {
@@ -238,6 +251,16 @@ export interface PersonaOverride {
    * the hook timeout in seconds.
    */
   onCompleteHookTimeoutSeconds?: number;
+  /**
+   * v0.17 turn limits — project/user config per-persona override of
+   * `maxTurns`. Feeds the project/user layers of `resolveMaxTurns`.
+   */
+  maxTurns?: number;
+  /**
+   * v0.17 turn limits — project/user config per-persona override of
+   * `graceTurns`. Feeds the project/user layers of `resolveGraceTurns`.
+   */
+  graceTurns?: number;
 }
 
 export const DEFAULT_CONFIG: ConductorConfig = {
