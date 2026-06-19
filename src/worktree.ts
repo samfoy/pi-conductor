@@ -327,10 +327,18 @@ export async function mergeWorktree(
   try {
     execSync(`git checkout ${opts.baseBranch}`, execOpts);
   } catch (err) {
-    return {
-      success: false,
-      errorMessage: `Failed to checkout base branch ${opts.baseBranch}: ${(err as Error).message}`,
-    };
+    // Defensive guard: git config core.bare may have been corrupted to `true`
+    // by a git operation run inside a worktree (commondir causes worktree git
+    // config writes to land in the main repo). Reset and retry once.
+    try {
+      execSync("git config core.bare false", execOpts);
+      execSync(`git checkout ${opts.baseBranch}`, execOpts);
+    } catch (retryErr) {
+      return {
+        success: false,
+        errorMessage: `Failed to checkout base branch ${opts.baseBranch}: ${(retryErr as Error).message}`,
+      };
+    }
   }
 
   if (opts.strategy === "squash") {

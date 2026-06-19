@@ -268,10 +268,15 @@ async function mergeWorktree(spec, opts) {
   try {
     execSync(`git checkout ${opts.baseBranch}`, execOpts);
   } catch (err) {
-    return {
-      success: false,
-      errorMessage: `Failed to checkout base branch ${opts.baseBranch}: ${err.message}`
-    };
+    try {
+      execSync("git config core.bare false", execOpts);
+      execSync(`git checkout ${opts.baseBranch}`, execOpts);
+    } catch (retryErr) {
+      return {
+        success: false,
+        errorMessage: `Failed to checkout base branch ${opts.baseBranch}: ${retryErr.message}`
+      };
+    }
   }
   if (opts.strategy === "squash") {
     const aheadOut = execSyncStr(
