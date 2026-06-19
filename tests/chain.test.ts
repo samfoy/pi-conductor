@@ -155,3 +155,86 @@ test("buildChainTask: replaces all occurrences of each template variable", () =>
   const result = buildChainTask("{persona} {persona}", ctx);
   assert.strictEqual(result, "builder builder");
 });
+
+// ── v0.16-S6 WDD witnesses: chain-aware worktrees ────────────────────────
+
+// W1: buildChainTask substitutes {worktreeBranch} with run.worktreeBranch value
+test("buildChainTask: substitutes {worktreeBranch} from context", () => {
+  const ctx = {
+    persona: "builder",
+    runId: "builder-abc1",
+    task: "t",
+    finalPath: "/tmp/__conductor_nonexistent__.md",
+    worktreeBranch: "conductor-wt/builder-abc1",
+    baseBranch: "master",
+    mergeStrategy: "squash" as const,
+  };
+  const result = buildChainTask("{worktreeBranch}", ctx);
+  assert.strictEqual(result, "conductor-wt/builder-abc1");
+});
+
+// W2: buildChainTask substitutes {baseBranch} with run.worktreeBaseBranch value
+test("buildChainTask: substitutes {baseBranch} from context", () => {
+  const ctx = {
+    persona: "builder",
+    runId: "builder-abc1",
+    task: "t",
+    finalPath: "/tmp/__conductor_nonexistent__.md",
+    worktreeBranch: "conductor-wt/builder-abc1",
+    baseBranch: "main",
+    mergeStrategy: "squash" as const,
+  };
+  const result = buildChainTask("{baseBranch}", ctx);
+  assert.strictEqual(result, "main");
+});
+
+// W3: when mergeStrategy === "none" and worktreeBranch is set and no custom template,
+//     buildChainTask uses WORKTREE_CHAIN_TEMPLATE (contains git diff instruction)
+test("buildChainTask: uses WORKTREE_CHAIN_TEMPLATE for mergeStrategy=none with worktreeBranch", () => {
+  const ctx = {
+    persona: "builder",
+    runId: "builder-abc1",
+    task: "build a widget",
+    finalPath: "/tmp/__conductor_nonexistent__.md",
+    worktreeBranch: "conductor-wt/builder-abc1",
+    baseBranch: "master",
+    mergeStrategy: "none" as const,
+  };
+  const result = buildChainTask(undefined, ctx);
+  // Must contain git diff instruction referencing both branches
+  assert.ok(
+    result.includes("git diff"),
+    `expected git diff in worktree template, got: ${result}`,
+  );
+  assert.ok(
+    result.includes("conductor-wt/builder-abc1"),
+    `expected worktreeBranch in template, got: ${result}`,
+  );
+  assert.ok(
+    result.includes("master"),
+    `expected baseBranch in template, got: ${result}`,
+  );
+});
+
+// W4: when mergeStrategy === "squash" (merged), the default template is used, not WORKTREE_CHAIN_TEMPLATE
+test("buildChainTask: uses DEFAULT_TEMPLATE (not worktree template) for mergeStrategy=squash", () => {
+  const ctx = {
+    persona: "builder",
+    runId: "builder-abc1",
+    task: "build a widget",
+    finalPath: "/tmp/__conductor_nonexistent__.md",
+    worktreeBranch: "conductor-wt/builder-abc1",
+    baseBranch: "master",
+    mergeStrategy: "squash" as const,
+  };
+  const result = buildChainTask(undefined, ctx);
+  // Default template says "Review the preceding" — worktree template says "git diff"
+  assert.ok(
+    result.includes("Review the preceding"),
+    `expected default template, got: ${result}`,
+  );
+  assert.ok(
+    !result.includes("git diff"),
+    `expected no git diff in default template, got: ${result}`,
+  );
+});

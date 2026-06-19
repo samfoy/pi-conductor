@@ -13,6 +13,20 @@ export type { ChainStep };
 const DEFAULT_TEMPLATE =
   "Review the preceding {persona} run ({runId}).\n\nOriginal task:\n{task}\n\n---\nFinal output:\n{final}";
 
+/**
+ * Template used when the builder ran with `mergeStrategy: "none"` and left
+ * its work on a branch. The critic needs to diff that branch against base
+ * rather than reading merged output.
+ */
+export const WORKTREE_CHAIN_TEMPLATE =
+  "Review the preceding {persona} run ({runId}).\n\n" +
+  "The work is on branch `{worktreeBranch}` (not yet merged to `{baseBranch}`).\n" +
+  "Run the following to inspect the changes:\n\n" +
+  "```bash\n" +
+  "git diff {baseBranch}...{worktreeBranch}\n" +
+  "```\n\n" +
+  "Original task:\n{task}";
+
 const FINAL_PLACEHOLDER = "(no final output)";
 
 /**
@@ -35,12 +49,16 @@ export function resolveChain(
  * Expand the task template for a chained run.
  *
  * Template variables:
- *   {persona} — parent run's persona name
- *   {runId}   — parent run's ID
- *   {task}    — parent run's original task
- *   {final}   — contents of `finalPath` on disk (or placeholder)
+ *   {persona}        — parent run's persona name
+ *   {runId}          — parent run's ID
+ *   {task}           — parent run's original task
+ *   {final}          — contents of `finalPath` on disk (or placeholder)
+ *   {worktreeBranch} — worktree branch name (if set on run)
+ *   {baseBranch}     — base branch name (if set on run)
  *
- * Falls back to the default review template when `taskTemplate` is undefined.
+ * Template selection (when `taskTemplate` is undefined):
+ *   - `mergeStrategy === "none"` AND `worktreeBranch` is set → `WORKTREE_CHAIN_TEMPLATE`
+ *   - otherwise → `DEFAULT_TEMPLATE`
  */
 export function buildChainTask(
   taskTemplate: string | undefined,
@@ -49,9 +67,22 @@ export function buildChainTask(
     runId: string;
     task: string;
     finalPath: string;
+    worktreeBranch?: string;
+    baseBranch?: string;
+    mergeStrategy?: string;
   },
 ): string {
-  const template = taskTemplate ?? DEFAULT_TEMPLATE;
+  let template: string;
+  if (taskTemplate !== undefined) {
+    template = taskTemplate;
+  } else if (
+    context.mergeStrategy === "none" &&
+    context.worktreeBranch
+  ) {
+    template = WORKTREE_CHAIN_TEMPLATE;
+  } else {
+    template = DEFAULT_TEMPLATE;
+  }
 
   let finalContent = FINAL_PLACEHOLDER;
   if (existsSync(context.finalPath)) {
@@ -66,5 +97,7 @@ export function buildChainTask(
     .replace(/\{persona\}/g, context.persona)
     .replace(/\{runId\}/g, context.runId)
     .replace(/\{task\}/g, context.task)
-    .replace(/\{final\}/g, finalContent);
+    .replace(/\{final\}/g, finalContent)
+    .replace(/\{worktreeBranch\}/g, context.worktreeBranch ?? "")
+    .replace(/\{baseBranch\}/g, context.baseBranch ?? "");
 }

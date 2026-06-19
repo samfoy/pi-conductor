@@ -5253,6 +5253,7 @@ import { Type } from "@sinclair/typebox";
 // src/chain.ts
 import { readFileSync as readFileSync5, existsSync as existsSync11 } from "node:fs";
 var DEFAULT_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nOriginal task:\n{task}\n\n---\nFinal output:\n{final}";
+var WORKTREE_CHAIN_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nThe work is on branch `{worktreeBranch}` (not yet merged to `{baseBranch}`).\nRun the following to inspect the changes:\n\n```bash\ngit diff {baseBranch}...{worktreeBranch}\n```\n\nOriginal task:\n{task}";
 var FINAL_PLACEHOLDER = "(no final output)";
 function resolveChain(personaName, chains) {
   if (!chains) return void 0;
@@ -5261,7 +5262,14 @@ function resolveChain(personaName, chains) {
   return step;
 }
 function buildChainTask(taskTemplate, context) {
-  const template = taskTemplate ?? DEFAULT_TEMPLATE;
+  let template;
+  if (taskTemplate !== void 0) {
+    template = taskTemplate;
+  } else if (context.mergeStrategy === "none" && context.worktreeBranch) {
+    template = WORKTREE_CHAIN_TEMPLATE;
+  } else {
+    template = DEFAULT_TEMPLATE;
+  }
   let finalContent = FINAL_PLACEHOLDER;
   if (existsSync11(context.finalPath)) {
     try {
@@ -5269,7 +5277,7 @@ function buildChainTask(taskTemplate, context) {
     } catch {
     }
   }
-  return template.replace(/\{persona\}/g, context.persona).replace(/\{runId\}/g, context.runId).replace(/\{task\}/g, context.task).replace(/\{final\}/g, finalContent);
+  return template.replace(/\{persona\}/g, context.persona).replace(/\{runId\}/g, context.runId).replace(/\{task\}/g, context.task).replace(/\{final\}/g, finalContent).replace(/\{worktreeBranch\}/g, context.worktreeBranch ?? "").replace(/\{baseBranch\}/g, context.baseBranch ?? "");
 }
 
 // src/steerable.ts
@@ -6737,7 +6745,10 @@ function buildOnChainCallback(args) {
       persona: parentRun.persona,
       runId: parentRun.id,
       task: parentRun.task,
-      finalPath: parentRun.finalPath
+      finalPath: parentRun.finalPath,
+      worktreeBranch: parentRun.worktreeBranch,
+      baseBranch: parentRun.worktreeBaseBranch,
+      mergeStrategy: parentRun.mergeStrategy
     });
     const baseOv = chainCfg.personaOverrides[chainPersona.name] ?? {};
     const chainTimeoutMs = step.timeoutMinutes ? step.timeoutMinutes * 60 * 1e3 : resolveTimeoutMs(chainPersona, baseOv, chainCfg);

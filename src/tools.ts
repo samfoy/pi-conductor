@@ -1291,6 +1291,9 @@ function buildOnChainCallback(
       runId: parentRun.id,
       task: parentRun.task,
       finalPath: parentRun.finalPath,
+      worktreeBranch: parentRun.worktreeBranch,
+      baseBranch: parentRun.worktreeBaseBranch,
+      mergeStrategy: parentRun.mergeStrategy,
     });
     const baseOv = chainCfg.personaOverrides[chainPersona.name] ?? {};
     const chainTimeoutMs = step.timeoutMinutes
