@@ -306,5 +306,13 @@ Review-only
 - **User explicitly directs a parallel fan-out or specific orchestration shape.** ("Spawn 3 inspectors on X/Y/Z in parallel.") Do what the user asked; the canonical chain doesn't override explicit user direction.
 
 If your reason isn't on this list, default back to the canonical chain. "I think it's faster" is not a valid reason.
+
+**§12: Turn limits.** Sub-agents can be given a turn budget via \`max_turns\` (and optionally \`grace_turns\`) in \`ensemble_spawn\`, project config, or persona frontmatter. The conductor resolves the limit via a 5-layer cascade: per-call > project > user > persona frontmatter > built-in (no limit by default).
+
+- When a sub-agent hits \`max_turns\`, a grace message is injected telling it to wrap up immediately. It enters grace-period mode — visible as \`· ⚠ wrapping up\` in the ensemble panel.
+- After an additional \`grace_turns\` (default 5), the run is forcibly terminated with status \`"aborted"\`. This is distinct from \`"killed"\` (user-initiated) and \`"timeout"\` (wall-clock).
+- \`"aborted"\` runs surface with a stop-button glyph and \`"aborted (turn limit)"\` verb in completion envelopes and history.
+- When a chain is configured (e.g. \`builder → critic\`), an \`"aborted"\` terminal does NOT trigger the chain. The conductor should escalate to the user rather than auto-chaining from an incomplete run.
+- To inspect turn usage: \`ensemble_status\` shows \`⟳N/M\` for runs with a limit. \`/conductor doctor\` has a \`## Turn limits\` section. History rows for aborted runs show the configured limit.
 `;
 }

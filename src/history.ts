@@ -88,7 +88,11 @@ export function buildHistoryReport(deps: HistoryDeps, opts: HistoryOpts): string
       lines.push("      (archived; resume creates new transcript)");
     }
 
-    if (r.status === "completed") {
+    if (r.status === "aborted") {
+      // v0.17-S6: aborted rows show the turn limit in the annotation column.
+      const limitNote = r.maxTurns ? ` (limit: ${r.maxTurns} turns)` : "";
+      lines.push(`      → turn limit reached${limitNote}`);
+    } else if (r.status === "completed") {
       const final = deps.readFinalText(e.id);
       if (final && final.trim()) {
         const excerpt = truncate(collapseWhitespace(final), EXCERPT_MAX_CHARS);

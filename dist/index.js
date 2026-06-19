@@ -3811,6 +3811,20 @@ async function buildDoctorReport(opts) {
   lines.push(`  active:        ${opts.registry.countActive()}`);
   lines.push(`  queued:        ${opts.queue.size()}`);
   lines.push(`  total tracked: ${opts.registry.list().length}`);
+  const allRuns = opts.registry.list();
+  const turnLimitRuns = allRuns.filter((r) => r.maxTurns !== void 0);
+  lines.push("");
+  lines.push("## Turn limits");
+  if (turnLimitRuns.length === 0) {
+    lines.push("  (no runs with turn limits active)");
+  } else {
+    for (const r of turnLimitRuns) {
+      const turns = r.usage.turns;
+      const max = r.maxTurns;
+      const grace = r.gracePeriodActive ? " (grace period active)" : "";
+      lines.push(`  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} turns: ${turns}/${max}${grace}`);
+    }
+  }
   return lines.join("\n");
 }
 function renderReconcileSummary(result, opts) {
@@ -3912,7 +3926,10 @@ function buildHistoryReport(deps, opts) {
     if (archived) {
       lines.push("      (archived; resume creates new transcript)");
     }
-    if (r.status === "completed") {
+    if (r.status === "aborted") {
+      const limitNote = r.maxTurns ? ` (limit: ${r.maxTurns} turns)` : "";
+      lines.push(`      \u2192 turn limit reached${limitNote}`);
+    } else if (r.status === "completed") {
       const final = deps.readFinalText(e.id);
       if (final && final.trim()) {
         const excerpt = truncate(collapseWhitespace(final), EXCERPT_MAX_CHARS);
@@ -6807,8 +6824,10 @@ function formatStatusForLLM(g, queueSize) {
     lines.push("");
     lines.push(`${label}:`);
     for (const r of list) {
-      const u = formatUsage(r.usage);
-      const usagePart = u ? `[${u}]` : "";
+      const turnPart = r.usage.turns > 0 ? r.maxTurns !== void 0 ? `\u27F3${r.usage.turns}/${r.maxTurns}` : `\u27F3${r.usage.turns}` : "";
+      const tokenPart = formatUsage({ turns: 0, input: r.usage.input, output: r.usage.output, cost: r.usage.cost });
+      const usageStr = [turnPart, tokenPart].filter(Boolean).join(" ");
+      const usagePart = usageStr ? `[${usageStr}]` : "";
       const hint = r.lastToolCall ? ` \u2192 ${r.lastToolCall}` : "";
       lines.push(
         `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint}`
@@ -7159,8 +7178,11 @@ function formatRow(r, theme, nowMs, wdCfg) {
   const glyph = statusGlyph(r.status, theme);
   const name = theme.fg("accent", r.persona) + theme.fg("dim", `:${r.id.split("-").pop() ?? r.id}`);
   const elapsed = theme.fg("dim", elapsedStr(r.startTime, r.finishedAt));
-  const activity = r.status === "queued" ? theme.fg("dim", " (queued)") : r.status === "paused" ? theme.fg("warning", " (paused)") : r.hookExecuting ? theme.fg("warning", " \xB7 hook") : r.lastToolCall ? theme.fg("dim", ` \u2192 ${r.lastToolCall}`) : r.status === "running" ? theme.fg("dim", " starting\u2026") : "";
-  const usage = r.usage.turns > 0 ? theme.fg("muted", ` [${formatUsage(r.usage)}]`) : "";
+  const activity = r.status === "queued" ? theme.fg("dim", " (queued)") : r.status === "paused" ? theme.fg("warning", " (paused)") : r.hookExecuting ? theme.fg("warning", " \xB7 hook") : r.gracePeriodActive ? theme.fg("warning", " \xB7 \u26A0 wrapping up") : r.lastToolCall ? theme.fg("dim", ` \u2192 ${r.lastToolCall}`) : r.status === "running" ? theme.fg("dim", " starting\u2026") : "";
+  const turnPart = r.usage.turns > 0 ? r.maxTurns !== void 0 ? `\u27F3${r.usage.turns}/${r.maxTurns}` : `\u27F3${r.usage.turns}` : "";
+  const tokenPart = formatUsage({ turns: 0, input: r.usage.input, output: r.usage.output, cost: r.usage.cost });
+  const usageStr = [turnPart, tokenPart].filter(Boolean).join(" ");
+  const usage = usageStr ? theme.fg("muted", ` [${usageStr}]`) : "";
   const stall = formatStallSegment(r, theme, nowMs, wdCfg);
   return `${glyph} ${name} ${elapsed}${activity}${stall}${usage}`;
 }
@@ -7799,6 +7821,14 @@ Review-only
 - **User explicitly directs a parallel fan-out or specific orchestration shape.** ("Spawn 3 inspectors on X/Y/Z in parallel.") Do what the user asked; the canonical chain doesn't override explicit user direction.
 
 If your reason isn't on this list, default back to the canonical chain. "I think it's faster" is not a valid reason.
+
+**\xA712: Turn limits.** Sub-agents can be given a turn budget via \`max_turns\` (and optionally \`grace_turns\`) in \`ensemble_spawn\`, project config, or persona frontmatter. The conductor resolves the limit via a 5-layer cascade: per-call > project > user > persona frontmatter > built-in (no limit by default).
+
+- When a sub-agent hits \`max_turns\`, a grace message is injected telling it to wrap up immediately. It enters grace-period mode \u2014 visible as \`\xB7 \u26A0 wrapping up\` in the ensemble panel.
+- After an additional \`grace_turns\` (default 5), the run is forcibly terminated with status \`"aborted"\`. This is distinct from \`"killed"\` (user-initiated) and \`"timeout"\` (wall-clock).
+- \`"aborted"\` runs surface with a stop-button glyph and \`"aborted (turn limit)"\` verb in completion envelopes and history.
+- When a chain is configured (e.g. \`builder \u2192 critic\`), an \`"aborted"\` terminal does NOT trigger the chain. The conductor should escalate to the user rather than auto-chaining from an incomplete run.
+- To inspect turn usage: \`ensemble_status\` shows \`\u27F3N/M\` for runs with a limit. \`/conductor doctor\` has a \`## Turn limits\` section. History rows for aborted runs show the configured limit.
 `;
 }
 

@@ -142,13 +142,23 @@ export function formatRow(
         ? theme.fg("warning", " (paused)")
         : r.hookExecuting
           ? theme.fg("warning", " · hook") // v0.11 slice 5: in-flight hook glyph
-          : r.lastToolCall
-            ? theme.fg("dim", ` → ${r.lastToolCall}`)
-            : r.status === "running"
-              ? theme.fg("dim", " starting…")
-              : "";
-  const usage =
-    r.usage.turns > 0 ? theme.fg("muted", ` [${formatUsage(r.usage)}]`) : "";
+          : r.gracePeriodActive
+            ? theme.fg("warning", " · ⚠ wrapping up") // v0.17-S6: grace period active
+            : r.lastToolCall
+              ? theme.fg("dim", ` → ${r.lastToolCall}`)
+              : r.status === "running"
+                ? theme.fg("dim", " starting…")
+                : "";
+  // v0.17-S6: show ⟳N/M when maxTurns defined, ⟳N otherwise.
+  const turnPart =
+    r.usage.turns > 0
+      ? r.maxTurns !== undefined
+        ? `⟳${r.usage.turns}/${r.maxTurns}`
+        : `⟳${r.usage.turns}`
+      : "";
+  const tokenPart = formatUsage({ turns: 0, input: r.usage.input, output: r.usage.output, cost: r.usage.cost });
+  const usageStr = [turnPart, tokenPart].filter(Boolean).join(" ");
+  const usage = usageStr ? theme.fg("muted", ` [${usageStr}]`) : "";
   // v0.10 Slice 4: stall indicator. Sourced from classifyStall (pure)
   // so widget output stays deterministic and mutation-witness-able.
   // Soft → warning slot; hard → error slot with trailing `!`.

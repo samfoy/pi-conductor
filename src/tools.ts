@@ -1151,8 +1151,15 @@ function formatStatusForLLM(g: StatusGroups, queueSize: number): string {
     lines.push("");
     lines.push(`${label}:`);
     for (const r of list) {
-      const u = formatUsage(r.usage);
-      const usagePart = u ? `[${u}]` : "";
+      // v0.17-S6: show ⟳N/M when maxTurns defined, plain N otherwise.
+      const turnPart = r.usage.turns > 0
+        ? r.maxTurns !== undefined
+          ? `⟳${r.usage.turns}/${r.maxTurns}`
+          : `⟳${r.usage.turns}`
+        : "";
+      const tokenPart = formatUsage({ turns: 0, input: r.usage.input, output: r.usage.output, cost: r.usage.cost });
+      const usageStr = [turnPart, tokenPart].filter(Boolean).join(" ");
+      const usagePart = usageStr ? `[${usageStr}]` : "";
       const hint = r.lastToolCall ? ` → ${r.lastToolCall}` : "";
       lines.push(
         `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint}`,

@@ -338,6 +338,22 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
   lines.push(`  queued:        ${opts.queue.size()}`);
   lines.push(`  total tracked: ${opts.registry.list().length}`);
 
+  // v0.17-S6: turn limits section — lists runs with maxTurns configured.
+  const allRuns = opts.registry.list();
+  const turnLimitRuns = allRuns.filter((r) => r.maxTurns !== undefined);
+  lines.push("");
+  lines.push("## Turn limits");
+  if (turnLimitRuns.length === 0) {
+    lines.push("  (no runs with turn limits active)");
+  } else {
+    for (const r of turnLimitRuns) {
+      const turns = r.usage.turns;
+      const max = r.maxTurns!;
+      const grace = r.gracePeriodActive ? " (grace period active)" : "";
+      lines.push(`  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} turns: ${turns}/${max}${grace}`);
+    }
+  }
+
   return lines.join("\n");
 }
 
