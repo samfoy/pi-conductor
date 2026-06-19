@@ -80,6 +80,10 @@ export interface PendingSpawn {
    * enqueueOrSpawn when the placeholder is created.
    */
   events?: ConductorEventEmitter;
+  /** v0.17 turn limits — per-call maxTurns, threaded to spawnRun on dequeue. */
+  maxTurns?: number;
+  /** v0.17 turn limits — per-call graceTurns, threaded to spawnRun on dequeue. */
+  graceTurns?: number;
 }
 
 export class SpawnQueue {
@@ -184,6 +188,8 @@ export class SpawnQueue {
       onCompleteHookTimeoutSeconds: opts.onCompleteHookTimeoutSeconds,
       worktree: opts.worktree,
       events: opts.events,
+      maxTurns: opts.maxTurns,
+      graceTurns: opts.graceTurns,
     };
     // v0.16-S2: emit emitCreated at queue time (before the run actually starts).
     // emitStarted will fire in spawnRun when drain dequeues this entry.
@@ -264,6 +270,8 @@ export class SpawnQueue {
         worktree: next.worktree,
         // v0.16-S2: thread events so emitStarted fires at drain time.
         events: next.events,
+        maxTurns: next.maxTurns,
+        graceTurns: next.graceTurns,
       });
     }
   }

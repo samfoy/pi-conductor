@@ -31,6 +31,7 @@ import { resolveInheritContext } from "./inherit-context.ts";
 import { seedSessionFile } from "./session-seed.ts";
 import { isNonSubstantiveFinalMessage } from "./substance-check.ts";
 import { resolveOnCompleteHook, type HookCascadeInput } from "./hook-cascade.ts";
+import { resolveMaxTurns, resolveGraceTurns } from "./turn-limit.ts";
 import { runHook, defaultKillGroup } from "./hook-runner.ts";
 import { loadConfigWithErrors } from "./config.ts";
 import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage } from "./worktree.ts";
@@ -965,6 +966,18 @@ export interface SpawnOptions {
    * are emitted (no-op fallback).
    */
   events?: ConductorEventEmitter;
+  /**
+   * v0.17 turn limits — per-call `maxTurns` override (highest cascade layer).
+   * Stamped onto `Run.maxTurns` at spawn time via `resolveMaxTurns`.
+   * Undefined falls through to project / user / persona-frontmatter layers.
+   */
+  maxTurns?: number;
+  /**
+   * v0.17 turn limits — per-call `graceTurns` override.
+   * Stamped onto `Run.graceTurns` at spawn time via `resolveGraceTurns`.
+   * Undefined falls through to lower layers; built-in default is 5.
+   */
+  graceTurns?: number;
 }
 
 /**
@@ -1130,6 +1143,42 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     mergeStrategy: opts.mergeStrategy,
     // v0.16-S4: monotone compaction counter; incremented in processLine.
     compactionCount: 0,
+    // v0.17-S3: turn-limit fields resolved at spawn time.
+    // Per-call layer from opts; project/user from config; persona from frontmatter.
+    // gracePeriodActive / gracePeriodStartTurn initialized to inactive state.
+    ...(() => {
+      const layered = loadConfigWithErrors(opts.cwd);
+      const projectOverride = layered.project.personaOverrides[opts.persona.name];
+      const userOverride = layered.user.personaOverrides[opts.persona.name];
+      const cascadeInput = {
+        perCall: (
+          opts.maxTurns !== undefined || opts.graceTurns !== undefined
+            ? { maxTurns: opts.maxTurns, graceTurns: opts.graceTurns }
+            : undefined
+        ),
+        project: (
+          projectOverride?.maxTurns !== undefined || projectOverride?.graceTurns !== undefined
+            ? { maxTurns: projectOverride?.maxTurns, graceTurns: projectOverride?.graceTurns }
+            : undefined
+        ),
+        user: (
+          userOverride?.maxTurns !== undefined || userOverride?.graceTurns !== undefined
+            ? { maxTurns: userOverride?.maxTurns, graceTurns: userOverride?.graceTurns }
+            : undefined
+        ),
+        persona: (
+          opts.persona.maxTurns !== undefined || opts.persona.graceTurns !== undefined
+            ? { maxTurns: opts.persona.maxTurns, graceTurns: opts.persona.graceTurns }
+            : undefined
+        ),
+      };
+      return {
+        maxTurns: resolveMaxTurns(cascadeInput),
+        graceTurns: resolveGraceTurns(cascadeInput),
+        gracePeriodActive: false as boolean,
+        gracePeriodStartTurn: undefined as number | undefined,
+      };
+    })(),
   };
   opts.registry.register(run);
 
@@ -1751,6 +1800,16 @@ export interface SendToRunOptions {
    * sessions. `undefined` means no events emitted.
    */
   events?: ConductorEventEmitter;
+  /**
+   * v0.17 turn limits — per-send `maxTurns` override. When provided,
+   * replaces `Run.maxTurns` for the resumed terminal and onward.
+   */
+  maxTurns?: number;
+  /**
+   * v0.17 turn limits — per-send `graceTurns` override. When provided,
+   * replaces `Run.graceTurns` for the resumed terminal and onward.
+   */
+  graceTurns?: number;
 }
 
 export type SendToRunResult =

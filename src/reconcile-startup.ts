@@ -640,6 +640,10 @@ function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
     sessionPath: record.sessionPath,
     systemPrompt: record.systemPrompt,
     hookResult: record.hookResult,
+    // v0.17-S3: restore turn-limit fields from the persisted record.
+    maxTurns: record.maxTurns,
+    graceTurns: record.graceTurns,
+    gracePeriodActive: false, // grace period is not persisted; conservative reset
     // proc intentionally undefined: we have no handle.
   };
 }

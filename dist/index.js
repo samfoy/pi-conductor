@@ -49,7 +49,9 @@ function toRunRecord(r) {
     thisInvocationStartedAt: r.thisInvocationStartedAt,
     thisInvocationUsageBaseline: r.thisInvocationUsageBaseline,
     resumeCount: r.resumeCount,
-    compactionCount: r.compactionCount
+    compactionCount: r.compactionCount,
+    maxTurns: r.maxTurns,
+    graceTurns: r.graceTurns
   };
 }
 function isTerminal(s) {
@@ -513,6 +515,8 @@ function validateAndBuild(raw, source, sourcePath) {
     frontmatter,
     "on_complete_hook_timeout_seconds"
   );
+  const maxTurns = optionalPositiveInteger(frontmatter, "max_turns");
+  const graceTurns = optionalNonNegativeInteger(frontmatter, "grace_turns");
   if (timeoutMinutes <= 0 || timeoutMinutes > 24 * 60) {
     throw new Error(`timeout_minutes must be in (0, 1440]; got ${timeoutMinutes}`);
   }
@@ -535,7 +539,9 @@ function validateAndBuild(raw, source, sourcePath) {
     sourcePath,
     readOnly,
     onCompleteHook,
-    onCompleteHookTimeoutSeconds
+    onCompleteHookTimeoutSeconds,
+    maxTurns,
+    graceTurns
   };
 }
 function requireString(fm, key) {
@@ -598,6 +604,14 @@ function optionalPositiveInteger(fm, key) {
   if (v === void 0) return void 0;
   if (typeof v !== "number" || !Number.isInteger(v) || v < 1) {
     throw new Error(`field "${key}" must be a positive integer; got ${String(v)}`);
+  }
+  return v;
+}
+function optionalNonNegativeInteger(fm, key) {
+  const v = fm[key];
+  if (v === void 0) return void 0;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 0) {
+    throw new Error(`field "${key}" must be a non-negative integer; got ${String(v)}`);
   }
   return v;
 }
@@ -1432,6 +1446,35 @@ function resolveOnCompleteHook(input) {
   return void 0;
 }
 
+// src/turn-limit.ts
+var DEFAULT_GRACE_TURNS = 5;
+function resolveMaxTurns(input) {
+  const layers = [
+    input.perCall,
+    input.project,
+    input.user,
+    input.persona
+  ];
+  for (const spec of layers) {
+    if (spec === void 0) continue;
+    if (spec.maxTurns !== void 0) return spec.maxTurns;
+  }
+  return void 0;
+}
+function resolveGraceTurns(input) {
+  const layers = [
+    input.perCall,
+    input.project,
+    input.user,
+    input.persona
+  ];
+  for (const spec of layers) {
+    if (spec === void 0) continue;
+    if (spec.graceTurns !== void 0) return spec.graceTurns;
+  }
+  return DEFAULT_GRACE_TURNS;
+}
+
 // src/hook-runner.ts
 import {
   spawn as childProcessSpawn
@@ -1893,7 +1936,12 @@ function buildOrphanRun(record, status) {
     finalPath: record.finalPath,
     sessionPath: record.sessionPath,
     systemPrompt: record.systemPrompt,
-    hookResult: record.hookResult
+    hookResult: record.hookResult,
+    // v0.17-S3: restore turn-limit fields from the persisted record.
+    maxTurns: record.maxTurns,
+    graceTurns: record.graceTurns,
+    gracePeriodActive: false
+    // grace period is not persisted; conservative reset
     // proc intentionally undefined: we have no handle.
   };
 }
@@ -2320,7 +2368,27 @@ function spawnRun(opts) {
     // v0.14 worktree auto-merge: stamp resolved merge strategy at spawn time.
     mergeStrategy: opts.mergeStrategy,
     // v0.16-S4: monotone compaction counter; incremented in processLine.
-    compactionCount: 0
+    compactionCount: 0,
+    // v0.17-S3: turn-limit fields resolved at spawn time.
+    // Per-call layer from opts; project/user from config; persona from frontmatter.
+    // gracePeriodActive / gracePeriodStartTurn initialized to inactive state.
+    ...(() => {
+      const layered = loadConfigWithErrors(opts.cwd);
+      const projectOverride = layered.project.personaOverrides[opts.persona.name];
+      const userOverride = layered.user.personaOverrides[opts.persona.name];
+      const cascadeInput = {
+        perCall: opts.maxTurns !== void 0 || opts.graceTurns !== void 0 ? { maxTurns: opts.maxTurns, graceTurns: opts.graceTurns } : void 0,
+        project: projectOverride?.maxTurns !== void 0 || projectOverride?.graceTurns !== void 0 ? { maxTurns: projectOverride?.maxTurns, graceTurns: projectOverride?.graceTurns } : void 0,
+        user: userOverride?.maxTurns !== void 0 || userOverride?.graceTurns !== void 0 ? { maxTurns: userOverride?.maxTurns, graceTurns: userOverride?.graceTurns } : void 0,
+        persona: opts.persona.maxTurns !== void 0 || opts.persona.graceTurns !== void 0 ? { maxTurns: opts.persona.maxTurns, graceTurns: opts.persona.graceTurns } : void 0
+      };
+      return {
+        maxTurns: resolveMaxTurns(cascadeInput),
+        graceTurns: resolveGraceTurns(cascadeInput),
+        gracePeriodActive: false,
+        gracePeriodStartTurn: void 0
+      };
+    })()
   };
   opts.registry.register(run);
   if (!opts.preAllocatedId) {
@@ -6870,7 +6938,9 @@ var SpawnQueue = class {
       onCompleteHook: opts.onCompleteHook,
       onCompleteHookTimeoutSeconds: opts.onCompleteHookTimeoutSeconds,
       worktree: opts.worktree,
-      events: opts.events
+      events: opts.events,
+      maxTurns: opts.maxTurns,
+      graceTurns: opts.graceTurns
     };
     opts.events?.emitCreated({
       id,
@@ -6936,7 +7006,9 @@ var SpawnQueue = class {
         onCompleteHookTimeoutSeconds: next.onCompleteHookTimeoutSeconds,
         worktree: next.worktree,
         // v0.16-S2: thread events so emitStarted fires at drain time.
-        events: next.events
+        events: next.events,
+        maxTurns: next.maxTurns,
+        graceTurns: next.graceTurns
       });
     }
   }

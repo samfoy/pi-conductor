@@ -441,6 +441,34 @@ export interface Run {
    */
   compactionCount?: number;
   /**
+   * v0.17 turn limits — resolved at spawn time by `resolveMaxTurns`.
+   * When defined, the enforcement loop fires when `usage.turns >= maxTurns`.
+   * `undefined` means no turn limit (the run may continue indefinitely).
+   * Stamped by S3; enforced by S4.
+   */
+  maxTurns?: number;
+  /**
+   * v0.17 turn limits — resolved at spawn time by `resolveGraceTurns`.
+   * Number of extra turns to allow after a wrap-up message is injected
+   * (steerable) or the run is force-aborted (non-steerable). Default 5.
+   * Always stamped by `spawnRun`; optional for back-compat with test
+   * fixtures that construct `Run` objects directly.
+   */
+  graceTurns?: number;
+  /**
+   * v0.17 turn limits — whether the grace period is currently active.
+   * Set to `true` by the S4 enforcement loop when the wrap-up message is
+   * injected. Always `false` at spawn time. Optional for back-compat with
+   * test fixtures that construct `Run` objects directly.
+   */
+  gracePeriodActive?: boolean;
+  /**
+   * v0.17 turn limits — the value of `usage.turns` when the grace period
+   * began. Set alongside `gracePeriodActive = true`. Undefined until the
+   * grace period fires.
+   */
+  gracePeriodStartTurn?: number;
+  /**
    * v0.10 watchdog (Slice 3) per-spawn override. When `true`, the
    * watchdog auto-kills this run on hard-stall. When undefined, the
    * conductor-wide default `cfg.watchdog.defaultKillOnStall` applies.
@@ -814,6 +842,16 @@ export interface RunRecord {
    * with records written before this slice; absence implies 0.
    */
   compactionCount?: number;
+  /**
+   * v0.17 turn limits — resolved at spawn time. Optional for back-compat
+   * with records written before this slice; absence implies no limit.
+   */
+  maxTurns?: number;
+  /**
+   * v0.17 turn limits — resolved at spawn time. Optional for back-compat;
+   * absence implies DEFAULT_GRACE_TURNS (5).
+   */
+  graceTurns?: number;
 }
 
 export function toRunRecord(r: Run): RunRecord {
@@ -854,6 +892,8 @@ export function toRunRecord(r: Run): RunRecord {
     thisInvocationUsageBaseline: r.thisInvocationUsageBaseline,
     resumeCount: r.resumeCount,
     compactionCount: r.compactionCount,
+    maxTurns: r.maxTurns,
+    graceTurns: r.graceTurns,
   };
 }
 

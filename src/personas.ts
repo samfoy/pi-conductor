@@ -214,6 +214,9 @@ function validateAndBuild(
     frontmatter,
     "on_complete_hook_timeout_seconds",
   );
+  // v0.17-S3: max_turns and grace_turns frontmatter fields.
+  const maxTurns = optionalPositiveInteger(frontmatter, "max_turns");
+  const graceTurns = optionalNonNegativeInteger(frontmatter, "grace_turns");
 
   if (timeoutMinutes <= 0 || timeoutMinutes > 24 * 60) {
     throw new Error(`timeout_minutes must be in (0, 1440]; got ${timeoutMinutes}`);
@@ -240,6 +243,8 @@ function validateAndBuild(
     readOnly,
     onCompleteHook,
     onCompleteHookTimeoutSeconds,
+    maxTurns,
+    graceTurns,
   };
 }
 
@@ -332,6 +337,22 @@ function optionalPositiveInteger(
   if (v === undefined) return undefined;
   if (typeof v !== "number" || !Number.isInteger(v) || v < 1) {
     throw new Error(`field "${key}" must be a positive integer; got ${String(v)}`);
+  }
+  return v;
+}
+
+/**
+ * Like `optionalPositiveInteger` but allows 0 as a valid value.
+ * Used for `grace_turns` where 0 means "no grace period".
+ */
+function optionalNonNegativeInteger(
+  fm: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const v = fm[key];
+  if (v === undefined) return undefined;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 0) {
+    throw new Error(`field "${key}" must be a non-negative integer; got ${String(v)}`);
   }
   return v;
 }
