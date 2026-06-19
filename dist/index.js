@@ -6949,8 +6949,12 @@ function mapFromRegistry2(r) {
 
 // src/widget.ts
 import { Text } from "@earendil-works/pi-tui";
+init_types();
 var WIDGET_KEY = "conductor-ensemble";
 var FINISHED_LINGER_MS = 8e3;
+function isActiveRun(run) {
+  return !isTerminal(run.status);
+}
 function mountEnsembleWidget(registry, getCtx, getWatchdogConfig) {
   const recentlyFinished = [];
   let lingerTimer;
@@ -6961,7 +6965,7 @@ function mountEnsembleWidget(registry, getCtx, getWatchdogConfig) {
     for (let i = recentlyFinished.length - 1; i >= 0; i--) {
       if (recentlyFinished[i].expiresAt <= now) recentlyFinished.splice(i, 1);
     }
-    const active = registry.list().filter((r) => r.status !== "completed" && r.status !== "failed" && r.status !== "killed" && r.status !== "timeout" && r.status !== "hook_failed");
+    const active = registry.list().filter(isActiveRun);
     const linger = recentlyFinished.map((e) => e.run);
     if (active.length === 0 && linger.length === 0) {
       ctx.ui.setWidget(WIDGET_KEY, void 0);
@@ -6990,7 +6994,8 @@ function mountEnsembleWidget(registry, getCtx, getWatchdogConfig) {
     }
   };
   const unsubscribe = registry.onChange((run) => {
-    if (run.status === "completed" || run.status === "failed" || run.status === "killed" || run.status === "timeout" || run.status === "hook_failed" || run.status === "aborted") {
+    if (run.status === "completed" || run.status === "failed" || run.status === "killed" || run.status === "timeout" || run.status === "hook_failed" || run.status === "merge_conflict" || // pre-existing omission fixed
+    run.status === "aborted") {
       const existing = recentlyFinished.find((e) => e.run.id === run.id);
       if (existing) existing.expiresAt = Date.now() + FINISHED_LINGER_MS;
       else recentlyFinished.push({ run, expiresAt: Date.now() + FINISHED_LINGER_MS });

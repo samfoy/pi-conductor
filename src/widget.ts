@@ -11,6 +11,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { elapsedStr, formatUsage, type RunRegistry } from "./runs.ts";
 import { STATUS_GLYPH } from "./status-glyph.ts";
+import { isTerminal } from "./types.ts";
 import type { Run, RunStatus } from "./types.ts";
 import { classifyStall, type WatchdogConfig } from "./watchdog.ts";
 
@@ -27,6 +28,15 @@ export interface EnsembleWidget {
   refresh: () => void;
   /** Tear down the widget. */
   dispose: () => void;
+}
+
+/**
+ * Returns true if a run should appear in the "active" section of the widget.
+ * Delegates to `isTerminal` so new terminal statuses are handled automatically
+ * (v0.17-S1 fix: explicit chain was missing "aborted" and "merge_conflict").
+ */
+export function isActiveRun(run: Run): boolean {
+  return !isTerminal(run.status);
 }
 
 /**
@@ -51,7 +61,7 @@ export function mountEnsembleWidget(
       if (recentlyFinished[i]!.expiresAt <= now) recentlyFinished.splice(i, 1);
     }
 
-    const active = registry.list().filter((r) => r.status !== "completed" && r.status !== "failed" && r.status !== "killed" && r.status !== "timeout" && r.status !== "hook_failed");
+    const active = registry.list().filter(isActiveRun);
     const linger = recentlyFinished.map((e) => e.run);
 
     if (active.length === 0 && linger.length === 0) {
@@ -91,6 +101,7 @@ export function mountEnsembleWidget(
       run.status === "killed" ||
       run.status === "timeout" ||
       run.status === "hook_failed" ||
+      run.status === "merge_conflict" || // pre-existing omission fixed
       run.status === "aborted" // v0.17
     ) {
       // De-dup: if already in linger, just refresh expiry.

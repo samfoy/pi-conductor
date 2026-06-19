@@ -140,3 +140,23 @@ test("widget: · hook glyph absent when run.hookExecuting !== true", () => {
   const out2 = formatRow(r2, stubTheme);
   assert.doesNotMatch(out2, /· hook/);
 });
+
+// ── v0.17-S1 critic fix: active filter uses isTerminal (no ghost rows) ──
+
+import { isActiveRun } from "../src/widget.ts";
+
+test("widget isActiveRun: terminal statuses are excluded from active (v0.17-S1 critic fix)", () => {
+  // All terminal statuses must return false — no ghost active rows.
+  const terminals: import("../src/types.ts").RunStatus[] = [
+    "completed", "failed", "killed", "timeout", "hook_failed", "merge_conflict", "aborted",
+  ];
+  for (const status of terminals) {
+    assert.equal(isActiveRun(runFx({ status })), false, `${status} should NOT be active`);
+  }
+  // Non-terminal statuses must return true — still in flight.
+  const nonTerminals: import("../src/types.ts").RunStatus[] = ["running", "queued", "paused"];
+  for (const status of nonTerminals) {
+    assert.equal(isActiveRun(runFx({ status })), true, `${status} should be active`);
+  }
+});
+
