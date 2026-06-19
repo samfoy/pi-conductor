@@ -48,7 +48,8 @@ function toRunRecord(r) {
     lastEventAt: r.lastEventAt,
     thisInvocationStartedAt: r.thisInvocationStartedAt,
     thisInvocationUsageBaseline: r.thisInvocationUsageBaseline,
-    resumeCount: r.resumeCount
+    resumeCount: r.resumeCount,
+    compactionCount: r.compactionCount
   };
 }
 function isTerminal(s) {
@@ -989,6 +990,9 @@ function applyEvent(run, event) {
     run.lastEventAt = Date.now();
   }
   if (e.type === "response") {
+    if (e.command === "compact") {
+      return { kind: "compacted" };
+    }
     routeRpcResponse(run, e);
     return UPDATED;
   }
@@ -1012,6 +1016,9 @@ function applyEvent(run, event) {
   }
   if (e.type === "message_end") {
     if (!e.message) return NONE;
+    if (e.message?.role === "compactionSummary") {
+      return { kind: "compacted" };
+    }
     const msg = e.message;
     run.messages.push(msg);
     run.lastEventAt = Date.now();
@@ -2302,7 +2309,9 @@ function spawnRun(opts) {
     // see a consistent shape during the brief pre-spawn window.
     steerable: opts.steerable === true,
     // v0.14 worktree auto-merge: stamp resolved merge strategy at spawn time.
-    mergeStrategy: opts.mergeStrategy
+    mergeStrategy: opts.mergeStrategy,
+    // v0.16-S4: monotone compaction counter; incremented in processLine.
+    compactionCount: 0
   };
   opts.registry.register(run);
   if (!opts.preAllocatedId) {
@@ -2615,6 +2624,11 @@ function runPiSubprocess(run, piArgs, opts) {
       void finalize(effect.status, effect.exitCode);
       return;
     }
+    if (effect.kind === "compacted") {
+      applyCompactionLine(run, opts.events);
+      opts.registry.notify(run);
+      return;
+    }
     if (effect.kind === "updated") {
       opts.registry.notify(run);
       if (opts.onUpdate) opts.onUpdate(run);
@@ -2894,6 +2908,18 @@ function applyCloseHandlerTerminal(run, terminal, exitCode) {
   run.exitCode = exitCode;
   run.finishedAt = Date.now();
   return true;
+}
+function applyCompactionLine(run, events) {
+  const tokensBefore = run.usage.input + run.usage.output;
+  run.compactionCount = (run.compactionCount ?? 0) + 1;
+  events?.emitCompacted({
+    id: run.id,
+    persona: run.persona,
+    compactionCount: run.compactionCount,
+    description: "",
+    tokensBefore
+  });
+  return run.compactionCount;
 }
 function applySubstanceCheck(run, terminal) {
   if (terminal !== "completed") return;

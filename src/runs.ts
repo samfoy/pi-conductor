@@ -1128,6 +1128,8 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     steerable: opts.steerable === true,
     // v0.14 worktree auto-merge: stamp resolved merge strategy at spawn time.
     mergeStrategy: opts.mergeStrategy,
+    // v0.16-S4: monotone compaction counter; incremented in processLine.
+    compactionCount: 0,
   };
   opts.registry.register(run);
 
@@ -1657,6 +1659,12 @@ function runPiSubprocess(
     const effect = applyEvent(run, event);
     if (effect.kind === "finalize") {
       void finalize(effect.status, effect.exitCode);
+      return;
+    }
+    if (effect.kind === "compacted") {
+      // v0.16-S4: delegate to the exported helper (also used by unit tests).
+      applyCompactionLine(run, opts.events);
+      opts.registry.notify(run);
       return;
     }
     if (effect.kind === "updated") {
@@ -2271,6 +2279,30 @@ export function applyCloseHandlerTerminal(
   run.exitCode = exitCode;
   run.finishedAt = Date.now();
   return true;
+}
+
+/**
+ * v0.16-S4: exported for unit tests. Applies a detected compaction event
+ * to a run: increments compactionCount, calls emitCompacted, and returns
+ * the new count. The snapshot of tokensBefore is taken before incrementing.
+ *
+ * In production this logic lives inside the processLine closure in
+ * runPiSubprocess; this export lets tests call it without a live subprocess.
+ */
+export function applyCompactionLine(
+  run: Run,
+  events: ConductorEventEmitter | undefined,
+): number {
+  const tokensBefore = run.usage.input + run.usage.output;
+  run.compactionCount = (run.compactionCount ?? 0) + 1;
+  events?.emitCompacted({
+    id: run.id,
+    persona: run.persona,
+    compactionCount: run.compactionCount,
+    description: "",
+    tokensBefore,
+  });
+  return run.compactionCount;
 }
 
 /**

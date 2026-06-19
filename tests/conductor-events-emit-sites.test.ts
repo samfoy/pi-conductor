@@ -33,6 +33,7 @@ import {
   RunRegistry,
   spawnRun,
   emitFinalizeEvent,
+  applyCompactionLine,
 } from "../src/runs.ts";
 import { SpawnQueue } from "../src/queue.ts";
 import { emptyUsage, type Persona, type Run } from "../src/types.ts";
@@ -347,5 +348,87 @@ test("S3-W4: emitSteered call is inside the RPC block, not on the spawn-resume p
     steeredIdx < spawnResumeIdx,
     `emitSteered (line ${steeredIdx + 1}) must appear before spawn-resume block (line ${spawnResumeIdx + 1})`,
   );
+});
+
+// ── S4 W1: JSON-mode compactionSummary increments compactionCount and emits ─
+//
+// Killing mutation: remove the `compactionSummary` branch from processLine
+// → W1 fails: compactionCount stays 0, emitCompacted not called.
+
+test("S4-W1: message_end/compactionSummary increments compactionCount to 1 and calls emitCompacted", () => {
+  const { bus, events } = makeFakeBus();
+  const emitter = new ConductorEventEmitter(bus);
+  const run = makeRun("s4-w1");
+
+  const count = applyCompactionLine(run, emitter);
+
+  assert.strictEqual(count, 1, "compactionCount must be 1 after first compaction");
+  assert.strictEqual(run.compactionCount, 1, "run.compactionCount must be 1");
+  const compacted = events.filter((e) => e.channel === CHANNEL.compacted);
+  assert.strictEqual(compacted.length, 1, "emitCompacted must fire exactly once");
+});
+
+// ── S4 W2: emitCompacted payload has compactionCount === 1 ──────────────────
+//
+// Killing mutation: emit payload with compactionCount hardcoded to 0
+// → W2 fails: payload.compactionCount === 0 instead of 1.
+
+test("S4-W2: emitCompacted payload has compactionCount === 1 after first compaction", () => {
+  const { bus, events } = makeFakeBus();
+  const emitter = new ConductorEventEmitter(bus);
+  const run = makeRun("s4-w2");
+
+  applyCompactionLine(run, emitter);
+
+  const compacted = events.filter((e) => e.channel === CHANNEL.compacted);
+  assert.strictEqual(compacted.length, 1);
+  const payload = compacted[0]!.data as { compactionCount: number; id: string; persona: string };
+  assert.strictEqual(payload.compactionCount, 1, "payload.compactionCount must be 1");
+  assert.strictEqual(payload.id, "s4-w2", "payload.id must match run.id");
+  assert.strictEqual(payload.persona, "builder", "payload.persona must match run.persona");
+});
+
+// ── S4 W3: RPC path also increments and emits (two distinct call detection) ─
+//
+// Killing mutation: remove the `command === "compact"` check from applyEvent
+// → the event routes to routeRpcResponse, returns UPDATED, processLine never
+//   calls applyCompactionLine, count stays at 0, no emitCompacted.
+
+test("S4-W3: two sequential compaction events yield compactionCount === 2", () => {
+  const { bus, events } = makeFakeBus();
+  const emitter = new ConductorEventEmitter(bus);
+  const run = makeRun("s4-w3");
+
+  applyCompactionLine(run, emitter); // first (simulates JSON or RPC path)
+  applyCompactionLine(run, emitter); // second
+
+  assert.strictEqual(run.compactionCount, 2, "compactionCount must be 2 after two compactions");
+  const compacted = events.filter((e) => e.channel === CHANNEL.compacted);
+  assert.strictEqual(compacted.length, 2, "emitCompacted must fire twice");
+  const p1 = compacted[0]!.data as { compactionCount: number };
+  const p2 = compacted[1]!.data as { compactionCount: number };
+  assert.strictEqual(p1.compactionCount, 1, "first payload must have compactionCount === 1");
+  assert.strictEqual(p2.compactionCount, 2, "second payload must have compactionCount === 2");
+});
+
+// ── S4 W4: tokensBefore is snapped at emit time (not post-increment) ────────
+//
+// Killing mutation: take tokensBefore snapshot AFTER incrementing
+// → W4 fails if usage were mutated by compaction (currently not, but the
+//   snapshot order contract is pinned here for future changes).
+
+test("S4-W4: tokensBefore in emitCompacted payload equals run.usage.input + run.usage.output at emit time", () => {
+  const { bus, events } = makeFakeBus();
+  const emitter = new ConductorEventEmitter(bus);
+  const run = makeRun("s4-w4");
+  run.usage.input = 500;
+  run.usage.output = 200;
+
+  applyCompactionLine(run, emitter);
+
+  const compacted = events.filter((e) => e.channel === CHANNEL.compacted);
+  assert.strictEqual(compacted.length, 1);
+  const payload = compacted[0]!.data as { tokensBefore: number };
+  assert.strictEqual(payload.tokensBefore, 700, "tokensBefore must be 500+200=700");
 });
 

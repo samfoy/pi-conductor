@@ -18,6 +18,7 @@ import type { Run } from "./types.ts";
 export type EventEffect =
   | { kind: "none" }
   | { kind: "updated" }
+  | { kind: "compacted" }
   | { kind: "finalize"; status: "completed" | "failed"; exitCode: number };
 
 const NONE: EventEffect = { kind: "none" };
@@ -69,6 +70,10 @@ export function applyEvent(run: Run, event: unknown): EventEffect {
   //     on the host's reply; bumping would mask the legitimate
   //     stall class "sub-agent waiting on unanswered UI request").
   if (e.type === "response") {
+    // v0.16-S4: detect RPC compaction before routing generic response.
+    if ((e as any).command === "compact") {
+      return { kind: "compacted" };
+    }
     routeRpcResponse(run, e as RpcResponse);
     return UPDATED;
   }
@@ -97,6 +102,10 @@ export function applyEvent(run: Run, event: unknown): EventEffect {
 
   if (e.type === "message_end") {
     if (!e.message) return NONE;
+    // v0.16-S4: detect JSON-mode compaction before processing message.
+    if ((e.message as any)?.role === "compactionSummary") {
+      return { kind: "compacted" };
+    }
     const msg = e.message as AgentMessage;
     run.messages.push(msg);
     run.lastEventAt = Date.now();

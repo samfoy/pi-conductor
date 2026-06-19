@@ -559,3 +559,37 @@ test(
     );
   },
 );
+
+// ── v0.16-S4: compacted detection paths ────────────────────────────────────
+
+test("applyEvent: response+compact (RPC mode) returns kind=compacted", () => {
+  const run = makeRun();
+  const effect = applyEvent(run, { type: "response", command: "compact", id: "r1", success: true });
+  assert.deepEqual(effect, { kind: "compacted" });
+});
+
+test("applyEvent: response without command=compact returns kind=updated (not compacted)", () => {
+  const run = makeRun();
+  // routeRpcResponse handles it; result should be updated, not compacted
+  const effect = applyEvent(run, { type: "response", command: "init", id: "r2", success: true });
+  assert.notDeepEqual(effect, { kind: "compacted" });
+});
+
+test("applyEvent: message_end+compactionSummary (JSON mode) returns kind=compacted", () => {
+  const run = makeRun();
+  const effect = applyEvent(run, {
+    type: "message_end",
+    message: { role: "compactionSummary", content: "Context was compacted" },
+  });
+  assert.deepEqual(effect, { kind: "compacted" });
+});
+
+test("applyEvent: message_end with role=assistant is NOT compacted", () => {
+  const run = makeRun();
+  const effect = applyEvent(run, {
+    type: "message_end",
+    message: { role: "assistant", content: [], usage: { input: 10, output: 5 } },
+  });
+  assert.notDeepEqual(effect, { kind: "compacted" });
+  assert.equal(effect.kind, "updated");
+});

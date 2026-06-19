@@ -410,6 +410,13 @@ export interface Run {
    */
   resumeCount?: number;
   /**
+   * v0.16-S4: monotone counter incremented on each compaction event
+   * (either JSON `message_end`+`compactionSummary` or RPC `response`+`compact`).
+   * Initialized to 0 at spawn time; persisted to RunRecord.
+   * Optional for back-compat with pre-v0.16 records and test fixtures.
+   */
+  compactionCount?: number;
+  /**
    * v0.10 watchdog (Slice 3) per-spawn override. When `true`, the
    * watchdog auto-kills this run on hard-stall. When undefined, the
    * conductor-wide default `cfg.watchdog.defaultKillOnStall` applies.
@@ -778,6 +785,11 @@ export interface RunRecord {
    * preserves the resume count. Optional; absence implies 0.
    */
   resumeCount?: number;
+  /**
+   * v0.16-S4: monotone compaction counter. Optional for back-compat
+   * with records written before this slice; absence implies 0.
+   */
+  compactionCount?: number;
 }
 
 export function toRunRecord(r: Run): RunRecord {
@@ -817,6 +829,7 @@ export function toRunRecord(r: Run): RunRecord {
     thisInvocationStartedAt: r.thisInvocationStartedAt,
     thisInvocationUsageBaseline: r.thisInvocationUsageBaseline,
     resumeCount: r.resumeCount,
+    compactionCount: r.compactionCount,
   };
 }
 
