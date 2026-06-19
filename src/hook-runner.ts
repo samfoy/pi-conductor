@@ -82,6 +82,18 @@ export interface RunHookOptions {
    * helper itself does not mutate `Run`.
    */
   onProc?: (proc: ChildProcess) => void;
+  /**
+   * Called after the subprocess spawns successfully (after `onProc`) —
+   * i.e. when the hook is confirmed running. Not called for sync spawn
+   * errors. Used by the event-emitter wiring in `runs.ts`.
+   */
+  onStart?: () => void;
+  /**
+   * Called with the final `HookResult` before resolving. Not called for
+   * sync spawn errors or async spawn errors. Used by the event-emitter
+   * wiring in `runs.ts`.
+   */
+  onEnd?: (result: HookResult) => void;
   /** Test injection seam. */
   deps?: HookRunnerDeps;
 }
@@ -208,6 +220,16 @@ export function runHook(opts: RunHookOptions): Promise<HookResult> {
     }
   }
 
+  // W1: onStart fires after spawn + onProc, before hook exits.
+  // Not reached for sync spawn errors (early return above).
+  if (opts.onStart) {
+    try {
+      opts.onStart();
+    } catch {
+      // callback errors must never abort the hook lifecycle
+    }
+  }
+
   return new Promise<HookResult>((resolve) => {
     let resolved = false;
     let killReason: "timeout" | "runaway_output" | undefined;
@@ -261,7 +283,7 @@ export function runHook(opts: RunHookOptions): Promise<HookResult> {
         }
       });
       void finishStream.then(() => {
-        resolve({
+        const hookResult: HookResult = {
           passed,
           command: opts.resolved.command,
           exitCode,
@@ -271,7 +293,16 @@ export function runHook(opts: RunHookOptions): Promise<HookResult> {
           tailBytes,
           tailLines: tailLineCount,
           failureKind,
-        });
+        };
+        // W2/W3: onEnd fires with the final result before resolve.
+        if (opts.onEnd) {
+          try {
+            opts.onEnd(hookResult);
+          } catch {
+            // callback errors must never abort hook resolution
+          }
+        }
+        resolve(hookResult);
       });
     };
 

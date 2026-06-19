@@ -1550,6 +1550,12 @@ function runHook(opts) {
     } catch {
     }
   }
+  if (opts.onStart) {
+    try {
+      opts.onStart();
+    } catch {
+    }
+  }
   return new Promise((resolve2) => {
     let resolved = false;
     let killReason;
@@ -1597,7 +1603,7 @@ function runHook(opts) {
         }
       });
       void finishStream.then(() => {
-        resolve2({
+        const hookResult = {
           passed,
           command: opts.resolved.command,
           exitCode,
@@ -1607,7 +1613,14 @@ function runHook(opts) {
           tailBytes,
           tailLines: tailLineCount,
           failureKind
-        });
+        };
+        if (opts.onEnd) {
+          try {
+            opts.onEnd(hookResult);
+          } catch {
+          }
+        }
+        resolve2(hookResult);
       });
     };
     const escalateToSigkill = () => {
@@ -2608,7 +2621,8 @@ function runPiSubprocess(run, piArgs, opts) {
         terminal = await applyHookToTerminal(
           run,
           opts.resolvedHook,
-          terminal
+          terminal,
+          { events: opts.events }
         );
       } catch (e) {
         run.hookResult = {
@@ -3062,6 +3076,33 @@ async function applyHookToTerminal(run, resolvedHook, terminal, deps = {}) {
       parentCwd: run.cwd,
       onProc: (proc) => {
         run.hookProc = proc;
+      },
+      onStart: () => {
+        deps.events?.emitHookStarted({
+          id: run.id,
+          persona: run.persona,
+          command: resolvedHook.command
+        });
+      },
+      onEnd: (result) => {
+        if (result.passed) {
+          deps.events?.emitHookCompleted({
+            id: run.id,
+            persona: run.persona,
+            command: resolvedHook.command,
+            exitCode: result.exitCode ?? 0,
+            durationMs: result.durationMs
+          });
+        } else {
+          deps.events?.emitHookFailed({
+            id: run.id,
+            persona: run.persona,
+            command: resolvedHook.command,
+            exitCode: result.exitCode,
+            durationMs: result.durationMs,
+            failureKind: result.failureKind ?? "exited"
+          });
+        }
       }
     });
     if (isTerminal(run.status)) {
@@ -8785,7 +8826,10 @@ var CHANNEL = {
   completed: "conductor:agent:completed",
   failed: "conductor:agent:failed",
   steered: "conductor:agent:steered",
-  compacted: "conductor:agent:compacted"
+  compacted: "conductor:agent:compacted",
+  hookStarted: "conductor:agent:hook:started",
+  hookCompleted: "conductor:agent:hook:completed",
+  hookFailed: "conductor:agent:hook:failed"
 };
 var ConductorEventEmitter = class {
   events;
@@ -8809,6 +8853,15 @@ var ConductorEventEmitter = class {
   }
   emitCompacted(payload) {
     this.events?.emit(CHANNEL.compacted, payload);
+  }
+  emitHookStarted(payload) {
+    this.events?.emit(CHANNEL.hookStarted, payload);
+  }
+  emitHookCompleted(payload) {
+    this.events?.emit(CHANNEL.hookCompleted, payload);
+  }
+  emitHookFailed(payload) {
+    this.events?.emit(CHANNEL.hookFailed, payload);
   }
 };
 

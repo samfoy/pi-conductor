@@ -1574,6 +1574,7 @@ function runPiSubprocess(
           run,
           opts.resolvedHook,
           terminal,
+          { events: opts.events },
         );
       } catch (e) {
         // Defensive: applyHookToTerminal's own try/finally clears the
@@ -2513,7 +2514,7 @@ export async function applyHookToTerminal(
   run: Run,
   resolvedHook: ResolvedHook,
   terminal: RunStatus,
-  deps: { runHookImpl?: typeof runHook } = {},
+  deps: { runHookImpl?: typeof runHook; events?: ConductorEventEmitter } = {},
 ): Promise<RunStatus> {
   // Pre-write final.md so CONDUCTOR_FINAL_TEXT_PATH resolves at hook
   // spawn time. writeFinal is best-effort; a write failure is rare and
@@ -2538,6 +2539,33 @@ export async function applyHookToTerminal(
       parentCwd: run.cwd,
       onProc: (proc) => {
         run.hookProc = proc;
+      },
+      onStart: () => {
+        deps.events?.emitHookStarted({
+          id: run.id,
+          persona: run.persona,
+          command: resolvedHook.command,
+        });
+      },
+      onEnd: (result) => {
+        if (result.passed) {
+          deps.events?.emitHookCompleted({
+            id: run.id,
+            persona: run.persona,
+            command: resolvedHook.command,
+            exitCode: result.exitCode ?? 0,
+            durationMs: result.durationMs,
+          });
+        } else {
+          deps.events?.emitHookFailed({
+            id: run.id,
+            persona: run.persona,
+            command: resolvedHook.command,
+            exitCode: result.exitCode,
+            durationMs: result.durationMs,
+            failureKind: result.failureKind ?? "exited",
+          });
+        }
       },
     });
     // W7 idempotency guard: forceTerminate may have flipped status

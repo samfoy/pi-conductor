@@ -70,6 +70,31 @@ export interface AgentCompactedPayload {
   tokensBefore: number;
 }
 
+// ── Hook lifecycle payload interfaces (v0.17-S5) ──────────────────────────
+
+export interface HookStartedPayload {
+  id: string;
+  persona: string;
+  command: string;
+}
+
+export interface HookCompletedPayload {
+  id: string;
+  persona: string;
+  command: string;
+  exitCode: number;
+  durationMs: number;
+}
+
+export interface HookFailedPayload {
+  id: string;
+  persona: string;
+  command: string;
+  exitCode: number | null;
+  durationMs: number;
+  failureKind: string;
+}
+
 // ── Channel name constants ──────────────────────────────────────────────────
 
 export const CHANNEL = {
@@ -79,6 +104,9 @@ export const CHANNEL = {
   failed: "conductor:agent:failed",
   steered: "conductor:agent:steered",
   compacted: "conductor:agent:compacted",
+  hookStarted: "conductor:agent:hook:started",
+  hookCompleted: "conductor:agent:hook:completed",
+  hookFailed: "conductor:agent:hook:failed",
 } as const;
 
 // ── EventBus interface (matches pi.events shape) ────────────────────────────
@@ -124,5 +152,17 @@ export class ConductorEventEmitter {
 
   emitCompacted(payload: AgentCompactedPayload): void {
     this.events?.emit(CHANNEL.compacted, payload);
+  }
+
+  emitHookStarted(payload: HookStartedPayload): void {
+    this.events?.emit(CHANNEL.hookStarted, payload);
+  }
+
+  emitHookCompleted(payload: HookCompletedPayload): void {
+    this.events?.emit(CHANNEL.hookCompleted, payload);
+  }
+
+  emitHookFailed(payload: HookFailedPayload): void {
+    this.events?.emit(CHANNEL.hookFailed, payload);
   }
 }

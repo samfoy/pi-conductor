@@ -49,10 +49,14 @@ test("CHANNEL constants have correct string values", () => {
   assert.strictEqual(CHANNEL.failed, "conductor:agent:failed");
   assert.strictEqual(CHANNEL.steered, "conductor:agent:steered");
   assert.strictEqual(CHANNEL.compacted, "conductor:agent:compacted");
+  // v0.17-S5: hook lifecycle channels
+  assert.strictEqual(CHANNEL.hookStarted, "conductor:agent:hook:started");
+  assert.strictEqual(CHANNEL.hookCompleted, "conductor:agent:hook:completed");
+  assert.strictEqual(CHANNEL.hookFailed, "conductor:agent:hook:failed");
 });
 
-test("CHANNEL has exactly 6 entries", () => {
-  assert.strictEqual(Object.keys(CHANNEL).length, 6);
+test("CHANNEL has exactly 9 entries (6 agent + 3 hook lifecycle v0.17-S5)", () => {
+  assert.strictEqual(Object.keys(CHANNEL).length, 9);
 });
 
 // ──────────────────────────────────────────────
