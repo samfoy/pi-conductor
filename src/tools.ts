@@ -948,7 +948,7 @@ function registerKillTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       }
       // Idempotent: if already-terminal, return current status as success.
       // Matches the brief's "calling on an already-terminated sub-agent is a no-op success".
-      if (run.status === "completed" || run.status === "failed" || run.status === "killed" || run.status === "timeout" || run.status === "hook_failed") {
+      if (run.status === "completed" || run.status === "failed" || run.status === "killed" || run.status === "timeout" || run.status === "hook_failed" || run.status === "merge_conflict" || run.status === "aborted") {
         return {
           content: [{ type: "text" as const, text: `already ${run.status}: ${run.id} (no-op)` }],
           details: { status: run.status, agent_id: run.id, persona: run.persona } as KillDetails,
@@ -1094,6 +1094,7 @@ interface StatusGroups {
   timeout: Run[];
   hook_failed: Run[];
   merge_conflict: Run[];
+  aborted: Run[]; // v0.17
 }
 
 function groupByStatus(runs: Run[]): StatusGroups {
@@ -1107,6 +1108,7 @@ function groupByStatus(runs: Run[]): StatusGroups {
     timeout: [],
     hook_failed: [],
     merge_conflict: [],
+    aborted: [],
   };
   for (const r of runs) g[r.status].push(r);
   return g;
@@ -1238,7 +1240,7 @@ function validateHookTimeoutSeconds(s: number | undefined): string | undefined {
 }
 
 function isTerminalStatus(s: RunStatus): boolean {
-  return s === "completed" || s === "failed" || s === "killed" || s === "timeout" || s === "hook_failed";
+  return s === "completed" || s === "failed" || s === "killed" || s === "timeout" || s === "hook_failed" || s === "merge_conflict" || s === "aborted";
 }
 
 // ── v0.15 chains ─────────────────────────────────────────────────────────

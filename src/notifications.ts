@@ -147,12 +147,14 @@ function headerLine(
     run.status === "completed" ? "✓" :
     run.status === "killed"    ? "■" :
     run.status === "timeout"   ? "⏱" :
-    run.status === "hook_failed" ? "⊗" : "✗";
+    run.status === "hook_failed" ? "⊗" :
+    run.status === "aborted"   ? "⏹" : "✗"; // v0.17: aborted (turn limit)
   const verb =
     run.status === "completed" ? "completed" :
     run.status === "killed"    ? "killed" :
     run.status === "timeout"   ? "timed out" :
-    run.status === "hook_failed" ? "hook failed" : "failed";
+    run.status === "hook_failed" ? "hook failed" :
+    run.status === "aborted"   ? "aborted (turn limit)" : "failed"; // v0.17
   const usagePart = usageStr ? `, ${usageStr}` : "";
   let line = `## ${glyph} \`${run.persona}\` ${verb} (${elapsed}${usagePart}) — id \`${run.id}\``;
   if (resumed) {

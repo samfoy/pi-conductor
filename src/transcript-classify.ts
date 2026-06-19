@@ -67,7 +67,7 @@ export interface ClassifiedLine {
 }
 
 /** STATUS_GLYPH chars that may lead a header line. Mirrors `status-glyph.ts`. */
-const HEADER_GLYPHS = new Set(["◌", "●", "⏸", "✓", "✗", "■", "⏱", "⊗", "⊘"]);
+const HEADER_GLYPHS = new Set(["◌", "●", "⏸", "✓", "✗", "■", "⏱", "⊗", "⊘", "⏹"]); // v0.17: ⏹ = aborted
 
 /**
  * Classify a single rendered line. Pure: same input → same output, no I/O.

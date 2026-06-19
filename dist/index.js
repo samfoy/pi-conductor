@@ -122,7 +122,9 @@ var init_types = __esm({
       "killed",
       "timeout",
       "hook_failed",
-      "merge_conflict"
+      "merge_conflict",
+      "aborted"
+      // v0.17: turn-limit termination
     ];
   }
 });
@@ -395,8 +397,10 @@ var STATUS_GLYPH = {
   killed: "\u25A0",
   timeout: "\u23F1",
   hook_failed: "\u2297",
-  merge_conflict: "\u2298"
+  merge_conflict: "\u2298",
   // v0.14: post-success conflict — ⊘ distinct from ⊗ (hook_failed)
+  aborted: "\u23F9"
+  // v0.17: turn-limit termination — ⏹ (stop button) distinct from ■ (killed)
 };
 
 // src/personas.ts
@@ -3057,7 +3061,10 @@ function forceTerminate(run, reason, registry, onComplete, killGroup = defaultKi
     }, 2e3).unref();
     run.hookProc = void 0;
   }
-  run.status = reason === "timeout" ? "timeout" : reason === "stalled" ? "killed" : "killed";
+  run.status = reason === "timeout" ? "timeout" : reason === "stalled" ? "killed" : reason === "aborted" ? "aborted" : (
+    // v0.17: turn-limit termination
+    "killed"
+  );
   if (reason === "stalled" && !run.errorMessage) {
     run.errorMessage = "watchdog: hard-stalled (no events past hard threshold)";
   }
@@ -5526,7 +5533,7 @@ function padOrTruncate(left, right, width) {
 init_types();
 
 // src/transcript-classify.ts
-var HEADER_GLYPHS = /* @__PURE__ */ new Set(["\u25CC", "\u25CF", "\u23F8", "\u2713", "\u2717", "\u25A0", "\u23F1", "\u2297", "\u2298"]);
+var HEADER_GLYPHS = /* @__PURE__ */ new Set(["\u25CC", "\u25CF", "\u23F8", "\u2713", "\u2717", "\u25A0", "\u23F1", "\u2297", "\u2298", "\u23F9"]);
 function classifyLine(line) {
   if (line.length > 0 && /^─+$/.test(line)) {
     return { kind: "ruler" };
@@ -5576,6 +5583,7 @@ function statusColorSlot(status) {
     case "timeout":
     case "hook_failed":
     case "merge_conflict":
+    case "aborted":
       return "error";
     case "paused":
       return "warning";
@@ -6502,7 +6510,7 @@ function registerKillTool(pi, opts) {
         );
         return r;
       }
-      if (run.status === "completed" || run.status === "failed" || run.status === "killed" || run.status === "timeout" || run.status === "hook_failed") {
+      if (run.status === "completed" || run.status === "failed" || run.status === "killed" || run.status === "timeout" || run.status === "hook_failed" || run.status === "merge_conflict" || run.status === "aborted") {
         return {
           content: [{ type: "text", text: `already ${run.status}: ${run.id} (no-op)` }],
           details: { status: run.status, agent_id: run.id, persona: run.persona }
@@ -6620,7 +6628,8 @@ function groupByStatus(runs) {
     killed: [],
     timeout: [],
     hook_failed: [],
-    merge_conflict: []
+    merge_conflict: [],
+    aborted: []
   };
   for (const r of runs) g[r.status].push(r);
   return g;
@@ -6725,7 +6734,7 @@ function validateHookTimeoutSeconds(s) {
   return void 0;
 }
 function isTerminalStatus(s) {
-  return s === "completed" || s === "failed" || s === "killed" || s === "timeout" || s === "hook_failed";
+  return s === "completed" || s === "failed" || s === "killed" || s === "timeout" || s === "hook_failed" || s === "merge_conflict" || s === "aborted";
 }
 function buildOnChainCallback(args) {
   if (!args.chainEnabled) return void 0;
@@ -6981,7 +6990,7 @@ function mountEnsembleWidget(registry, getCtx, getWatchdogConfig) {
     }
   };
   const unsubscribe = registry.onChange((run) => {
-    if (run.status === "completed" || run.status === "failed" || run.status === "killed" || run.status === "timeout" || run.status === "hook_failed") {
+    if (run.status === "completed" || run.status === "failed" || run.status === "killed" || run.status === "timeout" || run.status === "hook_failed" || run.status === "aborted") {
       const existing = recentlyFinished.find((e) => e.run.id === run.id);
       if (existing) existing.expiresAt = Date.now() + FINISHED_LINGER_MS;
       else recentlyFinished.push({ run, expiresAt: Date.now() + FINISHED_LINGER_MS });
@@ -7037,6 +7046,7 @@ function statusColorSlot2(s) {
     case "timeout":
     case "hook_failed":
     case "merge_conflict":
+    case "aborted":
       return "error";
   }
 }
@@ -7242,8 +7252,8 @@ function formatCompletionNotification(run) {
   return [header, "", ...lines].join("\n");
 }
 function headerLine(run, elapsed, usageStr, resumed) {
-  const glyph = run.status === "completed" ? "\u2713" : run.status === "killed" ? "\u25A0" : run.status === "timeout" ? "\u23F1" : run.status === "hook_failed" ? "\u2297" : "\u2717";
-  const verb = run.status === "completed" ? "completed" : run.status === "killed" ? "killed" : run.status === "timeout" ? "timed out" : run.status === "hook_failed" ? "hook failed" : "failed";
+  const glyph = run.status === "completed" ? "\u2713" : run.status === "killed" ? "\u25A0" : run.status === "timeout" ? "\u23F1" : run.status === "hook_failed" ? "\u2297" : run.status === "aborted" ? "\u23F9" : "\u2717";
+  const verb = run.status === "completed" ? "completed" : run.status === "killed" ? "killed" : run.status === "timeout" ? "timed out" : run.status === "hook_failed" ? "hook failed" : run.status === "aborted" ? "aborted (turn limit)" : "failed";
   const usagePart = usageStr ? `, ${usageStr}` : "";
   let line = `## ${glyph} \`${run.persona}\` ${verb} (${elapsed}${usagePart}) \u2014 id \`${run.id}\``;
   if (resumed) {

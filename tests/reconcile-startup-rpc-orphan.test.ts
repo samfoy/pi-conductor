@@ -261,6 +261,7 @@ test(
     // Allowed members: queued, running, paused, completed, failed,
     // killed, timeout (v0.10), hook_failed (v0.11). v0.12 fix #3 forbids
     // arbitrary additions; v0.14 adds merge_conflict for worktree auto-merge.
+    // v0.17 adds aborted for turn-limit termination.
     const allowed = [
       "queued",
       "running",
@@ -271,6 +272,7 @@ test(
       "timeout",
       "hook_failed",
       "merge_conflict", // v0.14: worktree auto-merge conflict terminal status
+      "aborted",        // v0.17: turn-limit termination
     ];
     for (const s of allowed) {
       assert.match(def, new RegExp(`"${s}"`), `RunStatus must include "${s}"`);

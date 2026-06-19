@@ -786,7 +786,7 @@ export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
 export type RunListener = (run: Run) => void;
 
 /** Reasons we report when forcing a terminal state externally. */
-export type TerminationReason = "killed" | "timeout" | "stalled";
+export type TerminationReason = "killed" | "timeout" | "stalled" | "aborted";
 
 export class RunRegistry {
   private runs = new Map<string, Run>();
@@ -2603,6 +2603,7 @@ export function forceTerminate(
   run.status =
     reason === "timeout" ? "timeout" :
     reason === "stalled" ? "killed" :
+    reason === "aborted" ? "aborted" : // v0.17: turn-limit termination
     "killed";
   // v0.10 watchdog: stalled hard-kills are reported via run.errorMessage
   // (status stays "killed" so existing UI/persistence paths don't grow a

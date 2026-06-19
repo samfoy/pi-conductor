@@ -90,7 +90,8 @@ export function mountEnsembleWidget(
       run.status === "failed" ||
       run.status === "killed" ||
       run.status === "timeout" ||
-      run.status === "hook_failed"
+      run.status === "hook_failed" ||
+      run.status === "aborted" // v0.17
     ) {
       // De-dup: if already in linger, just refresh expiry.
       const existing = recentlyFinished.find((e) => e.run.id === run.id);
@@ -190,6 +191,7 @@ function statusColorSlot(s: RunStatus): string {
     case "timeout":
     case "hook_failed":
     case "merge_conflict":
+    case "aborted": // v0.17: turn-limit termination
       return "error";
   }
 }

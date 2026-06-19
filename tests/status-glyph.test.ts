@@ -53,6 +53,7 @@ test("STATUS_GLYPH: covers every RunStatus key (no holes)", () => {
   // Surfaces drift if RunStatus gains a member without STATUS_GLYPH being updated.
   const keys = Object.keys(STATUS_GLYPH).sort();
   assert.deepEqual(keys, [
+    "aborted",
     "completed",
     "failed",
     "hook_failed",
@@ -64,3 +65,9 @@ test("STATUS_GLYPH: covers every RunStatus key (no holes)", () => {
     "timeout",
   ]);
 });
+
+test("STATUS_GLYPH: aborted is ⏹ (v0.17: turn-limit termination)", () => {
+  // ⏹ stop-button — visually distinct from ■ (killed) and ⏱ (timeout)
+  assert.equal(STATUS_GLYPH.aborted, "⏹");
+});
+

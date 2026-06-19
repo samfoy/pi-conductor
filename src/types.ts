@@ -311,7 +311,8 @@ export type RunStatus =
   | "killed"
   | "timeout"
   | "hook_failed"
-  | "merge_conflict"; // v0.14: worktree merged cleanly but conflicts prevent fast-forward
+  | "merge_conflict" // v0.14: worktree merged cleanly but conflicts prevent fast-forward
+  | "aborted"; // v0.17: sub-agent reached its turn limit and was terminated
 
 export type SpawnMode = "foreground" | "background";
 
@@ -894,6 +895,7 @@ export const TERMINAL_STATUSES: RunStatus[] = [
   "timeout",
   "hook_failed",
   "merge_conflict",
+  "aborted", // v0.17: turn-limit termination
 ];
 export function isTerminal(s: RunStatus): boolean {
   return TERMINAL_STATUSES.includes(s);

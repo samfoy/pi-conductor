@@ -39,3 +39,24 @@ test("isTerminal: non-terminals (queued/running/paused) are not terminal", () =>
   assert.equal(isTerminal("running"), false);
   assert.equal(isTerminal("paused"), false);
 });
+
+// ── v0.17-S1 witnesses ──────────────────────────────────────────────────────
+
+test("v0.17-S1 W1: aborted is a member of TERMINAL_STATUSES", () => {
+  assert.equal(TERMINAL_STATUSES.includes("aborted" as RunStatus), true);
+});
+
+test("v0.17-S1 W2: isTerminal aborted returns true", () => {
+  assert.equal(isTerminal("aborted" as RunStatus), true);
+});
+
+test("v0.17-S1 W2: isTerminal merge_conflict returns true (pre-existing omission now fixed in tools.ts)", () => {
+  // merge_conflict was in TERMINAL_STATUSES but the private isTerminalStatus in
+  // tools.ts omitted it. This test pins the public isTerminal for completeness.
+  assert.equal(isTerminal("merge_conflict" as RunStatus), true);
+});
+
+test("v0.17-S1 W4: TERMINAL_STATUSES has exactly 7 members after adding aborted", () => {
+  // completed, failed, killed, timeout, hook_failed, merge_conflict, aborted
+  assert.equal(TERMINAL_STATUSES.length, 7);
+});

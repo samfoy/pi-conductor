@@ -20,4 +20,5 @@ export const STATUS_GLYPH: Record<RunStatus, string> = {
   timeout: "⏱",
   hook_failed: "⊗",
   merge_conflict: "⊘", // v0.14: post-success conflict — ⊘ distinct from ⊗ (hook_failed)
+  aborted: "⏹", // v0.17: turn-limit termination — ⏹ (stop button) distinct from ■ (killed)
 };
