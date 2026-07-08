@@ -180,6 +180,12 @@ export class SpawnQueue {
       enqueuedAt: Date.now(),
       parentMessages: opts.parentMessages,
       onComplete: opts.onComplete,
+      // NOTE (v0.18): retryAttempt/onRetry are intentionally NOT captured here.
+      // A queued-then-drained run persists retryAttempt=0 regardless of the
+      // autonomous executor's real attempt — observability drift only. The
+      // executor's local `attempt` counter is authoritative (it drives
+      // buildRetryTask + shouldRetry); the auto path never reads
+      // run.retryAttempt. Not a correctness path.
       killOnStall: opts.killOnStall,
       softStallSeconds: opts.softStallSeconds,
       steerable: opts.steerable,

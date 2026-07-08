@@ -17,8 +17,17 @@ import { resolveChain, buildChainTask } from "./chain.ts";
 import { evaluateChainOutcome } from "./chain.ts";
 import { buildRetryTask } from "./retry.ts";
 import { scoreForShape, normalizeTaskShape } from "./memory.ts";
+import {
+  runAutonomous,
+  type AutoPlan,
+  type AutoStep,
+  type StepResult,
+  type SpawnedStepResult,
+} from "./autonomous.ts";
+import { resolveRetryPolicy } from "./retry.ts";
 import { collapseSteerableCascade } from "./steerable.ts";
 import { elapsedStr, forceTerminate, formatUsage, getFinalText, pauseRun, resolveTimeoutMs, resumeRun, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
+import { isTerminal } from "./types.ts";
 import { SpawnQueue } from "./queue.ts";
 import { resolveMergeStrategy } from "./worktree.ts";
 import { ConductorEventEmitter } from "./conductor-events.ts";
@@ -116,6 +125,7 @@ export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   registerKillTool(pi, opts);
   registerFocusTool(pi, opts);
   registerRecommendTool(pi, opts);
+  registerAutoTool(pi, opts);
 }
 
 // ── ensemble_list ────────────────────────────────────────────────────
@@ -242,6 +252,190 @@ function registerStatusTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           ].map(toStatusSummary),
           queueDetail: queueList,
         },
+      };
+    },
+  });
+}
+
+/**
+ * Resolve a Promise when the run `runId` reaches ANY terminal status.
+ *
+ * Two settle paths, once-guarded so exactly one wins:
+ *   - fast path: the caller wires the returned `settle` into the spawn's
+ *     `onComplete` (fires on natural exit + hook terminal);
+ *   - backstop: a `registry.onChange` listener catches terminals that do
+ *     NOT fire onComplete — operator kills (`ensemble_kill`/`/conductor
+ *     kill` → forceTerminate) and queue-cancels. Without this, an
+ *     autonomous executor awaiting `onComplete` would hang forever when
+ *     the human stops a sub-step (the documented mid-loop guardrail).
+ *
+ * Also covers the race where the run went terminal between enqueue and
+ * subscribe. Exported for unit testing.
+ */
+export function awaitTerminal(
+  registry: Pick<RunRegistry, "onChange" | "list">,
+  runId: string,
+): { promise: Promise<Run>; settle: (run: Run) => void } {
+  let settled = false;
+  let resolveFn!: (run: Run) => void;
+  let unsub: (() => void) | undefined;
+  const settle = (run: Run): void => {
+    if (settled) return;
+    settled = true;
+    unsub?.();
+    resolveFn(run);
+  };
+  const promise = new Promise<Run>((resolve) => {
+    resolveFn = resolve;
+  });
+  unsub = registry.onChange((r) => {
+    if (r.id === runId && isTerminal(r.status)) settle(r);
+  });
+  const cur = registry.list().find((r) => r.id === runId);
+  if (cur && isTerminal(cur.status)) settle(cur);
+  return { promise, settle };
+}
+
+function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
+  pi.registerTool({
+    name: "ensemble_auto",
+    label: "Autonomous run",
+    description:
+      "v0.18 autonomous mode: run an ordered persona plan to a terminal outcome " +
+      "with bounded, self-correcting execution. YOU (the conductor) supply the plan " +
+      "as an ordered list of steps; the executor spawns each in turn, classifies " +
+      "failures, retries the transient ones with diagnostics, re-evaluates after " +
+      "each step, and HALTS + escalates on a non-retryable failure, a stop verdict, " +
+      "the step cap, or the USD budget. Outcomes feed cross-session memory. " +
+      "Permission-class failures always escalate — never auto-retried.",
+    promptSnippet: "Run an ordered persona plan autonomously with retry + re-eval",
+    promptGuidelines: [
+      "Build the plan yourself (you are the planner): decompose the goal into ordered steps, each a persona + a self-contained task. Then call ensemble_auto once.",
+      "Always set max_steps; add budget_usd for cost-sensitive runs. The executor stops at the first non-retryable failure or stop verdict and reports what completed.",
+      "Set reevaluate:true on a step whose successor should only run if the step's output doesn't signal a blocker.",
+    ],
+    parameters: Type.Object({
+      goal: Type.String({ description: "One-line description of the overall goal (for the run summary)." }),
+      steps: Type.Array(
+        Type.Object({
+          persona: Type.String({ description: "Persona name to spawn for this step." }),
+          task: Type.String({ description: "Self-contained task for this step." }),
+          reevaluate: Type.Optional(
+            Type.Boolean({ description: "Re-evaluate this step's output before advancing (halt on a stop signal)." }),
+          ),
+        }),
+        { minItems: 1, description: "Ordered plan steps." },
+      ),
+      max_steps: Type.Integer({
+        minimum: 1,
+        description: "Hard cap on total spawns (original + retries). The executor halts when reached.",
+      }),
+      budget_usd: Type.Optional(
+        Type.Number({ minimum: 0, description: "Optional USD budget across all spawns. Halts when exceeded." }),
+      ),
+      retry_max_attempts: Type.Optional(
+        Type.Integer({ minimum: 1, description: "Per-step retry budget (incl. first attempt). Defaults to at least 2 in auto mode." }),
+      ),
+    }),
+    async execute(_id, params) {
+      const cwd = opts.getCwd();
+      const cfg = loadConfig(cwd);
+      const resolved = await resolvePersonas({ cwd, personaOverrides: cfg.personaOverrides });
+
+      // Validate every step's persona up front — fail fast before spawning.
+      const unknown = params.steps.map((s) => s.persona).filter((p) => !resolved.personas.get(p));
+      if (unknown.length) {
+        const reason = `unknown persona(s) in plan: ${[...new Set(unknown)].join(", ")}. Run ensemble_list to see available personas.`;
+        return {
+          content: [{ type: "text" as const, text: `Autonomous run HALTED — ${reason}` }],
+          details: {
+            status: "halted" as const,
+            haltReason: reason,
+            results: [] as StepResult[],
+            stepsRun: 0,
+            spentUsd: 0,
+          },
+        };
+      }
+
+      const plan: AutoPlan = {
+        goal: params.goal,
+        steps: params.steps.map((s): AutoStep => ({ persona: s.persona, task: s.task, reevaluate: s.reevaluate })),
+      };
+
+      // Auto mode is more autonomous than a supervised spawn: default to at
+      // least one retry unless the caller/config says otherwise.
+      const basePolicy = resolveRetryPolicy({
+        perCall: params.retry_max_attempts !== undefined ? { maxAttempts: params.retry_max_attempts } : undefined,
+        builtin: { maxAttempts: cfg.retry.maxAttempts, retryableClasses: cfg.retry.retryableClasses },
+      });
+      const retryPolicy =
+        params.retry_max_attempts === undefined && basePolicy.maxAttempts < 2
+          ? { ...basePolicy, maxAttempts: 2 }
+          : basePolicy;
+
+      const queue = opts.getQueue();
+      const events = opts.getEvents?.();
+
+      const spawnStep = (a: { persona: string; task: string; retryAttempt: number }): Promise<SpawnedStepResult> => {
+        const personaObj = resolved.personas.get(a.persona)!;
+        const ov = cfg.personaOverrides[personaObj.name] ?? {};
+        const registry = opts.getRegistry();
+        let settleRef: (run: Run) => void = () => {};
+        const spawned = queue.enqueueOrSpawn({
+          persona: personaObj,
+          task: a.task,
+          mode: "background",
+          cwd,
+          model: resolveModel(personaObj, ov),
+          thinking: resolveThinking(personaObj, ov),
+          timeoutMs: resolveTimeoutMs(personaObj, ov, cfg),
+          parentMessages: opts.getParentMessages(),
+          worktree: personaObj.worktree === true,
+          retryAttempt: a.retryAttempt,
+          // NO onRetry / onChain: the executor is the sole retry + sequencing
+          // authority (avoids double-fire with S2's background retry and the
+          // default builder->critic chain).
+          onComplete: (run) => {
+            opts.pushCompletionNotification(run);
+            settleRef(run); // fast path
+          },
+          events,
+        } as SpawnOptions);
+        // Backstop: operator kills (ensemble_kill / /conductor kill) and
+        // queue-cancels forceTerminate the run WITHOUT firing onComplete,
+        // which would hang the executor forever. `awaitTerminal` resolves on
+        // ANY terminal status via the registry (forceTerminate + drain-cancel
+        // both call registry.notify), once-guarded against the onComplete
+        // fast path above.
+        const trackedId =
+          spawned.kind === "spawned" ? spawned.run.id : spawned.placeholderRun.id;
+        const { promise, settle } = awaitTerminal(registry, trackedId);
+        settleRef = settle;
+        return promise.then((run) => ({
+          status: run.status,
+          failureClass: run.failureClass,
+          costUsd: run.usage.cost ?? 0,
+          finalText: getFinalText(run.messages),
+        }));
+      };
+
+      const outcome = await runAutonomous(plan, { maxSteps: params.max_steps, budgetUsd: params.budget_usd, retryPolicy }, {
+        spawnStep,
+      });
+
+      const lines = outcome.results.map(
+        (r, i) =>
+          `  ${i + 1}. ${r.persona} — ${r.status}${r.failureClass ? ` (${r.failureClass})` : ""}` +
+          `${r.attempts > 1 ? ` [${r.attempts} attempts]` : ""}`,
+      );
+      const header =
+        outcome.status === "done"
+          ? `Autonomous run COMPLETE — ${outcome.results.length} step(s), $${outcome.spentUsd.toFixed(3)}.`
+          : `Autonomous run HALTED — ${outcome.haltReason}. ${outcome.results.length} step(s), $${outcome.spentUsd.toFixed(3)}.`;
+      return {
+        content: [{ type: "text" as const, text: `${header}\n${lines.join("\n")}` }],
+        details: { ...outcome },
       };
     },
   });
