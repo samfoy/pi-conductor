@@ -607,6 +607,20 @@ export interface Run {
   stopReason?: string;
   /** First error message we saw on stderr or in an aborted message. */
   errorMessage?: string;
+  /**
+   * v0.18 failure classification: taxonomy bucket for a non-`completed`
+   * terminal. Stamped in `finalize()` before persistence. Feeds the
+   * classified-retry decision (S2), autonomous re-plan (S5), and the
+   * doctor/history surfaces. Undefined on `completed` runs and on any
+   * run finalized before v0.18.
+   */
+  failureClass?: import("./failure-classify.ts").FailureClass;
+  /**
+   * v0.18 classified retry: 0-indexed attempt number for this run
+   * (0 = original spawn). Incremented by the retry loop (S2). Undefined
+   * is treated as 0.
+   */
+  retryAttempt?: number;
 
   /** Streamed messages from the sub-agent. */
   messages: AgentMessage[];
@@ -763,6 +777,10 @@ export interface RunRecord {
   exitCode?: number;
   stopReason?: string;
   errorMessage?: string;
+  /** v0.18 failure classification (see `Run.failureClass`). */
+  failureClass?: import("./failure-classify.ts").FailureClass;
+  /** v0.18 classified retry attempt number (see `Run.retryAttempt`). */
+  retryAttempt?: number;
   usage: Usage;
   cwd: string;
   recordPath: string;
@@ -872,6 +890,8 @@ export function toRunRecord(r: Run): RunRecord {
     exitCode: r.exitCode,
     stopReason: r.stopReason,
     errorMessage: r.errorMessage,
+    failureClass: r.failureClass,
+    retryAttempt: r.retryAttempt,
     usage: r.usage,
     cwd: r.cwd,
     recordPath: r.recordPath,

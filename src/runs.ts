@@ -33,6 +33,7 @@ import { isNonSubstantiveFinalMessage } from "./substance-check.ts";
 import { resolveOnCompleteHook, type HookCascadeInput } from "./hook-cascade.ts";
 import { resolveMaxTurns, resolveGraceTurns } from "./turn-limit.ts";
 import { runHook, defaultKillGroup } from "./hook-runner.ts";
+import { classifyFailure } from "./failure-classify.ts";
 import { loadConfigWithErrors } from "./config.ts";
 import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage } from "./worktree.ts";
 import { readProcessStartTime } from "./reconcile-startup.ts";
@@ -1490,6 +1491,13 @@ function runPiSubprocess(
     run.status = "failed";
     run.errorMessage = `spawn failed: ${(e as Error).message}`;
     run.finishedAt = Date.now();
+    // v0.18: classify the in-process spawn failure (e.g. `spawn pi
+    // ENOENT` → environment) before persistence, same as the finalize
+    // and forceTerminate stamp sites.
+    run.failureClass = classifyFailure({
+      terminal: "failed",
+      errorMessage: run.errorMessage,
+    });
     opts.registry.notify(run);
     void writeRecord(run);
     void writeFinal(run);
@@ -1663,6 +1671,24 @@ function runPiSubprocess(
           `[conductor] worktree removal failed for ${run.id}; GC will clean up\n`,
         );
       }
+    }
+    // v0.18 failure classification: stamp non-completed terminals on the
+    // natural-exit path (failed / hook_failed / merge_conflict). The
+    // forceTerminate path stamps timeout/stall/turns itself and short-
+    // circuits above via applyCloseHandlerTerminal returning false, so we
+    // only reach here for exit-driven terminals. Uses the resolved
+    // `terminal` (post merge-flip) + stderr probes.
+    if (terminal !== "completed") {
+      // hook_failed diagnostics live in run.hookResult.tailText, not the
+      // subprocess stderr (the subprocess exited 0 before the hook ran).
+      const tail =
+        terminal === "hook_failed" ? run.hookResult?.tailText ?? stderr : stderr;
+      run.failureClass = classifyFailure({
+        terminal,
+        exitCode,
+        stderrTail: tail,
+        errorMessage: run.errorMessage,
+      });
     }
     opts.registry.notify(run);
     try {
@@ -2330,6 +2356,7 @@ export function emitFinalizeEvent(
       ...base,
       status: run.status as RunStatus,
       errorMessage: run.errorMessage,
+      failureClass: run.failureClass,
     });
   }
 }
@@ -2783,6 +2810,14 @@ export function forceTerminate(
     run.errorMessage = "watchdog: hard-stalled (no events past hard threshold)";
   }
   run.finishedAt = Date.now();
+  // v0.18 failure classification: stamp before persistence. forceTerminate
+  // is the authoritative source for timeout/stall/turns causes (the
+  // status alone loses the stall distinction — stalled maps to "killed").
+  run.failureClass = classifyFailure({
+    terminal: run.status,
+    terminationReason: reason,
+    errorMessage: run.errorMessage,
+  });
   registry.notify(run);
   void writeRecord(run);
   void writeFinal(run);

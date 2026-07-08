@@ -53,6 +53,13 @@ export interface AgentFailedPayload {
    */
   status: RunStatus;
   errorMessage: string | undefined;
+  /**
+   * v0.18 failure classification bucket (syntax | logic | test |
+   * environment | permission | timeout | stall | turns | unknown).
+   * Undefined for runs finalized before v0.18. Typed loosely as string
+   * to avoid a hard import cycle with failure-classify.
+   */
+  failureClass?: string;
 }
 
 export interface AgentSteeredPayload {

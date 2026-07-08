@@ -30,6 +30,8 @@ function toRunRecord(r) {
     exitCode: r.exitCode,
     stopReason: r.stopReason,
     errorMessage: r.errorMessage,
+    failureClass: r.failureClass,
+    retryAttempt: r.retryAttempt,
     usage: r.usage,
     cwd: r.cwd,
     recordPath: r.recordPath,
@@ -1708,6 +1710,111 @@ function renderTail(lines) {
   return lines.join("\n");
 }
 
+// src/failure-classify.ts
+var has = (...needles) => (h) => needles.some((n) => h.includes(n));
+var PROBES = [
+  {
+    cls: "permission",
+    test: has(
+      "permission denied",
+      "eacces",
+      "not authorized",
+      "mwinit",
+      "midway",
+      "credentials expired",
+      "403 forbidden",
+      "access denied",
+      "operation not permitted"
+    )
+  },
+  {
+    cls: "environment",
+    test: has(
+      "command not found",
+      "no such file or directory",
+      "enoent",
+      "cannot find module",
+      "module not found",
+      "econnrefused",
+      "etimedout",
+      "network is unreachable",
+      "network error",
+      "brazil-build",
+      "could not resolve",
+      "unable to locate",
+      "version not found"
+    )
+  },
+  {
+    cls: "syntax",
+    test: has(
+      "syntaxerror",
+      "parse error",
+      "unexpected token",
+      "compile error",
+      "compilation failed",
+      "ts(",
+      "cannot find name",
+      "type error"
+    )
+  },
+  {
+    cls: "test",
+    test: has(
+      "test suite failed to run",
+      "no tests found",
+      "jest encountered",
+      "cannot run tests",
+      "test runner"
+    )
+  },
+  {
+    cls: "logic",
+    test: has(
+      "assertionerror",
+      "assertion failed",
+      "expect(",
+      "tests failed",
+      "test failed",
+      "failing tests"
+    )
+  }
+];
+function classifyFailure(sig) {
+  switch (sig.terminationReason) {
+    case "timeout":
+      return "timeout";
+    case "stalled":
+      return "stall";
+    case "aborted":
+      return "turns";
+    // "killed" is ambiguous (user Ctrl+C, shutdown, or crash) — fall through.
+    case "killed":
+    case void 0:
+      break;
+  }
+  switch (sig.terminal) {
+    case "timeout":
+      return "timeout";
+    case "aborted":
+      return "turns";
+    case "merge_conflict":
+      return "logic";
+    case "completed":
+      return "unknown";
+    default:
+      break;
+  }
+  const haystack = `${sig.stderrTail ?? ""}
+${sig.errorMessage ?? ""}`.toLowerCase();
+  if (haystack.trim()) {
+    for (const probe of PROBES) {
+      if (probe.test(haystack)) return probe.cls;
+    }
+  }
+  return "unknown";
+}
+
 // src/runs.ts
 init_worktree();
 
@@ -2576,6 +2683,10 @@ function runPiSubprocess(run, piArgs, opts) {
     run.status = "failed";
     run.errorMessage = `spawn failed: ${e.message}`;
     run.finishedAt = Date.now();
+    run.failureClass = classifyFailure({
+      terminal: "failed",
+      errorMessage: run.errorMessage
+    });
     opts.registry.notify(run);
     void writeRecord(run);
     void writeFinal(run);
@@ -2680,6 +2791,15 @@ function runPiSubprocess(run, piArgs, opts) {
 `
         );
       }
+    }
+    if (terminal !== "completed") {
+      const tail = terminal === "hook_failed" ? run.hookResult?.tailText ?? stderr : stderr;
+      run.failureClass = classifyFailure({
+        terminal,
+        exitCode,
+        stderrTail: tail,
+        errorMessage: run.errorMessage
+      });
     }
     opts.registry.notify(run);
     try {
@@ -2994,7 +3114,8 @@ function emitFinalizeEvent(run, events) {
     events.emitFailed({
       ...base,
       status: run.status,
-      errorMessage: run.errorMessage
+      errorMessage: run.errorMessage,
+      failureClass: run.failureClass
     });
   }
 }
@@ -3207,6 +3328,11 @@ function forceTerminate(run, reason, registry, onComplete, killGroup = defaultKi
     run.errorMessage = "watchdog: hard-stalled (no events past hard threshold)";
   }
   run.finishedAt = Date.now();
+  run.failureClass = classifyFailure({
+    terminal: run.status,
+    terminationReason: reason,
+    errorMessage: run.errorMessage
+  });
   registry.notify(run);
   void writeRecord(run);
   void writeFinal(run);
