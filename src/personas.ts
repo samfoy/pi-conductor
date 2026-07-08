@@ -217,6 +217,8 @@ function validateAndBuild(
   // v0.17-S3: max_turns and grace_turns frontmatter fields.
   const maxTurns = optionalPositiveInteger(frontmatter, "max_turns");
   const graceTurns = optionalNonNegativeInteger(frontmatter, "grace_turns");
+  // v0.18: retry_max_attempts frontmatter field.
+  const retryMaxAttempts = optionalPositiveInteger(frontmatter, "retry_max_attempts");
 
   if (timeoutMinutes <= 0 || timeoutMinutes > 24 * 60) {
     throw new Error(`timeout_minutes must be in (0, 1440]; got ${timeoutMinutes}`);
@@ -245,6 +247,7 @@ function validateAndBuild(
     onCompleteHookTimeoutSeconds,
     maxTurns,
     graceTurns,
+    retryMaxAttempts,
   };
 }
 

@@ -117,6 +117,13 @@ var init_types = __esm({
       chains: {
         builder: { then: "critic" },
         simplifier: { then: "critic" }
+      },
+      // v0.18 classified retry: OFF by default (maxAttempts 1). Opt in via
+      // config/frontmatter/per-call. Retryable set excludes deterministic-
+      // cause classes (syntax/logic) and human-gated ones (permission).
+      retry: {
+        maxAttempts: 1,
+        retryableClasses: ["environment", "stall", "timeout", "test"]
       }
     };
     WRITE_CAPABLE_PERSONAS = /* @__PURE__ */ new Set(["builder", "simplifier"]);
@@ -519,6 +526,7 @@ function validateAndBuild(raw, source, sourcePath) {
   );
   const maxTurns = optionalPositiveInteger(frontmatter, "max_turns");
   const graceTurns = optionalNonNegativeInteger(frontmatter, "grace_turns");
+  const retryMaxAttempts = optionalPositiveInteger(frontmatter, "retry_max_attempts");
   if (timeoutMinutes <= 0 || timeoutMinutes > 24 * 60) {
     throw new Error(`timeout_minutes must be in (0, 1440]; got ${timeoutMinutes}`);
   }
@@ -543,7 +551,8 @@ function validateAndBuild(raw, source, sourcePath) {
     onCompleteHook,
     onCompleteHookTimeoutSeconds,
     maxTurns,
-    graceTurns
+    graceTurns,
+    retryMaxAttempts
   };
 }
 function requireString(fm, key) {
@@ -752,6 +761,28 @@ function mergeConfig(base, raw) {
       }
     }
     out.chains = merged;
+  }
+  if (r.retry && typeof r.retry === "object") {
+    const inc = r.retry;
+    const merged = { ...out.retry };
+    if (typeof inc.maxAttempts === "number" && inc.maxAttempts >= 1) {
+      merged.maxAttempts = Math.floor(inc.maxAttempts);
+    }
+    const VALID_CLASSES = /* @__PURE__ */ new Set([
+      "syntax",
+      "logic",
+      "test",
+      "environment",
+      "permission",
+      "timeout",
+      "stall",
+      "turns",
+      "unknown"
+    ]);
+    if (Array.isArray(inc.retryableClasses) && inc.retryableClasses.every((c) => typeof c === "string" && VALID_CLASSES.has(c))) {
+      merged.retryableClasses = inc.retryableClasses;
+    }
+    out.retry = merged;
   }
   return out;
 }
@@ -1814,6 +1845,50 @@ ${sig.errorMessage ?? ""}`.toLowerCase();
   }
   return "unknown";
 }
+var DEFAULT_RETRY_POLICY = {
+  maxAttempts: 1,
+  retryableClasses: ["environment", "stall", "timeout", "test"]
+};
+function shouldRetry(cls, attempt, policy) {
+  if (policy.maxAttempts <= 1) return false;
+  if (attempt >= policy.maxAttempts - 1) return false;
+  return policy.retryableClasses.includes(cls);
+}
+
+// src/retry.ts
+function resolveRetryPolicy(input) {
+  const builtin = input.builtin ?? DEFAULT_RETRY_POLICY;
+  const layers = [input.perCall, input.project, input.user, input.persona];
+  let maxAttempts;
+  let retryableClasses;
+  for (const layer of layers) {
+    if (!layer) continue;
+    if (maxAttempts === void 0 && typeof layer.maxAttempts === "number") {
+      maxAttempts = layer.maxAttempts;
+    }
+    if (retryableClasses === void 0 && layer.retryableClasses) {
+      retryableClasses = layer.retryableClasses;
+    }
+  }
+  return {
+    maxAttempts: Math.max(1, Math.floor(maxAttempts ?? builtin.maxAttempts)),
+    retryableClasses: retryableClasses ?? builtin.retryableClasses
+  };
+}
+function buildRetryTask(input) {
+  const nextAttempt = input.attempt + 2;
+  const diag = input.errorMessage?.trim() ? `
+Last error:
+${input.errorMessage.trim()}
+` : "";
+  return `## Retry (attempt ${nextAttempt} of ${input.maxAttempts})
+
+A previous attempt at this task failed with classification \`${input.failureClass}\`. Do not repeat the same approach if it was the cause; address the failure below first, then complete the task.
+${diag}
+---
+
+` + input.originalTask;
+}
 
 // src/runs.ts
 init_worktree();
@@ -2506,7 +2581,21 @@ function spawnRun(opts) {
         maxTurns: resolveMaxTurns(cascadeInput),
         graceTurns: resolveGraceTurns(cascadeInput),
         gracePeriodActive: false,
-        gracePeriodStartTurn: void 0
+        gracePeriodStartTurn: void 0,
+        // v0.18 classified retry: carry the attempt counter and resolve
+        // the effective policy from the same 5-layer cascade (per-call >
+        // project > user > persona frontmatter > built-in default).
+        retryAttempt: opts.retryAttempt ?? 0,
+        retryPolicy: resolveRetryPolicy({
+          perCall: opts.retryMaxAttempts !== void 0 ? { maxAttempts: opts.retryMaxAttempts } : void 0,
+          project: projectOverride?.retryMaxAttempts !== void 0 ? { maxAttempts: projectOverride.retryMaxAttempts } : void 0,
+          user: userOverride?.retryMaxAttempts !== void 0 ? { maxAttempts: userOverride.retryMaxAttempts } : void 0,
+          persona: opts.persona.retryMaxAttempts !== void 0 ? { maxAttempts: opts.persona.retryMaxAttempts } : void 0,
+          builtin: {
+            maxAttempts: layered.config.retry.maxAttempts,
+            retryableClasses: layered.config.retry.retryableClasses
+          }
+        })
       };
     })()
   };
@@ -2628,6 +2717,8 @@ function spawnRun(opts) {
     ),
     // v0.15 chains: thread the callback from spawnRun opts.
     onChain: opts.onChain,
+    // v0.18 classified retry: thread the retry callback.
+    onRetry: opts.onRetry,
     // v0.16-S3: thread the event bus adapter so finalize can emit lifecycle events.
     events: opts.events
   });
@@ -2758,6 +2849,7 @@ function runPiSubprocess(run, piArgs, opts) {
       } catch {
       }
       emitFinalizeEvent(run, opts.events);
+      applyRetryIfNeeded(run, opts.onRetry);
       donePromiseResolve(run);
       return;
     }
@@ -2815,6 +2907,7 @@ function runPiSubprocess(run, piArgs, opts) {
         }
       }
       applyChainIfPresent(run, run.status, opts.onChain);
+      applyRetryIfNeeded(run, opts.onRetry);
       emitFinalizeEvent(run, opts.events);
       donePromiseResolve(run);
     });
@@ -3178,6 +3271,18 @@ function applyChainIfPresent(run, terminal, onChain) {
     onChain(run);
   } catch {
   }
+}
+function applyRetryIfNeeded(run, onRetry) {
+  if (!onRetry) return false;
+  if (run.status === "completed") return false;
+  if (!run.retryPolicy || !run.failureClass) return false;
+  const attempt = run.retryAttempt ?? 0;
+  if (!shouldRetry(run.failureClass, attempt, run.retryPolicy)) return false;
+  try {
+    onRetry(run);
+  } catch {
+  }
+  return true;
 }
 async function applyHookToTerminal(run, resolvedHook, terminal, deps = {}) {
   try {
@@ -6274,6 +6379,12 @@ function registerSpawnTool(pi, opts) {
         Type.Boolean({
           description: "v0.15 chains: set to false to skip automatic chain spawns for this run even if a chain is configured in conductor.json for the persona. Default: true (chains apply when configured)."
         })
+      ),
+      retry_max_attempts: Type.Optional(
+        Type.Integer({
+          minimum: 1,
+          description: "v0.18 classified retry: total attempts (including the first) for this spawn. 1 = no retry (default). When >1, a non-completed terminal whose failure classifies as retryable (environment/stall/timeout/test by default) auto-respawns the same persona with a diagnostic-augmented task, up to this budget. Deterministic-cause failures (syntax/logic) and permission failures are never retried. Cascade: per-call > project > user > persona-frontmatter > built-in."
+        })
       )
     }),
     async execute(_id, params, signal, onUpdate) {
@@ -6358,6 +6469,21 @@ function registerSpawnTool(pi, opts) {
           cfg,
           queue,
           cwd,
+          pushNotification: opts.pushCompletionNotification,
+          getParentMessages: opts.getParentMessages,
+          events: opts.getEvents?.()
+        }),
+        // v0.18 classified retry: per-call attempt budget + the re-spawn
+        // callback. Undefined per-call falls through the cascade to
+        // config/persona/built-in (default maxAttempts 1 = no retry).
+        retryMaxAttempts: params.retry_max_attempts,
+        onRetry: buildOnRetryCallback({
+          originalTask: params.task,
+          persona,
+          cfg,
+          queue,
+          cwd,
+          retryMaxAttempts: params.retry_max_attempts,
           pushNotification: opts.pushCompletionNotification,
           getParentMessages: opts.getParentMessages,
           events: opts.getEvents?.()
@@ -7063,6 +7189,40 @@ function buildOnChainCallback(args) {
       events: args.events
     });
   };
+}
+function buildOnRetryCallback(args) {
+  const self = (failedRun) => {
+    const failedAttempt = failedRun.retryAttempt ?? 0;
+    const maxAttempts = failedRun.retryPolicy?.maxAttempts ?? 1;
+    const ov = args.cfg.personaOverrides[args.persona.name] ?? {};
+    const task = buildRetryTask({
+      originalTask: args.originalTask,
+      failureClass: failedRun.failureClass ?? "unknown",
+      attempt: failedAttempt,
+      maxAttempts,
+      errorMessage: failedRun.errorMessage
+    });
+    args.queue.enqueueOrSpawn({
+      persona: args.persona,
+      task,
+      mode: "background",
+      cwd: args.cwd,
+      model: resolveModel(args.persona, ov),
+      thinking: resolveThinking(args.persona, ov),
+      timeoutMs: resolveTimeoutMs(args.persona, ov, args.cfg),
+      parentMessages: args.getParentMessages(),
+      // Preserve worktree isolation across retries for write-capable personas.
+      worktree: args.persona.worktree === true,
+      // Carry the incremented attempt + the same per-call budget so the
+      // re-spawned run resolves the same policy and can retry again.
+      retryAttempt: failedAttempt + 1,
+      retryMaxAttempts: args.retryMaxAttempts,
+      onRetry: self,
+      onComplete: (run) => args.pushNotification(run),
+      events: args.events
+    });
+  };
+  return self;
 }
 
 // src/queue.ts

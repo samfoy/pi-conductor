@@ -33,7 +33,8 @@ import { isNonSubstantiveFinalMessage } from "./substance-check.ts";
 import { resolveOnCompleteHook, type HookCascadeInput } from "./hook-cascade.ts";
 import { resolveMaxTurns, resolveGraceTurns } from "./turn-limit.ts";
 import { runHook, defaultKillGroup } from "./hook-runner.ts";
-import { classifyFailure } from "./failure-classify.ts";
+import { classifyFailure, shouldRetry } from "./failure-classify.ts";
+import { resolveRetryPolicy } from "./retry.ts";
 import { loadConfigWithErrors } from "./config.ts";
 import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage } from "./worktree.ts";
 import { readProcessStartTime } from "./reconcile-startup.ts";
@@ -979,6 +980,25 @@ export interface SpawnOptions {
    * Undefined falls through to lower layers; built-in default is 5.
    */
   graceTurns?: number;
+  /**
+   * v0.18 classified retry — per-call `retry_max_attempts` override
+   * (highest cascade layer). Feeds `resolveRetryPolicy`.
+   */
+  retryMaxAttempts?: number;
+  /**
+   * v0.18 classified retry — carried across re-spawns. 0-indexed attempt
+   * number for the run being spawned (0 = original). The retry loop sets
+   * this to prevAttempt+1. Stamped onto `Run.retryAttempt`.
+   */
+  retryAttempt?: number;
+  /**
+   * v0.18 classified retry — fired from `finalize` when a non-completed
+   * terminal is retryable (per the run's resolved policy + attempt).
+   * Re-spawns the same persona with a diagnostic-augmented task and
+   * `retryAttempt+1`. Analogous to `onChain` but on failure; mutually
+   * exclusive with it (chain fires on completed only).
+   */
+  onRetry?: (run: Run) => void;
 }
 
 /**
@@ -1178,6 +1198,32 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
         graceTurns: resolveGraceTurns(cascadeInput),
         gracePeriodActive: false as boolean,
         gracePeriodStartTurn: undefined as number | undefined,
+        // v0.18 classified retry: carry the attempt counter and resolve
+        // the effective policy from the same 5-layer cascade (per-call >
+        // project > user > persona frontmatter > built-in default).
+        retryAttempt: opts.retryAttempt ?? 0,
+        retryPolicy: resolveRetryPolicy({
+          perCall:
+            opts.retryMaxAttempts !== undefined
+              ? { maxAttempts: opts.retryMaxAttempts }
+              : undefined,
+          project:
+            projectOverride?.retryMaxAttempts !== undefined
+              ? { maxAttempts: projectOverride.retryMaxAttempts }
+              : undefined,
+          user:
+            userOverride?.retryMaxAttempts !== undefined
+              ? { maxAttempts: userOverride.retryMaxAttempts }
+              : undefined,
+          persona:
+            opts.persona.retryMaxAttempts !== undefined
+              ? { maxAttempts: opts.persona.retryMaxAttempts }
+              : undefined,
+          builtin: {
+            maxAttempts: layered.config.retry.maxAttempts,
+            retryableClasses: layered.config.retry.retryableClasses,
+          },
+        }),
       };
     })(),
   };
@@ -1321,6 +1367,8 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     ),
     // v0.15 chains: thread the callback from spawnRun opts.
     onChain: opts.onChain,
+    // v0.18 classified retry: thread the retry callback.
+    onRetry: opts.onRetry,
     // v0.16-S3: thread the event bus adapter so finalize can emit lifecycle events.
     events: opts.events,
   });
@@ -1379,6 +1427,11 @@ interface RunPiSubprocessOpts {
    * `completed`. See {@link applyChainIfPresent}.
    */
   onChain?: (run: Run) => void;
+  /**
+   * v0.18 classified retry: callback fired from finalize when a
+   * non-completed terminal is retryable. See {@link applyRetryIfNeeded}.
+   */
+  onRetry?: (run: Run) => void;
   /**
    * v0.16 event bus adapter. Threaded from SpawnOptions/SendToRunOptions into
    * runPiSubprocess so the finalize closure can emit lifecycle events.
@@ -1627,6 +1680,11 @@ function runPiSubprocess(
       // v0.16-S3: emit lifecycle event for force-terminated runs (run.status
       // already set by forceTerminate; emit before resolving done).
       emitFinalizeEvent(run, opts.events);
+      // v0.18 classified retry: forceTerminate-settled runs (stall/timeout/
+      // abort) never reach the normal `.finally` below, so dispatch retry
+      // here. failureClass was stamped by forceTerminate; retryPolicy at
+      // spawn. shouldRetry gates non-retryable classes (e.g. user kill).
+      applyRetryIfNeeded(run, opts.onRetry);
       donePromiseResolve(run);
       return;
     }
@@ -1710,6 +1768,9 @@ function runPiSubprocess(
         }
         // v0.15 chains: fire after writeFinal so {final} template can read finalPath.
         applyChainIfPresent(run, run.status as RunStatus, opts.onChain);
+        // v0.18 classified retry: fire on retryable non-completed terminals.
+        // Mutually exclusive with the chain above (chain is completed-only).
+        applyRetryIfNeeded(run, opts.onRetry);
         // v0.16-S3: emit completed/failed lifecycle event.
         emitFinalizeEvent(run, opts.events);
         donePromiseResolve(run);
@@ -2508,6 +2569,38 @@ export function applyChainIfPresent(
   } catch {
     // never crash the finalize path on chain errors
   }
+}
+
+/**
+ * v0.18 classified retry: fire the `onRetry` callback when a non-completed
+ * terminal is retryable under the run's resolved policy.
+ *
+ * Fires from BOTH finalize paths (natural-exit `.finally` and the
+ * forceTerminate early-return block) because the retryable stall/timeout
+ * classes settle via forceTerminate, not natural exit. Mutually exclusive
+ * with `applyChainIfPresent` (chain fires on completed only).
+ *
+ * Preconditions: run has a stamped `failureClass` (S1) and `retryPolicy`
+ * (stamped at spawn). Returns true when a retry was dispatched. Swallows
+ * callback exceptions — a retry-spawn failure must not crash finalize.
+ *
+ * Exported for unit testing.
+ */
+export function applyRetryIfNeeded(
+  run: Run,
+  onRetry: ((run: Run) => void) | undefined,
+): boolean {
+  if (!onRetry) return false;
+  if (run.status === "completed") return false;
+  if (!run.retryPolicy || !run.failureClass) return false;
+  const attempt = run.retryAttempt ?? 0;
+  if (!shouldRetry(run.failureClass, attempt, run.retryPolicy)) return false;
+  try {
+    onRetry(run);
+  } catch {
+    // never crash the finalize path on retry-spawn errors
+  }
+  return true;
 }
 
 /**

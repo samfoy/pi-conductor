@@ -140,6 +140,28 @@ function mergeConfig(base: ConductorConfig, raw: unknown): ConductorConfig {
     out.chains = merged as ConductorConfig["chains"];
   }
 
+  // v0.18 retry: field-level merge of the retry defaults block.
+  if (r.retry && typeof r.retry === "object") {
+    const inc = r.retry as Record<string, unknown>;
+    const merged = { ...out.retry };
+    if (typeof inc.maxAttempts === "number" && inc.maxAttempts >= 1) {
+      merged.maxAttempts = Math.floor(inc.maxAttempts);
+    }
+    // Only accept known FailureClass values; a typo (e.g. "environmnet")
+    // is dropped rather than silently stored as a never-matching class.
+    const VALID_CLASSES = new Set([
+      "syntax", "logic", "test", "environment",
+      "permission", "timeout", "stall", "turns", "unknown",
+    ]);
+    if (
+      Array.isArray(inc.retryableClasses) &&
+      inc.retryableClasses.every((c) => typeof c === "string" && VALID_CLASSES.has(c))
+    ) {
+      merged.retryableClasses = inc.retryableClasses as ConductorConfig["retry"]["retryableClasses"];
+    }
+    out.retry = merged;
+  }
+
   return out;
 }
 

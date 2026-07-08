@@ -98,6 +98,12 @@ export interface Persona {
    * Default resolved by `resolveGraceTurns` to 5. 0 = immediate abort.
    */
   graceTurns?: number;
+  /**
+   * v0.18 classified retry — persona frontmatter (`retry_max_attempts`).
+   * Attempt budget for this persona's runs (incl. the first). Feeds the
+   * persona layer of `resolveRetryPolicy`. Undefined → lower layers.
+   */
+  retryMaxAttempts?: number;
 }
 
 export interface PersonaResolution {
@@ -179,6 +185,25 @@ export interface ConductorConfig {
    * Empty by default — no auto-chaining unless configured.
    */
   chains?: Record<string, ChainStep>;
+  /**
+   * v0.18 classified retry defaults. Built-in `maxAttempts: 1` (retry
+   * OFF) — opt in via config, persona frontmatter, or the per-call
+   * `retry_max_attempts` spawn arg. Mirrors the watchdog/turn-limit
+   * default-off posture.
+   */
+  retry: RetryConfigDefaults;
+}
+
+/**
+ * v0.18 retry defaults stored in ConductorConfig. The runtime policy
+ * type (`RetryPolicy`) lives in `src/failure-classify.ts`; this is the
+ * user-tunable default layer feeding `resolveRetryPolicy`.
+ */
+export interface RetryConfigDefaults {
+  /** Total attempts including the first. 1 = no retry (default). */
+  maxAttempts: number;
+  /** Failure classes worth re-running. */
+  retryableClasses: import("./failure-classify.ts").FailureClass[];
 }
 
 /**
@@ -261,6 +286,12 @@ export interface PersonaOverride {
    * `graceTurns`. Feeds the project/user layers of `resolveGraceTurns`.
    */
   graceTurns?: number;
+  /**
+   * v0.18 classified retry — project/user config per-persona override of
+   * the retry attempt budget. Feeds the project/user layers of
+   * `resolveRetryPolicy`.
+   */
+  retryMaxAttempts?: number;
 }
 
 export const DEFAULT_CONFIG: ConductorConfig = {
@@ -303,6 +334,13 @@ export const DEFAULT_CONFIG: ConductorConfig = {
   chains: {
     builder: { then: "critic" },
     simplifier: { then: "critic" },
+  },
+  // v0.18 classified retry: OFF by default (maxAttempts 1). Opt in via
+  // config/frontmatter/per-call. Retryable set excludes deterministic-
+  // cause classes (syntax/logic) and human-gated ones (permission).
+  retry: {
+    maxAttempts: 1,
+    retryableClasses: ["environment", "stall", "timeout", "test"],
   },
 };
 
@@ -621,6 +659,12 @@ export interface Run {
    * is treated as 0.
    */
   retryAttempt?: number;
+  /**
+   * v0.18 classified retry: resolved retry policy stamped at spawn time
+   * (via `resolveRetryPolicy`). Read by `finalize` to decide whether a
+   * non-completed terminal should trigger a re-spawn. Not persisted.
+   */
+  retryPolicy?: import("./failure-classify.ts").RetryPolicy;
 
   /** Streamed messages from the sub-agent. */
   messages: AgentMessage[];

@@ -13,6 +13,7 @@ import type { Persona, PersonaOverride, Run, RunStatus, ThinkingLevel, MergeStra
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
 import { resolveChain, buildChainTask } from "./chain.ts";
+import { buildRetryTask } from "./retry.ts";
 import { collapseSteerableCascade } from "./steerable.ts";
 import { elapsedStr, forceTerminate, formatUsage, getFinalText, pauseRun, resolveTimeoutMs, resumeRun, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
@@ -309,6 +310,13 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
             "v0.15 chains: set to false to skip automatic chain spawns for this run even if a chain is configured in conductor.json for the persona. Default: true (chains apply when configured).",
         }),
       ),
+      retry_max_attempts: Type.Optional(
+        Type.Integer({
+          minimum: 1,
+          description:
+            "v0.18 classified retry: total attempts (including the first) for this spawn. 1 = no retry (default). When >1, a non-completed terminal whose failure classifies as retryable (environment/stall/timeout/test by default) auto-respawns the same persona with a diagnostic-augmented task, up to this budget. Deterministic-cause failures (syntax/logic) and permission failures are never retried. Cascade: per-call > project > user > persona-frontmatter > built-in.",
+        }),
+      ),
     }),
     async execute(_id, params, signal, onUpdate) {
       const tmRange = validateTimeoutMinutes(params.timeout_minutes);
@@ -410,6 +418,21 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           cfg,
           queue,
           cwd,
+          pushNotification: opts.pushCompletionNotification,
+          getParentMessages: opts.getParentMessages,
+          events: opts.getEvents?.(),
+        }),
+        // v0.18 classified retry: per-call attempt budget + the re-spawn
+        // callback. Undefined per-call falls through the cascade to
+        // config/persona/built-in (default maxAttempts 1 = no retry).
+        retryMaxAttempts: params.retry_max_attempts,
+        onRetry: buildOnRetryCallback({
+          originalTask: params.task,
+          persona,
+          cfg,
+          queue,
+          cwd,
+          retryMaxAttempts: params.retry_max_attempts,
           pushNotification: opts.pushCompletionNotification,
           getParentMessages: opts.getParentMessages,
           events: opts.getEvents?.(),
@@ -1322,4 +1345,70 @@ function buildOnChainCallback(
       events: args.events,
     } as SpawnOptions);
   };
+}
+
+// ── v0.18 classified retry ───────────────────────────────────────────────
+
+export interface OnRetryCallbackOpts {
+  /** Pristine first-attempt task — never a previously-augmented one. */
+  originalTask: string;
+  persona: import("./types.ts").Persona;
+  cfg: ReturnType<typeof import("./config.ts").loadConfig>;
+  queue: SpawnQueue;
+  cwd: string;
+  /** Per-call retry budget (highest cascade layer); threaded to the re-spawn. */
+  retryMaxAttempts?: number;
+  pushNotification: (run: Run) => void;
+  getParentMessages: () => AgentMessage[];
+  events?: ConductorEventEmitter;
+}
+
+/**
+ * Build the `onRetry` callback for an `ensemble_spawn` call.
+ *
+ * Fired by `finalize`/`applyRetryIfNeeded` when a non-completed terminal
+ * is retryable under the run's resolved policy. Re-spawns the SAME persona
+ * with a diagnostic-augmented task (built from the pristine original, so
+ * preambles never stack) and `retryAttempt = failedAttempt + 1`.
+ *
+ * The re-spawn carries THIS SAME callback as its `onRetry`, so successive
+ * failures keep retrying until `shouldRetry` caps out at `maxAttempts`.
+ * Re-spawns run in the background and notify on completion (the original
+ * may have been foreground; a retry is always background).
+ */
+export function buildOnRetryCallback(
+  args: OnRetryCallbackOpts,
+): (run: Run) => void {
+  const self = (failedRun: Run): void => {
+    const failedAttempt = failedRun.retryAttempt ?? 0;
+    const maxAttempts = failedRun.retryPolicy?.maxAttempts ?? 1;
+    const ov = args.cfg.personaOverrides[args.persona.name] ?? {};
+    const task = buildRetryTask({
+      originalTask: args.originalTask,
+      failureClass: failedRun.failureClass ?? "unknown",
+      attempt: failedAttempt,
+      maxAttempts,
+      errorMessage: failedRun.errorMessage,
+    });
+    args.queue.enqueueOrSpawn({
+      persona: args.persona,
+      task,
+      mode: "background",
+      cwd: args.cwd,
+      model: resolveModel(args.persona, ov),
+      thinking: resolveThinking(args.persona, ov),
+      timeoutMs: resolveTimeoutMs(args.persona, ov, args.cfg),
+      parentMessages: args.getParentMessages(),
+      // Preserve worktree isolation across retries for write-capable personas.
+      worktree: args.persona.worktree === true,
+      // Carry the incremented attempt + the same per-call budget so the
+      // re-spawned run resolves the same policy and can retry again.
+      retryAttempt: failedAttempt + 1,
+      retryMaxAttempts: args.retryMaxAttempts,
+      onRetry: self,
+      onComplete: (run) => args.pushNotification(run),
+      events: args.events,
+    } as SpawnOptions);
+  };
+  return self;
 }
