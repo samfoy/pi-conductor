@@ -29,7 +29,7 @@
   ],
   "type": "module",
   "scripts": {
-    "test": "git config core.bare false 2>/dev/null; env -u CONDUCTOR_SUBAGENT node --test --import tsx tests/*.test.ts",
+    "test": "git config core.bare false 2>/dev/null; env -u CONDUCTOR_SUBAGENT CONDUCTOR_MEMORY_PATH=\"${TMPDIR:-/tmp}/conductor-test-memory.jsonl\" node --test --import tsx tests/*.test.ts",
     "test:summary": "git config core.bare false 2>/dev/null; env -u CONDUCTOR_SUBAGENT node --test --import tsx tests/*.test.ts > /tmp/pi-test-out.txt 2>&1; tail -10 /tmp/pi-test-out.txt",
     "typecheck": "tsc --noEmit",
     "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --sourcemap --packages=external --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-agent-core --external:@earendil-works/pi-tui --external:@sinclair/typebox",

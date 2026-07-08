@@ -35,6 +35,7 @@ import { resolveMaxTurns, resolveGraceTurns } from "./turn-limit.ts";
 import { runHook, defaultKillGroup } from "./hook-runner.ts";
 import { classifyFailure, shouldRetry } from "./failure-classify.ts";
 import { resolveRetryPolicy } from "./retry.ts";
+import { recordRunOutcome } from "./memory.ts";
 import { loadConfigWithErrors } from "./config.ts";
 import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage } from "./worktree.ts";
 import { readProcessStartTime } from "./reconcile-startup.ts";
@@ -1685,6 +1686,8 @@ function runPiSubprocess(
       // here. failureClass was stamped by forceTerminate; retryPolicy at
       // spawn. shouldRetry gates non-retryable classes (e.g. user kill).
       applyRetryIfNeeded(run, opts.onRetry);
+      // v0.18 memory: record the (forceTerminate) outcome too.
+      recordRunOutcome(run);
       donePromiseResolve(run);
       return;
     }
@@ -1771,6 +1774,9 @@ function runPiSubprocess(
         // v0.18 classified retry: fire on retryable non-completed terminals.
         // Mutually exclusive with the chain above (chain is completed-only).
         applyRetryIfNeeded(run, opts.onRetry);
+        // v0.18 memory: record the outcome (success AND failure) for
+        // cross-session persona scoring. Best-effort; never throws.
+        recordRunOutcome(run);
         // v0.16-S3: emit completed/failed lifecycle event.
         emitFinalizeEvent(run, opts.events);
         donePromiseResolve(run);

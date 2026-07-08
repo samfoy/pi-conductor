@@ -16,6 +16,7 @@ import { loadConfig } from "./config.ts";
 import { resolveChain, buildChainTask } from "./chain.ts";
 import { evaluateChainOutcome } from "./chain.ts";
 import { buildRetryTask } from "./retry.ts";
+import { scoreForShape, normalizeTaskShape } from "./memory.ts";
 import { collapseSteerableCascade } from "./steerable.ts";
 import { elapsedStr, forceTerminate, formatUsage, getFinalText, pauseRun, resolveTimeoutMs, resumeRun, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
@@ -114,6 +115,7 @@ export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   registerResumeTool(pi, opts);
   registerKillTool(pi, opts);
   registerFocusTool(pi, opts);
+  registerRecommendTool(pi, opts);
 }
 
 // ── ensemble_list ────────────────────────────────────────────────────
@@ -152,6 +154,44 @@ function registerListTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 }
 
 // ── ensemble_status ──────────────────────────────────────────────────
+
+function registerRecommendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
+  pi.registerTool({
+    name: "ensemble_recommend",
+    label: "Recommend persona",
+    description:
+      "v0.18 cross-session memory: given a task description, return conductor " +
+      "personas ranked by their confidence-weighted, recency-decayed success " +
+      "rate on similar tasks (matched by normalized task shape). Advisory only — " +
+      "an empty result means no history for this shape yet; use your own judgment.",
+    promptSnippet: "Recommend a persona for a task based on past outcomes",
+    promptGuidelines: [
+      "Call ensemble_recommend before spawning when you're unsure which persona historically succeeds on this kind of task.",
+      "The score is a HINT, not a mandate — a persona with no history simply won't appear. Prefer the canonical chain shapes when memory is empty.",
+    ],
+    parameters: Type.Object({
+      task: Type.String({ description: "The task description to score personas for." }),
+    }),
+    async execute(_id, params) {
+      const scores = scoreForShape(params.task);
+      const top = scores.slice(0, 8);
+      const text = top.length
+        ? "Persona recommendations for this task shape (recency-weighted score, higher = better; " +
+          "score blends success rate with recency and a small-sample penalty, so it is NOT a raw success %):\n" +
+          top
+            .map(
+              (s) =>
+                `  ${s.persona} — score ${s.successRate.toFixed(2)} (n=${s.n})`,
+            )
+            .join("\n")
+        : "No cross-session history for this task shape yet. Use the canonical chain.";
+      return {
+        content: [{ type: "text" as const, text }],
+        details: { taskShape: normalizeTaskShape(params.task), scores: top },
+      };
+    },
+  });
+}
 
 function registerStatusTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   pi.registerTool({
