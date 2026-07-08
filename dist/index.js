@@ -5647,6 +5647,7 @@ Resolve manually in the worktree and run /conductor worktree merge ${runId} agai
 
 // src/tools.ts
 import { Type } from "@sinclair/typebox";
+import { readFileSync as readFileSync6, existsSync as existsSync12 } from "node:fs";
 
 // src/chain.ts
 import { readFileSync as readFileSync5, existsSync as existsSync11 } from "node:fs";
@@ -5676,6 +5677,26 @@ function buildChainTask(taskTemplate, context) {
     }
   }
   return template.replace(/\{persona\}/g, context.persona).replace(/\{runId\}/g, context.runId).replace(/\{task\}/g, context.task).replace(/\{final\}/g, finalContent).replace(/\{worktreeBranch\}/g, context.worktreeBranch ?? "").replace(/\{baseBranch\}/g, context.baseBranch ?? "");
+}
+var STOP_SIGNALS = [
+  /chain: stop/i,
+  /do not proceed/i,
+  /cannot proceed/i,
+  /halt the chain/i,
+  /\bblocked:/i,
+  /escalate to human/i
+];
+function evaluateChainOutcome(input) {
+  const fc = input.parentFailureClass;
+  if (fc === "logic" || fc === "syntax" || fc === "permission") {
+    return { kind: "stop", reason: `parent failed with non-retryable class '${fc}'` };
+  }
+  for (const sig of STOP_SIGNALS) {
+    if (sig.test(input.parentFinal)) {
+      return { kind: "stop", reason: `parent output signalled halt (${sig.source})` };
+    }
+  }
+  return { kind: "proceed" };
 }
 
 // src/steerable.ts
@@ -7152,19 +7173,46 @@ function buildOnChainCallback(args) {
   return async (parentRun) => {
     const chainCwd = parentRun.cwd;
     const chainCfg = loadConfig(chainCwd);
+    let targetPersonaName = step.then;
+    let overrideTask;
+    if (step.reevaluate) {
+      let parentFinal = "";
+      if (existsSync12(parentRun.finalPath)) {
+        try {
+          parentFinal = readFileSync6(parentRun.finalPath, "utf-8");
+        } catch {
+        }
+      }
+      const verdict = evaluateChainOutcome({
+        parentFinal,
+        parentFailureClass: parentRun.failureClass,
+        step
+      });
+      if (verdict.kind === "stop") {
+        process.stderr.write(
+          `[conductor] chain re-eval: STOP after ${parentRun.id} \u2014 ${verdict.reason}; not spawning "${step.then}"
+`
+        );
+        return;
+      }
+      if (verdict.kind === "adapt" || verdict.kind === "insert") {
+        targetPersonaName = verdict.persona;
+        overrideTask = verdict.task;
+      }
+    }
     const chainResolved = await resolvePersonas({
       cwd: chainCwd,
       personaOverrides: chainCfg.personaOverrides
     });
-    const chainPersona = chainResolved.personas.get(step.then);
+    const chainPersona = chainResolved.personas.get(targetPersonaName);
     if (!chainPersona) {
       process.stderr.write(
-        `[conductor] chain: persona "${step.then}" not found \u2014 skipping auto-spawn after ${parentRun.id}
+        `[conductor] chain: persona "${targetPersonaName}" not found \u2014 skipping auto-spawn after ${parentRun.id}
 `
       );
       return;
     }
-    const task = buildChainTask(step.taskTemplate, {
+    const task = overrideTask ?? buildChainTask(step.taskTemplate, {
       persona: parentRun.persona,
       runId: parentRun.id,
       task: parentRun.task,
@@ -9182,7 +9230,7 @@ var ConductorEventEmitter = class {
 };
 
 // src/rpc-detach.ts
-import { existsSync as existsSync12, unlinkSync } from "node:fs";
+import { existsSync as existsSync13, unlinkSync } from "node:fs";
 function createRpcDetach(filePath, intervalMs = 200) {
   let resolveDetach = () => {
   };
@@ -9190,7 +9238,7 @@ function createRpcDetach(filePath, intervalMs = 200) {
     resolveDetach = res;
   });
   const pollTimer = setInterval(() => {
-    if (existsSync12(filePath)) {
+    if (existsSync13(filePath)) {
       try {
         unlinkSync(filePath);
       } catch {
@@ -9202,7 +9250,7 @@ function createRpcDetach(filePath, intervalMs = 200) {
   const unregister = () => {
     clearInterval(pollTimer);
     try {
-      if (existsSync12(filePath)) unlinkSync(filePath);
+      if (existsSync13(filePath)) unlinkSync(filePath);
     } catch {
     }
   };

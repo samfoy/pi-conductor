@@ -9,10 +9,12 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import { readFileSync, existsSync } from "node:fs";
 import type { Persona, PersonaOverride, Run, RunStatus, ThinkingLevel, MergeStrategy } from "./types.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
 import { resolveChain, buildChainTask } from "./chain.ts";
+import { evaluateChainOutcome } from "./chain.ts";
 import { buildRetryTask } from "./retry.ts";
 import { collapseSteerableCascade } from "./steerable.ts";
 import { elapsedStr, forceTerminate, formatUsage, getFinalText, pauseRun, resolveTimeoutMs, resumeRun, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
@@ -1275,7 +1277,7 @@ function isTerminalStatus(s: RunStatus): boolean {
 
 // ── v0.15 chains ─────────────────────────────────────────────────────────
 
-interface OnChainCallbackOpts {
+export interface OnChainCallbackOpts {
   chainEnabled: boolean;
   personaName: string;
   cfg: ReturnType<typeof import("./config.ts").loadConfig>;
@@ -1297,7 +1299,7 @@ interface OnChainCallbackOpts {
  * Chain-spawned runs receive `onChain: undefined` to prevent
  * chain-of-chains (depth-1 cap).
  */
-function buildOnChainCallback(
+export function buildOnChainCallback(
   args: OnChainCallbackOpts,
 ): ((run: Run) => void) | undefined {
   if (!args.chainEnabled) return undefined;
@@ -1307,26 +1309,62 @@ function buildOnChainCallback(
   return async (parentRun: Run) => {
     const chainCwd = parentRun.cwd;
     const chainCfg = loadConfig(chainCwd);
+
+    // v0.18 plans-as-hypotheses: when the step opts into re-evaluation,
+    // consult the verdict before spawning. `stop` halts the chain;
+    // `adapt`/`insert` retarget the successor (only the LLM-backed
+    // verdict in S5 emits those — the deterministic layer emits
+    // proceed/stop only).
+    let targetPersonaName = step.then;
+    let overrideTask: string | undefined;
+    if (step.reevaluate) {
+      let parentFinal = "";
+      if (existsSync(parentRun.finalPath)) {
+        try {
+          parentFinal = readFileSync(parentRun.finalPath, "utf-8");
+        } catch {
+          // best-effort; empty final → proceed
+        }
+      }
+      const verdict = evaluateChainOutcome({
+        parentFinal,
+        parentFailureClass: parentRun.failureClass,
+        step,
+      });
+      if (verdict.kind === "stop") {
+        process.stderr.write(
+          `[conductor] chain re-eval: STOP after ${parentRun.id} — ${verdict.reason}; not spawning "${step.then}"\n`,
+        );
+        return;
+      }
+      if (verdict.kind === "adapt" || verdict.kind === "insert") {
+        targetPersonaName = verdict.persona;
+        overrideTask = verdict.task;
+      }
+    }
+
     const chainResolved = await resolvePersonas({
       cwd: chainCwd,
       personaOverrides: chainCfg.personaOverrides,
     });
-    const chainPersona = chainResolved.personas.get(step.then);
+    const chainPersona = chainResolved.personas.get(targetPersonaName);
     if (!chainPersona) {
       process.stderr.write(
-        `[conductor] chain: persona "${step.then}" not found — skipping auto-spawn after ${parentRun.id}\n`,
+        `[conductor] chain: persona "${targetPersonaName}" not found — skipping auto-spawn after ${parentRun.id}\n`,
       );
       return;
     }
-    const task = buildChainTask(step.taskTemplate, {
-      persona: parentRun.persona,
-      runId: parentRun.id,
-      task: parentRun.task,
-      finalPath: parentRun.finalPath,
-      worktreeBranch: parentRun.worktreeBranch,
-      baseBranch: parentRun.worktreeBaseBranch,
-      mergeStrategy: parentRun.mergeStrategy,
-    });
+    const task =
+      overrideTask ??
+      buildChainTask(step.taskTemplate, {
+        persona: parentRun.persona,
+        runId: parentRun.id,
+        task: parentRun.task,
+        finalPath: parentRun.finalPath,
+        worktreeBranch: parentRun.worktreeBranch,
+        baseBranch: parentRun.worktreeBaseBranch,
+        mergeStrategy: parentRun.mergeStrategy,
+      });
     const baseOv = chainCfg.personaOverrides[chainPersona.name] ?? {};
     const chainTimeoutMs = step.timeoutMinutes
       ? step.timeoutMinutes * 60 * 1000

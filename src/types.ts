@@ -135,6 +135,14 @@ export interface ChainStep {
   taskTemplate?: string;
   /** Timeout override (minutes) for the chained run. */
   timeoutMinutes?: number;
+  /**
+   * v0.18 plans-as-hypotheses: when true, the conductor evaluates the
+   * parent run's outcome (via `evaluateChainOutcome`) BEFORE spawning
+   * `then`, and may proceed / adapt / insert a remediation step / stop.
+   * When false or absent, the chain spawns `then` unconditionally (v0.15
+   * behavior).
+   */
+  reevaluate?: boolean;
 }
 
 export interface ConductorConfig {
