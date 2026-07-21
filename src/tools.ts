@@ -62,6 +62,15 @@ interface RegisterToolsOpts {
    * nothing to inherit.
    */
   getParentMessages: () => AgentMessage[];
+  /**
+   * pi session id of THIS conductor host slot
+   * (`ctx.sessionManager.getSessionId()`). Stamped onto spawned runs as
+   * `parentSessionId` so post-startup reconcile can distinguish sibling
+   * slots that share one OS process (pi-dashboard). Returns undefined in
+   * headless / non-dashboard contexts (reconcile falls back to pid).
+   * Optional so lightweight test harnesses can omit it.
+   */
+  getSessionId?: () => string | undefined;
   /** Push a `<sub-agent-completed>` notification into the parent conversation. */
   pushCompletionNotification: (run: Run) => void;
   /**
@@ -391,6 +400,7 @@ function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           thinking: resolveThinking(personaObj, ov),
           timeoutMs: resolveTimeoutMs(personaObj, ov, cfg),
           parentMessages: opts.getParentMessages(),
+          parentSessionId: opts.getSessionId?.(),
           worktree: personaObj.worktree === true,
           retryAttempt: a.retryAttempt,
           // NO onRetry / onChain: the executor is the sole retry + sequencing
@@ -615,6 +625,9 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         // Snapshot parent context at spawn time. Honors inherit_context
         // (filtered/full) inside spawnRun via planSpawnPiArgs.
         parentMessages: opts.getParentMessages(),
+        // pi-dashboard multi-slot fix: stamp the spawning slot's session
+        // id so reconcile can distinguish sibling slots sharing one pid.
+        parentSessionId: opts.getSessionId?.(),
         // v0.10 Slice 3: per-spawn watchdog overrides. Undefined →
         // conductor default (off / 120s soft).
         killOnStall: params.kill_on_stall,
@@ -656,6 +669,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           cwd,
           pushNotification: opts.pushCompletionNotification,
           getParentMessages: opts.getParentMessages,
+          getSessionId: opts.getSessionId,
           events: opts.getEvents?.(),
         }),
         // v0.18 classified retry: per-call attempt budget + the re-spawn
@@ -671,6 +685,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           retryMaxAttempts: params.retry_max_attempts,
           pushNotification: opts.pushCompletionNotification,
           getParentMessages: opts.getParentMessages,
+          getSessionId: opts.getSessionId,
           events: opts.getEvents?.(),
         }),
         // v0.16 event bus: thread the adapter so emit sites in spawnRun/finalize fire.
@@ -1519,6 +1534,8 @@ export interface OnChainCallbackOpts {
   cwd: string;
   pushNotification: (run: Run) => void;
   getParentMessages: () => AgentMessage[];
+  /** Spawning slot's pi session id; stamped as `parentSessionId`. */
+  getSessionId?: () => string | undefined;
   events?: ConductorEventEmitter;
 }
 
@@ -1612,6 +1629,7 @@ export function buildOnChainCallback(
       thinking: resolveThinking(chainPersona, baseOv),
       timeoutMs: chainTimeoutMs,
       parentMessages: args.getParentMessages(),
+      parentSessionId: args.getSessionId?.(),
       onComplete: (run) => args.pushNotification(run),
       // no onChain: depth-1 cap (chain-spawned runs do not chain further)
       events: args.events,
@@ -1632,6 +1650,8 @@ export interface OnRetryCallbackOpts {
   retryMaxAttempts?: number;
   pushNotification: (run: Run) => void;
   getParentMessages: () => AgentMessage[];
+  /** Spawning slot's pi session id; stamped as `parentSessionId`. */
+  getSessionId?: () => string | undefined;
   events?: ConductorEventEmitter;
 }
 
@@ -1671,6 +1691,7 @@ export function buildOnRetryCallback(
       thinking: resolveThinking(args.persona, ov),
       timeoutMs: resolveTimeoutMs(args.persona, ov, args.cfg),
       parentMessages: args.getParentMessages(),
+      parentSessionId: args.getSessionId?.(),
       // Preserve worktree isolation across retries for write-capable personas.
       worktree: args.persona.worktree === true,
       // Carry the incremented attempt + the same per-call budget so the

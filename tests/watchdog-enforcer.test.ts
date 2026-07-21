@@ -37,6 +37,9 @@ function runFx(overrides: Partial<Run> = {}): Run {
     task: "test",
     mode: "background",
     status: "running" as RunStatus,
+    // Owning-session runs carry a live subprocess handle; the watchdog
+    // only checks `proc === undefined` (readopted/cross-session guard).
+    proc: {} as Run["proc"],
     startTime: T0,
     lastEventAt: T0,
     messages: [],

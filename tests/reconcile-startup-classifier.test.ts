@@ -254,6 +254,94 @@ test("classifyRecord: parentPid !== self AND foreign parent alive → skip-forei
   assert.equal(result, "skip-foreign");
 });
 
+test("classifyRecord: same pid but different sessionId (sibling dashboard slot) → skip-foreign (builder-eh18 fix)", () => {
+  // pi-dashboard multiplexes every slot into ONE OS process, so a
+  // sibling slot's run carries parentPid === our pid. Without the
+  // session-id discriminator this readopts (and the wrong slot's
+  // watchdog then fires spurious cross-slot stall notifications). With
+  // both session ids present and differing, the record is foreign.
+  const r = record({
+    status: "running",
+    pid: 12345,
+    parentPid: process.pid, // SAME pid — shared dashboard process
+    parentStartTime: 999,
+    parentSessionId: "session-SIBLING",
+  });
+  const result = classifyRecord(
+    r,
+    () => true, // child alive
+    0,
+    process.pid, // same pid
+    (_pid, _st) => true, // host process alive (it's us)
+    "session-SELF", // our session id differs from the record's
+  );
+  assert.equal(result, "skip-foreign", "sibling slot's run must not be readopted");
+});
+
+test("classifyRecord: same pid AND same sessionId (our own /reload survivor) → readopt", () => {
+  // Session id matches → it's genuinely our slot's run recovering across
+  // an in-process /reload. Must still readopt.
+  const r = record({
+    status: "running",
+    pid: 12345,
+    parentPid: process.pid,
+    parentStartTime: 999,
+    parentSessionId: "session-SELF",
+  });
+  const result = classifyRecord(
+    r,
+    () => true,
+    0,
+    process.pid,
+    (_pid, _st) => true,
+    "session-SELF", // matches
+  );
+  assert.equal(result, "readopt", "our own session's run must readopt");
+});
+
+test("classifyRecord: different sessionId but host process gone → readopt (genuine orphan, host died)", () => {
+  // If the whole dashboard process died, the sibling's session id is
+  // moot — the run is a genuine orphan and any surviving slot may adopt.
+  const r = record({
+    status: "running",
+    pid: 12345,
+    parentPid: process.pid,
+    parentStartTime: 999,
+    parentSessionId: "session-SIBLING",
+  });
+  const result = classifyRecord(
+    r,
+    () => true,
+    0,
+    process.pid,
+    (_pid, _st) => false, // host process gone
+    "session-SELF",
+  );
+  assert.equal(result, "readopt");
+});
+
+test("classifyRecord: record has sessionId but reconcile has none → falls back to pid (legacy-safe)", () => {
+  // A record written by a session-id-aware spawn, reconciled by a host
+  // that didn't supply selfSessionId (headless). Falls back to the pid
+  // comparison: same pid → treated as ours → readopt (pre-fix behavior).
+  const r = record({
+    status: "running",
+    pid: 12345,
+    parentPid: process.pid,
+    parentStartTime: 999,
+    parentSessionId: "session-SIBLING",
+  });
+  const result = classifyRecord(
+    r,
+    () => true,
+    0,
+    process.pid,
+    (_pid, _st) => true,
+    undefined, // reconcile supplied no session id
+  );
+  assert.equal(result, "readopt", "no self session id → pid fallback, same pid = ours");
+});
+
 test("classifyRecord: parentPid !== self but foreign parent gone → falls through to liveness (genuine orphan readopt)", () => {
   const r = record({
     status: "running",

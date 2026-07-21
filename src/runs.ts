@@ -940,6 +940,15 @@ export interface SpawnOptions {
    */
   onCompleteHookTimeoutSeconds?: number;
   /**
+   * pi session id of the spawning conductor host slot
+   * (`ctx.sessionManager.getSessionId()`), threaded from `tools.ts`.
+   * Stamped onto the record as `parentSessionId` so post-startup
+   * reconcile can distinguish sibling slots that share one OS process
+   * (pi-dashboard). Undefined in non-dashboard / headless contexts;
+   * reconcile then falls back to pid-based ownership scoping.
+   */
+  parentSessionId?: string;
+  /**
    * v0.13 worktree-per-persona. When `true`, `spawnRun` calls
    * `resolveWorktreeSpec` + `createWorktree` and sets
    * `Run.worktreePath` / `Run.worktreeBranch`. Non-git cwds fall back
@@ -1155,6 +1164,10 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // `classifyRecord` `skip-foreign` branch.
     parentPid: process.pid,
     parentStartTime: readProcessStartTime(process.pid),
+    // Session-scoped ownership identity (pi-dashboard multi-slot fix):
+    // distinguishes sibling slots that share this pid. Reconcile's
+    // skip-foreign prefers this over parentPid. See classifyRecord.
+    parentSessionId: opts.parentSessionId,
     // v0.12 slice 4 — stamp the cascade-collapsed steerable on the Run
     // BEFORE the spawn pipeline runs. `runPiSubprocess` re-stamps via
     // `stampSpawnStreamingMode` (idempotent) once the subprocess is

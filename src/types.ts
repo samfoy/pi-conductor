@@ -637,6 +637,22 @@ export interface Run {
   parentPid?: number;
 
   /**
+   * Session-scoped ownership identity: the pi session id
+   * (`ctx.sessionManager.getSessionId()`) of the conductor host slot
+   * that spawned this run. Stamped at spawn time.
+   *
+   * `parentPid` alone cannot distinguish sibling sessions in a
+   * multi-slot host (e.g. pi-dashboard, where every slot shares ONE
+   * node process and therefore one pid). Post-startup reconcile keys
+   * `skip-foreign` on this id when present so a sibling slot's live run
+   * is never readopted-and-watched by the wrong slot (which produced
+   * spurious cross-slot stall notifications — the builder-eh18 bug).
+   * `parentPid` remains the crash-recovery fallback when this is
+   * absent (legacy records, or non-dashboard hosts).
+   */
+  parentSessionId?: string;
+
+  /**
    * Linux-only fingerprint defending against pid reuse: `/proc/<pid>/stat`
    * field 22 (process start time in clock ticks since boot). Compared
    * against a fresh read at reconcile time; mismatch → original parent
@@ -820,6 +836,13 @@ export interface RunRecord {
    */
   parentPid?: number;
   /**
+   * Session-scoped ownership identity. See `Run.parentSessionId`.
+   * Preferred over `parentPid` by reconcile's `skip-foreign` so
+   * sibling slots in a shared-pid host (pi-dashboard) are
+   * distinguished. Optional for back-compat.
+   */
+  parentSessionId?: string;
+  /**
    * Linux-only `/proc/<pid>/stat` start-time fingerprint to defend
    * against pid reuse. See `Run.parentStartTime`.
    */
@@ -936,6 +959,7 @@ export function toRunRecord(r: Run): RunRecord {
     startTime: r.startTime,
     pid: r.pid,
     parentPid: r.parentPid,
+    parentSessionId: r.parentSessionId,
     parentStartTime: r.parentStartTime,
     finishedAt: r.finishedAt,
     pausedAt: r.pausedAt,

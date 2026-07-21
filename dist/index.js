@@ -24,6 +24,7 @@ function toRunRecord(r) {
     startTime: r.startTime,
     pid: r.pid,
     parentPid: r.parentPid,
+    parentSessionId: r.parentSessionId,
     parentStartTime: r.parentStartTime,
     finishedAt: r.finishedAt,
     pausedAt: r.pausedAt,
@@ -2017,12 +2018,15 @@ init_types();
 import { readFile as readFile2, readdir as readdir2, stat as stat2, writeFile } from "node:fs/promises";
 import { readFileSync as readFileSync4 } from "node:fs";
 import { join as join5 } from "node:path";
-function classifyRecord(record, isAlive, _now, selfPid = process.pid, isParentAlive = (pid, startTime) => defaultParentLivenessProbe(pid, startTime)) {
+function classifyRecord(record, isAlive, _now, selfPid = process.pid, isParentAlive = (pid, startTime) => defaultParentLivenessProbe(pid, startTime), selfSessionId = void 0) {
   const status = record.status;
   if (TERMINAL_STATUSES.includes(status)) {
     return "skip-terminal";
   }
-  if (record.parentPid !== void 0 && record.parentPid !== selfPid && isParentAlive(record.parentPid, record.parentStartTime)) {
+  const parentAlive = record.parentPid !== void 0 && isParentAlive(record.parentPid, record.parentStartTime);
+  const haveBothSessionIds = record.parentSessionId !== void 0 && selfSessionId !== void 0;
+  const isOurs = haveBothSessionIds ? record.parentSessionId === selfSessionId : record.parentPid !== void 0 && record.parentPid === selfPid;
+  if (parentAlive && !isOurs) {
     return "skip-foreign";
   }
   if (status === "queued") {
@@ -2129,7 +2133,8 @@ async function reconcileOrphansAtStartup(deps) {
         deps.isAlive,
         deps.now,
         deps.selfPid ?? process.pid,
-        deps.isParentAlive ?? defaultParentLivenessProbe
+        deps.isParentAlive ?? defaultParentLivenessProbe,
+        deps.selfSessionId
       );
       const dryRun = deps.dryRun === true;
       switch (verdict) {
@@ -2238,6 +2243,12 @@ function buildOrphanRun(record, status) {
     finishedAt: record.finishedAt,
     pausedAt: record.pausedAt,
     pid: record.pid,
+    // Restore ownership identity so downstream ownership checks
+    // (e.g. forceTerminate's foreign-run refusal) see the original
+    // spawning host/slot rather than treating the orphan as unowned.
+    parentPid: record.parentPid,
+    parentSessionId: record.parentSessionId,
+    parentStartTime: record.parentStartTime,
     exitCode: record.exitCode,
     stopReason: record.stopReason,
     errorMessage: record.errorMessage,
@@ -2673,6 +2684,10 @@ function spawnRun(opts) {
     // `classifyRecord` `skip-foreign` branch.
     parentPid: process.pid,
     parentStartTime: readProcessStartTime(process.pid),
+    // Session-scoped ownership identity (pi-dashboard multi-slot fix):
+    // distinguishes sibling slots that share this pid. Reconcile's
+    // skip-foreign prefers this over parentPid. See classifyRecord.
+    parentSessionId: opts.parentSessionId,
     // v0.12 slice 4 — stamp the cascade-collapsed steerable on the Run
     // BEFORE the spawn pipeline runs. `runPiSubprocess` re-stamps via
     // `stampSpawnStreamingMode` (idempotent) once the subprocess is
@@ -4644,6 +4659,9 @@ function evaluateRun(run, state, config, now) {
   if (run.hookExecuting === true) {
     return { transition: { kind: "none" }, nextState: current };
   }
+  if (run.proc === void 0) {
+    return { transition: { kind: "none" }, nextState: current };
+  }
   const ageMs = now - run.startTime;
   if (ageMs < config.graceSeconds * 1e3) {
     return { transition: { kind: "none" }, nextState: current };
@@ -4713,6 +4731,7 @@ function classifyStall(run, nowMs, defaults) {
   if (run.status !== "running") return null;
   if (run.pausedAt !== void 0) return null;
   if (run.hookExecuting === true) return null;
+  if (run.proc === void 0) return null;
   const eff = effectiveConfig(run, defaults);
   const silentMs = Math.max(0, nowMs - run.lastEventAt);
   const silentSeconds = Math.floor(silentMs / 1e3);
@@ -6692,6 +6711,7 @@ function registerAutoTool(pi, opts) {
           thinking: resolveThinking(personaObj, ov),
           timeoutMs: resolveTimeoutMs(personaObj, ov, cfg),
           parentMessages: opts.getParentMessages(),
+          parentSessionId: opts.getSessionId?.(),
           worktree: personaObj.worktree === true,
           retryAttempt: a.retryAttempt,
           // NO onRetry / onChain: the executor is the sole retry + sequencing
@@ -6867,6 +6887,9 @@ function registerSpawnTool(pi, opts) {
         // Snapshot parent context at spawn time. Honors inherit_context
         // (filtered/full) inside spawnRun via planSpawnPiArgs.
         parentMessages: opts.getParentMessages(),
+        // pi-dashboard multi-slot fix: stamp the spawning slot's session
+        // id so reconcile can distinguish sibling slots sharing one pid.
+        parentSessionId: opts.getSessionId?.(),
         // v0.10 Slice 3: per-spawn watchdog overrides. Undefined →
         // conductor default (off / 120s soft).
         killOnStall: params.kill_on_stall,
@@ -6907,6 +6930,7 @@ function registerSpawnTool(pi, opts) {
           cwd,
           pushNotification: opts.pushCompletionNotification,
           getParentMessages: opts.getParentMessages,
+          getSessionId: opts.getSessionId,
           events: opts.getEvents?.()
         }),
         // v0.18 classified retry: per-call attempt budget + the re-spawn
@@ -6922,6 +6946,7 @@ function registerSpawnTool(pi, opts) {
           retryMaxAttempts: params.retry_max_attempts,
           pushNotification: opts.pushCompletionNotification,
           getParentMessages: opts.getParentMessages,
+          getSessionId: opts.getSessionId,
           events: opts.getEvents?.()
         }),
         // v0.16 event bus: thread the adapter so emit sites in spawnRun/finalize fire.
@@ -7647,6 +7672,7 @@ function buildOnChainCallback(args) {
       thinking: resolveThinking(chainPersona, baseOv),
       timeoutMs: chainTimeoutMs,
       parentMessages: args.getParentMessages(),
+      parentSessionId: args.getSessionId?.(),
       onComplete: (run) => args.pushNotification(run),
       // no onChain: depth-1 cap (chain-spawned runs do not chain further)
       events: args.events
@@ -7674,6 +7700,7 @@ function buildOnRetryCallback(args) {
       thinking: resolveThinking(args.persona, ov),
       timeoutMs: resolveTimeoutMs(args.persona, ov, args.cfg),
       parentMessages: args.getParentMessages(),
+      parentSessionId: args.getSessionId?.(),
       // Preserve worktree isolation across retries for write-capable personas.
       worktree: args.persona.worktree === true,
       // Carry the incremented attempt + the same per-call budget so the
@@ -7768,6 +7795,7 @@ var SpawnQueue = class {
       timeoutMs: opts.timeoutMs,
       enqueuedAt: Date.now(),
       parentMessages: opts.parentMessages,
+      parentSessionId: opts.parentSessionId,
       onComplete: opts.onComplete,
       // NOTE (v0.18): retryAttempt/onRetry are intentionally NOT captured here.
       // A queued-then-drained run persists retryAttempt=0 regardless of the
@@ -7841,6 +7869,7 @@ var SpawnQueue = class {
         timeoutMs: next.timeoutMs,
         preAllocatedId: next.id,
         parentMessages: next.parentMessages,
+        parentSessionId: next.parentSessionId,
         onComplete: next.onComplete,
         killOnStall: next.killOnStall,
         softStallSeconds: next.softStallSeconds,
@@ -9863,6 +9892,21 @@ function index_default(pi) {
         return [];
       }
     },
+    /**
+     * pi session id of THIS conductor host slot. In pi-dashboard every
+     * slot shares one OS process (one pid), so `parentPid` alone can't
+     * tell sibling slots apart at reconcile time; the session id can.
+     * Stamped onto spawned runs as `parentSessionId`. Returns undefined
+     * in headless / pre-session_start contexts (reconcile then falls
+     * back to pid-based ownership scoping).
+     */
+    getSessionId: () => {
+      try {
+        return ctxRef?.sessionManager?.getSessionId();
+      } catch {
+        return void 0;
+      }
+    },
     openFocusedOverlay,
     getConductorMode: () => conductorModeOn,
     setConductorMode: (on) => {
@@ -9982,6 +10026,9 @@ function index_default(pi) {
         runsRoot: runsRoot(),
         registry,
         isAlive: defaultLivenessProbe,
+        // pi-dashboard multi-slot: scope ownership on the pi session id
+        // so sibling slots sharing this pid aren't readopted here.
+        selfSessionId: ctx.sessionManager?.getSessionId(),
         now: Date.now()
       }).then((result) => {
         lastReconcile = result;

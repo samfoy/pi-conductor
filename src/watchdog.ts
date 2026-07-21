@@ -136,6 +136,22 @@ export function evaluateRun(
     return { transition: { kind: "none" }, nextState: current };
   }
 
+  // (2c) Readopted / cross-session runs have no live subprocess handle in
+  // THIS session. `proc` is only set in the session whose `child_process`
+  // actually spawned the pi subprocess; a run adopted from the shared
+  // `runsRoot` at startup reconcile (crash recovery — or, in a
+  // multi-slot host like pi-dashboard where every slot shares one pid,
+  // a *sibling slot's* run) carries `proc === undefined`. Such a run
+  // receives no message-stream events here, so its `lastEventAt` is
+  // frozen at the readopt timestamp and would trip an immediate false
+  // stall. A session that cannot observe a run must not stall-judge it.
+  // (Terminal runs are already excluded at (1); the on_complete_hook
+  // window — where the owning session's proc is transiently gone — is
+  // excluded at (2b) above.)
+  if (run.proc === undefined) {
+    return { transition: { kind: "none" }, nextState: current };
+  }
+
   // (3) Cold-start grace. Suppress all transitions for runs younger than
   // graceSeconds. Subtle: this also suppresses recovery emission while
   // still inside grace; that's fine because we wouldn't have transitioned
@@ -350,6 +366,11 @@ export function classifyStall(
   // `lastEventAt` is frozen, but the run is doing legitimate work owned
   // by the parent's hook spawn.
   if (run.hookExecuting === true) return null;
+  // Readopted / cross-session runs have no live subprocess handle in this
+  // session (see `evaluateRun` (2c)); `lastEventAt` is frozen and would
+  // render a false stall. A session that can't observe a run must not
+  // classify its stall state.
+  if (run.proc === undefined) return null;
   const eff = effectiveConfig(run, defaults);
   const silentMs = Math.max(0, nowMs - run.lastEventAt);
   const silentSeconds = Math.floor(silentMs / 1000);

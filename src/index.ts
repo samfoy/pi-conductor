@@ -271,6 +271,21 @@ export default function (pi: ExtensionAPI): void {
         return [];
       }
     },
+    /**
+     * pi session id of THIS conductor host slot. In pi-dashboard every
+     * slot shares one OS process (one pid), so `parentPid` alone can't
+     * tell sibling slots apart at reconcile time; the session id can.
+     * Stamped onto spawned runs as `parentSessionId`. Returns undefined
+     * in headless / pre-session_start contexts (reconcile then falls
+     * back to pid-based ownership scoping).
+     */
+    getSessionId: (): string | undefined => {
+      try {
+        return ctxRef?.sessionManager?.getSessionId();
+      } catch {
+        return undefined;
+      }
+    },
     openFocusedOverlay,
     getConductorMode: () => conductorModeOn,
     setConductorMode: (on: boolean) => {
@@ -430,6 +445,9 @@ export default function (pi: ExtensionAPI): void {
         runsRoot: runsRoot(),
         registry,
         isAlive: defaultLivenessProbe,
+        // pi-dashboard multi-slot: scope ownership on the pi session id
+        // so sibling slots sharing this pid aren't readopted here.
+        selfSessionId: ctx.sessionManager?.getSessionId(),
         now: Date.now(),
       })
         .then((result) => {

@@ -33,6 +33,8 @@ function runFx(overrides: Partial<Run>): Run {
     task: "test",
     mode: "background",
     status: "running" as RunStatus,
+    // Watchdog only checks `proc === undefined` (readopted guard).
+    proc: {} as Run["proc"],
     startTime: T0 - 60_000,
     lastEventAt: T0 - 5_000,
     messages: [],

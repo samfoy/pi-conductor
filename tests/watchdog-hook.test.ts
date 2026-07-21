@@ -39,6 +39,9 @@ function runFx(overrides: Partial<Run> = {}): Run {
     task: "test",
     mode: "background",
     status: "running" as RunStatus,
+    // Watchdog only checks `proc === undefined` (readopted guard); a
+    // truthy stub represents an owning-session run.
+    proc: {} as Run["proc"],
     startTime: T0,
     lastEventAt: T0,
     messages: [],
@@ -112,6 +115,18 @@ test("classifyStall: pin — without hookExecuting, the same fixture classifies 
   const c = classifyStall(run, T0 + 700_000, DEFAULT_WATCHDOG_CONFIG);
   assert.ok(c, "expected non-null classification when hookExecuting is undefined");
   assert.equal(c.severity, "hard");
+});
+
+test("classifyStall: readopted run (proc === undefined) returns null", () => {
+  // Same rationale as evaluateRun's (2c) guard: a run this session can't
+  // observe (no live subprocess handle) must not render a stall badge.
+  const run = runFx({
+    startTime: T0,
+    lastEventAt: T0,
+    proc: undefined,
+  });
+  const c = classifyStall(run, T0 + 700_000, DEFAULT_WATCHDOG_CONFIG);
+  assert.equal(c, null);
 });
 
 // ── Composite: 200s in-flight hook vs 120s soft → no advisory ──────────

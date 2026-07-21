@@ -48,6 +48,10 @@ function runFx(overrides: Partial<Run> = {}): Run {
     task: "test",
     mode: "background",
     status: "running" as RunStatus,
+    // Owning-session runs carry a live subprocess handle; the watchdog
+    // only checks `proc === undefined` (readopted/cross-session guard),
+    // never dereferences it, so a truthy stub is sufficient.
+    proc: {} as Run["proc"],
     startTime: T0,
     lastEventAt: T0,
     messages: [],
@@ -120,6 +124,36 @@ test("evaluateRun: paused run inside hard window returns none", () => {
   assert.equal(out.transition.kind, "none");
   // State preserved untouched while paused.
   assert.deepEqual(out.nextState, soft);
+});
+
+test("evaluateRun: readopted run (proc === undefined) never stalls (LOAD-BEARING)", () => {
+  // A run adopted from the shared runsRoot at startup reconcile — crash
+  // recovery, or (in a multi-slot host like pi-dashboard where all slots
+  // share one pid) a sibling slot's run — carries proc === undefined and
+  // a frozen lastEventAt. This session cannot observe its events, so it
+  // must NOT stall-judge it. Without the (2c) proc guard this fires a
+  // spurious hard-stall (the exact builder-eh18 cross-slot false
+  // positive). Mutation-witness: deleting the guard flips this to "hard".
+  const run = runFx({
+    startTime: T0,
+    lastEventAt: T0, // frozen at readopt; ~infinitely silent vs `now`
+    proc: undefined,
+  });
+  const out = evaluateRun(run, fresh, CFG, T0 + 700_000);
+  assert.equal(out.transition.kind, "none");
+  assert.deepEqual(out.nextState, fresh);
+});
+
+test("evaluateRun: pin — same fixture WITH a live proc handle DOES trip hard", () => {
+  // Companion to the guard test: proves the proc guard (not some other
+  // condition) is what suppresses the transition above.
+  const run = runFx({
+    startTime: T0,
+    lastEventAt: T0,
+    proc: {} as Run["proc"],
+  });
+  const out = evaluateRun(run, fresh, CFG, T0 + 700_000);
+  assert.equal(out.transition.kind, "hard");
 });
 
 test("evaluateRun: terminal status (completed) returns none, never stalls", () => {

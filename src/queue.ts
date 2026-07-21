@@ -45,6 +45,15 @@ export interface PendingSpawn {
    * conductor's intent at the moment it was queued, not at drain time.
    */
   parentMessages?: AgentMessage[];
+  /**
+   * Session-scoped ownership identity captured at enqueue time and
+   * threaded to `spawnRun` on drain. MUST be preserved through the
+   * queue: a queued-then-drained run that loses this reverts to
+   * pid-based ownership scoping in reconcile, reintroducing the
+   * cross-slot readopt bug for every sub-agent that hits the
+   * concurrency cap (pi-dashboard shares one pid across slots).
+   */
+  parentSessionId?: string;
   /** Non-foreground onComplete plumbed through from the spawner. */
   onComplete?: (run: Run) => void;
   /** v0.10 watchdog (Slice 3) per-spawn override; threaded to spawnRun. */
@@ -179,6 +188,7 @@ export class SpawnQueue {
       timeoutMs: opts.timeoutMs,
       enqueuedAt: Date.now(),
       parentMessages: opts.parentMessages,
+      parentSessionId: opts.parentSessionId,
       onComplete: opts.onComplete,
       // NOTE (v0.18): retryAttempt/onRetry are intentionally NOT captured here.
       // A queued-then-drained run persists retryAttempt=0 regardless of the
@@ -266,6 +276,7 @@ export class SpawnQueue {
         timeoutMs: next.timeoutMs,
         preAllocatedId: next.id,
         parentMessages: next.parentMessages,
+        parentSessionId: next.parentSessionId,
         onComplete: next.onComplete,
         killOnStall: next.killOnStall,
         softStallSeconds: next.softStallSeconds,

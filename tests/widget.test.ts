@@ -32,6 +32,9 @@ function runFx(overrides: Partial<Run> = {}): Run {
     task: "test",
     mode: "background",
     status: "running" as RunStatus,
+    // Owning-session run: carries a live subprocess handle. classifyStall
+    // (via formatStallSegment) skips proc-less readopted runs.
+    proc: {} as Run["proc"],
     startTime: T0,
     lastEventAt: T0,
     messages: [],

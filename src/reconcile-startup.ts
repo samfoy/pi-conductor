@@ -130,6 +130,7 @@ export function classifyRecord(
     pid,
     startTime,
   ) => defaultParentLivenessProbe(pid, startTime),
+  selfSessionId: string | undefined = undefined,
 ): ClassifyResult {
   const status = record.status;
 
@@ -138,17 +139,27 @@ export function classifyRecord(
     return "skip-terminal";
   }
 
-  // Ownership scoping: if the record claims a parent pid that is NOT
-  // us AND that parent is still alive (with matching start-time on
-  // Linux), the record is owned by a sibling pi session. Do not adopt;
-  // do not mutate disk. Records with `parentPid === undefined` are
-  // legacy (pre-fix) and fall through to the existing logic—the
-  // pre-fix global readopt is the safest available behavior for them.
-  if (
+  // Ownership scoping. A record is FOREIGN (owned by another live host
+  // slot — skip; do not adopt, do not mutate disk) when its owning
+  // conductor host is still alive AND that host is not us.
+  //
+  // "Is it us?" is decided by session id when BOTH sides carry one:
+  // `parentSessionId` distinguishes sibling slots that share a single
+  // OS process (pi-dashboard multiplexes every slot into one pid, so a
+  // pid check alone reports a sibling's run as self-owned and readopts
+  // it — the builder-eh18 cross-slot stall bug). When either side
+  // lacks a session id (legacy records, non-dashboard hosts) we fall
+  // back to the pid comparison, which is correct for one-slot-per-pid
+  // hosts and no worse than the pre-session-id behavior otherwise.
+  const parentAlive =
     record.parentPid !== undefined &&
-    record.parentPid !== selfPid &&
-    isParentAlive(record.parentPid, record.parentStartTime)
-  ) {
+    isParentAlive(record.parentPid, record.parentStartTime);
+  const haveBothSessionIds =
+    record.parentSessionId !== undefined && selfSessionId !== undefined;
+  const isOurs = haveBothSessionIds
+    ? record.parentSessionId === selfSessionId
+    : record.parentPid !== undefined && record.parentPid === selfPid;
+  if (parentAlive && !isOurs) {
     return "skip-foreign";
   }
 
@@ -323,6 +334,14 @@ export interface PostStartupReconcileDeps {
    */
   selfPid?: number;
   /**
+   * Self session id for ownership scoping. When provided (production
+   * threads `ctx.sessionManager.getSessionId()`), `classifyRecord`
+   * prefers session-id equality over pid equality — the only way to
+   * distinguish sibling slots that share one OS process (pi-dashboard).
+   * Undefined falls back to the pid comparison.
+   */
+  selfSessionId?: string;
+  /**
    * Epoch ms used for `finishedAt` on reclassified records. Injectable
    * for deterministic tests.
    */
@@ -478,6 +497,7 @@ export async function reconcileOrphansAtStartup(
         deps.now,
         deps.selfPid ?? process.pid,
         deps.isParentAlive ?? defaultParentLivenessProbe,
+        deps.selfSessionId,
       );
       const dryRun = deps.dryRun === true;
 
@@ -627,6 +647,12 @@ function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
     finishedAt: record.finishedAt,
     pausedAt: record.pausedAt,
     pid: record.pid,
+    // Restore ownership identity so downstream ownership checks
+    // (e.g. forceTerminate's foreign-run refusal) see the original
+    // spawning host/slot rather than treating the orphan as unowned.
+    parentPid: record.parentPid,
+    parentSessionId: record.parentSessionId,
+    parentStartTime: record.parentStartTime,
     exitCode: record.exitCode,
     stopReason: record.stopReason,
     errorMessage: record.errorMessage,
