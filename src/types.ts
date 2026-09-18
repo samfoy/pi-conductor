@@ -149,6 +149,13 @@ export interface ConductorConfig {
   defaultTimeoutMinutes: number;
   maxConcurrent: number;
   /**
+   * Controls who owns filesystem isolation for write-capable personas.
+   * "conductor" preserves the native per-persona git worktree behavior.
+   * "external" runs personas in the current checkout because an outer
+   * orchestrator such as HerdrWorkbench already owns the task worktree.
+   */
+  worktreeMode: "conductor" | "external";
+  /**
    * v0.9 Item 2(c): separate cap on concurrently-running write-capable
    * sub-agents (`builder`, `simplifier`). Default 1. Read-only personas
    * are not affected. Set to a number >= maxConcurrent (or any large
@@ -305,6 +312,7 @@ export interface PersonaOverride {
 export const DEFAULT_CONFIG: ConductorConfig = {
   defaultTimeoutMinutes: 60,
   maxConcurrent: 4,
+  worktreeMode: "conductor",
   maxConcurrentWriteCapable: 1,
   queueOnConcurrencyCap: true,
   autoOpenFocusOnSpawn: false,

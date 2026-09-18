@@ -81,6 +81,7 @@ var init_types = __esm({
     DEFAULT_CONFIG = {
       defaultTimeoutMinutes: 60,
       maxConcurrent: 4,
+      worktreeMode: "conductor",
       maxConcurrentWriteCapable: 1,
       queueOnConcurrencyCap: true,
       autoOpenFocusOnSpawn: false,
@@ -720,6 +721,9 @@ function mergeConfig(base, raw) {
   if (typeof r.maxConcurrent === "number" && r.maxConcurrent >= 1) {
     out.maxConcurrent = Math.floor(r.maxConcurrent);
   }
+  if (r.worktreeMode === "conductor" || r.worktreeMode === "external") {
+    out.worktreeMode = r.worktreeMode;
+  }
   if (typeof r.maxConcurrentWriteCapable === "number" && r.maxConcurrentWriteCapable >= 1) {
     out.maxConcurrentWriteCapable = Math.floor(r.maxConcurrentWriteCapable);
   }
@@ -836,7 +840,12 @@ function loadConfigWithErrors(cwd) {
   return { config: merged, user: userCfg, project: projectCfg, errors };
 }
 function loadConfig(cwd) {
-  return loadConfigWithErrors(cwd).config;
+  const config = loadConfigWithErrors(cwd).config;
+  const envMode = process.env.PI_CONDUCTOR_WORKTREE_MODE;
+  if (envMode === "conductor" || envMode === "external") {
+    return { ...config, worktreeMode: envMode };
+  }
+  return config;
 }
 
 // src/runs.ts
@@ -6796,7 +6805,7 @@ function registerAutoTool(pi, opts) {
           timeoutMs: resolveTimeoutMs(personaObj, ov, cfg),
           parentMessages: opts.getParentMessages(),
           parentSessionId: opts.getSessionId?.(),
-          worktree: personaObj.worktree === true,
+          worktree: cfg.worktreeMode === "conductor" && personaObj.worktree === true,
           retryAttempt: a.retryAttempt,
           // NO onRetry / onChain: the executor is the sole retry + sequencing
           // authority (avoids double-fire with S2's background retry and the
@@ -6983,10 +6992,10 @@ function registerSpawnTool(pi, opts) {
         onCompleteHookTimeoutSeconds: params.on_complete_hook_timeout_seconds,
         steerable,
         // v0.13 worktree-per-persona: collapse from persona frontmatter.
-        worktree: persona.worktree === true,
+        worktree: cfg.worktreeMode === "conductor" && persona.worktree === true,
         // v0.14 worktree auto-merge: resolve the merge strategy cascade.
         // Cascade: per-call > project > user > persona-frontmatter > built-in class default.
-        mergeStrategy: persona.worktree === true ? resolveMergeStrategy({
+        mergeStrategy: cfg.worktreeMode === "conductor" && persona.worktree === true ? resolveMergeStrategy({
           perCall: params.merge_strategy,
           projectOverride: cfg.personaOverrides[persona.name]?.mergeStrategy,
           userOverride: void 0,
@@ -7786,7 +7795,7 @@ function buildOnRetryCallback(args) {
       parentMessages: args.getParentMessages(),
       parentSessionId: args.getSessionId?.(),
       // Preserve worktree isolation across retries for write-capable personas.
-      worktree: args.persona.worktree === true,
+      worktree: args.cfg.worktreeMode === "conductor" && args.persona.worktree === true,
       // Carry the incremented attempt + the same per-call budget so the
       // re-spawned run resolves the same policy and can retry again.
       retryAttempt: failedAttempt + 1,

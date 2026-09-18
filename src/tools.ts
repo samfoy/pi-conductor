@@ -401,7 +401,7 @@ function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           timeoutMs: resolveTimeoutMs(personaObj, ov, cfg),
           parentMessages: opts.getParentMessages(),
           parentSessionId: opts.getSessionId?.(),
-          worktree: personaObj.worktree === true,
+          worktree: cfg.worktreeMode === "conductor" && personaObj.worktree === true,
           retryAttempt: a.retryAttempt,
           // NO onRetry / onChain: the executor is the sole retry + sequencing
           // authority (avoids double-fire with S2's background retry and the
@@ -637,10 +637,10 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         onCompleteHookTimeoutSeconds: params.on_complete_hook_timeout_seconds,
         steerable,
         // v0.13 worktree-per-persona: collapse from persona frontmatter.
-        worktree: persona.worktree === true,
+        worktree: cfg.worktreeMode === "conductor" && persona.worktree === true,
         // v0.14 worktree auto-merge: resolve the merge strategy cascade.
         // Cascade: per-call > project > user > persona-frontmatter > built-in class default.
-        mergeStrategy: (persona.worktree === true)
+        mergeStrategy: (cfg.worktreeMode === "conductor" && persona.worktree === true)
           ? resolveMergeStrategy({
               perCall: params.merge_strategy as MergeStrategy | undefined,
               projectOverride: (cfg.personaOverrides[persona.name] as any)?.mergeStrategy,
@@ -1693,7 +1693,7 @@ export function buildOnRetryCallback(
       parentMessages: args.getParentMessages(),
       parentSessionId: args.getSessionId?.(),
       // Preserve worktree isolation across retries for write-capable personas.
-      worktree: args.persona.worktree === true,
+      worktree: args.cfg.worktreeMode === "conductor" && args.persona.worktree === true,
       // Carry the incremented attempt + the same per-call budget so the
       // re-spawned run resolves the same policy and can retry again.
       retryAttempt: failedAttempt + 1,

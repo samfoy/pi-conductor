@@ -82,6 +82,9 @@ function mergeConfig(base: ConductorConfig, raw: unknown): ConductorConfig {
   if (typeof r.maxConcurrent === "number" && r.maxConcurrent >= 1) {
     out.maxConcurrent = Math.floor(r.maxConcurrent);
   }
+  if (r.worktreeMode === "conductor" || r.worktreeMode === "external") {
+    out.worktreeMode = r.worktreeMode;
+  }
   if (
     typeof r.maxConcurrentWriteCapable === "number" &&
     r.maxConcurrentWriteCapable >= 1
@@ -241,5 +244,10 @@ export function loadConfigWithErrors(cwd: string): LoadConfigResult {
  * discarded — surfacing them is /conductor doctor's job.
  */
 export function loadConfig(cwd: string): ConductorConfig {
-  return loadConfigWithErrors(cwd).config;
+  const config = loadConfigWithErrors(cwd).config;
+  const envMode = process.env.PI_CONDUCTOR_WORKTREE_MODE;
+  if (envMode === "conductor" || envMode === "external") {
+    return { ...config, worktreeMode: envMode };
+  }
+  return config;
 }

@@ -284,6 +284,29 @@ test("loadConfig: defaults include defaultMode 'off' when no config files exist"
   }
 });
 
+test("loadConfig: defaults to conductor-owned worktrees", () => {
+  const fx = setup();
+  try {
+    assert.equal(loadConfig(fx.projectDir).worktreeMode, "conductor");
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("loadConfig: PI_CONDUCTOR_WORKTREE_MODE overrides file config", () => {
+  const fx = setup();
+  const previous = process.env.PI_CONDUCTOR_WORKTREE_MODE;
+  try {
+    writeUserConfig(fx, JSON.stringify({ worktreeMode: "conductor" }));
+    process.env.PI_CONDUCTOR_WORKTREE_MODE = "external";
+    assert.equal(loadConfig(fx.projectDir).worktreeMode, "external");
+  } finally {
+    if (previous === undefined) delete process.env.PI_CONDUCTOR_WORKTREE_MODE;
+    else process.env.PI_CONDUCTOR_WORKTREE_MODE = previous;
+    teardown(fx);
+  }
+});
+
 test("loadConfig: user config defaultMode 'on' is preserved", () => {
   const fx = setup();
   try {
