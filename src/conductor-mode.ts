@@ -38,6 +38,16 @@ export function resolveInitialConductorMode(
   env: Record<string, string | undefined>,
   config?: { defaultMode?: "on" | "off" | string },
 ): boolean {
+  // Host integrations may need deterministic conductor behavior without
+  // rewriting user/project config. This explicit force flag outranks the
+  // normal user-facing precedence chain.
+  const forced = env.PI_CONDUCTOR_FORCE_MODE;
+  if (forced !== undefined) {
+    const v = forced.trim().toLowerCase();
+    if (ON_TOKENS.has(v)) return true;
+    if (OFF_TOKENS.has(v)) return false;
+  }
+
   // Layer 1: pinned in config.
   if (config && typeof config.defaultMode === "string") {
     if (config.defaultMode === "on") return true;

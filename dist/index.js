@@ -4848,6 +4848,7 @@ var Watchdog = class {
     this.clearIntervalFn = deps.clearInterval ?? ((t) => globalThis.clearInterval(t));
     this.tickIntervalMs = deps.tickIntervalMs ?? DEFAULT_TICK_INTERVAL_MS;
   }
+  deps;
   states = /* @__PURE__ */ new Map();
   timer = null;
   unsub = null;
@@ -7819,6 +7820,9 @@ var SpawnQueue = class {
     this.maxConcurrentWriteCapable = maxConcurrentWriteCapable;
     this.registry.onChange(() => this.drain());
   }
+  registry;
+  maxConcurrent;
+  maxConcurrentWriteCapable;
   pending = [];
   setMaxConcurrent(n) {
     this.maxConcurrent = Math.max(1, Math.floor(n));
@@ -8720,6 +8724,7 @@ var FocusedStreamModel = class {
     this._getMetrics = opts.getMetrics ?? (() => NO_CLAMP_METRICS);
     this.refresh();
   }
+  registry;
   _focusedId;
   _collapseToolCalls = true;
   _showThinking = false;
@@ -9250,6 +9255,7 @@ var FocusedStreamOverlay = class {
     this._root.addChild(this._bodyZone);
     this._root.addChild(this._footerZone);
   }
+  _opts;
   _root;
   _headerZone;
   _bodyZone;
@@ -9549,6 +9555,12 @@ function installFocusedOverlayShortcut(ctx, options) {
 var OFF_TOKENS = /* @__PURE__ */ new Set(["0", "false", "off", "no"]);
 var ON_TOKENS = /* @__PURE__ */ new Set(["1", "true", "on", "yes"]);
 function resolveInitialConductorMode(env, config) {
+  const forced = env.PI_CONDUCTOR_FORCE_MODE;
+  if (forced !== void 0) {
+    const v = forced.trim().toLowerCase();
+    if (ON_TOKENS.has(v)) return true;
+    if (OFF_TOKENS.has(v)) return false;
+  }
   if (config && typeof config.defaultMode === "string") {
     if (config.defaultMode === "on") return true;
     if (config.defaultMode === "off") return false;

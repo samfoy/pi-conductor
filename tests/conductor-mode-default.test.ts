@@ -20,6 +20,23 @@ import { resolveInitialConductorMode } from "../src/conductor-mode.ts";
 
 // ── Built-in default + env-var path (no config) ───────────────────
 
+test("resolveInitialConductorMode: force env overrides pinned config for host integrations", () => {
+  assert.equal(
+    resolveInitialConductorMode(
+      { PI_CONDUCTOR_FORCE_MODE: "1", PI_CONDUCTOR_MODE: "0" },
+      { defaultMode: "off" },
+    ),
+    true,
+  );
+  assert.equal(
+    resolveInitialConductorMode(
+      { PI_CONDUCTOR_FORCE_MODE: "off", PI_CONDUCTOR_MODE: "1" },
+      { defaultMode: "on" },
+    ),
+    false,
+  );
+});
+
 test("resolveInitialConductorMode: OFF by default when the env var is unset", () => {
   assert.equal(resolveInitialConductorMode({}), false);
 });
