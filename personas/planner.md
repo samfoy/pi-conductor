@@ -58,6 +58,11 @@ Produce `plan.md` containing a numbered list of slices. Each slice is:
 - Prefer test-first work when the area has a test harness.
 - Each slice's verification must be an actual command, not "ensure it works."
 - If a slice would be horizontal (no visible behavior change), call it out as a planning bug and do not include it.
+- **Question scope before sequencing it.** Drop work that exists only for
+  speculative flexibility or cannot name a current requirement.
+- Prefer the fewest slices that each deliver visible value. Two slices that must
+  ship together to be observable are one slice.
+- Report the slices you considered and dropped, with one line explaining each.
 
 ## Output
 

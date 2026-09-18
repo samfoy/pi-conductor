@@ -18,7 +18,7 @@
  */
 
 import { spawn, execSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { mkdir, writeFile, appendFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { RpcStdinQueue } from "./rpc-stdin.ts";
@@ -40,6 +40,8 @@ import { loadConfigWithErrors } from "./config.ts";
 import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage } from "./worktree.ts";
 import { readProcessStartTime } from "./reconcile-startup.ts";
 import { ConductorEventEmitter } from "./conductor-events.ts";
+import { builtinPersonasDir } from "./personas.ts";
+import { loadWorkspaceDoctrine } from "./workspace-doctrine.ts";
 import {  emptyUsage,
   isTerminal,
   toRunRecord,
@@ -337,11 +339,21 @@ export const READ_ONLY_PERSONA_ENFORCER = [
  * `tests/read-only-enforcer.test.ts: assemblePersonaSystemPrompt:
  * read-only persona prompt begins with the enforcer block`.
  */
-export function assemblePersonaSystemPrompt(persona: Persona): string {
-  if (persona.readOnly === true) {
-    return `${READ_ONLY_PERSONA_ENFORCER}\n\n${persona.systemPrompt}`;
+export function assemblePersonaSystemPrompt(persona: Persona, cwd?: string): string {
+  const blocks = persona.readOnly === true
+    ? [READ_ONLY_PERSONA_ENFORCER, persona.systemPrompt]
+    : [persona.systemPrompt];
+  try {
+    const preamble = readFileSync(join(builtinPersonasDir(), "_preamble.md"), "utf8").trim();
+    if (preamble) blocks.push(preamble);
+  } catch {
+    // Optional doctrine must never prevent a child from spawning.
   }
-  return persona.systemPrompt;
+  if (cwd) {
+    const doctrine = loadWorkspaceDoctrine(cwd);
+    if (doctrine) blocks.push(doctrine);
+  }
+  return blocks.join("\n\n");
 }
 
 /**
@@ -1138,7 +1150,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // Item 13: assemblePersonaSystemPrompt prepends the read-only
     // enforcer when persona.readOnly is true. Captured ONCE here so
     // resumes re-pass the already-prepended body without doubling it.
-    systemPrompt: assemblePersonaSystemPrompt(opts.persona),
+    systemPrompt: assemblePersonaSystemPrompt(opts.persona, opts.cwd),
     // Item 15: per-invocation markers. Initial spawn IS the start of
     // the (sole, so far) invocation, so:
     //   - thisInvocationStartedAt mirrors startTime
@@ -1317,7 +1329,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // assembly used at the Run.systemPrompt capture above so the
     // initial spawn argv and resume argv stay byte-identical for
     // a given persona.
-    systemPrompt: assemblePersonaSystemPrompt(opts.persona),
+    systemPrompt: assemblePersonaSystemPrompt(opts.persona, opts.cwd),
     prompt,
     cwd: opts.cwd,
     model: opts.model,

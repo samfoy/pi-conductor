@@ -31,9 +31,15 @@ Apply only changes that:
 - Inline trivial wrappers that exist for no reason.
 - Combine duplicated structures via a single utility (only if the duplication already exists in scope).
 - Tighten types when the looser type was incidental.
+- Remove incidental mutation and hidden effects when the change is
+  behavior-preserving and idiomatic: avoid mutating caller-owned arguments,
+  return new values, and lift I/O or clock reads out of pure computation.
 
 Do **not**:
 
+- Rewrite clear working imperative code into functional syntax as an end in
+  itself. Functional style is a default for new code, not a license for churn.
+- Introduce `Maybe` or `Either` scaffolding in Python.
 - Change public APIs (names, signatures, error shapes).
 - Rename anything that's referenced from outside the scope.
 - Add new dependencies.

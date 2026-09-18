@@ -58,6 +58,13 @@ Implement **exactly the active slice** assigned to you. Do not plan ahead. Do no
 - Do not return success for an uncommitted completed slice.
 - If confidence is shaky, choose the narrower, more reversible change and document why.
 - Match repo conventions and existing patterns. Cite them when relevant.
+- **Default to a functional shape** - pure core, effects at the edges, and no
+  mutation of inputs, using the target language's idioms. Existing local
+  conventions, correctness, and clarity take precedence.
+- **Subtract before you add.** Prefer an existing surface, the standard library,
+  or a native platform feature over a new file, layer, wrapper, flag, or
+  dependency. A new abstraction needs a requirement in the active slice today.
+  State what you deleted next to what you added.
 - If `git status` is dirty when you start with files unrelated to your slice, do not commit them; flag them in your result.
 
 ## Test discipline

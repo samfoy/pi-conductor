@@ -380,7 +380,7 @@ async function loadPersonasFromDir(
   }
 
   for (const entry of entries) {
-    if (!entry.endsWith(".md")) continue;
+    if (!entry.endsWith(".md") || entry.startsWith("_")) continue;
     const filePath = join(dir, entry);
     try {
       const st = await stat(filePath);

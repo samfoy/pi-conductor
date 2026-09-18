@@ -87,7 +87,7 @@ test("assemblePersonaSystemPrompt: read-only persona prompt begins with the enfo
     out.startsWith(READ_ONLY_PERSONA_ENFORCER),
     "read-only persona system prompt must start with READ_ONLY_PERSONA_ENFORCER",
   );
-  assert.equal(out, `${READ_ONLY_PERSONA_ENFORCER}\n\n${persona.systemPrompt}`);
+  assert.ok(out.includes(`\n\n${persona.systemPrompt}\n\n## Standing doctrine`));
 });
 
 test("assemblePersonaSystemPrompt: write-capable persona prompt does NOT contain the enforcer block", () => {
@@ -97,7 +97,7 @@ test("assemblePersonaSystemPrompt: write-capable persona prompt does NOT contain
     !out.includes("[READ-ONLY PERSONA ENFORCER]"),
     "write-capable persona prompt must not contain the enforcer header",
   );
-  assert.equal(out, persona.systemPrompt);
+  assert.ok(out.startsWith(`${persona.systemPrompt}\n\n## Standing doctrine`));
 });
 
 test("assemblePersonaSystemPrompt: undefined readOnly is treated as false (defensive default)", () => {
@@ -109,12 +109,12 @@ test("assemblePersonaSystemPrompt: undefined readOnly is treated as false (defen
     readOnly: undefined as unknown as boolean,
   };
   const out = assemblePersonaSystemPrompt(persona);
-  assert.equal(out, persona.systemPrompt);
+  assert.ok(out.startsWith(`${persona.systemPrompt}\n\n## Standing doctrine`));
 });
 
 // ── Audit-style coverage across all 16 shipped personas ───────────────
 
-test("assemblePersonaSystemPrompt: all 10 read-only personas get the enforcer prepended; all 6 write-capable do not", () => {
+test("assemblePersonaSystemPrompt: all 10 read-only personas get the enforcer prepended; all 7 write-capable do not", () => {
   // Couples to the read_only audit table in tests/personas.test.ts.
   // If the audit table ever drifts from the actual persona files,
   // tests/personas.test.ts catches it; this test couples the prompt-
@@ -137,6 +137,7 @@ test("assemblePersonaSystemPrompt: all 10 read-only personas get the enforcer pr
     planner: false,
     scribe: false,
     simplifier: false,
+    writer: false,
   };
   for (const [name, readOnly] of Object.entries(audit)) {
     const persona = makePersona({ name, readOnly });

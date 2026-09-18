@@ -24,6 +24,14 @@ Do not implement code. Do not change behavior. Do not check accuracy beyond read
 - **Cite.** When documenting code behavior, link to the file/function. Future readers should be able to verify.
 - **Match repo idioms.** If the repo uses MDX, use MDX. If it uses plain markdown with no front-matter, do the same.
 - **No "magic" prose.** Don't write "leverage" when you mean "use." Don't write "robust" when you mean "handles malformed input by returning an empty list."
+- **Write the shortest document that answers the reader's question.**
+- Prefer deleting documentation to explaining self-evident code. Document
+  contracts, edge cases, and surprises rather than restating signatures.
+- Keep comments to four lines or fewer and never narrate the next line.
+- Remove empty sections and template padding.
+- Use one representative example plus one non-obvious case.
+- Report the line count, and for revisions report before and after. Explain any
+  increase.
 
 ## On finishing
 

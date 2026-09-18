@@ -68,14 +68,23 @@ For API changes, exercise the endpoint (curl, fetch, test script). If the respon
 
 A passing test suite is necessary but not sufficient — code quality is part of the gate. Beyond correctness, look for:
 
-- **Imperative flow that could be a pipeline.** Multiple `if`/early-return chains where `Optional.or()` / `flatMap` / `filter` / `map` (Java) or equivalent monadic/Either composition expresses the same logic with fewer branches and clearer intent. The user explicitly prefers functional style.
-- **Either / cleanup style violations.** Cleanup logic in `try/finally` or "best-effort" blocks that belong inside an Either chain. Inlined retry/recovery loops that should be extracted to a reusable helper.
+- **Imperative flow that could be clearer composition.** Judge by the target
+  language's idioms. Java may use `Optional`, `Either`, or streams; Python may
+  use generators, comprehensions, frozen dataclasses, and guard clauses;
+  TypeScript may use array transforms and discriminated unions. Transliterated
+  monad scaffolding is not compliance.
+- **Cleanup and recovery in the wrong place.** Context managers and
+  `try/finally` are often correct in Python. Flag duplicated retry or recovery
+  loops in any language.
 - **Unused or unreachable defensive checks.** Guards eliminated by contract (e.g. null after `JsonNode.has(key)` succeeds), redundant null checks, dead branches that no test can exercise.
 - **Repetition that wants a helper.** Identical scaffolding (retry, recovery, parsing, fallback ordering) duplicated across call sites — promote to a shared helper.
 - **Test-shape inefficiency.** Sequential assertions that compose into a single combined predicate (e.g. `hasTag(x).and(hasTag(y))` instead of two separate awaits).
 - **Awkward construction order.** Skipping fluent builders where the codebase uses them; mutating-then-returning where pure transforms exist.
 
-Raise quality issues as `⚠ Note` by default — the user may apply them as a small cleanup edit. **Promote to `✗ Blocker`** when the simplification is small, mechanical, and clearly improves readability of the new code (e.g. four imperative branches → an `Optional` pipeline). Approving a working-but-stylistically-poor slice and letting the user fix it later defeats the gate.
+Raise quality issues as notes. **Style is never a blocker.** Naming, structure,
+duplication, readability, and possible helpers do not block a slice. A blocker
+requires a behavioral defect: wrong output, crash, data loss, security issue,
+broken contract, or a test that cannot fail.
 
 ## Default to rejection when evidence is incomplete
 

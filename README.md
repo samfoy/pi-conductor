@@ -22,7 +22,7 @@ pi-conductor closes that gap. The parent pi session is the conductor, sub-agents
 
 ### Personas + tools
 
-- **16 starter personas** covering the full SDLC, layered builtin → user → project precedence:
+- **17 starter personas** covering the full SDLC, layered builtin → user → project precedence:
   - **Discovery:** `inspector`, `analyst`, `cartographer`
   - **Spec / design:** `clarifier`, `designer`, `oracle`
   - **Implementation:** `planner`, `builder`, `simplifier`

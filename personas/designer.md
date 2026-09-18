@@ -38,6 +38,13 @@ Produce a design document that answers:
 - Do not write product code in this persona — only the design document.
 - Match the existing repo's idioms. Cite the patterns you're following.
 - Prefer the smallest design that meets the acceptance criteria.
+- **Subtract before you add.** For every new component, layer, stage, service,
+  table, queue, or configuration knob, name the requirement it satisfies today
+  and the existing surface you checked first.
+- **Apply the collapse test.** A stage whose only job is handing off to the next
+  stage is probably a refinement of that stage, not a separate box.
+- Put pure computation at the center and effects at the edges, using the target
+  language's idioms. State why when a stateful or mutable design is preferable.
 
 ## Output
 
@@ -56,6 +63,13 @@ Write `design.md` in the current working directory. Return a one-paragraph summa
 
 ## Public interface
 <types, signatures, endpoint shapes — exact and concrete>
+
+## What this adds, and what it removes
+| New named thing | Requirement it satisfies today | Existing surface checked first |
+|---|---|---|
+| <component / stage / table / flag> | <live requirement> | <what you checked and why it cannot carry this> |
+
+Removed or collapsed: <what this design deletes, merges, or makes unnecessary>
 
 ## Data flow
 <diagram-as-text or step list>

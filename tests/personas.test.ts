@@ -233,6 +233,7 @@ test("personas: v0.8.1 inherit_context audit (PRD Open Q #16 fold-in)", () => {
     analyst: "none",
     profiler: "none",
     scribe: "none",
+    writer: "none",
     verifier: "none",
     // 9 personas keep filtered (trajectory-needers, gates with parent context
     // value, and write-capable producers).
@@ -248,10 +249,10 @@ test("personas: v0.8.1 inherit_context audit (PRD Open Q #16 fold-in)", () => {
   };
 
   const dir = builtinPersonasDir();
-  const files = readdirSync(dir).filter((f) => f.endsWith(".md"));
-  // Sanity: 16 shipped personas. If this fails, either a persona was added
+  const files = readdirSync(dir).filter((f) => f.endsWith(".md") && !f.startsWith("_"));
+  // Sanity: 17 shipped personas. If this fails, either a persona was added
   // or removed without updating the audit — update the table above first.
-  assert.equal(files.length, 16, `expected 16 personas, found ${files.length}`);
+  assert.equal(files.length, 17, `expected 17 personas, found ${files.length}`);
 
   for (const file of files) {
     const text = readFileSync(join(dir, file), "utf8");
@@ -304,11 +305,12 @@ test("personas: read_only audit (docs/backlog.md item 13 fix candidate #1)", () 
     planner: false,
     scribe: false,
     simplifier: false,
+    writer: false,
   };
 
   const dir = builtinPersonasDir();
-  const files = readdirSync(dir).filter((f) => f.endsWith(".md"));
-  assert.equal(files.length, 16, `expected 16 personas, found ${files.length}`);
+  const files = readdirSync(dir).filter((f) => f.endsWith(".md") && !f.startsWith("_"));
+  assert.equal(files.length, 17, `expected 17 personas, found ${files.length}`);
 
   for (const file of files) {
     const text = readFileSync(join(dir, file), "utf8");
@@ -613,7 +615,7 @@ test("personas: no shipped persona declares an active on_complete_hook frontmatt
   // comments inside personas/*.md. No shipped persona declares a
   // hook in v0.11. This regression catches accidental drift.
   const dir = builtinPersonasDir();
-  const files = (await readdir(dir)).filter((f) => f.endsWith(".md"));
+  const files = (await readdir(dir)).filter((f) => f.endsWith(".md") && !f.startsWith("_"));
   for (const f of files) {
     const body = readFileSync(join(dir, f), "utf8");
     // Match an UNCOMMENTED YAML key. A leading `# ` (recommendation
