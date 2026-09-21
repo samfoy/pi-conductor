@@ -25,7 +25,12 @@ import { registerTools } from "./tools.ts";
 import { RunRegistry } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
 import { mountEnsembleWidget, type EnsembleWidget } from "./widget.ts";
-import { buildCompletionSendMessageOptions, formatCompletionNotification } from "./notifications.ts";
+import {
+  buildCompletionMessage,
+  buildCompletionSendMessageOptions,
+  buildStallMessage,
+} from "./notifications.ts";
+import { registerNotificationRenderer } from "./notification-renderer.ts";
 import {
   CompletionWakeTracker,
   DEFAULT_TICK_INTERVAL_MS,
@@ -368,15 +373,7 @@ export default function (pi: ExtensionAPI): void {
       return { detachSignal, unregister };
     },
     pushCompletionNotification: (run: Run) => {
-      const text = formatCompletionNotification(run);
-      pi.sendMessage(
-        {
-          customType: "ensemble-notification",
-          content: text,
-          display: true,
-        },
-        buildCompletionSendMessageOptions(run),
-      );
+      pi.sendMessage(buildCompletionMessage(run), buildCompletionSendMessageOptions(run));
       // Item 11 dead-man-switch: track this wake. clearOnTurnStart()
       // drops it when the conductor's next turn fires (the wake
       // worked). The 15s tick re-fires if no turn fires within 30s.
@@ -510,18 +507,13 @@ export default function (pi: ExtensionAPI): void {
                 meta.severity === "hard"
                   ? cfg.watchdog.defaultHardSeconds
                   : cfg.watchdog.defaultSoftSeconds;
-              const text = formatStallNotification(run, {
-                severity: meta.severity,
-                silentSeconds: meta.silentSeconds,
-                thresholdSeconds,
-              });
               try {
                 pi.sendMessage(
-                  {
-                    customType: "ensemble-notification",
-                    content: text,
-                    display: true,
-                  },
+                  buildStallMessage(run, {
+                    severity: meta.severity,
+                    silentSeconds: meta.silentSeconds,
+                    thresholdSeconds,
+                  }),
                   { triggerTurn: false, deliverAs: "followUp" },
                 );
               } catch (err) {
@@ -580,14 +572,7 @@ export default function (pi: ExtensionAPI): void {
         // PRD line 257 contract is binary — fire a turn or don't —
         // so a second attempt is appropriate even if the first was a
         // host-side downgrade rather than a missed event.
-        pi.sendMessage(
-          {
-            customType: "ensemble-notification",
-            content: formatCompletionNotification(run),
-            display: true,
-          },
-          buildCompletionSendMessageOptions(run),
-        );
+        pi.sendMessage(buildCompletionMessage(run), buildCompletionSendMessageOptions(run));
       }
       for (const runId of result.expired) {
         // Cap hit — surface a warning so a human notices. The conductor
@@ -692,4 +677,8 @@ export default function (pi: ExtensionAPI): void {
 
   registerTools(pi, opts);
   registerCommands(pi, opts);
+  // Registered at factory time, not lazily: pi resolves a message's
+  // renderer when it builds the component, so a renderer registered after
+  // the first notification lands would leave that card rendered raw.
+  registerNotificationRenderer(pi);
 }

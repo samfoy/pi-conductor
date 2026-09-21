@@ -6105,8 +6105,8 @@ function renderHeader(run, width) {
       left = baseLeft + sepText + fitted;
     }
   }
-  const headerLine2 = padOrTruncate(left, right, width);
-  return [sep2, headerLine2];
+  const headerLine3 = padOrTruncate(left, right, width);
+  return [sep2, headerLine3];
 }
 var IDLE_THRESHOLD_MS = 5e3;
 function deriveActivity(run, nowMs) {
@@ -8298,9 +8298,26 @@ function formatCompletionNotification(run) {
   const header = headerLine(run, elapsed, usageStr, resumed);
   return [header, "", ...lines].join("\n");
 }
+function statusVerb(status) {
+  switch (status) {
+    case "completed":
+      return "completed";
+    case "killed":
+      return "killed";
+    case "timeout":
+      return "timed out";
+    case "hook_failed":
+      return "hook failed";
+    case "aborted":
+      return "aborted (turn limit)";
+    // v0.17
+    default:
+      return "failed";
+  }
+}
 function headerLine(run, elapsed, usageStr, resumed) {
   const glyph = run.status === "completed" ? "\u2713" : run.status === "killed" ? "\u25A0" : run.status === "timeout" ? "\u23F1" : run.status === "hook_failed" ? "\u2297" : run.status === "aborted" ? "\u23F9" : "\u2717";
-  const verb = run.status === "completed" ? "completed" : run.status === "killed" ? "killed" : run.status === "timeout" ? "timed out" : run.status === "hook_failed" ? "hook failed" : run.status === "aborted" ? "aborted (turn limit)" : "failed";
+  const verb = statusVerb(run.status);
   const usagePart = usageStr ? `, ${usageStr}` : "";
   let line = `## ${glyph} \`${run.persona}\` ${verb} (${elapsed}${usagePart}) \u2014 id \`${run.id}\``;
   if (resumed) {
@@ -8344,6 +8361,136 @@ function buildCompletionSendMessageOptions(run) {
     return { triggerTurn: true };
   }
   return { triggerTurn: true, deliverAs: "followUp" };
+}
+function buildCompletionMessage(run) {
+  const perSend = perSendNumbers(run);
+  const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
+  const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
+  const stats = [elapsedStr(perSendStart, perSendEnd)];
+  const usageStr = formatUsage(perSend);
+  if (usageStr) stats.push(usageStr);
+  stats.push(run.id);
+  if ((run.resumeCount ?? 0) >= 1) {
+    const cost = run.usage.cost ? ` $${run.usage.cost.toFixed(3)}` : "";
+    const resumes = run.resumeCount === 1 ? "1 resume" : `${run.resumeCount} resumes`;
+    stats.push(`lifetime ${elapsedStr(run.startTime, run.finishedAt)}${cost} (${resumes})`);
+  }
+  const notes = [];
+  if (run.errorMessage) notes.push({ slot: "error", text: run.errorMessage });
+  if (run.nonSubstantiveFinal) {
+    notes.push({
+      slot: "warning",
+      text: `${run.nonSubstantiveFinal.reason}: ${run.nonSubstantiveFinal.message}`
+    });
+  }
+  if (run.hookResult) {
+    const h = run.hookResult;
+    const exit = h.exitCode ?? "signal";
+    notes.push({
+      slot: h.passed ? "muted" : "error",
+      text: h.passed ? `hook ok: ${h.command} (${h.logPath})` : `hook failed: ${h.command} (exit ${exit}) \u2192 ${h.logPath}`
+    });
+  }
+  return {
+    customType: "ensemble-notification",
+    content: formatCompletionNotification(run),
+    display: true,
+    details: {
+      kind: "completed",
+      id: run.id,
+      persona: run.persona,
+      status: run.status,
+      stats,
+      body: getFinalText(run.messages),
+      transcriptPath: run.transcriptPath,
+      notes
+    }
+  };
+}
+function buildStallMessage(run, args) {
+  return {
+    customType: "ensemble-notification",
+    content: formatStallNotification(run, args),
+    display: true,
+    details: {
+      kind: "stalled",
+      id: run.id,
+      persona: run.persona,
+      status: run.status,
+      severity: args.severity,
+      stats: [`silent ${args.silentSeconds}s`, `threshold ${args.thresholdSeconds}s`, run.id],
+      body: "",
+      transcriptPath: run.transcriptPath,
+      notes: run.lastToolCall ? [{ slot: "muted", text: `last tool: ${run.lastToolCall}` }] : []
+    }
+  };
+}
+
+// src/notification-renderer.ts
+import { Text as Text2 } from "@earendil-works/pi-tui";
+var DEFAULT_MAX_BODY_LINES = 40;
+var INDENT = "  ";
+var EXPAND_KEY = "ctrl+o";
+function renderNotificationCard(d, opts) {
+  const lines = [headerLine2(d)];
+  const bodyLines = d.body.split("\n").filter((l) => l.trim().length > 0);
+  if (opts.expanded) {
+    const max = opts.maxBodyLines ?? DEFAULT_MAX_BODY_LINES;
+    for (const line of bodyLines.slice(0, max)) {
+      lines.push([{ text: INDENT + line, slot: "toolOutput" }]);
+    }
+    const dropped = bodyLines.length - max;
+    if (dropped > 0) {
+      lines.push([
+        { text: `${INDENT}\u2026 ${dropped} more lines \u2014 see transcript`, slot: "dim" }
+      ]);
+    }
+  } else if (bodyLines.length > 0) {
+    lines.push([{ text: `${INDENT}\u23BF  ${bodyLines[0]}`, slot: "toolOutput" }]);
+    if (bodyLines.length > 1) {
+      lines.push([{ text: `${INDENT}${EXPAND_KEY} for the full result`, slot: "dim" }]);
+    }
+  }
+  for (const note of d.notes) {
+    lines.push([{ text: INDENT + note.text, slot: note.slot }]);
+  }
+  if (opts.expanded) {
+    lines.push([{ text: `${INDENT}transcript: ${d.transcriptPath}`, slot: "muted" }]);
+  }
+  return lines;
+}
+function headerLine2(d) {
+  const stalled = d.kind === "stalled";
+  const glyph = stalled ? d.severity === "hard" ? "\u26A0" : "\xB7" : STATUS_GLYPH[d.status];
+  const slot = stalled ? d.severity === "hard" ? "warning" : "muted" : statusColorSlot(d.status);
+  const verb = stalled ? `${d.severity}-stalled` : statusVerb(d.status);
+  const line = [
+    { text: glyph, slot },
+    { text: " " },
+    { text: d.persona, bold: true },
+    { text: ` ${verb}`, slot: "dim" }
+  ];
+  if (d.stats.length > 0) {
+    line.push({ text: ` \xB7 ${d.stats.join(" \xB7 ")}`, slot: "dim" });
+  }
+  return line;
+}
+function paintCardLines(lines, theme) {
+  return lines.map(
+    (line) => line.map((span) => {
+      const styled = span.bold ? theme.bold(span.text) : span.text;
+      return span.slot ? theme.fg(span.slot, styled) : styled;
+    }).join("")
+  ).join("\n");
+}
+function notificationRenderer(message, opts, theme) {
+  const details = message.details;
+  if (!details?.kind) return void 0;
+  const lines = renderNotificationCard(details, { expanded: opts.expanded });
+  return new Text2(paintCardLines(lines, theme), opts.outputPad, 0);
+}
+function registerNotificationRenderer(pi) {
+  pi.registerMessageRenderer("ensemble-notification", notificationRenderer);
 }
 
 // src/completion-wake-tracker.ts
@@ -10065,15 +10212,7 @@ function index_default(pi) {
       return { detachSignal, unregister };
     },
     pushCompletionNotification: (run) => {
-      const text = formatCompletionNotification(run);
-      pi.sendMessage(
-        {
-          customType: "ensemble-notification",
-          content: text,
-          display: true
-        },
-        buildCompletionSendMessageOptions(run)
-      );
+      pi.sendMessage(buildCompletionMessage(run), buildCompletionSendMessageOptions(run));
       completionWakeTracker.track(run.id, Date.now());
     }
   };
@@ -10168,18 +10307,13 @@ function index_default(pi) {
             const run = meta?.agentId ? registry.get(meta.agentId) : void 0;
             if (run && meta?.severity && typeof meta.silentSeconds === "number") {
               const thresholdSeconds = meta.severity === "hard" ? cfg.watchdog.defaultHardSeconds : cfg.watchdog.defaultSoftSeconds;
-              const text = formatStallNotification(run, {
-                severity: meta.severity,
-                silentSeconds: meta.silentSeconds,
-                thresholdSeconds
-              });
               try {
                 pi.sendMessage(
-                  {
-                    customType: "ensemble-notification",
-                    content: text,
-                    display: true
-                  },
+                  buildStallMessage(run, {
+                    severity: meta.severity,
+                    silentSeconds: meta.silentSeconds,
+                    thresholdSeconds
+                  }),
                   { triggerTurn: false, deliverAs: "followUp" }
                 );
               } catch (err) {
@@ -10220,14 +10354,7 @@ function index_default(pi) {
           completionWakeTracker.drop(runId);
           continue;
         }
-        pi.sendMessage(
-          {
-            customType: "ensemble-notification",
-            content: formatCompletionNotification(run),
-            display: true
-          },
-          buildCompletionSendMessageOptions(run)
-        );
+        pi.sendMessage(buildCompletionMessage(run), buildCompletionSendMessageOptions(run));
       }
       for (const runId of result.expired) {
         ctxRef?.ui.notify(
@@ -10303,6 +10430,7 @@ ${addendum}`;
   });
   registerTools(pi, opts);
   registerCommands(pi, opts);
+  registerNotificationRenderer(pi);
 }
 export {
   index_default as default

@@ -5,15 +5,65 @@
  * Shape mirrors team-mode's <task-notification> XML so the conductor LLM
  * has a consistent payload to parse.
  *
- * v0.2: rendered as plain markdown (visible to user, machine-readable XML
- * embedded for the LLM). The "folded card" rendering described in the PRD
- * is a v1.x polish item — pi's customMessage rendering doesn't yet support
- * collapsible cards out of the box.
+ * The envelope here is the LLM's half: markdown header plus a fenced XML
+ * block it parses, and the exact bytes `compaction-hook.ts` rewrites. The
+ * user's half is the folded card in `notification-renderer.ts`, fed by the
+ * `details` payload {@link buildCompletionMessage} attaches to the same
+ * message. Both halves ship together — sending one without the other is
+ * what left raw XML in the transcript until 2026-06.
  */
 
 import { compactEnvelopeBlock } from "./compaction-hook.ts";
 import { elapsedStr, formatUsage, getFinalText } from "./runs.ts";
-import type { Run } from "./types.ts";
+import type { Run, RunStatus } from "./types.ts";
+
+/** Theme slot for an annotation row under a notification card. */
+export type NotificationNoteSlot = "error" | "warning" | "muted";
+
+export interface NotificationNote {
+  slot: NotificationNoteSlot;
+  text: string;
+}
+
+/**
+ * Structured payload attached to every `ensemble-notification` custom
+ * message as `details`, and the only input
+ * {@link renderNotificationCard} reads.
+ *
+ * Why it exists: pi resolves a custom message's renderer by `customType`
+ * and hands the renderer `message.details`. We used to send content
+ * only, so the host fell back to printing the raw ```xml envelope. The
+ * envelope stays (it is the LLM's contract and `compaction-hook.ts`
+ * rewrites it verbatim); `details` is the parallel machine-readable copy
+ * the TUI draws from.
+ *
+ * Everything here is pre-formatted. Keeping the formatters on this side
+ * means the renderer owns layout only, and the numbers in the card can
+ * never drift from the numbers in the envelope.
+ */
+export interface EnsembleNotificationDetails {
+  kind: "completed" | "stalled";
+  id: string;
+  persona: string;
+  status: RunStatus;
+  /** Stall severity. Present only when `kind === "stalled"`. */
+  severity?: "soft" | "hard";
+  /** Summary segments, joined with " · " onto the header line. */
+  stats: string[];
+  /** Sub-agent final text. Empty for stall advisories. */
+  body: string;
+  transcriptPath: string;
+  /** Error / warning / hook rows rendered under the body. */
+  notes: NotificationNote[];
+}
+
+/** Shape of the `pi.sendMessage` first argument for a notification. */
+export interface NotificationMessage {
+  customType: "ensemble-notification";
+  content: string;
+  display: true;
+  details: EnsembleNotificationDetails;
+}
 
 /**
  * Item 15: per-send vs lifetime accounting for the completion envelope.
@@ -137,6 +187,21 @@ export function formatCompletionNotification(run: Run): string {
   return [header, "", ...lines].join("\n");
 }
 
+/**
+ * Past-tense wording for a terminal status, shared by the XML envelope's
+ * markdown header and the inline card so the two can't disagree.
+ */
+export function statusVerb(status: RunStatus): string {
+  switch (status) {
+    case "completed": return "completed";
+    case "killed": return "killed";
+    case "timeout": return "timed out";
+    case "hook_failed": return "hook failed";
+    case "aborted": return "aborted (turn limit)"; // v0.17
+    default: return "failed";
+  }
+}
+
 function headerLine(
   run: Run,
   elapsed: string,
@@ -149,12 +214,7 @@ function headerLine(
     run.status === "timeout"   ? "⏱" :
     run.status === "hook_failed" ? "⊗" :
     run.status === "aborted"   ? "⏹" : "✗"; // v0.17: aborted (turn limit)
-  const verb =
-    run.status === "completed" ? "completed" :
-    run.status === "killed"    ? "killed" :
-    run.status === "timeout"   ? "timed out" :
-    run.status === "hook_failed" ? "hook failed" :
-    run.status === "aborted"   ? "aborted (turn limit)" : "failed"; // v0.17
+  const verb = statusVerb(run.status);
   const usagePart = usageStr ? `, ${usageStr}` : "";
   let line = `## ${glyph} \`${run.persona}\` ${verb} (${elapsed}${usagePart}) — id \`${run.id}\``;
   if (resumed) {
@@ -285,4 +345,92 @@ export function buildCompletionSendMessageOptions(run: Run): {
     return { triggerTurn: true };
   }
   return { triggerTurn: true, deliverAs: "followUp" };
+}
+
+// ── Inline cards — `details` payload builders ──────────────────────────
+
+/**
+ * Build the whole `pi.sendMessage` first argument for a completion
+ * notification: unchanged XML `content` for the LLM, structured
+ * `details` for {@link renderNotificationCard}.
+ *
+ * All three call sites in `index.ts` (terminal transition, watchdog
+ * advisory, dead-man-switch re-fire) go through this so `details` can't
+ * be forgotten on one of them — which is exactly how the raw-XML
+ * regression shipped.
+ */
+export function buildCompletionMessage(run: Run): NotificationMessage {
+  const perSend = perSendNumbers(run);
+  const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
+  const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
+
+  const stats = [elapsedStr(perSendStart, perSendEnd)];
+  const usageStr = formatUsage(perSend);
+  if (usageStr) stats.push(usageStr);
+  stats.push(run.id);
+  if ((run.resumeCount ?? 0) >= 1) {
+    const cost = run.usage.cost ? ` $${run.usage.cost.toFixed(3)}` : "";
+    const resumes = run.resumeCount === 1 ? "1 resume" : `${run.resumeCount} resumes`;
+    stats.push(`lifetime ${elapsedStr(run.startTime, run.finishedAt)}${cost} (${resumes})`);
+  }
+
+  const notes: NotificationNote[] = [];
+  if (run.errorMessage) notes.push({ slot: "error", text: run.errorMessage });
+  if (run.nonSubstantiveFinal) {
+    notes.push({
+      slot: "warning",
+      text: `${run.nonSubstantiveFinal.reason}: ${run.nonSubstantiveFinal.message}`,
+    });
+  }
+  if (run.hookResult) {
+    const h = run.hookResult;
+    const exit = h.exitCode ?? "signal";
+    notes.push({
+      slot: h.passed ? "muted" : "error",
+      text: h.passed
+        ? `hook ok: ${h.command} (${h.logPath})`
+        : `hook failed: ${h.command} (exit ${exit}) → ${h.logPath}`,
+    });
+  }
+
+  return {
+    customType: "ensemble-notification",
+    content: formatCompletionNotification(run),
+    display: true,
+    details: {
+      kind: "completed",
+      id: run.id,
+      persona: run.persona,
+      status: run.status,
+      stats,
+      body: getFinalText(run.messages),
+      transcriptPath: run.transcriptPath,
+      notes,
+    },
+  };
+}
+
+/** {@link buildCompletionMessage} for a watchdog stall advisory. */
+export function buildStallMessage(
+  run: Run,
+  args: { severity: "soft" | "hard"; silentSeconds: number; thresholdSeconds: number },
+): NotificationMessage {
+  return {
+    customType: "ensemble-notification",
+    content: formatStallNotification(run, args),
+    display: true,
+    details: {
+      kind: "stalled",
+      id: run.id,
+      persona: run.persona,
+      status: run.status,
+      severity: args.severity,
+      stats: [`silent ${args.silentSeconds}s`, `threshold ${args.thresholdSeconds}s`, run.id],
+      body: "",
+      transcriptPath: run.transcriptPath,
+      notes: run.lastToolCall
+        ? [{ slot: "muted" as const, text: `last tool: ${run.lastToolCall}` }]
+        : [],
+    },
+  };
 }
