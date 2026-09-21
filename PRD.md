@@ -580,6 +580,24 @@ When `inherit_context: filtered`, before launching the sub-agent we serialize a 
 - New module `src/worktree.ts`; git env vars stripped from child processes to prevent pre-commit hook contamination.
 - 1 commit `3b45a28`; 28 new tests; design `docs/v0.13-worktree-design.md`.
 
+### v0.14 — Worktree auto-merge — _shipped_
+- A worktree run that reaches `completed` merges its branch back to the base branch. `merge_strategy` selects how: `"squash"` (all commits into one), `"merge"` (merge commit), or `"none"` (leave the branch for a human/chain to inspect).
+- `resolveMergeStrategy` cascade: per-call > project config > user config > persona frontmatter > built-in default. Built-in is `"squash"` for `builder`/`simplifier` and `"none"` for every other persona.
+- New `"merge_conflict"` `RunStatus` (terminal, post-success) with its own `⊘` glyph — deliberately distinct from `⊗` (`hook_failed`) so the two post-success failure modes are never confused. `mergeWorktree` aborts cleanly on conflict and returns the conflicting paths; `worktreePath` is retained so the work is recoverable.
+- `mergeStrategy` and `worktreeBaseBranch` stamped onto `Run` at spawn time; `applyMergeToTerminal` wired into `finalize` after the hook gate.
+- Squash path pre-checks that the branch is actually ahead of base before squashing, so an empty diff reports `nothingToCommit` success instead of a false failure — and a branch that *is* ahead but stages nothing reports failure rather than silently losing work (`58e4ac8`).
+- GC gains a `mergeConflictTtlDays` bucket (falls back to `failedTtlDays`) so conflicted worktrees aren't reaped on the ordinary completed-run schedule.
+- `/conductor worktree list|merge|clean` for manual inspection and recovery.
+- 7 commits `5601205..58e4ac8` (design `5601205`, slices S1–S6 `e86ab09..38e6ec2`, fix `58e4ac8`); design `docs/v0.14-worktree-merge-design.md`.
+
+### v0.15 — Persona auto-chains — _shipped_
+- `chains` in `.pi/conductor.json` maps a source persona to a `ChainStep`; when the source completes successfully the conductor auto-spawns the target as a background run. The chained run appears in the ensemble panel and fires its own completion notification, so the conductor doesn't have to remember to spawn the follow-up.
+- **On by default, no config needed:** `builder → critic` and `simplifier → critic` ship as built-in defaults (`src/types.ts`). `{ then: "" }` is the explicit-disable sentinel, mirroring `on_complete_hook`'s empty-string convention; `chain: false` on a single `ensemble_spawn` skips that one spawn's chain.
+- Depth-1 cap: chain-spawned runs never trigger further chains.
+- Config merge is key-level — project keys override user keys, and keys absent from the incoming layer are preserved from the base layer, so a project can retarget one chain without redeclaring the rest.
+- The chain task template hands the target the source's final output. When the source ran with `mergeStrategy: "none"`, `WORKTREE_CHAIN_TEMPLATE` is used instead: the critic gets the branch name and a ready-to-run `git diff {baseBranch}...{worktreeBranch}` rather than merged output it can't see.
+- 2 commits `5529647` (config + resolution) and `fde2752` (built-in defaults); no separate design doc.
+
 ### v0.16 — Event bus + chain-aware worktrees — _shipped_
 - `ConductorEventEmitter` thin wrapper over `pi.events` with typed channel constants under `conductor:agent:*` namespace. 6 agent-lifecycle channels (`created`, `started`, `completed`, `failed`, `steered`, `compacted`) + 3 hook channels (`hook:started`, `hook:completed`, `hook:failed`). DI-wired via `src/conductor-events.ts`; emit sites across `src/runs.ts`, `src/index.ts`, and `src/hooks.ts`.
 - Compacted emit uses dual-detection: JSON `compact_result` event type + RPC `response.type === "compact"` to cover both non-RPC and RPC streaming modes without false positives.
@@ -595,6 +613,23 @@ When `inherit_context: filtered`, before launching the sub-agent we serialize a 
 - Hook lifecycle events via `ConductorEventEmitter`: `hook:started`, `hook:completed`, `hook:failed` emitted from `src/hooks.ts` at the three natural boundary points.
 - UX surfaces: ensemble panel shows `⏱ N turns / M max` glyph for capped runs; `/conductor doctor` reports `maxTurns`/`graceTurns` for each run; notification on abort; `/conductor history` renders `aborted` with dedicated glyph; conductor system-prompt addendum §12 documents the turn-budget contract for sub-agents.
 - 7 commits `ddd5ea3..0c6b388`; design `docs/v0.17-graceful-turns-design.md`; plan `docs/v0.17-graceful-turns-plan.md`. Test count: ~1510 → 1546 (+36). Verifier PASS 2026-06-19 (1546 pass / 0 fail / 11 skipped; tsc clean).
+
+### v0.18 — Autonomous mode (Metaphor pattern port) — _shipped_
+- **Failure-classification taxonomy** (`src/failure-classify.ts`): every non-completed terminal is stamped with one of `syntax | logic | test | environment | permission | timeout | stall | turns | unknown`. The split that matters is deterministic-cause (`syntax`, `logic`) vs transient (`environment`, `stall`, `timeout`, `test`) — re-running the former just burns tokens.
+- **Classified retry** (`src/retry.ts`): a retryable terminal auto-respawns the same persona with a diagnostic-augmented task, up to `retry_max_attempts` (per-call > project > user > persona > built-in). `DEFAULT_RETRY_POLICY` is `maxAttempts: 1` — **off by default** — with `retryableClasses: [environment, stall, timeout, test]`. Permission failures are never auto-retried; they always escalate.
+- **Plans-as-hypotheses** chain re-evaluation: `ChainStep.reevaluate` gates the successor on the source's output, so a stop verdict halts the chain before the next persona spawns.
+- **Confidence-weighted cross-session memory** (`src/memory.ts`): `ensemble_recommend` ranks personas by recency-decayed, confidence-weighted past success on the normalized shape of a task. Advisory only — an empty result means no history for that shape yet.
+- **Capstone `ensemble_auto`** (`src/autonomous.ts`): runs a conductor-supplied ordered persona plan to a terminal outcome with in-loop classified retry, per-step re-evaluation, and `max_steps` / `budget_usd` caps. Halts and escalates on a non-retryable failure, a stop verdict, or a cap. Outcomes feed back into cross-session memory.
+- 6 commits `207139d..d7af20b` (slices S1–S5 + docs); design `docs/v0.18-autonomous-mode-design.md`.
+
+### Post-v0.18 — unversioned — _shipped_
+Work that landed after the v0.18 capstone without its own phase number:
+- `97dc6c2` — watchdog: stop cross-slot stall false-positives on shared-pid hosts.
+- `2b2591f` — port Hermes persona doctrine.
+- `0a576e7` — support externally owned worktrees.
+- `d416d95` — allow host integrations to force conductor mode.
+- `5d2ccdb` — stop installing a second Pi runtime.
+- `cf527ef` — render sub-agent notifications as folded cards (see the 2026-06-20 decision-log entry).
 
 ### v0.10+ — v2 ideas — _planned_
 - Run-record GC (open question #12).
