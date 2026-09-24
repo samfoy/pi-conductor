@@ -2674,15 +2674,18 @@ export async function applyMergeToTerminal(
 /**
  * Finalize's worktree step: merge back (v0.14), then remove the worktree
  * and delete its branch (v0.13). `merge_conflict` keeps both for manual
- * resolution. Best-effort removal: failure is logged, and worktreePath
- * stays set so the GC delete path can find the orphan. Exported for tests.
+ * resolution. So does a startup-reconciled run on every terminal: its
+ * resume ran in run.cwd, so the worktree holds the dead process's only
+ * copy of its work. The fields stay set for `/conductor worktree` and GC.
+ * Best-effort removal: failure is logged, and worktreePath stays set so
+ * the GC delete path can find the orphan. Exported for tests.
  */
 export async function settleWorktree(run: Run, terminal: RunStatus): Promise<RunStatus> {
   if (run.worktreePath && run.mergeStrategy && run.mergeStrategy !== "none") {
     const gitRoot = dirname(dirname(dirname(run.worktreePath)));
     terminal = await applyMergeToTerminal(run, gitRoot, terminal);
   }
-  if (terminal === "merge_conflict") return terminal;
+  if (terminal === "merge_conflict" || run.reconciledAtStartup) return terminal;
   if (run.worktreePath && run.worktreeBranch) {
     const wtSpec = {
       // Reconstruct gitRoot: <gitRoot>/.worktrees/conductor-wt/<run-id> → 3 levels up

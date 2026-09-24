@@ -3624,7 +3624,7 @@ async function settleWorktree(run, terminal) {
     const gitRoot2 = dirname7(dirname7(dirname7(run.worktreePath)));
     terminal = await applyMergeToTerminal(run, gitRoot2, terminal);
   }
-  if (terminal === "merge_conflict") return terminal;
+  if (terminal === "merge_conflict" || run.reconciledAtStartup) return terminal;
   if (run.worktreePath && run.worktreeBranch) {
     const wtSpec = {
       // Reconstruct gitRoot: <gitRoot>/.worktrees/conductor-wt/<run-id> → 3 levels up

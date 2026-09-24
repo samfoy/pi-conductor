@@ -9,17 +9,20 @@
  *       and the resume that completes it runs in run.cwd, not the
  *       worktree being merged). It lands in merge_conflict instead.
  *   (c) buildOrphanRun restores every field record.json persists.
+ *   (d) A re-adopted run's worktree survives a resume that ends in any
+ *       terminal status: the resume runs in run.cwd, so the worktree
+ *       still holds the dead process's only copy of its work.
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { reconcileOrphansAtStartup } from "../src/reconcile-startup.ts";
-import { applyMergeToTerminal } from "../src/runs.ts";
+import { applyMergeToTerminal, RunRegistry, sendToRun } from "../src/runs.ts";
 import { emptyUsage, toRunRecord, type Run, type RunRecord } from "../src/types.ts";
 import { gitTestEnv } from "./helpers/git-env.ts";
 import { loadConductor, stubCtx } from "./helpers/stub-pi.ts";
@@ -183,6 +186,76 @@ test("reconcile then completion: a re-adopted worktree run lands in merge_confli
     assert.match(run.errorMessage ?? "", /on_complete_hook/);
     assert.ok(run.errorMessage?.includes(`/conductor worktree merge builder-full`), run.errorMessage);
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── (d) a failed resume never destroys a re-adopted worktree ────────
+
+test("reconcile then a failed resume: the dead builder's worktree and branch survive", { timeout: 30_000 }, async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "conductor-readopt-resume-")));
+  const saved = { HOME: process.env.HOME, PI_BIN: process.env.PI_BIN };
+  try {
+    const repo = join(root, "repo");
+    mkdirSync(repo);
+    git(repo, "init -b mainline");
+    git(repo, "config user.email t@t");
+    git(repo, "config user.name T");
+    writeFileSync(join(repo, "README.md"), "init\n");
+    git(repo, "add README.md");
+    git(repo, "commit -m init");
+    const id = "builder-dead";
+    const branch = `conductor-wt/${id}`;
+    const wt = join(repo, ".worktrees", "conductor-wt", id);
+    git(repo, `worktree add -b ${branch} ${JSON.stringify(wt)}`);
+    writeFileSync(join(wt, "work.ts"), "two hours of work\n");
+    git(wt, "add work.ts");
+    git(wt, `commit -m "dead builder's work"`);
+
+    process.env.HOME = join(root, "home");
+    const runsRoot = join(root, "runs");
+    const dir = join(runsRoot, id);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "session.jsonl"), "{}\n");
+    const record = toRunRecord(
+      fullRun(dir, {
+        id,
+        pid: 999_999,
+        parentPid: 999_998,
+        parentSessionId: undefined,
+        cwd: repo,
+        worktreePath: wt,
+        worktreeBranch: branch,
+        mergeResult: undefined,
+        errorMessage: undefined,
+      }),
+    );
+    writeFileSync(record.recordPath, JSON.stringify(record));
+
+    const registry = new RunRegistry();
+    await reconcileOrphansAtStartup({ runsRoot, registry, isAlive: () => false, isParentAlive: () => false, now: 9_000 });
+    const run = registry.get(id)!;
+    assert.equal(run.status, "killed", "precondition: the dead run is re-adopted as killed");
+    assert.equal(run.worktreePath, wt, "precondition: worktree fields survive re-adoption");
+
+    // The resume fails fast, like a retired model ("Model not found").
+    const stub = join(root, "pi-stub.mjs");
+    writeFileSync(stub, `console.error('Model "retired/x" not found'); process.exit(1);\n`);
+    process.env.PI_BIN = stub;
+    const sent = sendToRun(run, "please finish", { registry, timeoutMs: 10_000 });
+    assert.equal(sent.kind, "started", sent.kind === "rejected" ? sent.reason : "");
+    await sent.done;
+    assert.equal(run.status, "failed", "precondition: the resume failed");
+
+    assert.equal(existsSync(join(wt, "work.ts")), true, "worktree directory and its work kept");
+    assert.notEqual(git(repo, `branch --list ${branch}`).trim(), "", "worktree branch kept");
+    assert.equal(run.worktreePath, wt, "worktree path kept for worktree merge|clean and GC");
+    assert.equal(run.worktreeBranch, branch);
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
     rmSync(root, { recursive: true, force: true });
   }
 });
