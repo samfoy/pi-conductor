@@ -171,6 +171,7 @@ __export(worktree_exports, {
   removeWorktree: () => removeWorktree,
   resolveMergeStrategy: () => resolveMergeStrategy,
   resolveWorktreeSpec: () => resolveWorktreeSpec,
+  worktreeHasUncommittedChanges: () => worktreeHasUncommittedChanges,
   worktreeSpecFromRun: () => worktreeSpecFromRun
 });
 import { execSync } from "node:child_process";
@@ -230,7 +231,7 @@ function createWorktree(spec, opts = {}) {
 function currentBranch(gitRoot2) {
   return tryGitExec("git rev-parse --abbrev-ref HEAD", gitRoot2) ?? void 0;
 }
-function removeWorktree(spec) {
+function removeWorktree(spec, opts = {}) {
   let ok = true;
   try {
     execSync(
@@ -240,19 +241,26 @@ function removeWorktree(spec) {
   } catch {
     ok = false;
   }
-  try {
-    execSync(
-      `git branch -D ${JSON.stringify(spec.branch)}`,
-      { cwd: spec.gitRoot, stdio: "pipe", env: gitEnv() }
-    );
-  } catch {
-    ok = false;
+  if (!opts.keepBranch) {
+    try {
+      execSync(
+        `git branch -D ${JSON.stringify(spec.branch)}`,
+        { cwd: spec.gitRoot, stdio: "pipe", env: gitEnv() }
+      );
+    } catch {
+      ok = false;
+    }
   }
   try {
     execSync("git worktree prune", { cwd: spec.gitRoot, stdio: "pipe", env: gitEnv() });
   } catch {
   }
   return ok;
+}
+function worktreeHasUncommittedChanges(worktreePath) {
+  if (!existsSync4(worktreePath)) return false;
+  const status = tryGitExec("git status --porcelain", worktreePath);
+  return status === null || status !== "";
 }
 function ensureWorktreeGitignore(gitRoot2) {
   const ignorePath = join4(gitRoot2, ".gitignore");
@@ -1624,20 +1632,22 @@ function runHook(opts) {
     mkdirSync2(dirname3(logPath), { recursive: true });
   } catch {
   }
+  const { CONDUCTOR_WORKTREE_PATH: _inherited, ...inheritedEnv } = process.env;
   const env = {
-    ...process.env,
+    ...inheritedEnv,
     CONDUCTOR_RUN_ID: opts.runId,
     CONDUCTOR_PERSONA: opts.persona,
     CONDUCTOR_FINAL_TEXT_PATH: opts.finalPath,
     CONDUCTOR_TRANSCRIPT_PATH: opts.transcriptPath,
     CONDUCTOR_RUN_DIR: opts.runDir,
     CONDUCTOR_HOOK_LOG: logPath,
-    CONDUCTOR_PARENT_CWD: opts.parentCwd
+    CONDUCTOR_PARENT_CWD: opts.parentCwd,
+    ...opts.worktreePath ? { CONDUCTOR_WORKTREE_PATH: opts.worktreePath } : {}
   };
   const spawnOpts = {
     shell: true,
     detached: true,
-    cwd: opts.parentCwd,
+    cwd: opts.worktreePath ?? opts.parentCwd,
     env,
     stdio: ["ignore", "pipe", "pipe"]
   };
@@ -3632,10 +3642,16 @@ async function settleWorktree(run, terminal) {
       worktreePath: run.worktreePath,
       branch: run.worktreeBranch
     };
-    const removed = removeWorktree(wtSpec);
+    const keepBranch = !run.mergeStrategy || run.mergeStrategy === "none";
+    if (keepBranch && worktreeHasUncommittedChanges(wtSpec.worktreePath)) {
+      const hint = `worktree kept: uncommitted changes in ${wtSpec.worktreePath}; commit them to ${wtSpec.branch} or discard them, then git worktree remove ${wtSpec.worktreePath}`;
+      run.errorMessage = run.errorMessage ? `${run.errorMessage}; ${hint}` : hint;
+      return terminal;
+    }
+    const removed = removeWorktree(wtSpec, { keepBranch });
     if (removed) {
       run.worktreePath = void 0;
-      run.worktreeBranch = void 0;
+      if (!keepBranch) run.worktreeBranch = void 0;
     } else {
       process.stderr.write(
         `[conductor] worktree removal failed for ${run.id}; GC will clean up
@@ -3681,6 +3697,7 @@ async function applyHookToTerminal(run, resolvedHook, terminal, deps = {}) {
       finalPath: run.finalPath,
       transcriptPath: run.transcriptPath,
       parentCwd: run.cwd,
+      worktreePath: run.worktreePath,
       onProc: (proc) => {
         run.hookProc = proc;
       },

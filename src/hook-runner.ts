@@ -77,6 +77,12 @@ export interface RunHookOptions {
   /** Parent process cwd at spawn time. Surfaced as `CONDUCTOR_PARENT_CWD`. */
   parentCwd: string;
   /**
+   * The run's worktree, when it has one: the hook runs there (the tree
+   * the sub-agent changed) instead of `parentCwd`, and gets it as
+   * `CONDUCTOR_WORKTREE_PATH`.
+   */
+  worktreePath?: string;
+  /**
    * Called synchronously after the child process is created so the caller
    * can stash the handle on `Run.hookProc` for `forceTerminate`. The
    * helper itself does not mutate `Run`.
@@ -173,8 +179,9 @@ export function runHook(opts: RunHookOptions): Promise<HookResult> {
     // best-effort
   }
 
+  const { CONDUCTOR_WORKTREE_PATH: _inherited, ...inheritedEnv } = process.env;
   const env: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...inheritedEnv,
     CONDUCTOR_RUN_ID: opts.runId,
     CONDUCTOR_PERSONA: opts.persona,
     CONDUCTOR_FINAL_TEXT_PATH: opts.finalPath,
@@ -182,12 +189,13 @@ export function runHook(opts: RunHookOptions): Promise<HookResult> {
     CONDUCTOR_RUN_DIR: opts.runDir,
     CONDUCTOR_HOOK_LOG: logPath,
     CONDUCTOR_PARENT_CWD: opts.parentCwd,
+    ...(opts.worktreePath ? { CONDUCTOR_WORKTREE_PATH: opts.worktreePath } : {}),
   };
 
   const spawnOpts: SpawnOptions = {
     shell: true,
     detached: true,
-    cwd: opts.parentCwd,
+    cwd: opts.worktreePath ?? opts.parentCwd,
     env,
     stdio: ["ignore", "pipe", "pipe"],
   };

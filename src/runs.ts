@@ -38,7 +38,7 @@ import { classifyFailure, shouldRetry } from "./failure-classify.ts";
 import { resolveRetryPolicy } from "./retry.ts";
 import { recordRunOutcome } from "./memory.ts";
 import { loadConfigWithErrors } from "./config.ts";
-import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage, currentBranch } from "./worktree.ts";
+import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage, currentBranch, worktreeHasUncommittedChanges } from "./worktree.ts";
 import { readProcessStartTime } from "./reconcile-startup.ts";
 import { ConductorEventEmitter } from "./conductor-events.ts";
 import { builtinPersonasDir, effectiveExcludeTools } from "./personas.ts";
@@ -2677,6 +2677,8 @@ export async function applyMergeToTerminal(
  * resolution. So does a startup-reconciled run on every terminal: its
  * resume ran in run.cwd, so the worktree holds the dead process's only
  * copy of its work. The fields stay set for `/conductor worktree` and GC.
+ * Without a merge-back (`none` or unset) the branch is the deliverable
+ * (v0.16 chains diff it): only a clean directory is removed (v0.20 B3).
  * Best-effort removal: failure is logged, and worktreePath stays set so
  * the GC delete path can find the orphan. Exported for tests.
  */
@@ -2693,10 +2695,18 @@ export async function settleWorktree(run: Run, terminal: RunStatus): Promise<Run
       worktreePath: run.worktreePath,
       branch: run.worktreeBranch,
     };
-    const removed = removeWorktree(wtSpec);
+    const keepBranch = !run.mergeStrategy || run.mergeStrategy === "none";
+    if (keepBranch && worktreeHasUncommittedChanges(wtSpec.worktreePath)) {
+      const hint =
+        `worktree kept: uncommitted changes in ${wtSpec.worktreePath}; commit them to ${wtSpec.branch} ` +
+        `or discard them, then git worktree remove ${wtSpec.worktreePath}`;
+      run.errorMessage = run.errorMessage ? `${run.errorMessage}; ${hint}` : hint;
+      return terminal;
+    }
+    const removed = removeWorktree(wtSpec, { keepBranch });
     if (removed) {
       run.worktreePath = undefined;
-      run.worktreeBranch = undefined;
+      if (!keepBranch) run.worktreeBranch = undefined;
     } else {
       process.stderr.write(
         `[conductor] worktree removal failed for ${run.id}; GC will clean up\n`,
@@ -2816,6 +2826,7 @@ export async function applyHookToTerminal(
       finalPath: run.finalPath,
       transcriptPath: run.transcriptPath,
       parentCwd: run.cwd,
+      worktreePath: run.worktreePath,
       onProc: (proc) => {
         run.hookProc = proc;
       },

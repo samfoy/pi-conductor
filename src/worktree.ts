@@ -6,6 +6,7 @@
  *   - `resolveWorktreeSpec`    — path computation + git root detection (I/O: git CLI only)
  *   - `createWorktree`         — `git worktree add` + `ensureWorktreeGitignore`
  *   - `removeWorktree`         — `git worktree remove --force` + `git branch -D` (best-effort)
+ *   - `worktreeHasUncommittedChanges` — `git status --porcelain` guard before a removal
  *   - `ensureWorktreeGitignore` — idempotent `.gitignore` append
  *   - `detectBrazilWorkspaceRoot` — walks up dir tree looking for `.brazil` marker
  *   - `worktreeSpecFromRun`    — reconstruct spec from a persisted RunRecord (for GC)
@@ -143,11 +144,13 @@ export function currentBranch(gitRoot: string): string | undefined {
 /**
  * Remove a worktree and its branch. Best-effort — swallows ENOENT and
  * git errors so callers (finalize, GC) are not blocked.
+ * `keepBranch` removes only the directory (v0.20 B3: a `none` run's
+ * branch is its deliverable).
  *
- * Returns `true` when both steps succeeded; `false` when one or both
- * failed (errors are logged to stderr but not re-thrown).
+ * Returns `true` when every step succeeded; `false` when one failed
+ * (errors are not re-thrown).
  */
-export function removeWorktree(spec: WorktreeSpec): boolean {
+export function removeWorktree(spec: WorktreeSpec, opts: { keepBranch?: boolean } = {}): boolean {
   let ok = true;
 
   try {
@@ -159,13 +162,15 @@ export function removeWorktree(spec: WorktreeSpec): boolean {
     ok = false;
   }
 
-  try {
-    execSync(
-      `git branch -D ${JSON.stringify(spec.branch)}`,
-      { cwd: spec.gitRoot, stdio: "pipe", env: gitEnv() },
-    );
-  } catch {
-    ok = false;
+  if (!opts.keepBranch) {
+    try {
+      execSync(
+        `git branch -D ${JSON.stringify(spec.branch)}`,
+        { cwd: spec.gitRoot, stdio: "pipe", env: gitEnv() },
+      );
+    } catch {
+      ok = false;
+    }
   }
 
   // Best-effort prune of stale worktree metadata.
@@ -176,6 +181,17 @@ export function removeWorktree(spec: WorktreeSpec): boolean {
   }
 
   return ok;
+}
+
+/**
+ * Whether a worktree holds changes no commit has (tracked edits or
+ * untracked files). A git error counts as dirty, so callers keep the
+ * directory; a directory that is already gone counts as clean.
+ */
+export function worktreeHasUncommittedChanges(worktreePath: string): boolean {
+  if (!existsSync(worktreePath)) return false;
+  const status = tryGitExec("git status --porcelain", worktreePath);
+  return status === null || status !== "";
 }
 
 /**

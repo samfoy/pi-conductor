@@ -2,7 +2,9 @@
  * Finalize's worktree step (`settleWorktree`): a successful merge-back
  * removes the worktree directory and deletes its branch; a merge_conflict
  * keeps both for manual resolution; a non-completed run still gets its
- * worktree removed (v0.13).
+ * worktree removed (v0.13). With no merge-back (`none`), the branch is
+ * the deliverable: only a clean worktree directory goes (v0.20 B3). The
+ * on_complete_hook gate runs in the worktree, not the main checkout (B4).
  *
  * Real git in temp repos, every call through gitTestEnv(). The spawnRun
  * smoke forks a PI_BIN stub, not pi.
@@ -11,7 +13,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -48,6 +50,22 @@ function worktreeWithCommit(repo: string, id: string, file: string, content: str
 }
 
 const branchExists = (repo: string, branch: string): boolean => git(repo, `branch --list ${branch}`).trim() !== "";
+
+function builderPersona(): Persona {
+  return {
+    name: "builder",
+    description: "probe",
+    inheritContext: "none",
+    inheritSkills: false,
+    defaultReads: [],
+    worktree: true,
+    timeoutMinutes: 1,
+    systemPrompt: "You are builder.",
+    source: "builtin",
+    sourcePath: "/fake/builder.md",
+    readOnly: false,
+  };
+}
 
 function makeRun(id: string, over: Partial<Run>): Run {
   const dir = mkdtempSync(join(tmpdir(), "conductor-wt-finalize-run-"));
@@ -142,6 +160,55 @@ test("settleWorktree: a failed run's worktree is still removed (no merge attempt
   }
 });
 
+for (const strategy of ["none", undefined] as const) {
+  test(`settleWorktree: merge strategy ${strategy ?? "unset"} keeps the branch and removes only the clean worktree dir`, { timeout: 15_000 }, async () => {
+    const { root, repo } = initRepo();
+    try {
+      const wt = worktreeWithCommit(repo, "builder-nm01", "gated.ts", "for the critic\n");
+      const run = makeRun("builder-nm01", { worktreePath: wt.path, worktreeBranch: wt.branch, mergeStrategy: strategy });
+
+      assert.equal(await settleWorktree(run, "completed"), "completed");
+
+      assert.equal(existsSync(wt.path), false, "clean worktree directory removed");
+      assert.equal(branchExists(repo, wt.branch), true, "branch kept for the critic-gated merge");
+      assert.match(git(repo, `show --stat --oneline ${wt.branch}`), /gated\.ts/, "the branch still holds the work");
+      assert.doesNotMatch(git(repo, "log --stat --oneline mainline"), /gated\.ts/, "nothing merged");
+      assert.equal(run.worktreePath, undefined, "no directory to point at");
+      assert.equal(run.worktreeBranch, wt.branch, "branch name kept for the chain template");
+      assert.equal(run.errorMessage, undefined);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("settleWorktree: merge strategy none with uncommitted changes keeps worktree, branch and fields, with a hint", { timeout: 15_000 }, async () => {
+  const { root, repo } = initRepo();
+  try {
+    const wt = worktreeWithCommit(repo, "builder-nd01", "done.ts", "committed\n");
+    writeFileSync(join(wt.path, "half.ts"), "never committed\n");
+    const run = makeRun("builder-nd01", {
+      status: "failed",
+      worktreePath: wt.path,
+      worktreeBranch: wt.branch,
+      mergeStrategy: "none",
+      errorMessage: "pi subprocess exited with code 1",
+    });
+
+    assert.equal(await settleWorktree(run, "failed"), "failed");
+
+    assert.equal(readFileSync(join(wt.path, "half.ts"), "utf8"), "never committed\n", "uncommitted work kept");
+    assert.equal(branchExists(repo, wt.branch), true);
+    assert.equal(run.worktreePath, wt.path);
+    assert.equal(run.worktreeBranch, wt.branch);
+    assert.match(run.errorMessage ?? "", /^pi subprocess exited with code 1; /, "the original error is kept");
+    assert.match(run.errorMessage ?? "", /uncommitted/);
+    assert.ok(run.errorMessage?.includes(wt.path), run.errorMessage);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("spawnRun: a completed worktree run is merged back, then its worktree and branch are gone", { timeout: 20_000 }, async () => {
   const { root, repo } = initRepo();
   const stub = join(root, "pi-stub.mjs");
@@ -158,22 +225,9 @@ test("spawnRun: a completed worktree run is merged back, then its worktree and b
   process.env.HOME = join(root, "home");
   process.env.PI_BIN = stub;
   try {
-    const persona: Persona = {
-      name: "builder",
-      description: "probe",
-      inheritContext: "none",
-      inheritSkills: false,
-      defaultReads: [],
-      worktree: true,
-      timeoutMinutes: 1,
-      systemPrompt: "You are builder.",
-      source: "builtin",
-      sourcePath: "/fake/builder.md",
-      readOnly: false,
-    };
     const { run, done } = spawnRun({
       registry: new RunRegistry(),
-      persona,
+      persona: builderPersona(),
       task: "probe",
       mode: "background",
       cwd: repo,
@@ -191,6 +245,52 @@ test("spawnRun: a completed worktree run is merged back, then its worktree and b
     assert.match(git(repo, "show --stat --oneline mainline"), /work\.ts/, "the sub-agent's commit is on mainline");
     assert.equal(existsSync(wtPath), false, "worktree directory removed");
     assert.equal(branchExists(repo, branch), false, "worktree branch deleted");
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("spawnRun: the on_complete_hook runs in the worktree, so it sees the sub-agent's unmerged change", { timeout: 20_000 }, async () => {
+  const { root, repo } = initRepo();
+  const stub = join(root, "pi-stub.mjs");
+  writeFileSync(
+    stub,
+    `import { execSync } from "node:child_process";\n` +
+      `import { writeFileSync } from "node:fs";\n` +
+      `const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")));\n` +
+      `writeFileSync("work.ts", "done\\n");\n` +
+      `execSync("git add work.ts && git -c user.email=t@t -c user.name=T commit -m work", { env, stdio: "pipe" });\n`,
+  );
+  const saved = { HOME: process.env.HOME, PI_BIN: process.env.PI_BIN };
+  process.env.HOME = join(root, "home");
+  process.env.PI_BIN = stub;
+  try {
+    const { run, done } = spawnRun({
+      registry: new RunRegistry(),
+      persona: builderPersona(),
+      task: "probe",
+      mode: "background",
+      cwd: repo,
+      timeoutMs: 15_000,
+      worktree: true,
+      mergeStrategy: "squash",
+      onCompleteHook: `pwd -P > "$CONDUCTOR_RUN_DIR/hook-cwd.txt"; echo "$CONDUCTOR_WORKTREE_PATH" > "$CONDUCTOR_RUN_DIR/hook-env.txt"; test -f work.ts`,
+    });
+    const wtPath = run.worktreePath;
+    assert.ok(wtPath, "spawnRun created a worktree");
+
+    await done;
+
+    const runDir = join(root, "home", ".pi", "agent", "conductor", "runs", run.id);
+    assert.equal(readFileSync(join(runDir, "hook-cwd.txt"), "utf8").trim(), wtPath, "hook cwd is the worktree");
+    assert.equal(readFileSync(join(runDir, "hook-env.txt"), "utf8").trim(), wtPath, "CONDUCTOR_WORKTREE_PATH is set");
+    assert.equal(run.status, "completed", run.errorMessage ?? run.hookResult?.tailText);
+    assert.equal(run.hookResult?.passed, true);
+    assert.match(git(repo, "show --stat --oneline mainline"), /work\.ts/, "merged after the gate passed");
   } finally {
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) delete process.env[k];

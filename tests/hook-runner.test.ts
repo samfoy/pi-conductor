@@ -206,6 +206,39 @@ test("runHook: injects CONDUCTOR_* env vars per design §3.5", async () => {
   }
 });
 
+test("runHook: a worktree run's hook runs in the worktree and gets CONDUCTOR_WORKTREE_PATH", async () => {
+  const fx = setup();
+  try {
+    const { spawn, calls } = fakeSpawn();
+    const promise = runHook(baseOpts(fx, { spawn }, { parentCwd: "/work", worktreePath: "/work/.worktrees/conductor-wt/b" }));
+    assert.equal(calls[0]!.options.cwd, "/work/.worktrees/conductor-wt/b");
+    assert.equal(calls[0]!.options.env!["CONDUCTOR_WORKTREE_PATH"], "/work/.worktrees/conductor-wt/b");
+    assert.equal(calls[0]!.options.env!["CONDUCTOR_PARENT_CWD"], "/work", "parent cwd keeps its meaning");
+    calls[0]!.proc.emitClose(0, null);
+    await promise;
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("runHook: without a worktree the hook runs in the parent cwd and CONDUCTOR_WORKTREE_PATH is unset", async () => {
+  const fx = setup();
+  const saved = process.env.CONDUCTOR_WORKTREE_PATH;
+  process.env.CONDUCTOR_WORKTREE_PATH = "/inherited/from/an/outer/hook";
+  try {
+    const { spawn, calls } = fakeSpawn();
+    const promise = runHook(baseOpts(fx, { spawn }, { parentCwd: "/work" }));
+    assert.equal(calls[0]!.options.cwd, "/work");
+    assert.equal(calls[0]!.options.env!["CONDUCTOR_WORKTREE_PATH"], undefined);
+    calls[0]!.proc.emitClose(0, null);
+    await promise;
+  } finally {
+    if (saved === undefined) delete process.env.CONDUCTOR_WORKTREE_PATH;
+    else process.env.CONDUCTOR_WORKTREE_PATH = saved;
+    teardown(fx);
+  }
+});
+
 // ── onProc callback ───────────────────────────────────────────────────
 
 test("runHook: invokes onProc with the spawned ChildProcess", async () => {
