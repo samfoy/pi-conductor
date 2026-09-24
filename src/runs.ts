@@ -2676,7 +2676,9 @@ export async function applyMergeToTerminal(
  * `merge_conflict` keeps the worktree and branch for manual resolution.
  * So does a startup-reconciled run on every terminal: its resume ran in
  * run.cwd, so the worktree holds the dead process's only copy of its
- * work. The fields stay set for `/conductor worktree` and GC. Without a
+ * work. The fields stay set for `/conductor worktree` and GC. A resume
+ * that doesn't complete keeps them too: it ran in the worktree a kill or
+ * a conflict kept, and never merged it. Without a
  * merge-back (`none` or unset) the branch is the deliverable (v0.16
  * chains diff it), so only the directory goes (v0.20 B3). Exported for tests.
  */
@@ -2686,6 +2688,7 @@ export async function settleWorktree(run: Run, terminal: RunStatus): Promise<Run
     terminal = await applyMergeToTerminal(run, gitRoot, terminal);
   }
   if (terminal === "merge_conflict" || run.reconciledAtStartup) return terminal;
+  if (terminal !== "completed" && (run.resumeCount ?? 0) > 0) return terminal;
   releaseWorktree(run, { keepBranch: !run.mergeStrategy || run.mergeStrategy === "none" });
   return terminal;
 }

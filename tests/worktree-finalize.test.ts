@@ -6,7 +6,8 @@
  * the deliverable: only a clean worktree directory goes (v0.20 B3). The
  * on_complete_hook gate runs in the worktree, not the main checkout (B4).
  * A leftover uncommitted change is never force-removed, and a run settled
- * by forceTerminate (kill, stall, timeout) keeps its partial work.
+ * by forceTerminate (kill, stall, timeout) keeps its partial work. A resume
+ * that doesn't complete never releases a worktree it didn't merge.
  *
  * Real git in temp repos, every call through gitTestEnv(). The spawnRun
  * smoke forks a PI_BIN stub, not pi.
@@ -19,7 +20,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { forceTerminate, RunRegistry, settleWorktree, spawnRun } from "../src/runs.ts";
+import { forceTerminate, RunRegistry, sendToRun, settleWorktree, spawnRun } from "../src/runs.ts";
 import { runWorktreeCmd } from "../src/commands.ts";
 import { emptyUsage, type Persona, type Run } from "../src/types.ts";
 import { gitTestEnv } from "./helpers/git-env.ts";
@@ -53,6 +54,48 @@ function worktreeWithCommit(repo: string, id: string, file: string, content: str
 }
 
 const branchExists = (repo: string, branch: string): boolean => git(repo, `branch --list ${branch}`).trim() !== "";
+
+/**
+ * A PI_BIN stub. `onResume` runs for `--session` (a resume) and `onSpawn`
+ * for a fresh spawn, which first writes a session file whose header cwd is
+ * the process cwd, as pi does, so the run is resumable.
+ */
+function writePiStub(root: string, parts: { onSpawn: string; onResume: string }): string {
+  const stub = join(root, "pi-stub.mjs");
+  writeFileSync(
+    stub,
+    `import { execSync } from "node:child_process";\n` +
+      `import { mkdirSync, writeFileSync } from "node:fs";\n` +
+      `import { join } from "node:path";\n` +
+      `const args = process.argv.slice(2);\n` +
+      `const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")));\n` +
+      `const commit = (file, text, msg) => { writeFileSync(file, text); execSync(\`git add \${file} && git -c user.email=t@t -c user.name=T commit -m \${msg}\`, { env, stdio: "pipe" }); };\n` +
+      `if (args.includes("--session")) {\n${parts.onResume}\n} else {\n` +
+      `  const sd = args[args.indexOf("--session-dir") + 1];\n` +
+      `  mkdirSync(sd, { recursive: true });\n` +
+      `  writeFileSync(join(sd, "s.jsonl"), JSON.stringify({ type: "session", cwd: process.cwd() }) + "\\n");\n` +
+      `${parts.onSpawn}\n}\n`,
+  );
+  return stub;
+}
+
+/** Point HOME and PI_BIN at the test's temp dirs for `fn`, then restore them. */
+async function withPiStub(root: string, stub: string, fn: () => Promise<void>): Promise<void> {
+  const saved = { HOME: process.env.HOME, PI_BIN: process.env.PI_BIN };
+  process.env.HOME = join(root, "home");
+  process.env.PI_BIN = stub;
+  try {
+    await fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+const danglingCommits = (repo: string): number =>
+  git(repo, "fsck --no-reflogs").split("\n").filter((l) => l.startsWith("dangling commit")).length;
 
 function builderPersona(): Persona {
   return {
@@ -382,6 +425,89 @@ test("forceTerminate: a killed worktree run keeps its worktree, branch and field
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// A resume runs in the session header's cwd, the worktree, so it can add
+// commits there. One that doesn't complete must leave the kept worktree
+// and branch alone; GC rule 5b reclaims them later.
+test("sendToRun: a killed worktree run's worktree and branch survive a failed resume", { timeout: 30_000 }, async () => {
+  const { root, repo } = initRepo();
+  const stub = writePiStub(root, {
+    onSpawn: `commit("partial.ts", "half done\\n", "partial"); setInterval(() => {}, 1000);`,
+    onResume: `process.stderr.write("resume boom\\n"); process.exit(1);`,
+  });
+  try {
+    await withPiStub(root, stub, async () => {
+      const registry = new RunRegistry();
+      const { run, done } = spawnRun({
+        registry, persona: builderPersona(), task: "probe", mode: "background", cwd: repo,
+        timeoutMs: 15_000, worktree: true, mergeStrategy: "squash",
+      });
+      const wtPath = run.worktreePath!;
+      const branch = run.worktreeBranch!;
+      const deadline = Date.now() + 10_000;
+      while (git(repo, `log --oneline mainline..${branch}`).trim() === "") {
+        assert.ok(Date.now() < deadline, "the stub committed its partial work");
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      forceTerminate(run, "killed", registry);
+      await done;
+      assert.ok(existsSync(join(wtPath, "partial.ts")), "precondition: the kill kept the worktree");
+      assert.ok(run.sessionPath && existsSync(run.sessionPath), `resumable: ${run.sessionPath}`);
+
+      const sent = sendToRun(run, "please continue", { registry, timeoutMs: 10_000 });
+      assert.equal(sent.kind, "started", sent.kind === "rejected" ? sent.reason : "");
+      await sent.done;
+
+      assert.equal(run.status, "failed");
+      assert.equal(readFileSync(join(wtPath, "partial.ts"), "utf8"), "half done\n", "worktree kept");
+      assert.match(git(repo, `log --oneline mainline..${branch}`), /partial/, "branch kept with the partial commit");
+      assert.equal(run.worktreePath, wtPath);
+      assert.equal(run.worktreeBranch, branch);
+      assert.equal(danglingCommits(repo), 0, "no commit left dangling");
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("sendToRun: a merge_conflict run's worktree and branch survive a failed resume", { timeout: 30_000 }, async () => {
+  const { root, repo } = initRepo();
+  // The spawn commits one side of a conflict in the worktree and the other on mainline.
+  const stub = writePiStub(root, {
+    onSpawn:
+      `commit("README.md", "builder side\\n", "builder");\n` +
+      `execSync("git -c user.email=t@t -c user.name=T commit -am base-side", { env, stdio: "pipe", cwd: ${JSON.stringify(repo)} });`,
+    onResume: `process.stderr.write("resume boom\\n"); process.exit(1);`,
+  });
+  try {
+    writeFileSync(join(repo, "README.md"), "base side\n");
+    await withPiStub(root, stub, async () => {
+      const registry = new RunRegistry();
+      const { run, done } = spawnRun({
+        registry, persona: builderPersona(), task: "probe", mode: "background", cwd: repo,
+        timeoutMs: 15_000, worktree: true, mergeStrategy: "squash",
+      });
+      const wtPath = run.worktreePath!;
+      const branch = run.worktreeBranch!;
+      await done;
+      assert.equal(run.status, "merge_conflict", `precondition: conflict (${run.errorMessage})`);
+      assert.ok(run.sessionPath && existsSync(run.sessionPath), `resumable: ${run.sessionPath}`);
+
+      const sent = sendToRun(run, "please fix the conflict", { registry, timeoutMs: 10_000 });
+      assert.equal(sent.kind, "started", sent.kind === "rejected" ? sent.reason : "");
+      await sent.done;
+
+      assert.equal(run.status, "failed");
+      assert.equal(readFileSync(join(wtPath, "README.md"), "utf8"), "builder side\n", "worktree kept");
+      assert.match(git(repo, `log --oneline mainline..${branch}`), /builder/, "branch kept with the builder's commit");
+      assert.equal(run.worktreePath, wtPath);
+      assert.equal(run.worktreeBranch, branch);
+      assert.equal(danglingCommits(repo), 0, "no commit left dangling");
+    });
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

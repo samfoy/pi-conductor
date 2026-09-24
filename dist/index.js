@@ -3635,6 +3635,7 @@ async function settleWorktree(run, terminal) {
     terminal = await applyMergeToTerminal(run, gitRoot2, terminal);
   }
   if (terminal === "merge_conflict" || run.reconciledAtStartup) return terminal;
+  if (terminal !== "completed" && (run.resumeCount ?? 0) > 0) return terminal;
   releaseWorktree(run, { keepBranch: !run.mergeStrategy || run.mergeStrategy === "none" });
   return terminal;
 }
