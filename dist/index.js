@@ -2330,7 +2330,11 @@ function buildOrphanRun(record, status) {
     exitCode: record.exitCode,
     stopReason: record.stopReason,
     errorMessage: record.errorMessage,
-    lastEventAt: record.finishedAt ?? record.startTime,
+    // Retry lineage: ensemble_spawn's retry respawn and ensemble_auto's
+    // step report read both.
+    failureClass: record.failureClass,
+    retryAttempt: record.retryAttempt,
+    lastEventAt: record.lastEventAt ?? record.finishedAt ?? record.startTime,
     messages: [],
     usage: record.usage ?? emptyUsage(),
     cwd: record.cwd,
@@ -2343,12 +2347,28 @@ function buildOrphanRun(record, status) {
     // loses its exclusions (buildResumePiArgs reads these).
     tools: record.tools,
     excludeTools: record.excludeTools,
+    // resolveSendStrategy picks rpc vs spawn-resume from these.
+    steerable: record.steerable,
+    streamingMode: record.streamingMode,
     hookResult: record.hookResult,
+    // /conductor worktree list|merge|clean and finalize's merge-back read
+    // these; without them a dead run's worktree is invisible.
+    worktreePath: record.worktreePath,
+    worktreeBranch: record.worktreeBranch,
+    worktreeBaseBranch: record.worktreeBaseBranch,
+    mergeStrategy: record.mergeStrategy,
+    mergeResult: record.mergeResult,
+    // Completion envelope's per-send split; sendToRun increments resumeCount.
+    thisInvocationStartedAt: record.thisInvocationStartedAt,
+    thisInvocationUsageBaseline: record.thisInvocationUsageBaseline,
+    resumeCount: record.resumeCount,
+    compactionCount: record.compactionCount,
     // v0.17-S3: restore turn-limit fields from the persisted record.
     maxTurns: record.maxTurns,
     graceTurns: record.graceTurns,
-    gracePeriodActive: false
+    gracePeriodActive: false,
     // grace period is not persisted; conservative reset
+    reconciledAtStartup: true
     // proc intentionally undefined: we have no handle.
   };
 }
@@ -3586,6 +3606,10 @@ function applySubstanceCheck(run, terminal) {
 async function applyMergeToTerminal(run, gitRoot2, terminal) {
   if (terminal !== "completed" || !run.worktreePath || !run.worktreeBranch || !run.mergeStrategy || run.mergeStrategy === "none") {
     return terminal;
+  }
+  if (run.reconciledAtStartup) {
+    run.errorMessage = `auto-merge skipped: startup reconcile re-adopted this run, so its on_complete_hook gate could not be rebuilt; worktree preserved at ${run.worktreePath}; review ${run.worktreeBranch}, then /conductor worktree merge ${run.id}`;
+    return "merge_conflict";
   }
   const baseBranch = run.worktreeBaseBranch ?? "master";
   const commitMessage = buildMergeCommitMessage(
@@ -10574,23 +10598,25 @@ function index_default(pi) {
       }),
       notify: (message, level) => ctx.ui.notify(message, level)
     });
-    setImmediate(() => {
-      void reconcileOrphansAtStartup({
-        runsRoot: runsRoot(),
-        registry,
-        isAlive: defaultLivenessProbe,
-        // pi-dashboard multi-slot: scope ownership on the pi session id
-        // so sibling slots sharing this pid aren't readopted here.
-        selfSessionId: ctx.sessionManager?.getSessionId(),
-        now: Date.now()
-      }).then((result) => {
-        lastReconcile = result;
-      }).catch((err) => {
-        console.error(
-          `reconcile-startup: failed: ${err?.message ?? String(err)}`
-        );
-      });
-    });
+    if (process.env.CONDUCTOR_SUBAGENT !== "1") {
+      setImmediate(
+        () => reconcileOrphansAtStartup({
+          runsRoot: runsRoot(),
+          registry,
+          isAlive: defaultLivenessProbe,
+          // pi-dashboard multi-slot: scope ownership on the pi session id
+          // so sibling slots sharing this pid aren't readopted here.
+          selfSessionId: ctx.sessionManager?.getSessionId(),
+          now: Date.now()
+        }).then((result) => {
+          lastReconcile = result;
+        }).catch((err) => {
+          console.error(
+            `reconcile-startup: failed: ${err?.message ?? String(err)}`
+          );
+        })
+      );
+    }
     setImmediate(() => {
       const cfg = loadConfig(cwd());
       void maybeAutoRunGc({

@@ -656,7 +656,11 @@ function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
     exitCode: record.exitCode,
     stopReason: record.stopReason,
     errorMessage: record.errorMessage,
-    lastEventAt: record.finishedAt ?? record.startTime,
+    // Retry lineage: ensemble_spawn's retry respawn and ensemble_auto's
+    // step report read both.
+    failureClass: record.failureClass,
+    retryAttempt: record.retryAttempt,
+    lastEventAt: record.lastEventAt ?? record.finishedAt ?? record.startTime,
     messages: [],
     usage: record.usage ?? emptyUsage(),
     cwd: record.cwd,
@@ -669,11 +673,27 @@ function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
     // loses its exclusions (buildResumePiArgs reads these).
     tools: record.tools,
     excludeTools: record.excludeTools,
+    // resolveSendStrategy picks rpc vs spawn-resume from these.
+    steerable: record.steerable,
+    streamingMode: record.streamingMode,
     hookResult: record.hookResult,
+    // /conductor worktree list|merge|clean and finalize's merge-back read
+    // these; without them a dead run's worktree is invisible.
+    worktreePath: record.worktreePath,
+    worktreeBranch: record.worktreeBranch,
+    worktreeBaseBranch: record.worktreeBaseBranch,
+    mergeStrategy: record.mergeStrategy,
+    mergeResult: record.mergeResult,
+    // Completion envelope's per-send split; sendToRun increments resumeCount.
+    thisInvocationStartedAt: record.thisInvocationStartedAt,
+    thisInvocationUsageBaseline: record.thisInvocationUsageBaseline,
+    resumeCount: record.resumeCount,
+    compactionCount: record.compactionCount,
     // v0.17-S3: restore turn-limit fields from the persisted record.
     maxTurns: record.maxTurns,
     graceTurns: record.graceTurns,
     gracePeriodActive: false, // grace period is not persisted; conservative reset
+    reconciledAtStartup: true,
     // proc intentionally undefined: we have no handle.
   };
 }

@@ -2620,6 +2620,10 @@ export function applySubstanceCheck(run: Run, terminal: RunStatus): void {
  *   - On conflict or error: sets `run.status` to `"merge_conflict"`, sets
  *     `run.errorMessage` with conflict file list and recovery hint, and
  *     returns `"merge_conflict"` (worktreePath is intentionally preserved).
+ *   - On a run startup reconcile re-adopted: no merge attempt; returns
+ *     `"merge_conflict"` with a review-then-merge hint. Its spawn-time
+ *     hook gate is gone (the per-call hook isn't persisted) and the resume
+ *     that completed it ran in `run.cwd`, not the worktree.
  *
  * The `gitRoot` argument is the repository root (derived from
  * `run.worktreePath` in production; injected in tests).
@@ -2641,6 +2645,14 @@ export async function applyMergeToTerminal(
     run.mergeStrategy === "none"
   ) {
     return terminal;
+  }
+
+  if (run.reconciledAtStartup) {
+    run.errorMessage =
+      `auto-merge skipped: startup reconcile re-adopted this run, so its on_complete_hook gate ` +
+      `could not be rebuilt; worktree preserved at ${run.worktreePath}; review ${run.worktreeBranch}, ` +
+      `then /conductor worktree merge ${run.id}`;
+    return "merge_conflict";
   }
 
   const baseBranch = run.worktreeBaseBranch ?? "master";

@@ -641,6 +641,13 @@ export interface Run {
   mergeStrategy?: MergeStrategy;
   /** v0.14 worktree auto-merge: result of the merge attempt on terminal. */
   mergeResult?: MergeResult;
+  /**
+   * Set when startup reconcile rebuilt this Run from record.json rather
+   * than this runtime spawning it. Its spawn-time hook gate can't be
+   * rebuilt, so `applyMergeToTerminal` refuses to auto-merge it.
+   * In-memory only: each reconcile sets it again.
+   */
+  reconciledAtStartup?: boolean;
 
   // ── v0.12 steering (slice 1 types) ───────────────────────────────────────
   // Slice 1 declares these optional fields; slice 2 wires the RPC

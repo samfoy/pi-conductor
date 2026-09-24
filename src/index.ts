@@ -456,26 +456,31 @@ export default function (pi: ExtensionAPI): void {
     // GC's age/budget rules rather than the orphan-TTL fallback.
     // Per design §4: separate setImmediate, fired ahead of GC's
     // setImmediate. Failure here MUST NOT block session bootstrap.
-    setImmediate(() => {
-      void reconcileOrphansAtStartup({
-        runsRoot: runsRoot(),
-        registry,
-        isAlive: defaultLivenessProbe,
-        // pi-dashboard multi-slot: scope ownership on the pi session id
-        // so sibling slots sharing this pid aren't readopted here.
-        selfSessionId: ctx.sessionManager?.getSessionId(),
-        now: Date.now(),
-      })
-        .then((result) => {
-          lastReconcile = result;
+    // A conductor child shares the lead's runs root but owns none of its
+    // runs, so it must not readopt or reclassify them. The callback
+    // returns the promise so tests capturing setImmediate can await it.
+    if (process.env.CONDUCTOR_SUBAGENT !== "1") {
+      setImmediate(() =>
+        reconcileOrphansAtStartup({
+          runsRoot: runsRoot(),
+          registry,
+          isAlive: defaultLivenessProbe,
+          // pi-dashboard multi-slot: scope ownership on the pi session id
+          // so sibling slots sharing this pid aren't readopted here.
+          selfSessionId: ctx.sessionManager?.getSessionId(),
+          now: Date.now(),
         })
-        .catch((err: unknown) => {
-          // Best-effort: never let reconcile break session bootstrap.
-          console.error(
-            `reconcile-startup: failed: ${(err as Error)?.message ?? String(err)}`,
-          );
-        });
-    });
+          .then((result) => {
+            lastReconcile = result;
+          })
+          .catch((err: unknown) => {
+            // Best-effort: never let reconcile break session bootstrap.
+            console.error(
+              `reconcile-startup: failed: ${(err as Error)?.message ?? String(err)}`,
+            );
+          }),
+      );
+    }
 
     // v0.9 Slice 5: auto-trigger GC on session_start, debounced + fire-
     // and-forget. Bootstrap MUST NOT block on disk I/O — the orphan
