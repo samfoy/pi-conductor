@@ -26,8 +26,8 @@
  *   - sendToRun rejected → notify the reason.
  */
 
-import type { Run } from "./types.ts";
-import { modelRegistryPredicate, type ModelRegisteredPredicate, type RunRegistry } from "./runs.ts";
+import type { Persona, Run } from "./types.ts";
+import { modelRegistryPredicate, sendCwd, type ModelRegisteredPredicate, type RunRegistry } from "./runs.ts";
 
 export interface PromptAndSendCtx {
   ui: {
@@ -41,13 +41,14 @@ export interface PromptAndSendCtx {
 export interface PromptAndSendDeps {
   getCtx: () => PromptAndSendCtx | null | undefined;
   registry: RunRegistry;
+  /** The conductor's cwd: only the fallback for a run without one ({@link sendCwd}). */
   cwd: string;
   validateSendable: (run: Run) => { ok: true } | { ok: false; reason: string };
   loadConfig: (cwd: string) => { personaOverrides: Record<string, unknown> };
   resolvePersonas: (args: {
     cwd: string;
     personaOverrides: Record<string, unknown>;
-  }) => Promise<{ personas: Map<string, unknown> }>;
+  }) => Promise<{ personas: Map<string, Persona> }>;
   resolveTimeoutMs: (
     persona: unknown,
     overrides: unknown,
@@ -61,6 +62,7 @@ export interface PromptAndSendDeps {
       timeoutMs: number;
       onComplete: (r: Run) => void;
       isRegisteredModel?: ModelRegisteredPredicate;
+      persona?: Persona;
     },
   ) => { kind: "queued" } | { kind: "rejected"; reason: string };
   pushCompletionNotification: (run: Run) => void;
@@ -120,10 +122,11 @@ export async function executePromptAndSend(
     if (!message || !message.trim()) return;
     message = message.trim();
   }
-  const cfg = deps.loadConfig(deps.cwd);
+  const cwd = sendCwd(run, deps.cwd);
+  const cfg = deps.loadConfig(cwd);
   const ov = (cfg.personaOverrides as Record<string, unknown>)[run.persona] ?? {};
   const resolved = await deps.resolvePersonas({
-    cwd: deps.cwd,
+    cwd,
     personaOverrides: cfg.personaOverrides,
   });
   const persona = resolved.personas.get(run.persona);
@@ -133,6 +136,7 @@ export async function executePromptAndSend(
     timeoutMs,
     onComplete: (r) => deps.pushCompletionNotification(r),
     isRegisteredModel: modelRegistryPredicate(modelRegistry),
+    persona,
   });
   if (result.kind === "rejected") {
     try {

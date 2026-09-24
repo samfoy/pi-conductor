@@ -27,7 +27,7 @@ import {
 } from "./autonomous.ts";
 import { resolveRetryPolicy } from "./retry.ts";
 import { collapseSteerableCascade } from "./steerable.ts";
-import { elapsedStr, forceTerminate, formatUsage, getFinalText, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
+import { elapsedStr, forceTerminate, formatUsage, getFinalText, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendCwd, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
 import { isTerminal } from "./types.ts";
 import { SpawnQueue } from "./queue.ts";
 import { resolveMergeStrategy } from "./worktree.ts";
@@ -990,8 +990,6 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       const stallRange = validateStallThresholdSeconds(params.stall_threshold_seconds);
       if (stallRange) return errorResult(stallRange);
 
-      const cwd = opts.getCwd();
-      const cfg = loadConfig(cwd);
       const registry = opts.getRegistry();
       const run = registry.get(params.agent_id);
       if (!run) {
@@ -999,6 +997,8 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           `agent_id "${params.agent_id}" not found. Run ensemble_status to see active sub-agents.`,
         );
       }
+      const cwd = sendCwd(run, opts.getCwd());
+      const cfg = loadConfig(cwd);
 
       const foreground = params.foreground !== false;
       // Per-persona timeout takes precedence over the global default.
@@ -1034,6 +1034,7 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         // v0.16 event bus: thread through for emitSteered / emitCompleted / emitFailed.
         events: opts.getEvents?.(),
         isRegisteredModel: modelRegistryPredicate(ctx?.modelRegistry),
+        persona,
       });
 
       if (result.kind === "rejected") {

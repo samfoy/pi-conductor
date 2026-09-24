@@ -2024,6 +2024,20 @@ export interface SendToRunOptions {
    * without checking, as before.
    */
   isRegisteredModel?: ModelRegisteredPredicate;
+  /**
+   * The run's persona, resolved from {@link sendCwd}. Its frontmatter
+   * `on_complete_hook` gates the resumed terminal, as it gates a spawn.
+   */
+  persona?: Persona;
+}
+
+/**
+ * Where a send resolves persona, config and timeout: the run's own cwd,
+ * not the conductor's, which may be another project. Records without a
+ * cwd fall back to the conductor's.
+ */
+export function sendCwd(run: Run, conductorCwd: string): string {
+  return run.cwd || conductorCwd;
 }
 
 export type SendToRunResult =
@@ -2512,6 +2526,7 @@ export function sendToRun(
       run.cwd,
       run.persona,
       hookSpecFromOpts(run.onCompleteHook, run.onCompleteHookTimeoutSeconds),
+      opts.persona ? hookSpecFromPersona(opts.persona) : undefined,
     ),
     // v0.16-S3: thread event bus so finalize on the resumed run can emit.
     events: opts.events,

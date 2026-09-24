@@ -3362,6 +3362,9 @@ function mapFromRegistry(r) {
   for (const x of r.list()) m.set(x.id, x);
   return m;
 }
+function sendCwd(run, conductorCwd) {
+  return run.cwd || conductorCwd;
+}
 function validateSendable(run) {
   const r = resolveSendStrategy(run, "auto");
   if (r.strategy.kind === "rejected") {
@@ -3608,7 +3611,8 @@ function sendToRun(run, message, opts) {
     resolvedHook: resolveCloseHook(
       run.cwd,
       run.persona,
-      hookSpecFromOpts(run.onCompleteHook, run.onCompleteHookTimeoutSeconds)
+      hookSpecFromOpts(run.onCompleteHook, run.onCompleteHookTimeoutSeconds),
+      opts.persona ? hookSpecFromPersona(opts.persona) : void 0
     ),
     // v0.16-S3: thread event bus so finalize on the resumed run can emit.
     events: opts.events
@@ -5705,7 +5709,7 @@ async function runSendCmd(opts, ctx, arg) {
     ctx.ui.notify(check.reason, "warning");
     return;
   }
-  const cwd = opts.getCwd();
+  const cwd = sendCwd(run, opts.getCwd());
   const cfg = loadConfig(cwd);
   const baseOv = cfg.personaOverrides[run.persona] ?? {};
   const resolved = await resolvePersonas({
@@ -5718,7 +5722,8 @@ async function runSendCmd(opts, ctx, arg) {
     registry,
     timeoutMs,
     streamingBehavior: behavior,
-    isRegisteredModel: modelRegistryPredicate(ctx.modelRegistry)
+    isRegisteredModel: modelRegistryPredicate(ctx.modelRegistry),
+    persona
   });
   if (result.kind === "rejected") {
     ctx.ui.notify(result.reason, "warning");
@@ -7646,8 +7651,6 @@ function registerSendTool(pi, opts) {
       if (tmRange) return errorResult(tmRange);
       const stallRange = validateStallThresholdSeconds(params.stall_threshold_seconds);
       if (stallRange) return errorResult(stallRange);
-      const cwd = opts.getCwd();
-      const cfg = loadConfig(cwd);
       const registry = opts.getRegistry();
       const run = registry.get(params.agent_id);
       if (!run) {
@@ -7655,6 +7658,8 @@ function registerSendTool(pi, opts) {
           `agent_id "${params.agent_id}" not found. Run ensemble_status to see active sub-agents.`
         );
       }
+      const cwd = sendCwd(run, opts.getCwd());
+      const cfg = loadConfig(cwd);
       const foreground = params.foreground !== false;
       const resolved = await resolvePersonas({ cwd, personaOverrides: cfg.personaOverrides });
       const persona = resolved.personas.get(run.persona);
@@ -7677,7 +7682,8 @@ function registerSendTool(pi, opts) {
         streamingBehavior: params.streaming_behavior,
         // v0.16 event bus: thread through for emitSteered / emitCompleted / emitFailed.
         events: opts.getEvents?.(),
-        isRegisteredModel: modelRegistryPredicate(ctx?.modelRegistry)
+        isRegisteredModel: modelRegistryPredicate(ctx?.modelRegistry),
+        persona
       });
       if (result.kind === "rejected") {
         return errorResult(result.reason);
@@ -10416,10 +10422,11 @@ async function executePromptAndSend(deps, agentId, presuppliedText) {
     if (!message || !message.trim()) return;
     message = message.trim();
   }
-  const cfg = deps.loadConfig(deps.cwd);
+  const cwd = sendCwd(run, deps.cwd);
+  const cfg = deps.loadConfig(cwd);
   const ov = cfg.personaOverrides[run.persona] ?? {};
   const resolved = await deps.resolvePersonas({
-    cwd: deps.cwd,
+    cwd,
     personaOverrides: cfg.personaOverrides
   });
   const persona = resolved.personas.get(run.persona);
@@ -10428,7 +10435,8 @@ async function executePromptAndSend(deps, agentId, presuppliedText) {
     registry: deps.registry,
     timeoutMs,
     onComplete: (r) => deps.pushCompletionNotification(r),
-    isRegisteredModel: modelRegistryPredicate(modelRegistry)
+    isRegisteredModel: modelRegistryPredicate(modelRegistry),
+    persona
   });
   if (result.kind === "rejected") {
     try {

@@ -36,6 +36,7 @@ import {
   resumeRun,
   runDir,
   runsRoot,
+  sendCwd,
   sendToRun,
   type RunRegistry,
   validateSendable,
@@ -537,7 +538,7 @@ async function runSendCmd(
     return;
   }
 
-  const cwd = opts.getCwd();
+  const cwd = sendCwd(run, opts.getCwd());
   const cfg = loadConfig(cwd);
   const baseOv = cfg.personaOverrides[run.persona] ?? {};
   const resolved = await resolvePersonas({
@@ -552,6 +553,7 @@ async function runSendCmd(
     timeoutMs,
     streamingBehavior: behavior,
     isRegisteredModel: modelRegistryPredicate(ctx.modelRegistry),
+    persona,
   });
 
   if (result.kind === "rejected") {
