@@ -25,6 +25,8 @@ import { forceTerminate, RunRegistry, sendToRun, settleWorktree, spawnRun } from
 import { runWorktreeCmd } from "../src/commands.ts";
 import { formatCompletionNotification } from "../src/notifications.ts";
 import { renderForegroundSummary } from "../src/foreground-stream.ts";
+import { resolvePersonas } from "../src/personas.ts";
+import { sessionHeaderCwd } from "../src/session-seed.ts";
 import { emptyUsage, type Persona, type Run } from "../src/types.ts";
 import { gitTestEnv } from "./helpers/git-env.ts";
 
@@ -849,6 +851,103 @@ test("sendToRun: a resume that completes and merges drops the kill's stale kept 
       assert.match(git(repo, "show --stat --oneline mainline"), /rest\.ts/, "merged back");
       assert.equal(run.worktreeKept, undefined, "no stale hint");
       assert.doesNotMatch(renderForegroundSummary(run), /⚠/);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// pi 0.87.1 runs a `--session` in its header's cwd, whatever the process cwd.
+// A seeded spawn (inherit_context filtered, filtered_compact or full, as the
+// shipped builder and simplifier are) boots that way, so its header must name
+// the worktree, or the child works in the main checkout.
+const seedFrom = [{ role: "user", content: "the parent conversation", timestamp: 0 } as any];
+
+test("spawnRun: a seeded worktree spawn writes the worktree as its session header cwd", { timeout: 20_000 }, async () => {
+  const { root, repo } = initRepo();
+  const stub = writePiStub(root, { onSpawn: `process.exit(5);`, onResume: `process.exit(0);` });
+  try {
+    await withPiStub(root, stub, async () => {
+      const { run, done } = spawnRun({
+        registry: new RunRegistry(),
+        persona: { ...builderPersona(), inheritContext: "filtered_compact" },
+        parentMessages: seedFrom,
+        task: "probe", mode: "background", cwd: repo, timeoutMs: 15_000, worktree: true, mergeStrategy: "squash",
+      });
+      assert.ok(run.worktreePath && run.sessionPath, "a worktree and a seeded session");
+      assert.equal(sessionHeaderCwd(readFileSync(run.sessionPath, "utf8")), run.worktreePath);
+      await done;
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("spawnRun: the shipped builder, seeded, commits on its worktree branch, which merges back; base gets no direct commit", { timeout: 30_000 }, async () => {
+  const { root, repo } = initRepo();
+  const childCwd = join(root, "child-cwd.txt");
+  const stub = writePiStub(root, {
+    onSpawn: `process.exit(5);`,
+    onResume: `writeFileSync(${JSON.stringify(childCwd)}, process.cwd());\ncommit("work.ts", "done\\n", "builder-work");`,
+  });
+  try {
+    await withPiStub(root, stub, async () => {
+      const builder = (await resolvePersonas({ cwd: repo })).personas.get("builder")!;
+      assert.equal(builder.inheritContext, "filtered_compact", "precondition: the shipped builder is seeded");
+      assert.equal(builder.worktree, true);
+      const baseBefore = git(repo, "rev-parse mainline").trim();
+      const { run, done } = spawnRun({
+        registry: new RunRegistry(), persona: builder, parentMessages: seedFrom,
+        task: "probe", mode: "background", cwd: repo, timeoutMs: 15_000, worktree: true, mergeStrategy: "squash",
+      });
+      const wtPath = run.worktreePath!;
+      const branch = run.worktreeBranch!;
+      await done;
+
+      assert.equal(run.status, "completed", run.errorMessage);
+      assert.equal(readFileSync(childCwd, "utf8"), wtPath, "the child ran in its worktree");
+      assert.deepEqual(run.mergeResult, { success: true }, "a real merge, not the committed-to-base no-op");
+      const subjects = git(repo, `log --format=%s ${baseBefore}..mainline`).trim().split("\n");
+      assert.equal(subjects.length, 1, `one squash commit on base: ${subjects}`);
+      assert.notEqual(subjects[0], "builder-work", "the builder's own commit never landed on base");
+      assert.match(git(repo, "show --stat --oneline mainline"), /work\.ts/, "the work merged back");
+      assert.equal(existsSync(wtPath), false);
+      assert.equal(branchExists(repo, branch), false);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The doctrine block stays keyed on the spawn cwd, not the worktree. From a
+// nested worktree pi natively loads every ancestor AGENTS.md, including an
+// untracked one in the main checkout, so a worktree-keyed lookup would inject
+// that file a second time.
+test("spawnRun: a seeded worktree child's prompt doesn't repeat an untracked main-checkout AGENTS.md", { timeout: 20_000 }, async () => {
+  const { root, repo } = initRepo();
+  writeFileSync(join(repo, ".gitignore"), "AGENTS.md\n");
+  git(repo, "add .gitignore");
+  git(repo, "commit -m ignore");
+  writeFileSync(join(repo, "AGENTS.md"), "LOCAL RULES\n");
+  const argvFile = join(root, "argv.json");
+  const stub = writePiStub(root, {
+    onSpawn: `process.exit(5);`,
+    onResume: `writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(args));`,
+  });
+  try {
+    await withPiStub(root, stub, async () => {
+      const { run, done } = spawnRun({
+        registry: new RunRegistry(),
+        persona: { ...builderPersona(), inheritContext: "filtered_compact" },
+        parentMessages: seedFrom,
+        task: "probe", mode: "background", cwd: repo, timeoutMs: 15_000, worktree: true, mergeStrategy: "squash",
+      });
+      assert.equal(existsSync(join(run.worktreePath!, "AGENTS.md")), false, "precondition: the worktree has no copy");
+      await done;
+      const argv: string[] = JSON.parse(readFileSync(argvFile, "utf8"));
+      const prompt = argv[argv.indexOf("--append-system-prompt") + 1] ?? "";
+      assert.match(prompt, /You are builder\./, "the persona body is there");
+      assert.doesNotMatch(prompt, /LOCAL RULES/, "pi loads it natively; no doctrine copy");
     });
   } finally {
     rmSync(root, { recursive: true, force: true });

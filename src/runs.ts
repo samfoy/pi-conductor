@@ -1419,10 +1419,13 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // Item 13: prepend read-only enforcer when applicable. Same
     // assembly used at the Run.systemPrompt capture above so the
     // initial spawn argv and resume argv stay byte-identical for
-    // a given persona.
+    // a given persona. Doctrine stays keyed on opts.cwd: from a worktree
+    // pi already loads every ancestor AGENTS.md natively.
     systemPrompt: assemblePersonaSystemPrompt(opts.persona, opts.cwd),
     prompt,
-    cwd: opts.cwd,
+    // pi runs a seeded `--session` in its header's cwd, not the process
+    // cwd, so the header must name the worktree for the child to work there.
+    cwd: effectiveCwd,
     model: opts.model,
     thinking: opts.thinking,
     // PRD #15: when `inherit_skills: true`, pass the parent's user +
