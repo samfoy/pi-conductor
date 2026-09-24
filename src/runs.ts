@@ -21,6 +21,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { mkdir, writeFile, appendFile } from "node:fs/promises";
 import { homedir } from "node:os";
+import { StringDecoder } from "node:string_decoder";
 import { RpcStdinQueue } from "./rpc-stdin.ts";
 import { dirname, join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -1714,7 +1715,6 @@ function runPiSubprocess(
   }, opts.timeoutMs);
 
   // Stream parsing.
-  let buffer = "";
   let stderr = "";
   let finalized = false;
   let donePromiseResolve: (r: Run) => void;
@@ -1729,7 +1729,8 @@ function runPiSubprocess(
       clearTimeout(run.timeoutTimer);
       run.timeoutTimer = undefined;
     }
-    if (buffer.trim()) processLine(buffer);
+    const rest = stdoutLines.end();
+    if (rest.trim()) processLine(rest);
     // v0.11 on_complete_hook (slice 2): fire the resolved hook between
     // stream-drain and `applyCloseHandlerTerminal`. Gates are strict:
     // only on natural exit-zero close with a resolved hook AND when
@@ -1936,12 +1937,8 @@ function runPiSubprocess(
     );
   };
 
-  proc.stdout?.on("data", (data: Buffer) => {
-    buffer += data.toString();
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-    for (const line of lines) processLine(line);
-  });
+  const stdoutLines = createLineDecoder(processLine);
+  proc.stdout?.on("data", (data: Buffer) => stdoutLines.write(data));
 
   proc.stderr?.on("data", (data: Buffer) => {
     stderr += data.toString();
@@ -1960,6 +1957,33 @@ function runPiSubprocess(
 
   proc.unref();
   return done;
+}
+
+/**
+ * Split a byte stream into newline-terminated lines for `onLine`. `end()`
+ * returns the unterminated tail. Used for the pi subprocess stdout (print
+ * and RPC mode alike). The StringDecoder holds back a multibyte UTF-8
+ * character a pipe chunk cut in half, instead of decoding it to U+FFFD.
+ */
+export function createLineDecoder(onLine: (line: string) => void): {
+  write(chunk: Buffer): void;
+  end(): string;
+} {
+  const decoder = new StringDecoder("utf8");
+  let buffer = "";
+  return {
+    write(chunk) {
+      buffer += decoder.write(chunk);
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) onLine(line);
+    },
+    end() {
+      const rest = buffer + decoder.end();
+      buffer = "";
+      return rest;
+    },
+  };
 }
 
 function mapFromRegistry(r: RunRegistry): Map<string, Run> {

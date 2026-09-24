@@ -919,6 +919,7 @@ import { spawn } from "node:child_process";
 import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync6, readdirSync, statSync as statSync2 } from "node:fs";
 import { mkdir, writeFile as writeFile2, appendFile } from "node:fs/promises";
 import { homedir as homedir5 } from "node:os";
+import { StringDecoder } from "node:string_decoder";
 
 // src/rpc-stdin.ts
 function findRawCr(value, depth = 0) {
@@ -3164,7 +3165,6 @@ function runPiSubprocess(run, piArgs, opts) {
       forceTerminate(run, "timeout", opts.registry, opts.onComplete);
     }
   }, opts.timeoutMs);
-  let buffer = "";
   let stderr = "";
   let finalized = false;
   let donePromiseResolve;
@@ -3178,7 +3178,8 @@ function runPiSubprocess(run, piArgs, opts) {
       clearTimeout(run.timeoutTimer);
       run.timeoutTimer = void 0;
     }
-    if (buffer.trim()) processLine(buffer);
+    const rest = stdoutLines.end();
+    if (rest.trim()) processLine(rest);
     if (terminal === "completed" && exitCode === 0 && opts.resolvedHook && !isTerminal(run.status)) {
       try {
         terminal = await applyHookToTerminal(
@@ -3306,12 +3307,8 @@ function runPiSubprocess(run, piArgs, opts) {
       (r, reason) => forceTerminate(r, reason, opts.registry, opts.onComplete)
     );
   };
-  proc.stdout?.on("data", (data) => {
-    buffer += data.toString();
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-    for (const line of lines) processLine(line);
-  });
+  const stdoutLines = createLineDecoder(processLine);
+  proc.stdout?.on("data", (data) => stdoutLines.write(data));
   proc.stderr?.on("data", (data) => {
     stderr += data.toString();
   });
@@ -3326,6 +3323,23 @@ function runPiSubprocess(run, piArgs, opts) {
   });
   proc.unref();
   return done;
+}
+function createLineDecoder(onLine) {
+  const decoder = new StringDecoder("utf8");
+  let buffer = "";
+  return {
+    write(chunk) {
+      buffer += decoder.write(chunk);
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) onLine(line);
+    },
+    end() {
+      const rest = buffer + decoder.end();
+      buffer = "";
+      return rest;
+    }
+  };
 }
 function mapFromRegistry(r) {
   const m = /* @__PURE__ */ new Map();

@@ -77,6 +77,8 @@ CONDUCTOR_LIVE_TESTS=1 npm test  # includes the live integration test (needs AWS
 npm run typecheck             # tsc --noEmit
 ```
 
+Both test scripts unset `CONDUCTOR_SUBAGENT` and every `HERDR_*` variable herdr sets in its panes, so no test can drive a live herdr session; `tests/herdr-env-isolation.test.ts` fails if one leaks through. Running a single file with bare `node --test` inside a herdr pane trips that guard, so prefix the same `env -u` list.
+
 Target wall time for the unit suite: **under 5 seconds**. If a single test pushes that over, mark it `{ skip: true }` with a justification or move it into a gated suite.
 
 **Tests that run git must pass `env: gitTestEnv()`** (`tests/helpers/git-env.ts`) to every git subprocess and to any script that shells out to git. A commit from a linked worktree exports `GIT_DIR` / `GIT_INDEX_FILE` to the pre-commit hook, and an inheriting child git rewrites the real repo's config and index instead of the temp repo's. `tests/git-env.test.ts` pins this.
