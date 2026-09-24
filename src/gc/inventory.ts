@@ -63,6 +63,8 @@ export interface InventoryEntry {
   inMemory: Run | undefined;
   /** True if `record.json` is missing or unparseable. Other fields are best-effort. */
   malformed: boolean;
+  /** The record's `worktreePath` still exists on disk (a kept worktree). */
+  holdsWorktree?: boolean;
 }
 
 interface SafeStat {
@@ -194,6 +196,7 @@ async function buildEntry(
     sessionPathPresent,
     inMemory,
     malformed: false,
+    holdsWorktree: record.worktreePath !== undefined && existsSync(record.worktreePath),
   };
 }
 

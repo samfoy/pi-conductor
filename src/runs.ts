@@ -2672,15 +2672,13 @@ export async function applyMergeToTerminal(
 }
 
 /**
- * Finalize's worktree step: merge back (v0.14), then remove the worktree
- * and delete its branch (v0.13). `merge_conflict` keeps both for manual
- * resolution. So does a startup-reconciled run on every terminal: its
- * resume ran in run.cwd, so the worktree holds the dead process's only
- * copy of its work. The fields stay set for `/conductor worktree` and GC.
- * Without a merge-back (`none` or unset) the branch is the deliverable
- * (v0.16 chains diff it): only a clean directory is removed (v0.20 B3).
- * Best-effort removal: failure is logged, and worktreePath stays set so
- * the GC delete path can find the orphan. Exported for tests.
+ * Finalize's worktree step: merge back (v0.14), then {@link releaseWorktree}.
+ * `merge_conflict` keeps the worktree and branch for manual resolution.
+ * So does a startup-reconciled run on every terminal: its resume ran in
+ * run.cwd, so the worktree holds the dead process's only copy of its
+ * work. The fields stay set for `/conductor worktree` and GC. Without a
+ * merge-back (`none` or unset) the branch is the deliverable (v0.16
+ * chains diff it), so only the directory goes (v0.20 B3). Exported for tests.
  */
 export async function settleWorktree(run: Run, terminal: RunStatus): Promise<RunStatus> {
   if (run.worktreePath && run.mergeStrategy && run.mergeStrategy !== "none") {
@@ -2688,32 +2686,38 @@ export async function settleWorktree(run: Run, terminal: RunStatus): Promise<Run
     terminal = await applyMergeToTerminal(run, gitRoot, terminal);
   }
   if (terminal === "merge_conflict" || run.reconciledAtStartup) return terminal;
-  if (run.worktreePath && run.worktreeBranch) {
-    const wtSpec = {
-      // Reconstruct gitRoot: <gitRoot>/.worktrees/conductor-wt/<run-id> → 3 levels up
-      gitRoot: dirname(dirname(dirname(run.worktreePath))),
-      worktreePath: run.worktreePath,
-      branch: run.worktreeBranch,
-    };
-    const keepBranch = !run.mergeStrategy || run.mergeStrategy === "none";
-    if (keepBranch && worktreeHasUncommittedChanges(wtSpec.worktreePath)) {
-      const hint =
-        `worktree kept: uncommitted changes in ${wtSpec.worktreePath}; commit them to ${wtSpec.branch} ` +
-        `or discard them, then git worktree remove ${wtSpec.worktreePath}`;
-      run.errorMessage = run.errorMessage ? `${run.errorMessage}; ${hint}` : hint;
-      return terminal;
-    }
-    const removed = removeWorktree(wtSpec, { keepBranch });
-    if (removed) {
-      run.worktreePath = undefined;
-      if (!keepBranch) run.worktreeBranch = undefined;
-    } else {
-      process.stderr.write(
-        `[conductor] worktree removal failed for ${run.id}; GC will clean up\n`,
-      );
-    }
-  }
+  releaseWorktree(run, { keepBranch: !run.mergeStrategy || run.mergeStrategy === "none" });
   return terminal;
+}
+
+/**
+ * Remove a settled run's worktree directory and, unless `keepBranch`, its
+ * branch, clearing the fields that no longer point anywhere. Shared by
+ * finalize and `/conductor worktree merge`. A directory with uncommitted
+ * changes is never force-removed: both stay, with a recovery hint.
+ * Best-effort: on failure the fields stay set so GC can find the orphan.
+ */
+export function releaseWorktree(run: Run, opts: { keepBranch: boolean }): void {
+  if (!run.worktreePath || !run.worktreeBranch) return;
+  const wtSpec = {
+    // Reconstruct gitRoot: <gitRoot>/.worktrees/conductor-wt/<run-id> → 3 levels up
+    gitRoot: dirname(dirname(dirname(run.worktreePath))),
+    worktreePath: run.worktreePath,
+    branch: run.worktreeBranch,
+  };
+  if (worktreeHasUncommittedChanges(wtSpec.worktreePath)) {
+    const hint =
+      `worktree kept: uncommitted changes in ${wtSpec.worktreePath}; commit them to ${wtSpec.branch} ` +
+      `or discard them, then git worktree remove ${wtSpec.worktreePath}`;
+    run.errorMessage = run.errorMessage ? `${run.errorMessage}; ${hint}` : hint;
+    return;
+  }
+  if (removeWorktree(wtSpec, opts)) {
+    run.worktreePath = undefined;
+    if (!opts.keepBranch) run.worktreeBranch = undefined;
+  } else {
+    process.stderr.write(`[conductor] worktree removal failed for ${run.id}; GC will clean up\n`);
+  }
 }
 
 /**
@@ -3081,6 +3085,17 @@ export function forceTerminate(
     terminationReason: reason,
     errorMessage: run.errorMessage,
   });
+  // A killed run never reaches settleWorktree: its worktree and branch
+  // stay, since they may hold partial committed work. Stamped after the
+  // classification so the paths can't sway it; GC reclaims it on its TTL.
+  if (run.worktreePath && run.worktreeBranch) {
+    const gitRoot = dirname(dirname(dirname(run.worktreePath)));
+    const hint =
+      `worktree kept with any partial work: ${run.worktreePath} (branch ${run.worktreeBranch}); ` +
+      `keep it with cd ${gitRoot} && git merge ${run.worktreeBranch}, or discard it (with every other kept ` +
+      `worktree) via /conductor worktree clean`;
+    run.errorMessage = run.errorMessage ? `${run.errorMessage}; ${hint}` : hint;
+  }
   registry.notify(run);
   void writeRecord(run);
   void writeFinal(run);

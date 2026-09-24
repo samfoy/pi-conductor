@@ -3635,31 +3635,29 @@ async function settleWorktree(run, terminal) {
     terminal = await applyMergeToTerminal(run, gitRoot2, terminal);
   }
   if (terminal === "merge_conflict" || run.reconciledAtStartup) return terminal;
-  if (run.worktreePath && run.worktreeBranch) {
-    const wtSpec = {
-      // Reconstruct gitRoot: <gitRoot>/.worktrees/conductor-wt/<run-id> → 3 levels up
-      gitRoot: dirname7(dirname7(dirname7(run.worktreePath))),
-      worktreePath: run.worktreePath,
-      branch: run.worktreeBranch
-    };
-    const keepBranch = !run.mergeStrategy || run.mergeStrategy === "none";
-    if (keepBranch && worktreeHasUncommittedChanges(wtSpec.worktreePath)) {
-      const hint = `worktree kept: uncommitted changes in ${wtSpec.worktreePath}; commit them to ${wtSpec.branch} or discard them, then git worktree remove ${wtSpec.worktreePath}`;
-      run.errorMessage = run.errorMessage ? `${run.errorMessage}; ${hint}` : hint;
-      return terminal;
-    }
-    const removed = removeWorktree(wtSpec, { keepBranch });
-    if (removed) {
-      run.worktreePath = void 0;
-      if (!keepBranch) run.worktreeBranch = void 0;
-    } else {
-      process.stderr.write(
-        `[conductor] worktree removal failed for ${run.id}; GC will clean up
-`
-      );
-    }
-  }
+  releaseWorktree(run, { keepBranch: !run.mergeStrategy || run.mergeStrategy === "none" });
   return terminal;
+}
+function releaseWorktree(run, opts) {
+  if (!run.worktreePath || !run.worktreeBranch) return;
+  const wtSpec = {
+    // Reconstruct gitRoot: <gitRoot>/.worktrees/conductor-wt/<run-id> → 3 levels up
+    gitRoot: dirname7(dirname7(dirname7(run.worktreePath))),
+    worktreePath: run.worktreePath,
+    branch: run.worktreeBranch
+  };
+  if (worktreeHasUncommittedChanges(wtSpec.worktreePath)) {
+    const hint = `worktree kept: uncommitted changes in ${wtSpec.worktreePath}; commit them to ${wtSpec.branch} or discard them, then git worktree remove ${wtSpec.worktreePath}`;
+    run.errorMessage = run.errorMessage ? `${run.errorMessage}; ${hint}` : hint;
+    return;
+  }
+  if (removeWorktree(wtSpec, opts)) {
+    run.worktreePath = void 0;
+    if (!opts.keepBranch) run.worktreeBranch = void 0;
+  } else {
+    process.stderr.write(`[conductor] worktree removal failed for ${run.id}; GC will clean up
+`);
+  }
 }
 function applyChainIfPresent(run, terminal, onChain) {
   if (terminal !== "completed") return;
@@ -3836,6 +3834,11 @@ function forceTerminate(run, reason, registry, onComplete, killGroup = defaultKi
     terminationReason: reason,
     errorMessage: run.errorMessage
   });
+  if (run.worktreePath && run.worktreeBranch) {
+    const gitRoot2 = dirname7(dirname7(dirname7(run.worktreePath)));
+    const hint = `worktree kept with any partial work: ${run.worktreePath} (branch ${run.worktreeBranch}); keep it with cd ${gitRoot2} && git merge ${run.worktreeBranch}, or discard it (with every other kept worktree) via /conductor worktree clean`;
+    run.errorMessage = run.errorMessage ? `${run.errorMessage}; ${hint}` : hint;
+  }
   registry.notify(run);
   void writeRecord(run);
   void writeFinal(run);
@@ -4071,7 +4074,8 @@ async function buildEntry(id, runDir2, registry) {
     archivedAt: archivedStat?.mtimeMs ?? null,
     sessionPathPresent,
     inMemory,
-    malformed: false
+    malformed: false,
+    holdsWorktree: record.worktreePath !== void 0 && existsSync8(record.worktreePath)
   };
 }
 
@@ -4192,6 +4196,18 @@ function decideForEntry(entry, config, now, orphanThresholdMs) {
   }
   if (entry.pinned && isTerminal(entry.status)) {
     return { kind: "keep", id: entry.id, reason: "pinned" };
+  }
+  if (entry.holdsWorktree && isTerminal(entry.status)) {
+    const ageMs = now - (entry.finishedAt ?? entry.startTime);
+    if (ageMs > config.mergeConflictTtlDays * DAY_MS) {
+      return {
+        kind: "delete",
+        id: entry.id,
+        reason: `holds a worktree, finished > ${config.mergeConflictTtlDays}d ago`,
+        bytesReclaimed: entry.totalSizeBytes,
+        losesResume: entry.sessionPathPresent
+      };
+    }
   }
   if (entry.archived) {
     const archivedAt = entry.archivedAt ?? entry.startTime;
@@ -6107,10 +6123,11 @@ async function runWorktreeCmd(opts, ctx, subRest) {
         if (result.success) {
           run.status = "completed";
           run.mergeResult = result;
-          run.worktreePath = void 0;
-          run.worktreeBranch = void 0;
+          run.errorMessage = void 0;
+          releaseWorktree(run, { keepBranch: false });
           ctx.ui.notify(
-            `\u2714 Merged ${run.id} \u2192 ${baseBranch}. Run is now completed.`,
+            `\u2714 Merged ${run.id} \u2192 ${baseBranch}. Run is now completed.` + (run.errorMessage ? `
+${run.errorMessage}` : ""),
             "info"
           );
         } else {

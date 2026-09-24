@@ -8,11 +8,13 @@
  *   - `merge <run-id>`: error when run not found
  *   - `merge <run-id>`: error when run is not merge_conflict status
  *   - `clean`: removes worktrees for terminal (non-merge_conflict) runs
+ *   - `merge <run-id>`: a successful manual merge removes the worktree and
+ *     its branch, like finalize's auto-merge (real git, gitTestEnv)
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
@@ -20,6 +22,7 @@ import { execSync } from "node:child_process";
 import { runWorktreeCmd } from "../src/commands.ts";
 import { RunRegistry, runsRoot } from "../src/runs.ts";
 import { DEFAULT_CONFIG, emptyUsage, type Run, type RunRecord } from "../src/types.ts";
+import { gitTestEnv } from "./helpers/git-env.ts";
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -243,5 +246,86 @@ test("runWorktreeCmd: unknown subcommand shows usage", async () => {
     );
   } finally {
     teardown(fx);
+  }
+});
+
+// ── merge: the manual path settles the worktree like the auto path ─────
+
+function git(cwd: string, cmd: string): string {
+  return execSync(`git ${cmd}`, { cwd, env: gitTestEnv(), stdio: "pipe" }).toString();
+}
+
+/** A repo whose merge_conflict run's branch now merges cleanly into mainline. */
+function conflictedRunRepo(id: string): { root: string; repo: string; wt: string; branch: string } {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "conductor-wt-cmd-merge-")));
+  const repo = join(root, "repo");
+  mkdirSync(repo);
+  git(repo, "init -b mainline");
+  git(repo, "config user.email t@t");
+  git(repo, "config user.name T");
+  writeFileSync(join(repo, "README.md"), "init\n");
+  git(repo, "add README.md");
+  git(repo, "commit -m init");
+  const branch = `conductor-wt/${id}`;
+  const wt = join(repo, ".worktrees", "conductor-wt", id);
+  git(repo, `worktree add -b ${branch} ${JSON.stringify(wt)}`);
+  writeFileSync(join(wt, "resolved.ts"), "resolved\n");
+  git(wt, "add resolved.ts");
+  git(wt, `commit -m resolved`);
+  return { root, repo, wt, branch };
+}
+
+function conflictedRun(id: string, wt: string, branch: string): Partial<Run> {
+  return {
+    id,
+    status: "merge_conflict",
+    worktreePath: wt,
+    worktreeBranch: branch,
+    worktreeBaseBranch: "mainline",
+    mergeStrategy: "squash",
+    errorMessage: `merge conflict in: README.md; worktree preserved at ${wt}`,
+  };
+}
+
+test("runWorktreeCmd merge: a successful merge removes the worktree and deletes its branch", { timeout: 15_000 }, async () => {
+  const fx = setup();
+  const { root, repo, wt, branch } = conflictedRunRepo("builder-mm01");
+  try {
+    const reg = makeRegistry([conflictedRun("builder-mm01", wt, branch)]);
+    const ctx = mockCtx();
+    await runWorktreeCmd(mockOpts(reg) as any, ctx as any, "merge builder-mm01");
+
+    const run = reg.get("builder-mm01")!;
+    assert.equal(run.status, "completed", ctx.calls.map((c) => c.message).join("\n"));
+    assert.match(git(repo, "show --stat --oneline mainline"), /resolved\.ts/, "merged");
+    assert.equal(existsSync(wt), false, "worktree directory removed");
+    assert.equal(git(repo, `branch --list ${branch}`).trim(), "", "branch deleted");
+    assert.equal(run.worktreePath, undefined);
+    assert.equal(run.worktreeBranch, undefined);
+    assert.equal(run.errorMessage, undefined, "the conflict error no longer applies");
+  } finally {
+    teardown(fx);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runWorktreeCmd merge: an uncommitted leftover keeps the worktree after the merge, and the notice says why", { timeout: 15_000 }, async () => {
+  const fx = setup();
+  const { root, repo, wt, branch } = conflictedRunRepo("builder-mm02");
+  try {
+    writeFileSync(join(wt, "scratch.txt"), "edited during resolution, never committed\n");
+    const reg = makeRegistry([conflictedRun("builder-mm02", wt, branch)]);
+    const ctx = mockCtx();
+    await runWorktreeCmd(mockOpts(reg) as any, ctx as any, "merge builder-mm02");
+
+    const run = reg.get("builder-mm02")!;
+    assert.equal(run.status, "completed");
+    assert.match(git(repo, "show --stat --oneline mainline"), /resolved\.ts/, "merged");
+    assert.equal(readFileSync(join(wt, "scratch.txt"), "utf8"), "edited during resolution, never committed\n");
+    assert.equal(run.worktreePath, wt);
+    assert.match(ctx.calls.map((c) => c.message).join("\n"), /uncommitted/);
+  } finally {
+    teardown(fx);
+    rmSync(root, { recursive: true, force: true });
   }
 });

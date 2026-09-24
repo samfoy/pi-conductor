@@ -295,3 +295,24 @@ test("walkInventory: transcriptMtime is populated when transcript exists", async
 // silence unused import warning for symlinkSync (kept for potential follow-up tests)
 void symlinkSync;
 void (null as unknown as InventoryEntry);
+
+test("walkInventory: holdsWorktree is true only while the record's worktree is on disk", async () => {
+  const root = tempRoot();
+  try {
+    const wt = join(root, "wt-on-disk");
+    mkdirSync(wt);
+    makeRunDir(root, "builder-kept", { status: "killed", worktreePath: wt, worktreeBranch: "conductor-wt/builder-kept" });
+    makeRunDir(root, "builder-gone", {
+      status: "killed",
+      worktreePath: join(root, "wt-removed"),
+      worktreeBranch: "conductor-wt/builder-gone",
+    });
+    makeRunDir(root, "builder-none", { status: "killed" });
+    const byId = Object.fromEntries((await walkInventory(root, new RunRegistry())).map((e) => [e.id, e]));
+    assert.equal(byId["builder-kept"]!.holdsWorktree, true);
+    assert.equal(byId["builder-gone"]!.holdsWorktree, false);
+    assert.equal(byId["builder-none"]!.holdsWorktree, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

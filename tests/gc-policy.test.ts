@@ -551,3 +551,31 @@ test("planReclaim: merge_conflict within mergeConflictTtlDays → keep", () => {
   const byId = Object.fromEntries(plan.actions.map((a) => [a.id, a]));
   assert.equal(byId["mc-bbbb"]!.kind, "keep");
 });
+
+// ── A terminal run that still holds a worktree (kill, merge_conflict, …) ──
+
+test("planReclaim: a terminal run still holding a worktree is deleted past mergeConflictTtlDays, archived or not", () => {
+  const config = defaultGcConfig({ failedTtlDays: 60, mergeConflictTtlDays: 14 });
+  const finishedAt = NOW - 20 * DAY_MS;
+  const entries = [
+    makeEntry({ id: "killed-wt01", status: "killed", finishedAt, holdsWorktree: true }),
+    makeEntry({ id: "mc-wt01", status: "merge_conflict", finishedAt, holdsWorktree: true }),
+    makeEntry({ id: "killed-nowt", status: "killed", finishedAt }),
+  ];
+  const byId = Object.fromEntries(planReclaim(entries, config, NOW).actions.map((a) => [a.id, a]));
+  assert.equal(byId["killed-wt01"]!.kind, "delete", "the kept worktree is reclaimed on age alone");
+  assert.match(byId["killed-wt01"]!.reason, /worktree/);
+  assert.equal(byId["mc-wt01"]!.kind, "delete");
+  assert.equal(byId["killed-nowt"]!.kind, "keep", "without a worktree the failed bucket still applies");
+});
+
+test("planReclaim: a worktree-holding run within mergeConflictTtlDays, or pinned, is kept", () => {
+  const config = defaultGcConfig({ mergeConflictTtlDays: 14 });
+  const entries = [
+    makeEntry({ id: "killed-wt02", status: "killed", finishedAt: NOW - 10 * DAY_MS, holdsWorktree: true }),
+    makeEntry({ id: "killed-wt03", status: "killed", finishedAt: NOW - 20 * DAY_MS, holdsWorktree: true, pinned: true }),
+  ];
+  const byId = Object.fromEntries(planReclaim(entries, config, NOW).actions.map((a) => [a.id, a]));
+  assert.equal(byId["killed-wt02"]!.kind, "keep");
+  assert.equal(byId["killed-wt03"]!.kind, "keep");
+});

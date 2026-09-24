@@ -5,6 +5,8 @@
  * worktree removed (v0.13). With no merge-back (`none`), the branch is
  * the deliverable: only a clean worktree directory goes (v0.20 B3). The
  * on_complete_hook gate runs in the worktree, not the main checkout (B4).
+ * A leftover uncommitted change is never force-removed, and a run settled
+ * by forceTerminate (kill, stall, timeout) keeps its partial work.
  *
  * Real git in temp repos, every call through gitTestEnv(). The spawnRun
  * smoke forks a PI_BIN stub, not pi.
@@ -17,7 +19,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { RunRegistry, settleWorktree, spawnRun } from "../src/runs.ts";
+import { forceTerminate, RunRegistry, settleWorktree, spawnRun } from "../src/runs.ts";
+import { runWorktreeCmd } from "../src/commands.ts";
 import { emptyUsage, type Persona, type Run } from "../src/types.ts";
 import { gitTestEnv } from "./helpers/git-env.ts";
 
@@ -209,6 +212,24 @@ test("settleWorktree: merge strategy none with uncommitted changes keeps worktre
   }
 });
 
+test("settleWorktree: a successful merge with an uncommitted leftover keeps the worktree, with a hint", { timeout: 15_000 }, async () => {
+  const { root, repo } = initRepo();
+  try {
+    const wt = worktreeWithCommit(repo, "builder-lo01", "new.ts", "hello\n");
+    writeFileSync(join(wt.path, "notes.txt"), "not part of the merge\n");
+    const run = makeRun("builder-lo01", { worktreePath: wt.path, worktreeBranch: wt.branch });
+
+    assert.equal(await settleWorktree(run, "completed"), "completed");
+
+    assert.match(git(repo, "show --stat --oneline mainline"), /new\.ts/, "the committed work is merged");
+    assert.equal(readFileSync(join(wt.path, "notes.txt"), "utf8"), "not part of the merge\n", "leftover kept");
+    assert.equal(run.worktreePath, wt.path);
+    assert.match(run.errorMessage ?? "", /uncommitted/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("spawnRun: a completed worktree run is merged back, then its worktree and branch are gone", { timeout: 20_000 }, async () => {
   const { root, repo } = initRepo();
   const stub = join(root, "pi-stub.mjs");
@@ -291,6 +312,71 @@ test("spawnRun: the on_complete_hook runs in the worktree, so it sees the sub-ag
     assert.equal(run.status, "completed", run.errorMessage ?? run.hookResult?.tailText);
     assert.equal(run.hookResult?.passed, true);
     assert.match(git(repo, "show --stat --oneline mainline"), /work\.ts/, "merged after the gate passed");
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("forceTerminate: a killed worktree run keeps its worktree, branch and fields, and says so", { timeout: 20_000 }, async () => {
+  const { root, repo } = initRepo();
+  const stub = join(root, "pi-stub.mjs");
+  // Commits partial work, then keeps running until it is killed.
+  writeFileSync(
+    stub,
+    `import { execSync } from "node:child_process";\n` +
+      `import { writeFileSync } from "node:fs";\n` +
+      `const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")));\n` +
+      `writeFileSync("partial.ts", "half done\\n");\n` +
+      `execSync("git add partial.ts && git -c user.email=t@t -c user.name=T commit -m partial", { env, stdio: "pipe" });\n` +
+      `setInterval(() => {}, 1000);\n`,
+  );
+  const saved = { HOME: process.env.HOME, PI_BIN: process.env.PI_BIN };
+  process.env.HOME = join(root, "home");
+  process.env.PI_BIN = stub;
+  try {
+    const registry = new RunRegistry();
+    const { run, done } = spawnRun({
+      registry,
+      persona: builderPersona(),
+      task: "probe",
+      mode: "background",
+      cwd: repo,
+      timeoutMs: 15_000,
+      worktree: true,
+      mergeStrategy: "squash",
+    });
+    const wtPath = run.worktreePath!;
+    const branch = run.worktreeBranch!;
+    assert.ok(wtPath && branch, "spawnRun created a worktree");
+    const deadline = Date.now() + 10_000;
+    while (git(repo, `log --oneline mainline..${branch}`).trim() === "") {
+      assert.ok(Date.now() < deadline, "the stub committed its partial work");
+      await new Promise((r) => setTimeout(r, 50));
+    }
+
+    forceTerminate(run, "killed", registry);
+    await done;
+
+    assert.equal(run.status, "killed");
+    assert.equal(readFileSync(join(wtPath, "partial.ts"), "utf8"), "half done\n", "worktree kept");
+    assert.match(git(repo, `log --oneline mainline..${branch}`), /partial/, "branch kept with the partial commit");
+    assert.equal(run.worktreePath, wtPath);
+    assert.equal(run.worktreeBranch, branch);
+    assert.ok(run.errorMessage?.includes(wtPath) && run.errorMessage.includes(branch), run.errorMessage);
+    const record = JSON.parse(readFileSync(run.recordPath, "utf8"));
+    assert.equal(record.worktreePath, wtPath, "record.json points GC at the worktree");
+
+    const notes: string[] = [];
+    await runWorktreeCmd(
+      { getRegistry: () => registry, getCwd: () => repo } as any,
+      { ui: { notify: (m: string) => notes.push(m) } } as any,
+      "list",
+    );
+    assert.ok(notes.join("\n").includes(run.id) && notes.join("\n").includes(wtPath), notes.join("\n"));
   } finally {
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) delete process.env[k];

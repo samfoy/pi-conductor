@@ -61,6 +61,7 @@ function transcriptCapFor(_entry: InventoryEntry, config: GcConfig): number {
  *   3. status === "running" AND no `inMemory` AND not yet stale \u2192 keep ("running but fresh; awaiting orphan TTL").
  *   4. malformed AND not pinned \u2192 keep ("malformed; surface only, do not reclaim").
  *   5. pinned AND terminal \u2192 keep ("pinned").
+ *   5b. terminal AND holds a worktree AND finished > mergeConflictTtlDays ago \u2192 delete.
  *   6. archived AND age > full TTL AND unpinned \u2192 delete ("archived past TTL").
  *   7. archived \u2192 keep ("archived; within TTL").
  *   8. terminal AND transcriptSizeBytes > per-cap \u2192 cold-archive ("transcript-cap exceeded").
@@ -203,6 +204,22 @@ function decideForEntry(
   // Rule 5: pinned + terminal.
   if (entry.pinned && isTerminal(entry.status)) {
     return { kind: "keep", id: entry.id, reason: "pinned" };
+  }
+
+  // Rule 5b: a kept worktree (killed, merge_conflict, reconciled) is the
+  // disk cost, and a small transcript never triggers archiving, so it is
+  // reclaimed on age alone. fullDelete removes the worktree and branch.
+  if (entry.holdsWorktree && isTerminal(entry.status)) {
+    const ageMs = now - (entry.finishedAt ?? entry.startTime);
+    if (ageMs > config.mergeConflictTtlDays * DAY_MS) {
+      return {
+        kind: "delete",
+        id: entry.id,
+        reason: `holds a worktree, finished > ${config.mergeConflictTtlDays}d ago`,
+        bytesReclaimed: entry.totalSizeBytes,
+        losesResume: entry.sessionPathPresent,
+      };
+    }
   }
 
   // Rules 6/7: already-archived.

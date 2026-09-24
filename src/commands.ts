@@ -32,6 +32,7 @@ import {
   formatUsage,
   modelRegistryPredicate,
   pauseRun,
+  releaseWorktree,
   resumeRun,
   runDir,
   runsRoot,
@@ -1343,10 +1344,12 @@ export async function runWorktreeCmd(
         if (result.success) {
           run.status = "completed";
           run.mergeResult = result;
-          run.worktreePath = undefined;
-          run.worktreeBranch = undefined;
+          run.errorMessage = undefined;
+          // Same removal as finalize's auto-merge, so the worktree doesn't leak.
+          releaseWorktree(run, { keepBranch: false });
           ctx.ui.notify(
-            `✔ Merged ${run.id} → ${baseBranch}. Run is now completed.`,
+            `✔ Merged ${run.id} → ${baseBranch}. Run is now completed.` +
+              (run.errorMessage ? `\n${run.errorMessage}` : ""),
             "info",
           );
         } else {
