@@ -2638,8 +2638,8 @@ function buildResumePiArgs(run, message) {
     steerable: false
   });
 }
-function sessionProviderForModel(sessionText, model) {
-  let provider;
+function sessionServedModels(sessionText) {
+  const out = [];
   for (const line of sessionText.split("\n")) {
     if (!line.includes('"provider"')) continue;
     let entry;
@@ -2649,19 +2649,31 @@ function sessionProviderForModel(sessionText, model) {
       continue;
     }
     const served = entry?.type === "model_change" ? { provider: entry.provider, model: entry.modelId } : entry?.type === "message" && entry.message?.role === "assistant" ? entry.message : void 0;
-    if (served?.model === model && typeof served.provider === "string" && served.provider) {
-      provider = served.provider;
+    if (typeof served?.model === "string" && typeof served.provider === "string" && served.provider) {
+      out.push({ provider: served.provider, model: served.model });
     }
   }
-  return provider;
+  return out;
 }
-function resumeModel(model, sessionPath) {
+var latestProviderFor = (served, model) => served.filter((s) => s.model === model).at(-1)?.provider;
+function modelRegistryPredicate(registry) {
+  return registry && ((provider, id) => registry.find(provider, id) !== void 0);
+}
+function resumeModel(model, readSession, isRegistered) {
   if (!model) return model;
+  const slash = model.indexOf("/");
+  if (isRegistered && slash > 0 && isRegistered(model.slice(0, slash), model.slice(slash + 1))) return model;
+  let served;
   try {
-    return qualifyModel(model, sessionProviderForModel(readFileSync6(sessionPath, "utf8"), model));
+    served = sessionServedModels(readSession());
   } catch {
     return model;
   }
+  const provider = latestProviderFor(served, model);
+  if (!isRegistered) return qualifyModel(model, provider);
+  if (provider && isRegistered(provider, model)) return qualifyModel(model, provider);
+  const retired = served.find((s) => `${s.provider}/${s.model}` === model && !isRegistered(s.provider, s.model));
+  return retired ? retired.model : model;
 }
 function trimLeadingNonUser(messages) {
   let i = 0;
@@ -3486,7 +3498,7 @@ function sendToRun(run, message, opts) {
     run.onCompleteHookTimeoutSeconds = opts.onCompleteHookTimeoutSeconds;
   opts.registry.notify(run);
   const sessionPath = run.sessionPath;
-  run.model = resumeModel(run.model, sessionPath);
+  run.model = resumeModel(run.model, () => readFileSync6(sessionPath, "utf8"), opts.isRegisteredModel);
   const piArgs = buildResumePiArgs(run, trimmed);
   const done = runPiSubprocess(run, piArgs, {
     registry: opts.registry,
@@ -5543,7 +5555,8 @@ async function runSendCmd(opts, ctx, arg) {
   const result = sendToRun(run, message, {
     registry,
     timeoutMs,
-    streamingBehavior: behavior
+    streamingBehavior: behavior,
+    isRegisteredModel: modelRegistryPredicate(ctx.modelRegistry)
   });
   if (result.kind === "rejected") {
     ctx.ui.notify(result.reason, "warning");
@@ -7466,7 +7479,7 @@ function registerSendTool(pi, opts) {
         )
       )
     }),
-    async execute(_id, params, signal, onUpdate) {
+    async execute(_id, params, signal, onUpdate, ctx) {
       const tmRange = validateTimeoutMinutes(params.timeout_minutes);
       if (tmRange) return errorResult(tmRange);
       const stallRange = validateStallThresholdSeconds(params.stall_threshold_seconds);
@@ -7501,7 +7514,8 @@ function registerSendTool(pi, opts) {
         // v0.12 slice 4: drive resolveSendStrategy. Undefined → "auto".
         streamingBehavior: params.streaming_behavior,
         // v0.16 event bus: thread through for emitSteered / emitCompleted / emitFailed.
-        events: opts.getEvents?.()
+        events: opts.getEvents?.(),
+        isRegisteredModel: modelRegistryPredicate(ctx?.modelRegistry)
       });
       if (result.kind === "rejected") {
         return errorResult(result.reason);
@@ -10260,7 +10274,8 @@ async function executePromptAndSend(deps, agentId, presuppliedText) {
   const result = deps.sendToRun(run, message, {
     registry: deps.registry,
     timeoutMs,
-    onComplete: (r) => deps.pushCompletionNotification(r)
+    onComplete: (r) => deps.pushCompletionNotification(r),
+    isRegisteredModel: modelRegistryPredicate(ctx.modelRegistry)
   });
   if (result.kind === "rejected") {
     try {

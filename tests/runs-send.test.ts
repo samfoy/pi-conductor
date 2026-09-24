@@ -18,6 +18,7 @@ import { join } from "node:path";
 import {
   RunRegistry,
   buildResumePiArgs,
+  resumeModel,
   sendToRun,
   sessionProviderForModel,
   validateSendable,
@@ -307,6 +308,74 @@ test("sessionProviderForModel: undefined when no entry names a provider for that
 test("sessionProviderForModel: skips malformed lines", () => {
   const text = `{not json\n${JSON.stringify(assistant("amazon-bedrock", "m"))}\n\n`;
   assert.equal(sessionProviderForModel(text, "m"), "amazon-bedrock");
+});
+
+// ── resumeModel: only qualify with a provider pi still registers ──
+//
+// Most legacy records name providers pi no longer loads (amazon-claude-code,
+// bedrock-mantle). Their bare id resumed fine; `<gone-provider>/<id>` fails
+// with `Model "..." not found`, and the id is persisted to record.json.
+
+const OPUS = "anthropic.claude-opus-5-5";
+const registeredOnly =
+  (...pairs: string[]) =>
+  (provider: string, id: string): boolean =>
+    pairs.includes(`${provider}/${id}`);
+
+function countingReader(text: string): { read: () => string; calls: () => number } {
+  let n = 0;
+  return {
+    read: () => {
+      n++;
+      return text;
+    },
+    calls: () => n,
+  };
+}
+
+test("resumeModel: a legacy bare id whose session provider is unregistered stays bare", () => {
+  const text = sessionText(assistant("amazon-claude-code", OPUS));
+  assert.equal(resumeModel(OPUS, () => text, registeredOnly(`amazon-bedrock/${OPUS}`)), OPUS);
+});
+
+test("resumeModel: a persisted `<unregistered>/<id>` from the session is repaired to the bare id", () => {
+  const text = sessionText(assistant("amazon-claude-code", OPUS));
+  assert.equal(resumeModel(`amazon-claude-code/${OPUS}`, () => text, registeredOnly(`amazon-bedrock/${OPUS}`)), OPUS);
+});
+
+test("resumeModel: a legacy bare id whose session provider is registered is prefixed", () => {
+  const text = sessionText(assistant("pi-amazon-claude-provider", OPUS));
+  assert.equal(
+    resumeModel(OPUS, () => text, registeredOnly(`pi-amazon-claude-provider/${OPUS}`)),
+    `pi-amazon-claude-provider/${OPUS}`,
+  );
+});
+
+test("resumeModel: a registered qualified id skips the session read", () => {
+  const reader = countingReader(sessionText(assistant("amazon-bedrock", OPUS)));
+  assert.equal(resumeModel(`amazon-bedrock/${OPUS}`, reader.read, registeredOnly(`amazon-bedrock/${OPUS}`)), `amazon-bedrock/${OPUS}`);
+  assert.equal(reader.calls(), 0, "5.7 MB sessions cost 33-52 ms to read");
+});
+
+test("resumeModel: an unregistered qualified id the session never served passes through", () => {
+  // A configured persona model is the user's choice; only strip a prefix
+  // the session itself vouches for.
+  const text = sessionText(assistant("amazon-bedrock", OPUS));
+  assert.equal(resumeModel("custom-provider/some-model", () => text, registeredOnly()), "custom-provider/some-model");
+});
+
+test("resumeModel: without a registry predicate, the session provider is prefixed as before", () => {
+  const text = sessionText(assistant("amazon-claude-code", OPUS));
+  assert.equal(resumeModel(OPUS, () => text), `amazon-claude-code/${OPUS}`);
+  assert.equal(resumeModel(`amazon-claude-code/${OPUS}`, () => text), `amazon-claude-code/${OPUS}`);
+});
+
+test("resumeModel: an unreadable session passes the id through", () => {
+  const boom = () => {
+    throw new Error("ENOENT");
+  };
+  assert.equal(resumeModel(OPUS, boom, registeredOnly()), OPUS);
+  assert.equal(resumeModel(undefined, boom, registeredOnly()), undefined);
 });
 
 test("sendToRun reseeds lastEventAt to now", () => {

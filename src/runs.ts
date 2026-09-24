@@ -541,13 +541,14 @@ export function buildResumePiArgs(run: Run, message: string): string[] {
   });
 }
 
-/**
- * Provider that served `model` according to a pi session JSONL: the latest
- * assistant message or `model_change` entry naming that exact id. Latest,
- * because a seeded session opens with the parent's messages. Pure.
- */
-export function sessionProviderForModel(sessionText: string, model: string): string | undefined {
-  let provider: string | undefined;
+interface ServedModel {
+  provider: string;
+  model: string;
+}
+
+/** Every (provider, model) pair a pi session JSONL records serving, in file order. Pure. */
+function sessionServedModels(sessionText: string): ServedModel[] {
+  const out: ServedModel[] = [];
   for (const line of sessionText.split("\n")) {
     if (!line.includes('"provider"')) continue;
     let entry: any;
@@ -562,25 +563,61 @@ export function sessionProviderForModel(sessionText: string, model: string): str
         : entry?.type === "message" && entry.message?.role === "assistant"
           ? entry.message
           : undefined;
-    if (served?.model === model && typeof served.provider === "string" && served.provider) {
-      provider = served.provider;
+    if (typeof served?.model === "string" && typeof served.provider === "string" && served.provider) {
+      out.push({ provider: served.provider, model: served.model });
     }
   }
-  return provider;
+  return out;
+}
+
+const latestProviderFor = (served: ServedModel[], model: string): string | undefined =>
+  served.filter((s) => s.model === model).at(-1)?.provider;
+
+/**
+ * Provider that served `model` according to a pi session JSONL: the latest
+ * assistant message or `model_change` entry naming that exact id. Latest,
+ * because a seeded session opens with the parent's messages. Pure.
+ */
+export function sessionProviderForModel(sessionText: string, model: string): string | undefined {
+  return latestProviderFor(sessionServedModels(sessionText), model);
+}
+
+/** Whether pi's model registry still resolves `provider/id` (`ctx.modelRegistry.find`). */
+export type ModelRegisteredPredicate = (provider: string, id: string) => boolean;
+
+/** {@link ModelRegisteredPredicate} over a pi `ModelRegistry`; undefined without one. */
+export function modelRegistryPredicate(
+  registry: { find(provider: string, id: string): unknown } | undefined,
+): ModelRegisteredPredicate | undefined {
+  return registry && ((provider, id) => registry.find(provider, id) !== undefined);
 }
 
 /**
  * Model for a resume argv. Records written before the event handler
  * qualified models hold pi's bare id; qualify it from the session when it
- * names the provider, otherwise pass it through as before.
+ * names the provider. With `isRegistered`, qualify only with a provider pi
+ * still loads, and strip a session-vouched prefix it no longer loads: most
+ * legacy records name retired providers, and only their bare id resolves.
  */
-function resumeModel(model: string | undefined, sessionPath: string): string | undefined {
+export function resumeModel(
+  model: string | undefined,
+  readSession: () => string,
+  isRegistered?: ModelRegisteredPredicate,
+): string | undefined {
   if (!model) return model;
+  const slash = model.indexOf("/");
+  if (isRegistered && slash > 0 && isRegistered(model.slice(0, slash), model.slice(slash + 1))) return model;
+  let served: ServedModel[];
   try {
-    return qualifyModel(model, sessionProviderForModel(readFileSync(sessionPath, "utf8"), model));
+    served = sessionServedModels(readSession());
   } catch {
     return model;
   }
+  const provider = latestProviderFor(served, model);
+  if (!isRegistered) return qualifyModel(model, provider);
+  if (provider && isRegistered(provider, model)) return qualifyModel(model, provider);
+  const retired = served.find((s) => `${s.provider}/${s.model}` === model && !isRegistered(s.provider, s.model));
+  return retired ? retired.model : model;
 }
 
 // ── Spawn invocation planner (inherit_context) ──────────────────────
@@ -1987,6 +2024,12 @@ export interface SendToRunOptions {
    * replaces `Run.graceTurns` for the resumed terminal and onward.
    */
   graceTurns?: number;
+  /**
+   * Checks a resume's `provider/id` against pi's model registry (see
+   * {@link modelRegistryPredicate}). Absent: qualify from the session
+   * without checking, as before.
+   */
+  isRegisteredModel?: ModelRegisteredPredicate;
 }
 
 export type SendToRunResult =
@@ -2405,7 +2448,7 @@ export function sendToRun(
   // but TS can't see through a free-function call — capture it.
   const sessionPath = run.sessionPath as string;
 
-  run.model = resumeModel(run.model, sessionPath);
+  run.model = resumeModel(run.model, () => readFileSync(sessionPath, "utf8"), opts.isRegisteredModel);
   const piArgs = buildResumePiArgs(run, trimmed);
 
   const done = runPiSubprocess(run, piArgs, {

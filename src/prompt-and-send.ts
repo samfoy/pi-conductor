@@ -27,13 +27,15 @@
  */
 
 import type { Run } from "./types.ts";
-import type { RunRegistry } from "./runs.ts";
+import { modelRegistryPredicate, type ModelRegisteredPredicate, type RunRegistry } from "./runs.ts";
 
 export interface PromptAndSendCtx {
   ui: {
     input(title: string, placeholder?: string): Promise<string | undefined>;
     notify(message: string, kind?: string): void;
   };
+  /** pi's ModelRegistry; the resume checks its `provider/id` against it. */
+  modelRegistry?: { find(provider: string, id: string): unknown };
 }
 
 export interface PromptAndSendDeps {
@@ -58,6 +60,7 @@ export interface PromptAndSendDeps {
       registry: RunRegistry;
       timeoutMs: number;
       onComplete: (r: Run) => void;
+      isRegisteredModel?: ModelRegisteredPredicate;
     },
   ) => { kind: "queued" } | { kind: "rejected"; reason: string };
   pushCompletionNotification: (run: Run) => void;
@@ -122,6 +125,7 @@ export async function executePromptAndSend(
     registry: deps.registry,
     timeoutMs,
     onComplete: (r) => deps.pushCompletionNotification(r),
+    isRegisteredModel: modelRegistryPredicate(ctx.modelRegistry),
   });
   if (result.kind === "rejected") {
     try {

@@ -27,7 +27,7 @@ import {
 } from "./autonomous.ts";
 import { resolveRetryPolicy } from "./retry.ts";
 import { collapseSteerableCascade } from "./steerable.ts";
-import { elapsedStr, forceTerminate, formatUsage, getFinalText, pauseRun, resolveTimeoutMs, resumeRun, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
+import { elapsedStr, forceTerminate, formatUsage, getFinalText, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
 import { isTerminal } from "./types.ts";
 import { SpawnQueue } from "./queue.ts";
 import { resolveMergeStrategy } from "./worktree.ts";
@@ -991,7 +991,7 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         ),
       ),
     }),
-    async execute(_id, params, signal, onUpdate) {
+    async execute(_id, params, signal, onUpdate, ctx) {
       const tmRange = validateTimeoutMinutes(params.timeout_minutes);
       if (tmRange) return errorResult(tmRange);
       const stallRange = validateStallThresholdSeconds(params.stall_threshold_seconds);
@@ -1040,6 +1040,7 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         streamingBehavior: params.streaming_behavior,
         // v0.16 event bus: thread through for emitSteered / emitCompleted / emitFailed.
         events: opts.getEvents?.(),
+        isRegisteredModel: modelRegistryPredicate(ctx?.modelRegistry),
       });
 
       if (result.kind === "rejected") {

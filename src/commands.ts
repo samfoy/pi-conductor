@@ -30,6 +30,7 @@ import {
   elapsedStr,
   forceTerminate,
   formatUsage,
+  modelRegistryPredicate,
   pauseRun,
   resumeRun,
   runDir,
@@ -544,6 +545,7 @@ async function runSendCmd(
     registry,
     timeoutMs,
     streamingBehavior: behavior,
+    isRegisteredModel: modelRegistryPredicate(ctx.modelRegistry),
   });
 
   if (result.kind === "rejected") {
