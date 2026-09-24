@@ -15,6 +15,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  CONDUCTOR_LLM_TOOL_NAMES,
   CONTEXT_INHERITANCE,
   THINKING_LEVELS,
   type ContextInheritance,
@@ -219,6 +220,12 @@ function validateAndBuild(
   const graceTurns = optionalNonNegativeInteger(frontmatter, "grace_turns");
   // v0.18: retry_max_attempts frontmatter field.
   const retryMaxAttempts = optionalPositiveInteger(frontmatter, "retry_max_attempts");
+  const tools =
+    frontmatter.tools === undefined ? undefined : parseToolList(frontmatter.tools, "tools");
+  const excludeTools =
+    frontmatter.exclude_tools === undefined
+      ? undefined
+      : parseToolList(frontmatter.exclude_tools, "exclude_tools");
 
   if (timeoutMinutes <= 0 || timeoutMinutes > 24 * 60) {
     throw new Error(`timeout_minutes must be in (0, 1440]; got ${timeoutMinutes}`);
@@ -248,7 +255,50 @@ function validateAndBuild(
     maxTurns,
     graceTurns,
     retryMaxAttempts,
+    tools,
+    excludeTools,
   };
+}
+
+// ── Tool policy ────────────────────────────────────────────────────────────────
+
+const TOOL_NAME_PATTERN = /^[A-Za-z0-9_.:-]+$/;
+
+/**
+ * Validate a `tools` / `exclude_tools` value (frontmatter or config
+ * override) into a trimmed, deduped name list. Throws on anything else;
+ * an empty `tools` allowlist is rejected because it would disable every
+ * tool, which is almost certainly a typo rather than intent.
+ */
+function parseToolList(value: unknown, field: "tools" | "exclude_tools"): string[] {
+  if (typeof value === "string" && /^\[.*\]$/.test(value.trim())) {
+    throw new Error(
+      `field "${field}" must be a block list (one \`- name\` per line); flow syntax [a, b] is not supported`,
+    );
+  }
+  if (!Array.isArray(value) || !value.every((x) => typeof x === "string")) {
+    throw new Error(`field "${field}" must be a list of tool names`);
+  }
+  const names = value.map((s) => s.trim());
+  if (names.includes("")) throw new Error(`field "${field}" has an empty entry`);
+  const bad = names.find((n) => !TOOL_NAME_PATTERN.test(n));
+  if (bad !== undefined) {
+    throw new Error(
+      `field "${field}" entry "${bad}" is not a valid tool name (allowed: letters, digits, _ . : -)`,
+    );
+  }
+  if (field === "tools" && names.length === 0) {
+    throw new Error(`field "tools" must list at least one tool name; omit it to keep pi's default set`);
+  }
+  return [...new Set(names)];
+}
+
+/**
+ * The `--exclude-tools` list a sub-agent actually gets: the persona's own
+ * exclusions (first, in order) plus every conductor LLM tool, deduped.
+ */
+export function effectiveExcludeTools(excludeTools?: readonly string[]): string[] {
+  return [...new Set([...(excludeTools ?? []), ...CONDUCTOR_LLM_TOOL_NAMES])];
 }
 
 function requireString(fm: Record<string, unknown>, key: string): string {
@@ -432,8 +482,24 @@ export async function resolvePersonas(opts: {
     }
     const base = personas.get(name);
     if (!base) continue; // override of nonexistent persona is a no-op (doctor will warn)
+    // Tool lists replace the persona's whole array. A malformed one drops
+    // the persona (like a malformed file) rather than silently loosening it.
+    let tools = base.tools;
+    let excludeTools = base.excludeTools;
+    try {
+      if (ov.tools !== undefined) tools = parseToolList(ov.tools, "tools");
+      if (ov.exclude_tools !== undefined) {
+        excludeTools = parseToolList(ov.exclude_tools, "exclude_tools");
+      }
+    } catch (e) {
+      errors.push({ path: `personaOverrides.${name}`, reason: (e as Error).message });
+      personas.delete(name);
+      continue;
+    }
     personas.set(name, {
       ...base,
+      tools,
+      excludeTools,
       model: ov.model ?? base.model,
       thinking: ov.thinking ?? base.thinking,
       timeoutMinutes: ov.timeoutMinutes ?? base.timeoutMinutes,

@@ -10,7 +10,7 @@
 | Decision | Choice | Rationale |
 |---|---|---|
 | Name | `pi-conductor` | Orchestra metaphor: parent conducts, personas play, audience watches. |
-| Tool restrictions | **Not implemented.** | Pi has no clean way to whitelist tools in a child subprocess. Persona `tools:` field dropped from frontmatter. Personas guide tool use via prompt only — no false security. |
+| Tool restrictions | **Enforced by pi's own flags (2026-09-24).** Was not implemented. | Persona frontmatter `tools` (allowlist → `pi --tools`) and `exclude_tools` (denylist → `pi --exclude-tools`); every spawn and resume also excludes the conductor's own `ensemble_*` tools. Read-only builtins exclude `edit`/`write`/`insert_before`/`insert_after`. **Partial enforcement:** `bash` stays available unless a persona excludes it, so this is not a sandbox. See the 2026-09-24 decision-log entry. |
 | Default spawn mode | **foreground** | Streams inline in the parent conversation as it runs. Background mode still available via explicit `foreground: false`. |
 | Notification visibility | **Inline visible** | `<sub-agent-completed>` blocks render in the parent conversation as a folded summary card with persona, status, duration, usage, transcript path, and final result. The user sees them; the LLM acts on them. |
 | Pause / resume | **Supported in v1.** | `ensemble_pause` (SIGSTOP) / `ensemble_resume` (SIGCONT). Useful for cost control while the user thinks. |
@@ -57,7 +57,7 @@ The user's goal: **see exactly what each subagent is doing, when they're doing i
 - Not a quality-gate hook framework (team-mode's `taskCompletedHook`). Could add later.
 - Not a worktree manager. Worktree support per persona may come in v2; v1 runs in cwd.
 - Not multi-coordinator / nested ensembles. One conductor, one ensemble.
-- **Not enforcing tool restrictions.** Personas describe expected tool usage in their prompts; the runtime does not gate access. (Pi's extension API doesn't expose this cleanly. Documented honestly rather than faked.)
+- **Not a sandbox.** Persona `tools` / `exclude_tools` are enforced by pi, but `bash` remains available unless excluded, so a read-only persona can still mutate files through the shell. The prompt-level read-only enforcer covers that gap by instruction, not mechanism.
 
 ## Personas
 
@@ -97,7 +97,8 @@ Frontmatter fields (v1):
 | `description` | string | — | Shown in `/conductor list`, used by orchestrator prompt |
 | `model` | string | **parent's model (inherited)** | Provider-qualified ID, e.g. `anthropic/claude-sonnet-4`. Omit to inherit. |
 | `thinking` | enum | **parent's thinking (inherited)** | `off|minimal|low|medium|high|xhigh`. Omit to inherit. |
-| ~~`tools`~~ | — | — | **Removed.** Pi has no clean way to whitelist tools in a child subprocess. Persona prompts may describe tool boundaries but they are not enforced. |
+| `tools` | list | pi's default set | Allowlist passed as `pi --tools <csv>`; replaces the child's default active set (builtin and extension tools). Block-list syntax only; an empty list is rejected. |
+| `exclude_tools` | list | `[]` | Denylist passed as `pi --exclude-tools <csv>`, unioned with the conductor's `ensemble_*` tools. |
 | `inherit_context` | enum | `filtered` | `none` (fresh), `filtered` (parent prose, no orchestration tool calls), `full` |
 | `inherit_skills` | bool | `false` | Pass parent's skill catalog to child |
 | `default_reads` | list | `[]` | Files auto-prefixed to the launch prompt as context |
@@ -480,7 +481,14 @@ When `inherit_context: filtered`, before launching the sub-agent we serialize a 
 
 ### Tool restriction in personas
 
-*Not implemented.* Pi has no clean way to whitelist tools in a child subprocess; faking it would mislead users. Persona prompts may describe tool boundaries but they are not enforced.
+*Enforced by pi (2026-09-24).* Pi 0.87 accepts `--tools <csv>` (an allowlist that replaces the default active set and applies to builtin **and** extension tools) and `--exclude-tools <csv>` (a denylist); filtering is Set-based, so an unknown name is a harmless no-op (`dist/core/sdk.js` ~L140, `dist/core/agent-session.js` `_refreshToolRegistry` ~L2494). An excluded tool is dropped from the child's registry, so the child cannot re-activate it.
+
+- **Frontmatter.** `tools` and `exclude_tools` are block lists of names matching `^[A-Za-z0-9_.:-]+$`. Entries are trimmed and deduped; empty entries, flow syntax (`[a, b]`), and an empty `tools` list are load errors.
+- **Overrides.** `personaOverrides.<name>.tools` / `.exclude_tools` replace the persona's whole array. A malformed override drops the persona and records a resolution error rather than silently loosening its policy.
+- **Always excluded.** Every argv from `buildPiArgs` passes `--exclude-tools` with `CONDUCTOR_LLM_TOOL_NAMES` (`src/types.ts`), the same constant `registerTools` reads its tool names from. The `CONDUCTOR_SUBAGENT=1` registration gate in `src/tools.ts` stays as defense in depth.
+- **Persistence.** `Run.tools` / `Run.excludeTools` (and `record.json`) hold the effective lists, re-applied on every `ensemble_send` resume. Legacy runs without the fields still get the conductor tools excluded.
+- **Builtins.** The nine read-only reviewers (`analyst`, `critic`, `finalizer`, `inspector`, `investigator`, `oracle`, `profiler`, `redteam`, `verifier`) exclude `edit`, `write`, `insert_before`, `insert_after` (the last two come from a smart-edit extension on some hosts). No builtin sets an allowlist.
+- **Limit.** `bash` stays available, so this is partial enforcement: it removes the edit tools, not the ability to write through a shell. It is not a security boundary.
 
 ## Implementation phases
 
@@ -630,6 +638,7 @@ Work that landed after the v0.18 capstone without its own phase number:
 - `d416d95` — allow host integrations to force conductor mode.
 - `5d2ccdb` — stop installing a second Pi runtime.
 - `cf527ef` — render sub-agent notifications as folded cards (see the 2026-06-20 decision-log entry).
+- Enforced persona tool policy (`tools` / `exclude_tools`); see the 2026-09-24 decision-log entry.
 
 ### v0.10+ — v2 ideas — _planned_
 - Run-record GC (open question #12).
@@ -647,10 +656,10 @@ Work that landed after the v0.18 capstone without its own phase number:
 All release-blocking questions through v0.7 are resolved. Remaining items are v1.x decisions that don't gate any current milestone.
 
 1. ~~Naming.~~ **Resolved:** `pi-conductor`.
-2. ~~Tool restriction enforcement.~~ **Resolved:** dropped; pi has no clean mechanism, and we don't fake it.
+2. ~~Tool restriction enforcement.~~ **Resolved (2026-09-24):** enforced through pi's `--tools` / `--exclude-tools`; see §"Tool restriction in personas". Originally dropped on 2026-05-14 when pi had no such flags.
 3. ~~Foreground vs background default.~~ **Resolved:** foreground default.
 4. ~~Notification rendering.~~ **Resolved:** inline visible folded card.
-5. ~~Persona tool inheritance.~~ **Resolved (moot):** no tool restrictions.
+5. ~~Persona tool inheritance.~~ **Resolved (2026-09-24):** a sub-agent gets its persona's `tools` / `exclude_tools` plus the always-excluded conductor tools; nothing is inherited from the parent's tool set.
 6. ~~Pause / resume.~~ **Resolved:** shipped in v0.5 via SIGSTOP/SIGCONT, exposed as `ensemble_pause` / `ensemble_resume` tools and `/conductor pause` / `resume` slash commands.
 7. ~~Foreground spawn that gets queued.~~ **Resolved:** auto-downgrade to background.
 8. ~~Filtered context inheritance — port or reimplement?~~ **Resolved:** reimplement; shipped in v0.6.
@@ -676,7 +685,7 @@ All release-blocking questions through v0.7 are resolved. Remaining items are v1
 
 - **TUI complexity.** The focused-stream overlay is the centerpiece and the most complex piece of code. Mitigation: lift the stream parser from `pi-essentials/subagent.ts`, lift the rendering primitives from pi's own message renderer.
 - **Context inheritance bugs.** Filtering parent context to send to the child is subtle (pi-subagents has a whole module for this). Mitigation: in v0.6, start with `inherit_context: none`, add filtered later.
-- **Tool restriction may be prompt-only.** See open question #2. If so, document clearly and don't pretend it's a security boundary.
+- **Tool restriction is partial.** Pi enforces `tools` / `exclude_tools`, but `bash` stays available unless excluded. Document it as partial enforcement and don't pretend it's a security boundary.
 - **Cost surprises.** Multiple sub-agents in parallel with `thinking: high` can rack up cost fast. Mitigation: ensemble panel shows running cost; settings cap `maxConcurrent`; doctor warns if all personas use high-thinking large models.
 
 ## Decision log
@@ -685,7 +694,7 @@ All release-blocking questions through v0.7 are resolved. Remaining items are v1
 - 2026-05-14 — Will not replace `pi-essentials/subagent`; coexistence via `ensemble_*` tool namespace.
 - 2026-05-14 — Sub-agents are subprocesses (subprocess pi --mode json -p); transient/in-process is a v2 option.
 - 2026-05-14 — **Foreground by default** (was background). Background via `foreground: false`.
-- 2026-05-14 — **Tool restrictions dropped.** Pi has no clean enforcement; persona `tools:` field removed; personas describe expected tool boundaries in prompt only.
+- 2026-05-14 — **Tool restrictions dropped.** Pi has no clean enforcement; persona `tools:` field removed; personas describe expected tool boundaries in prompt only. _Superseded 2026-09-24 — see entry below._
 - 2026-05-14 — **Pause/resume supported in v1** via SIGSTOP/SIGCONT.
 - 2026-05-14 — **Concurrency cap = queue (FIFO)**, not reject. Foreground-while-queued behavior still TBD (open Q #7).
 - 2026-05-14 — **Inline-visible folded completion cards** for both foreground and background sub-agents. User sees them; LLM acts on them.
@@ -740,3 +749,4 @@ All release-blocking questions through v0.7 are resolved. Remaining items are v1
 - 2026-06-19 — **v0.16 event bus + chain-aware worktrees — shipped.** 8 commits `7e70e58..d156850`. `ConductorEventEmitter` with 6 lifecycle + 3 hook channels under `conductor:agent:*`; dual JSON+RPC compacted detection; `{worktreeBranch}/{baseBranch}` chain template vars; infrastructure fixes for test isolation (`CONDUCTOR_SUBAGENT` unset) and `core.bare` corruption. Design `docs/v0.16-events-design.md`. Test count ~1476 → ~1510 (+~34).
 - 2026-06-19 — **v0.17 graceful turn limits + hook events — shipped.** 7 commits `ddd5ea3..0c6b388`. `"aborted"` RunStatus; `resolveMaxTurns`/`resolveGraceTurns` cascade; `checkTurnLimit` enforcement in `processLine` with grace injection; hook lifecycle events from `src/hooks.ts`; UX surfaces in widget/doctor/history/notifications/prompt. Design `docs/v0.17-graceful-turns-design.md`. Test count ~1510 → 1546 (+36). Verifier PASS (1546 pass / 0 fail / 11 skipped; tsc clean).
 - 2026-06-20 — **Folded completion cards actually rendered.** The 2026-05-14 decision above ("inline-visible folded completion cards") shipped only half: `pushCompletionNotification` sent `customType: "ensemble-notification"` with no `details` and no `pi.registerMessageRenderer`, so pi's `CustomMessageComponent` fell through to its default branch and printed the fenced ```xml envelope verbatim. The deferral note in `src/notifications.ts` ("pi's customMessage rendering doesn't yet support collapsible cards") was wrong — `MessageRenderer` has received `{ expanded, outputPad }` for as long as it has existed. Fix: `buildCompletionMessage` / `buildStallMessage` attach a pre-formatted `EnsembleNotificationDetails` beside the unchanged XML content, and `src/notification-renderer.ts` lays it out as spans (pure) which `paintCardLines` styles (the only ANSI step), mirroring the `transcript.ts` → `transcript-style.ts` split. Collapsed = header + one-line preview + ctrl+o hint; expanded adds the full body (capped at 40 lines), annotation rows, and the transcript path. Renderer returns `undefined` when `details` is absent so pre-existing sessions degrade to the old rendering rather than crash. Test count 1657 → 1673 (+16).
+- 2026-09-24 — **Tool restrictions enforced; reverses the 2026-05-14 drop.** The original rationale ("pi has no clean way to whitelist tools in a child") no longer holds: pi 0.87.1 ships `--tools <csv>` (allowlist, replaces the default active set, applies to builtin and extension tools), `--exclude-tools <csv>` (denylist), and `--no-builtin-tools`. Filtering is Set-based (`dist/core/sdk.js` ~L140; `dist/core/agent-session.js` `_refreshToolRegistry` ~L2494), so unknown names are harmless and an excluded tool leaves the child's registry. Persona frontmatter gains `tools` and `exclude_tools` (block lists, name shape `^[A-Za-z0-9_.:-]+$`, deduped; `personaOverrides.<name>.tools` / `.exclude_tools` replace the whole array). `buildPiArgs` emits `--tools` when an allowlist is set and always emits `--exclude-tools` with the persona's exclusions unioned with `CONDUCTOR_LLM_TOOL_NAMES`, the constant `registerTools` reads its names from; fresh and resume spawns alike, with the effective lists persisted on `Run` / `record.json`. The nine read-only builtins exclude `edit` / `write` / `insert_before` / `insert_after`. `--no-extensions` is deliberately never emitted: the user's model provider is an extension. **Partial enforcement:** `bash` stays available, so this narrows the edit surface rather than sandboxing the child; the `CONDUCTOR_SUBAGENT=1` registration gate stays as defense in depth.

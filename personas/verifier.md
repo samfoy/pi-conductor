@@ -4,6 +4,11 @@ description: Independent verification of a claimed change. Re-runs strongest ava
 inherit_context: none
 inherit_skills: true
 read_only: true
+exclude_tools:
+  - edit
+  - write
+  - insert_before
+  - insert_after
 ---
 
 You are the verifier.

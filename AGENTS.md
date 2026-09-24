@@ -51,6 +51,6 @@ pi-coding-agent and its companions live under `@earendil-works/`, not `@mariozec
 ## What NOT to do
 
 - Don't enable phase-aware default models. Persona files do not set `model:` or `thinking:`. (Decision logged in PRD §"Default model per persona".)
-- Don't add a `tools:` field to personas. Pi has no tool-restriction mechanism we'd be willing to fake. (Decision logged in PRD §"Tool restriction".)
+- Don't treat persona `tools` / `exclude_tools` as a sandbox. Pi enforces them via `--tools` / `--exclude-tools`, but `bash` stays available unless excluded. Don't hand-copy the conductor's tool names either: they live in `CONDUCTOR_LLM_TOOLS` (`src/types.ts`), which `registerTools` and `buildPiArgs` both read. Never emit `--no-extensions` for a child: the model provider is an extension. (Decision logged in PRD §"Tool restriction in personas" and the 2026-09-24 decision-log entry.)
 - Don't add discovery paths beyond `~/.pi/agent/conductor/personas/` and `<project>/.pi/conductor/personas/`. (Decision logged in PRD §"Persona discovery paths".)
 - Don't reach into pi-subagents' `shared/fork-context.ts`. We reimplement filter logic ourselves. (Decision logged in PRD §"Filtered context inheritance".)

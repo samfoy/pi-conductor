@@ -4,6 +4,11 @@ description: Whole-task completeness gate. Stricter than the critic about end-to
 inherit_context: filtered
 inherit_skills: true
 read_only: true
+exclude_tools:
+  - edit
+  - write
+  - insert_before
+  - insert_after
 default_reads:
   - context.md
   - plan.md

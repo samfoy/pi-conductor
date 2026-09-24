@@ -40,6 +40,8 @@ function toRunRecord(r) {
     finalPath: r.finalPath,
     sessionPath: r.sessionPath,
     systemPrompt: r.systemPrompt,
+    tools: r.tools,
+    excludeTools: r.excludeTools,
     steerable: r.steerable,
     streamingMode: r.streamingMode,
     hookResult: r.hookResult,
@@ -60,7 +62,7 @@ function toRunRecord(r) {
 function isTerminal(s) {
   return TERMINAL_STATUSES.includes(s);
 }
-var THINKING_LEVELS, CONTEXT_INHERITANCE, DEFAULT_CONFIG, WRITE_CAPABLE_PERSONAS, TERMINAL_STATUSES;
+var THINKING_LEVELS, CONTEXT_INHERITANCE, CONDUCTOR_LLM_TOOLS, CONDUCTOR_LLM_TOOL_NAMES, DEFAULT_CONFIG, WRITE_CAPABLE_PERSONAS, TERMINAL_STATUSES;
 var init_types = __esm({
   "src/types.ts"() {
     "use strict";
@@ -78,6 +80,19 @@ var init_types = __esm({
       "filtered_compact",
       "full"
     ];
+    CONDUCTOR_LLM_TOOLS = {
+      list: "ensemble_list",
+      status: "ensemble_status",
+      spawn: "ensemble_spawn",
+      send: "ensemble_send",
+      pause: "ensemble_pause",
+      resume: "ensemble_resume",
+      kill: "ensemble_kill",
+      focus: "ensemble_focus",
+      recommend: "ensemble_recommend",
+      auto: "ensemble_auto"
+    };
+    CONDUCTOR_LLM_TOOL_NAMES = Object.values(CONDUCTOR_LLM_TOOLS);
     DEFAULT_CONFIG = {
       defaultTimeoutMinutes: 60,
       maxConcurrent: 4,
@@ -401,6 +416,7 @@ import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
 
 // src/commands.ts
+init_types();
 import { existsSync as existsSync12, readdirSync as readdirSync2, readFileSync as readFileSync7, statSync as statSync4 } from "node:fs";
 import { join as join14, dirname as dirname9 } from "node:path";
 
@@ -533,6 +549,8 @@ function validateAndBuild(raw, source, sourcePath) {
   const maxTurns = optionalPositiveInteger(frontmatter, "max_turns");
   const graceTurns = optionalNonNegativeInteger(frontmatter, "grace_turns");
   const retryMaxAttempts = optionalPositiveInteger(frontmatter, "retry_max_attempts");
+  const tools = frontmatter.tools === void 0 ? void 0 : parseToolList(frontmatter.tools, "tools");
+  const excludeTools = frontmatter.exclude_tools === void 0 ? void 0 : parseToolList(frontmatter.exclude_tools, "exclude_tools");
   if (timeoutMinutes <= 0 || timeoutMinutes > 24 * 60) {
     throw new Error(`timeout_minutes must be in (0, 1440]; got ${timeoutMinutes}`);
   }
@@ -558,8 +576,36 @@ function validateAndBuild(raw, source, sourcePath) {
     onCompleteHookTimeoutSeconds,
     maxTurns,
     graceTurns,
-    retryMaxAttempts
+    retryMaxAttempts,
+    tools,
+    excludeTools
   };
+}
+var TOOL_NAME_PATTERN = /^[A-Za-z0-9_.:-]+$/;
+function parseToolList(value, field) {
+  if (typeof value === "string" && /^\[.*\]$/.test(value.trim())) {
+    throw new Error(
+      `field "${field}" must be a block list (one \`- name\` per line); flow syntax [a, b] is not supported`
+    );
+  }
+  if (!Array.isArray(value) || !value.every((x) => typeof x === "string")) {
+    throw new Error(`field "${field}" must be a list of tool names`);
+  }
+  const names = value.map((s) => s.trim());
+  if (names.includes("")) throw new Error(`field "${field}" has an empty entry`);
+  const bad = names.find((n) => !TOOL_NAME_PATTERN.test(n));
+  if (bad !== void 0) {
+    throw new Error(
+      `field "${field}" entry "${bad}" is not a valid tool name (allowed: letters, digits, _ . : -)`
+    );
+  }
+  if (field === "tools" && names.length === 0) {
+    throw new Error(`field "tools" must list at least one tool name; omit it to keep pi's default set`);
+  }
+  return [...new Set(names)];
+}
+function effectiveExcludeTools(excludeTools) {
+  return [.../* @__PURE__ */ new Set([...excludeTools ?? [], ...CONDUCTOR_LLM_TOOL_NAMES])];
 }
 function requireString(fm, key) {
   const v = fm[key];
@@ -681,8 +727,22 @@ async function resolvePersonas(opts) {
     }
     const base = personas.get(name);
     if (!base) continue;
+    let tools = base.tools;
+    let excludeTools = base.excludeTools;
+    try {
+      if (ov.tools !== void 0) tools = parseToolList(ov.tools, "tools");
+      if (ov.exclude_tools !== void 0) {
+        excludeTools = parseToolList(ov.exclude_tools, "exclude_tools");
+      }
+    } catch (e) {
+      errors.push({ path: `personaOverrides.${name}`, reason: e.message });
+      personas.delete(name);
+      continue;
+    }
     personas.set(name, {
       ...base,
+      tools,
+      excludeTools,
       model: ov.model ?? base.model,
       thinking: ov.thinking ?? base.thinking,
       timeoutMinutes: ov.timeoutMinutes ?? base.timeoutMinutes,
@@ -2531,6 +2591,8 @@ function buildPiArgs(opts) {
   }
   if (opts.model) args.push("--model", opts.model);
   if (opts.thinking) args.push("--thinking", opts.thinking);
+  if (opts.tools && opts.tools.length > 0) args.push("--tools", opts.tools.join(","));
+  args.push("--exclude-tools", effectiveExcludeTools(opts.excludeTools).join(","));
   if (opts.kind === "fresh") {
     args.push("--append-system-prompt", opts.systemPrompt);
   } else if (opts.systemPrompt) {
@@ -2557,6 +2619,8 @@ function buildResumePiArgs(run, message) {
     model: run.model,
     thinking: run.thinking,
     systemPrompt: run.systemPrompt,
+    tools: run.tools,
+    excludeTools: run.excludeTools,
     // v0.12 steering: spawn-resume on a terminal run is always
     // print-mode by design (§4.4 archived-run compat / Q10 lock).
     // RPC mode is NOT sticky across the original-subprocess boundary
@@ -2581,6 +2645,7 @@ function filteredHistorySentinel() {
 function planSpawnPiArgs(opts) {
   const { persona, parentMessages = [], sessionDir, systemPrompt, prompt, cwd, model, thinking, skillPaths } = opts;
   const steerable = opts.steerable === true;
+  const toolPolicy = { tools: persona.tools, excludeTools: persona.excludeTools };
   const resolvedInheritContext = resolveInheritContext(
     opts.inheritContextOverride,
     persona
@@ -2630,7 +2695,8 @@ function planSpawnPiArgs(opts) {
         // through to the argv builder so resume-shaped RPC spawns
         // (seeded session + steerable=true) emit `--mode rpc` and
         // skip the trailing positional prompt.
-        steerable
+        steerable,
+        ...toolPolicy
       })
     };
   }
@@ -2647,7 +2713,8 @@ function planSpawnPiArgs(opts) {
       // v0.12 slice 4 — cascade-collapsed steerable threaded into the
       // fresh-mode argv builder. `false` (default) preserves today's
       // print-mode behaviour.
-      steerable
+      steerable,
+      ...toolPolicy
     })
   };
 }
@@ -2757,6 +2824,10 @@ function spawnRun(opts) {
     // enforcer when persona.readOnly is true. Captured ONCE here so
     // resumes re-pass the already-prepended body without doubling it.
     systemPrompt: assemblePersonaSystemPrompt(opts.persona, opts.cwd),
+    // Effective tool policy, captured for record.json and re-applied on
+    // resume. Same inputs planSpawnPiArgs reads from opts.persona below.
+    tools: opts.persona.tools,
+    excludeTools: effectiveExcludeTools(opts.persona.excludeTools),
     // Item 15: per-invocation markers. Initial spawn IS the start of
     // the (sole, so far) invocation, so:
     //   - thisInvocationStartedAt mirrors startTime
@@ -5150,6 +5221,9 @@ async function runShow(opts, ctx, name) {
     );
     return;
   }
+  ctx.ui.notify(formatPersonaDetail(p), "info");
+}
+function formatPersonaDetail(p) {
   const lines = [];
   lines.push(`# ${p.name}`);
   lines.push(`source: ${p.source} (${p.sourcePath})`);
@@ -5163,11 +5237,16 @@ async function runShow(opts, ctx, name) {
   );
   lines.push(`worktree: ${p.worktree}`);
   lines.push(`timeout_minutes: ${p.timeoutMinutes}`);
+  lines.push(`tools: ${p.tools ? p.tools.join(", ") : "(pi default set)"}`);
+  lines.push(
+    `exclude_tools: ${p.excludeTools && p.excludeTools.length > 0 ? p.excludeTools.join(", ") : "(none)"}`
+  );
+  lines.push(`always excluded: ${CONDUCTOR_LLM_TOOL_NAMES.join(", ")} (conductor tools)`);
   lines.push("");
   lines.push("## System prompt");
   lines.push("");
   lines.push(p.systemPrompt);
-  ctx.ui.notify(lines.join("\n"), "info");
+  return lines.join("\n");
 }
 async function runDoctor(opts, ctx) {
   const report = await buildDoctorReport({
@@ -5876,6 +5955,7 @@ Resolve manually in the worktree and run /conductor worktree merge ${runId} agai
 }
 
 // src/tools.ts
+init_types();
 import { Type } from "@sinclair/typebox";
 import { readFileSync as readFileSync9, existsSync as existsSync14 } from "node:fs";
 
@@ -6600,9 +6680,9 @@ function registerTools(pi, opts) {
 }
 function registerListTool(pi, opts) {
   pi.registerTool({
-    name: "ensemble_list",
+    name: CONDUCTOR_LLM_TOOLS.list,
     label: "List personas",
-    description: "List the conductor sub-agent personas available in this workspace. Returns each persona's name, one-line description, model/thinking config, context-inheritance mode, and source (builtin / user / project).",
+    description: "List the conductor sub-agent personas available in this workspace. Returns each persona's name, one-line description, model/thinking config, context-inheritance mode, source (builtin / user / project), and enforced tool policy (`tools` allowlist, `exclude_tools` denylist).",
     promptSnippet: "List available conductor sub-agent personas",
     promptGuidelines: [
       "Call ensemble_list when you need to know which personas are installed before spawning one.",
@@ -6629,7 +6709,7 @@ function registerListTool(pi, opts) {
 }
 function registerRecommendTool(pi, opts) {
   pi.registerTool({
-    name: "ensemble_recommend",
+    name: CONDUCTOR_LLM_TOOLS.recommend,
     label: "Recommend persona",
     description: "v0.18 cross-session memory: given a task description, return conductor personas ranked by their confidence-weighted, recency-decayed success rate on similar tasks (matched by normalized task shape). Advisory only \u2014 an empty result means no history for this shape yet; use your own judgment.",
     promptSnippet: "Recommend a persona for a task based on past outcomes",
@@ -6655,7 +6735,7 @@ function registerRecommendTool(pi, opts) {
 }
 function registerStatusTool(pi, opts) {
   pi.registerTool({
-    name: "ensemble_status",
+    name: CONDUCTOR_LLM_TOOLS.status,
     label: "Sub-agent status",
     description: "Report status of currently-running, queued, paused, and recently-finished sub-agents in this session.",
     promptSnippet: "Check status of conductor sub-agents",
@@ -6725,7 +6805,7 @@ function awaitTerminal(registry, runId) {
 }
 function registerAutoTool(pi, opts) {
   pi.registerTool({
-    name: "ensemble_auto",
+    name: CONDUCTOR_LLM_TOOLS.auto,
     label: "Autonomous run",
     description: "v0.18 autonomous mode: run an ordered persona plan to a terminal outcome with bounded, self-correcting execution. YOU (the conductor) supply the plan as an ordered list of steps; the executor spawns each in turn, classifies failures, retries the transient ones with diagnostics, re-evaluates after each step, and HALTS + escalates on a non-retryable failure, a stop verdict, the step cap, or the USD budget. Outcomes feed cross-session memory. Permission-class failures always escalate \u2014 never auto-retried.",
     promptSnippet: "Run an ordered persona plan autonomously with retry + re-eval",
@@ -6840,7 +6920,7 @@ ${lines.join("\n")}` }],
 }
 function registerSpawnTool(pi, opts) {
   pi.registerTool({
-    name: "ensemble_spawn",
+    name: CONDUCTOR_LLM_TOOLS.spawn,
     label: "Spawn sub-agent",
     description: "Launch a focused sub-agent using a persona. Foreground (default): blocks until the sub-agent completes; result is returned. Background: returns immediately; completion arrives as a <sub-agent-completed> user-role message that wakes you. When the concurrency cap is reached, foreground spawns auto-downgrade to background.",
     promptSnippet: "Spawn a persona-based sub-agent (foreground or background)",
@@ -7150,7 +7230,7 @@ Spawned in background. Continue with other work; completion will arrive as a <su
 }
 function registerSendTool(pi, opts) {
   pi.registerTool({
-    name: "ensemble_send",
+    name: CONDUCTOR_LLM_TOOLS.send,
     label: "Send to sub-agent",
     description: "Continue an existing sub-agent's session with a new user-role message. Works on finished sub-agents too (resumes via pi --session). Foreground (default): blocks until the sub-agent's reply arrives. Background: returns immediately; reply arrives as a <sub-agent-completed> notification.",
     promptSnippet: "Send a follow-up message to an existing sub-agent",
@@ -7360,7 +7440,7 @@ Send dispatched in background. Continue with other work; completion will arrive 
 }
 function registerPauseTool(pi, opts) {
   pi.registerTool({
-    name: "ensemble_pause",
+    name: CONDUCTOR_LLM_TOOLS.pause,
     label: "Pause sub-agent",
     description: "SIGSTOP a running sub-agent. The process is alive but not consuming tokens. Use ensemble_resume to continue. Useful for cost control while the user reviews partial output.",
     promptSnippet: "Pause a running sub-agent",
@@ -7402,7 +7482,7 @@ function registerPauseTool(pi, opts) {
 }
 function registerResumeTool(pi, opts) {
   pi.registerTool({
-    name: "ensemble_resume",
+    name: CONDUCTOR_LLM_TOOLS.resume,
     label: "Resume sub-agent",
     description: "SIGCONT a paused sub-agent. The sub-agent must have been paused via ensemble_pause first.",
     promptSnippet: "Resume a paused sub-agent",
@@ -7444,7 +7524,7 @@ function registerResumeTool(pi, opts) {
 }
 function registerKillTool(pi, opts) {
   pi.registerTool({
-    name: "ensemble_kill",
+    name: CONDUCTOR_LLM_TOOLS.kill,
     label: "Kill sub-agent",
     description: "Force-terminate a running, paused, or queued sub-agent by `agent_id`. SIGTERM-then-SIGKILL on processes; queued sub-agents are removed from the queue. Use to stop a sub-agent that has run too long, gone off-track, or that you want to abort before completion. The sub-agent's run record is preserved for inspection (transcript, final.md). Idempotent \u2014 calling on an already-terminated sub-agent is a no-op success. Killing via tool never triggers a follow-up turn (consistent with the existing pi convention that tool-initiated kills are silent).",
     promptSnippet: "Force-terminate a sub-agent",
@@ -7488,7 +7568,7 @@ function registerKillTool(pi, opts) {
 }
 function registerFocusTool(pi, opts) {
   pi.registerTool({
-    name: "ensemble_focus",
+    name: CONDUCTOR_LLM_TOOLS.focus,
     label: "Focus a sub-agent",
     description: "Request the focused-stream overlay open on a specific sub-agent. When agent_id is omitted, opens the overlay on the currently-focused (most recently active) sub-agent. The user controls the overlay with Esc (close), Tab/Shift+Tab (cycle), arrows (scroll), c (collapse tool calls), t (thinking visibility), k (kill).",
     promptSnippet: "Open the focused-stream overlay on a sub-agent",
@@ -7557,20 +7637,30 @@ function personaSummary(p) {
     inheritContext: p.inheritContext,
     inheritSkills: p.inheritSkills,
     timeoutMinutes: p.timeoutMinutes,
-    source: p.source
+    source: p.source,
+    tools: p.tools ?? "<default>",
+    excludeTools: p.excludeTools ?? []
   };
 }
 function formatPersonaListForLLM(personas) {
   if (personas.length === 0) {
     return "No personas resolved. Check ~/.pi/agent/conductor/personas/ and `<cwd>/.pi/conductor/personas/`.";
   }
-  const lines = [`${personas.length} personas:`, ""];
+  const lines = [
+    `${personas.length} personas:`,
+    `(every sub-agent also runs with the conductor tools excluded: ${CONDUCTOR_LLM_TOOL_NAMES.join(", ")})`,
+    ""
+  ];
   for (const p of personas) {
     const cfg = [];
     cfg.push(`source=${p.source}`);
     cfg.push(`model=${p.model ?? "inherited"}`);
     cfg.push(`thinking=${p.thinking ?? "inherited"}`);
     cfg.push(`context=${p.inheritContext}`);
+    cfg.push(`tools=${p.tools ? p.tools.join(",") : "default"}`);
+    if (p.excludeTools && p.excludeTools.length > 0) {
+      cfg.push(`exclude_tools=${p.excludeTools.join(",")}`);
+    }
     lines.push(`  ${p.name.padEnd(14)} \u2014 ${p.description}`);
     lines.push(`  ${" ".repeat(14)}   [${cfg.join(", ")}]`);
   }

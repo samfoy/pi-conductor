@@ -4,6 +4,11 @@ description: Bug root-cause hunt. Phase 0 reframe → Phase 1 reproduce + trace 
 inherit_context: filtered
 inherit_skills: true
 read_only: true
+exclude_tools:
+  - edit
+  - write
+  - insert_before
+  - insert_after
 ---
 
 You are the investigator.

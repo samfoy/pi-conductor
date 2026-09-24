@@ -34,9 +34,11 @@ Two cross-cutting context-rewriters:
 - `src/compaction-hook.ts` rewrites older `<sub-agent-completed>`
   bodies to a `<result-summary>` form on context flush.
 
-Non-goals (per `PRD.md` "Non-goals"): the runtime does not gate tool
-access, manage worktrees, build TODO DAGs, or nest coordinators. These
-are documented as deliberate omissions, not gaps.
+Non-goals (per `PRD.md` "Non-goals"): the runtime does not sandbox
+sub-agents (persona `tools` / `exclude_tools` are passed to pi's
+`--tools` / `--exclude-tools`, but `bash` stays available), manage
+worktrees, build TODO DAGs, or nest coordinators. These are documented
+as deliberate omissions, not gaps.
 
 ## 2. Module map
 

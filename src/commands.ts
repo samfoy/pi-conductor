@@ -20,7 +20,8 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
-import type { PersonaResolution, Run, RunRecord, RunStatus } from "./types.ts";
+import type { Persona, PersonaResolution, Run, RunRecord, RunStatus } from "./types.ts";
+import { CONDUCTOR_LLM_TOOL_NAMES } from "./types.ts";
 import { STATUS_GLYPH } from "./status-glyph.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig, projectConfigPath, userConfigPath } from "./config.ts";
@@ -236,6 +237,11 @@ async function runShow(
     return;
   }
 
+  ctx.ui.notify(formatPersonaDetail(p), "info");
+}
+
+/** `/conductor show <name>` body. Pure; exported for tests. */
+export function formatPersonaDetail(p: Persona): string {
   const lines: string[] = [];
   lines.push(`# ${p.name}`);
   lines.push(`source: ${p.source} (${p.sourcePath})`);
@@ -249,12 +255,16 @@ async function runShow(
   );
   lines.push(`worktree: ${p.worktree}`);
   lines.push(`timeout_minutes: ${p.timeoutMinutes}`);
+  lines.push(`tools: ${p.tools ? p.tools.join(", ") : "(pi default set)"}`);
+  lines.push(
+    `exclude_tools: ${p.excludeTools && p.excludeTools.length > 0 ? p.excludeTools.join(", ") : "(none)"}`,
+  );
+  lines.push(`always excluded: ${CONDUCTOR_LLM_TOOL_NAMES.join(", ")} (conductor tools)`);
   lines.push("");
   lines.push("## System prompt");
   lines.push("");
   lines.push(p.systemPrompt);
-
-  ctx.ui.notify(lines.join("\n"), "info");
+  return lines.join("\n");
 }
 
 async function runDoctor(

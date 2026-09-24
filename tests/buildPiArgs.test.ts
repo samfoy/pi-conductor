@@ -19,6 +19,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
 import { buildPiArgs } from "../src/runs.ts";
+import { CONDUCTOR_LLM_TOOL_NAMES } from "../src/types.ts";
 
 test('buildPiArgs(fresh, steerable=true): emits ["--mode", "rpc", ...] without "-p" and without trailing prompt positional', () => {
   const args = buildPiArgs({
@@ -67,12 +68,16 @@ test("buildPiArgs(fresh, steerable=false): emits today's argv EXACTLY (regressio
     prompt: "PROMPT",
     steerable: false,
   });
+  // Tool-policy slice: every argv now carries --exclude-tools with the
+  // conductor's own LLM tools (see tests/tool-policy.test.ts).
   assert.deepEqual(args, [
     "--mode",
     "json",
     "-p",
     "--session-dir",
     "/tmp/sess",
+    "--exclude-tools",
+    CONDUCTOR_LLM_TOOL_NAMES.join(","),
     "--append-system-prompt",
     "SYS",
     "PROMPT",
@@ -108,6 +113,8 @@ test("buildPiArgs(resume, steerable=false): emits today's resume argv EXACTLY (r
     "-p",
     "--session",
     "/tmp/sess/abc.jsonl",
+    "--exclude-tools",
+    CONDUCTOR_LLM_TOOL_NAMES.join(","),
     "another question",
   ]);
 });

@@ -4,6 +4,11 @@ description: Decision-consistency check / drift detector. Reviews a plan or prop
 inherit_context: none
 inherit_skills: true
 read_only: true
+exclude_tools:
+  - edit
+  - write
+  - insert_before
+  - insert_after
 default_reads:
   - context.md
   - design.md

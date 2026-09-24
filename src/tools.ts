@@ -11,6 +11,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { readFileSync, existsSync } from "node:fs";
 import type { Persona, PersonaOverride, Run, RunStatus, ThinkingLevel, MergeStrategy } from "./types.ts";
+import { CONDUCTOR_LLM_TOOLS, CONDUCTOR_LLM_TOOL_NAMES } from "./types.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
 import { resolveChain, buildChainTask } from "./chain.ts";
@@ -141,12 +142,13 @@ export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 
 function registerListTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   pi.registerTool({
-    name: "ensemble_list",
+    name: CONDUCTOR_LLM_TOOLS.list,
     label: "List personas",
     description:
       "List the conductor sub-agent personas available in this workspace. " +
       "Returns each persona's name, one-line description, model/thinking config, " +
-      "context-inheritance mode, and source (builtin / user / project).",
+      "context-inheritance mode, source (builtin / user / project), and enforced tool policy " +
+      "(`tools` allowlist, `exclude_tools` denylist).",
     promptSnippet: "List available conductor sub-agent personas",
     promptGuidelines: [
       "Call ensemble_list when you need to know which personas are installed before spawning one.",
@@ -176,7 +178,7 @@ function registerListTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 
 function registerRecommendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   pi.registerTool({
-    name: "ensemble_recommend",
+    name: CONDUCTOR_LLM_TOOLS.recommend,
     label: "Recommend persona",
     description:
       "v0.18 cross-session memory: given a task description, return conductor " +
@@ -214,7 +216,7 @@ function registerRecommendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void 
 
 function registerStatusTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   pi.registerTool({
-    name: "ensemble_status",
+    name: CONDUCTOR_LLM_TOOLS.status,
     label: "Sub-agent status",
     description:
       "Report status of currently-running, queued, paused, and recently-finished sub-agents in this session.",
@@ -307,7 +309,7 @@ export function awaitTerminal(
 
 function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   pi.registerTool({
-    name: "ensemble_auto",
+    name: CONDUCTOR_LLM_TOOLS.auto,
     label: "Autonomous run",
     description:
       "v0.18 autonomous mode: run an ordered persona plan to a terminal outcome " +
@@ -455,7 +457,7 @@ function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 
 function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   pi.registerTool({
-    name: "ensemble_spawn",
+    name: CONDUCTOR_LLM_TOOLS.spawn,
     label: "Spawn sub-agent",
     description:
       "Launch a focused sub-agent using a persona. " +
@@ -836,7 +838,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 
 function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   pi.registerTool({
-    name: "ensemble_send",
+    name: CONDUCTOR_LLM_TOOLS.send,
     label: "Send to sub-agent",
     description:
       "Continue an existing sub-agent's session with a new user-role message. " +
@@ -1095,7 +1097,7 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 
 function registerPauseTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   pi.registerTool({
-    name: "ensemble_pause",
+    name: CONDUCTOR_LLM_TOOLS.pause,
     label: "Pause sub-agent",
     description:
       "SIGSTOP a running sub-agent. The process is alive but not consuming tokens. " +
@@ -1141,7 +1143,7 @@ function registerPauseTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 
 function registerResumeTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   pi.registerTool({
-    name: "ensemble_resume",
+    name: CONDUCTOR_LLM_TOOLS.resume,
     label: "Resume sub-agent",
     description:
       "SIGCONT a paused sub-agent. The sub-agent must have been paused via ensemble_pause first.",
@@ -1188,7 +1190,7 @@ function registerResumeTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 
 function registerKillTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   pi.registerTool({
-    name: "ensemble_kill",
+    name: CONDUCTOR_LLM_TOOLS.kill,
     label: "Kill sub-agent",
     description:
       "Force-terminate a running, paused, or queued sub-agent by `agent_id`. " +
@@ -1252,7 +1254,7 @@ function registerKillTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 
 function registerFocusTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   pi.registerTool({
-    name: "ensemble_focus",
+    name: CONDUCTOR_LLM_TOOLS.focus,
     label: "Focus a sub-agent",
     description:
       "Request the focused-stream overlay open on a specific sub-agent. " +
@@ -1338,20 +1340,30 @@ function personaSummary(p: Persona): Record<string, unknown> {
     inheritSkills: p.inheritSkills,
     timeoutMinutes: p.timeoutMinutes,
     source: p.source,
+    tools: p.tools ?? "<default>",
+    excludeTools: p.excludeTools ?? [],
   };
 }
 
-function formatPersonaListForLLM(personas: Persona[]): string {
+export function formatPersonaListForLLM(personas: Persona[]): string {
   if (personas.length === 0) {
     return "No personas resolved. Check ~/.pi/agent/conductor/personas/ and `<cwd>/.pi/conductor/personas/`.";
   }
-  const lines: string[] = [`${personas.length} personas:`, ""];
+  const lines: string[] = [
+    `${personas.length} personas:`,
+    `(every sub-agent also runs with the conductor tools excluded: ${CONDUCTOR_LLM_TOOL_NAMES.join(", ")})`,
+    "",
+  ];
   for (const p of personas) {
     const cfg: string[] = [];
     cfg.push(`source=${p.source}`);
     cfg.push(`model=${p.model ?? "inherited"}`);
     cfg.push(`thinking=${p.thinking ?? "inherited"}`);
     cfg.push(`context=${p.inheritContext}`);
+    cfg.push(`tools=${p.tools ? p.tools.join(",") : "default"}`);
+    if (p.excludeTools && p.excludeTools.length > 0) {
+      cfg.push(`exclude_tools=${p.excludeTools.join(",")}`);
+    }
     lines.push(`  ${p.name.padEnd(14)} — ${p.description}`);
     lines.push(`  ${" ".repeat(14)}   [${cfg.join(", ")}]`);
   }

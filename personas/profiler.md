@@ -4,6 +4,11 @@ description: Identify performance hot paths and establish baseline measurements.
 inherit_context: none
 inherit_skills: true
 read_only: true
+exclude_tools:
+  - edit
+  - write
+  - insert_before
+  - insert_after
 ---
 
 You are the profiler.

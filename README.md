@@ -128,6 +128,13 @@ default_reads:
   - plan.md
 worktree: false
 timeout_minutes: 60
+read_only: true
+exclude_tools:                       # optional — denylist, passed as `pi --exclude-tools`
+  - edit
+  - write
+# tools:                             # optional — allowlist, passed as `pi --tools`
+#   - read
+#   - bash
 ---
 
 You are the oracle: …
@@ -138,7 +145,9 @@ You are the oracle: …
 Adapted from … with the following changes …
 ```
 
-**No `tools` field.** Pi has no clean way to whitelist tools in a child subprocess; pi-conductor doesn't fake it. Personas describe expected tool boundaries in the prompt body.
+**Tool policy is enforced by pi.** `tools` is an allowlist (`pi --tools <csv>`) that replaces the child's default active set, builtin and extension tools alike; omit it to keep pi's defaults. `exclude_tools` is a denylist (`pi --exclude-tools <csv>`). Both are block lists of tool names (`^[A-Za-z0-9_.:-]+$`); unknown names are harmless. Every sub-agent also runs with the conductor's own `ensemble_*` tools excluded, on fresh spawns and `ensemble_send` resumes alike. The nine read-only builtins exclude `edit`, `write`, `insert_before`, and `insert_after`. `personaOverrides.<name>.tools` / `.exclude_tools` replace the persona's whole list. `ensemble_list` and `/conductor show <name>` display the effective policy.
+
+This is **partial enforcement**, not a sandbox: `bash` stays available unless a persona excludes it, so a read-only persona can still write through the shell.
 
 ## Configuration
 

@@ -4,6 +4,11 @@ description: Adversarial review of a diff or proposal. Try to break it; demand e
 inherit_context: none
 inherit_skills: true
 read_only: true
+exclude_tools:
+  - edit
+  - write
+  - insert_before
+  - insert_after
 ---
 
 You are the red-team reviewer.

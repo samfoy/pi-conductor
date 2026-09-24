@@ -28,13 +28,33 @@ export const CONTEXT_INHERITANCE: ContextInheritance[] = [
 export type PersonaSource = "builtin" | "user" | "project";
 
 /**
+ * Names of the LLM tools `registerTools` (src/tools.ts) registers. Each
+ * registrar reads its `name` from here, so this map is the single source.
+ * Every sub-agent spawn passes these to `pi --exclude-tools`.
+ */
+export const CONDUCTOR_LLM_TOOLS = {
+  list: "ensemble_list",
+  status: "ensemble_status",
+  spawn: "ensemble_spawn",
+  send: "ensemble_send",
+  pause: "ensemble_pause",
+  resume: "ensemble_resume",
+  kill: "ensemble_kill",
+  focus: "ensemble_focus",
+  recommend: "ensemble_recommend",
+  auto: "ensemble_auto",
+} as const;
+
+export const CONDUCTOR_LLM_TOOL_NAMES: readonly string[] = Object.values(CONDUCTOR_LLM_TOOLS);
+
+/**
  * A persona definition resolved from a markdown file with YAML-ish frontmatter.
  * `model` and `thinking` are intentionally optional — when omitted, the
  * sub-agent inherits the parent session's configuration.
  *
- * Note: there is no `tools` field. Pi has no clean way to whitelist tools
- * in a child subprocess, and we don't fake it. Personas describe expected
- * tool boundaries in the prompt body, not via runtime gating.
+ * `tools` / `excludeTools` are enforced by pi itself (`--tools` /
+ * `--exclude-tools`), but `bash` stays available unless excluded, so a
+ * denylist of edit tools is partial enforcement, not a sandbox.
  */
 export interface Persona {
   /** Unique name within the resolved scope (project overrides user overrides builtin). */
@@ -104,6 +124,17 @@ export interface Persona {
    * persona layer of `resolveRetryPolicy`. Undefined → lower layers.
    */
   retryMaxAttempts?: number;
+  /**
+   * Frontmatter `tools`: allowlist passed as `pi --tools <csv>`. Replaces
+   * pi's default active set (builtin and extension tools). Undefined →
+   * pi's default set. Never empty (the parser rejects an empty list).
+   */
+  tools?: string[];
+  /**
+   * Frontmatter `exclude_tools`: denylist passed as `pi --exclude-tools`,
+   * unioned at spawn time with {@link CONDUCTOR_LLM_TOOL_NAMES}.
+   */
+  excludeTools?: string[];
 }
 
 export interface PersonaResolution {
@@ -307,6 +338,13 @@ export interface PersonaOverride {
    * `resolveRetryPolicy`.
    */
   retryMaxAttempts?: number;
+  /** Replaces the persona's whole `tools` allowlist. */
+  tools?: string[];
+  /**
+   * Replaces the persona's whole `exclude_tools` denylist. Snake case on
+   * purpose: the key mirrors the frontmatter field it replaces.
+   */
+  exclude_tools?: string[];
 }
 
 export const DEFAULT_CONFIG: ConductorConfig = {
@@ -736,6 +774,17 @@ export interface Run {
    * existed.
    */
   systemPrompt?: string;
+  /**
+   * Effective `--tools` allowlist stamped at spawn time. Re-applied on
+   * every resume, like `systemPrompt`. Undefined → pi's default set.
+   */
+  tools?: string[];
+  /**
+   * Effective `--exclude-tools` denylist stamped at spawn time (persona
+   * exclusions ∪ conductor tools). Undefined on pre-policy records;
+   * resumes still exclude the conductor tools.
+   */
+  excludeTools?: string[];
 
   /** Working directory of the subprocess. */
   cwd: string;
@@ -871,6 +920,10 @@ export interface RunRecord {
   finalPath: string;
   sessionPath?: string;
   systemPrompt?: string;
+  /** See `Run.tools`. */
+  tools?: string[];
+  /** See `Run.excludeTools`. */
+  excludeTools?: string[];
   /**
    * v0.12 steering: spawn-time steerable flag. See `Run.steerable`.
    * Persisted to record.json so post-startup reconcile (v0.9.x) knows
@@ -983,6 +1036,8 @@ export function toRunRecord(r: Run): RunRecord {
     finalPath: r.finalPath,
     sessionPath: r.sessionPath,
     systemPrompt: r.systemPrompt,
+    tools: r.tools,
+    excludeTools: r.excludeTools,
     steerable: r.steerable,
     streamingMode: r.streamingMode,
     hookResult: r.hookResult,

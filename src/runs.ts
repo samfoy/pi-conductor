@@ -40,7 +40,7 @@ import { loadConfigWithErrors } from "./config.ts";
 import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage, currentBranch } from "./worktree.ts";
 import { readProcessStartTime } from "./reconcile-startup.ts";
 import { ConductorEventEmitter } from "./conductor-events.ts";
-import { builtinPersonasDir } from "./personas.ts";
+import { builtinPersonasDir, effectiveExcludeTools } from "./personas.ts";
 import { loadWorkspaceDoctrine } from "./workspace-doctrine.ts";
 import {  emptyUsage,
   isTerminal,
@@ -387,9 +387,18 @@ export function buildSubAgentPrompt(persona: Persona, task: string): string {
  *
  * In both modes the prompt becomes the trailing positional argument and is
  * delivered to the sub-agent as a user-role message.
+ *
+ * Both modes take the tool policy: `tools` → `--tools <csv>` (omitted when
+ * undefined) and `excludeTools` → `--exclude-tools <csv>`, always unioned
+ * with the conductor's own LLM tool names via `effectiveExcludeTools`.
  */
-export type PiArgsOptions =
-  | {
+interface PiToolPolicyArgs {
+  tools?: readonly string[];
+  excludeTools?: readonly string[];
+}
+
+export type PiArgsOptions = PiToolPolicyArgs &
+  ({
       kind: "fresh";
       sessionDir: string;
       systemPrompt: string;
@@ -444,7 +453,7 @@ export type PiArgsOptions =
        * `false`.
        */
       steerable: boolean;
-    };
+    });
 
 export function buildPiArgs(opts: PiArgsOptions): string[] {
   // v0.12 steering: argv shape is mode-bifurcated. Print mode
@@ -464,6 +473,8 @@ export function buildPiArgs(opts: PiArgsOptions): string[] {
   }
   if (opts.model) args.push("--model", opts.model);
   if (opts.thinking) args.push("--thinking", opts.thinking);
+  if (opts.tools && opts.tools.length > 0) args.push("--tools", opts.tools.join(","));
+  args.push("--exclude-tools", effectiveExcludeTools(opts.excludeTools).join(","));
   if (opts.kind === "fresh") {
     // Pi exposes --append-system-prompt for system prompt addenda; we use that
     // for the persona body so pi's own system prompt logic still runs.
@@ -518,6 +529,8 @@ export function buildResumePiArgs(run: Run, message: string): string[] {
     model: run.model,
     thinking: run.thinking,
     systemPrompt: run.systemPrompt,
+    tools: run.tools,
+    excludeTools: run.excludeTools,
     // v0.12 steering: spawn-resume on a terminal run is always
     // print-mode by design (§4.4 archived-run compat / Q10 lock).
     // RPC mode is NOT sticky across the original-subprocess boundary
@@ -695,6 +708,7 @@ function filteredHistorySentinel(): AgentMessage {
 export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
   const { persona, parentMessages = [], sessionDir, systemPrompt, prompt, cwd, model, thinking, skillPaths } = opts;
   const steerable = opts.steerable === true;
+  const toolPolicy = { tools: persona.tools, excludeTools: persona.excludeTools };
 
   // Item 12 candidate #3: per-call inherit_context wins above
   // persona.inheritContext (which already merges project/user
@@ -775,6 +789,7 @@ export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
         // (seeded session + steerable=true) emit `--mode rpc` and
         // skip the trailing positional prompt.
         steerable,
+        ...toolPolicy,
       }),
     };
   }
@@ -793,6 +808,7 @@ export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
       // fresh-mode argv builder. `false` (default) preserves today's
       // print-mode behaviour.
       steerable,
+      ...toolPolicy,
     }),
   };
 }
@@ -1151,6 +1167,10 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // enforcer when persona.readOnly is true. Captured ONCE here so
     // resumes re-pass the already-prepended body without doubling it.
     systemPrompt: assemblePersonaSystemPrompt(opts.persona, opts.cwd),
+    // Effective tool policy, captured for record.json and re-applied on
+    // resume. Same inputs planSpawnPiArgs reads from opts.persona below.
+    tools: opts.persona.tools,
+    excludeTools: effectiveExcludeTools(opts.persona.excludeTools),
     // Item 15: per-invocation markers. Initial spawn IS the start of
     // the (sole, so far) invocation, so:
     //   - thisInvocationStartedAt mirrors startTime
