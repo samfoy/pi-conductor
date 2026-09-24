@@ -15,6 +15,7 @@
  *   /conductor history [N]           — list past sub-agent runs (default 20)
  *   /conductor pin <agent-id>        — pin a run (protect from GC)
  *   /conductor unpin <agent-id>      — unpin a run
+ *   /conductor cwd [<path>|--reset]  — show or change the default cwd for spawns
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
@@ -53,9 +54,12 @@ import { planReclaim, type ReclaimAction } from "./gc/policy.ts";
 import { classifyStall, resolveKillOnStall } from "./watchdog.ts";
 import { worktreeSpecFromRun, mergeWorktree, buildMergeCommitMessage } from "./worktree.ts";
 import { isTerminal } from "./types.ts";
+import { formatCwdInfo, type CwdController } from "./conductor-cwd.ts";
 
 interface RegisterCommandsOpts {
   getCwd: () => string;
+  /** Backs `/conductor cwd`; shared with the `ensemble_cwd` tool. */
+  cwdControl?: CwdController;
   getRegistry: () => RunRegistry;
   getQueue: () => SpawnQueue;
   /** Read/write the conductor-mode flag for this session. */
@@ -93,11 +97,12 @@ const SUBCOMMANDS = [
   "watchdog",
   "send",
   "worktree",
+  "cwd",
 ];
 
 export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): void {
   pi.registerCommand("conductor", {
-    description: "pi-conductor: list, show, doctor, on/off, status, stop/pause/resume/queue",
+    description: "pi-conductor: list, show, doctor, on/off, status, stop/pause/resume/queue, cwd",
     getArgumentCompletions: (prefix: string) => {
       const items = SUBCOMMANDS.map((s) => ({ value: s, label: s }));
       const head = prefix.split(/\s+/)[0] ?? "";
@@ -173,6 +178,9 @@ export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): 
         case "worktree":
           await runWorktreeCmd(opts, ctx, subRest);
           return;
+        case "cwd":
+          runCwd(opts, ctx, subRest);
+          return;
         default:
           ctx.ui.notify(
             `unknown subcommand: ${sub}. Try one of: ${SUBCOMMANDS.join(", ")}.`,
@@ -181,6 +189,16 @@ export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): 
       }
     },
   });
+}
+
+/** `/conductor cwd [<path>|--reset]` — same controller as the `ensemble_cwd` tool. */
+function runCwd(opts: RegisterCommandsOpts, ctx: ExtensionCommandContext, arg: string): void {
+  if (!opts.cwdControl) {
+    ctx.ui.notify("the conductor cwd override is unavailable in this context", "warning");
+    return;
+  }
+  const r = opts.cwdControl.change(arg === "" ? {} : arg === "--reset" ? { reset: true } : { path: arg });
+  ctx.ui.notify(r.ok ? formatCwdInfo(r.info) : r.error, r.ok ? "info" : "warning");
 }
 
 async function runList(opts: RegisterCommandsOpts, ctx: ExtensionCommandContext): Promise<void> {

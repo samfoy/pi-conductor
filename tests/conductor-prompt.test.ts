@@ -104,6 +104,12 @@ test("buildConductorSystemPrompt: documents ensemble_send / pause / resume", () 
   assert.match(out, /`ensemble_resume`/);
 });
 
+test("buildConductorSystemPrompt: tells the conductor to pass cwd for repo work so write-capable personas get worktrees", () => {
+  const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
+  assert.match(out, /`cwd`.*repo.*worktree/i);
+  assert.match(out, /`ensemble_cwd`/);
+});
+
 test("buildConductorSystemPrompt: warns the LLM that ensemble_send bypasses the concurrency cap", () => {
   const out = buildConductorSystemPrompt({ personas: [], maxConcurrent: 4 });
   assert.match(out, /bypass(es)? the (concurrency )?cap/i);

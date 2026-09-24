@@ -202,3 +202,28 @@ test("runAutonomous: onStep hook fires per spawn", async () => {
   assert.equal(out.status, "done");
   assert.deepEqual(seen, ["a", "b"]);
 });
+
+test("runAutonomous: each spawn (retries included) carries its step's cwd", async () => {
+  const calls: Array<{ persona: string; cwd?: string }> = [];
+  const results: SpawnedStepResult[] = [
+    { status: "failed", failureClass: "environment", costUsd: 0, finalText: "" },
+    ok(),
+    ok(),
+  ];
+  const out = await runAutonomous(
+    { goal: "g", steps: [{ persona: "a", task: "t", cwd: "/repo" }, { persona: "b", task: "t" }] },
+    CFG,
+    {
+      spawnStep: async (a) => {
+        calls.push({ persona: a.persona, cwd: a.cwd });
+        return results[calls.length - 1]!;
+      },
+    },
+  );
+  assert.equal(out.status, "done");
+  assert.deepEqual(calls, [
+    { persona: "a", cwd: "/repo" },
+    { persona: "a", cwd: "/repo" },
+    { persona: "b", cwd: undefined },
+  ]);
+});

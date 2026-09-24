@@ -31,6 +31,7 @@ import { elapsedStr, forceTerminate, formatUsage, getFinalText, pauseRun, resolv
 import { isTerminal } from "./types.ts";
 import { SpawnQueue } from "./queue.ts";
 import { resolveMergeStrategy } from "./worktree.ts";
+import { formatCwdInfo, resolveCwdArg, type CwdController, type CwdResolution } from "./conductor-cwd.ts";
 import { ConductorEventEmitter } from "./conductor-events.ts";
 import {
   awaitOrDetach,
@@ -51,7 +52,10 @@ import type { ThemeFg } from "./transcript-style.ts";
 const FOREGROUND_STREAM_INTERVAL_MS = 50;
 
 interface RegisterToolsOpts {
+  /** The conductor's default cwd (session cwd or `ensemble_cwd` override). */
   getCwd: () => string;
+  /** Backs `ensemble_cwd`. Optional so lightweight test harnesses can omit it. */
+  cwdControl?: CwdController;
   getRegistry: () => RunRegistry;
   getQueue: () => SpawnQueue;
   /** Returns the shared FocusedStreamModel (drives the focused-stream overlay). */
@@ -136,6 +140,50 @@ export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   registerFocusTool(pi, opts);
   registerRecommendTool(pi, opts);
   registerAutoTool(pi, opts);
+  registerCwdTool(pi, opts);
+}
+
+/** A per-spawn `cwd` arg, resolved against the conductor's default; omitted → the default. */
+function resolveSpawnCwd(arg: string | undefined, base: string): CwdResolution {
+  return arg === undefined ? { ok: true, cwd: base } : resolveCwdArg(arg, base);
+}
+
+const SPAWN_CWD_DESCRIPTION =
+  "Directory the sub-agent runs in; personas, config, and the git root for worktree isolation resolve from it. " +
+  "`~` and relative paths resolve against the conductor's cwd (see ensemble_cwd), which is also the default.";
+
+// ── ensemble_cwd ─────────────────────────────────────────────────────
+
+function registerCwdTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
+  pi.registerTool({
+    name: CONDUCTOR_LLM_TOOLS.cwd,
+    label: "Conductor cwd",
+    description:
+      "Show or change the conductor's default cwd: where later ensemble_spawn / ensemble_auto sub-agents run " +
+      "and where worktree, personas, and config resolve. `path` sets an override (`~` and relative paths resolve " +
+      "against the current default); `reset: true` returns to the session's start cwd; no args reports the " +
+      "effective cwd and its source. The override survives /reload and resume. Existing runs and ensemble_send " +
+      "resumes keep their own cwd.",
+    promptSnippet: "Show or change the conductor's default cwd for spawns",
+    promptGuidelines: [
+      "Prefer a per-call `cwd` on ensemble_spawn for one-off repo work; use ensemble_cwd when a whole stretch of work targets another repo.",
+    ],
+    parameters: Type.Object({
+      path: Type.Optional(Type.String({ description: "New default cwd. Must be an existing directory." })),
+      reset: Type.Optional(Type.Boolean({ description: "true clears the override and returns to the session's start cwd." })),
+    }),
+    async execute(_id, params) {
+      const r = opts.cwdControl?.change({ path: params.path, reset: params.reset }) ?? {
+        ok: false as const,
+        error: "the conductor cwd override is unavailable in this context",
+      };
+      const text = r.ok ? formatCwdInfo(r.info) : r.error;
+      return {
+        content: [{ type: "text" as const, text }],
+        details: r.ok ? { ...r.info } : { error: r.error },
+      };
+    },
+  });
 }
 
 // ── ensemble_list ────────────────────────────────────────────────────
@@ -334,6 +382,7 @@ function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           reevaluate: Type.Optional(
             Type.Boolean({ description: "Re-evaluate this step's output before advancing (halt on a stop signal)." }),
           ),
+          cwd: Type.Optional(Type.String({ description: SPAWN_CWD_DESCRIPTION })),
         }),
         { minItems: 1, description: "Ordered plan steps." },
       ),
@@ -349,29 +398,47 @@ function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       ),
     }),
     async execute(_id, params) {
-      const cwd = opts.getCwd();
-      const cfg = loadConfig(cwd);
-      const resolved = await resolvePersonas({ cwd, personaOverrides: cfg.personaOverrides });
+      const baseCwd = opts.getCwd();
+      const cfg = loadConfig(baseCwd);
+      const halted = (reason: string) => ({
+        content: [{ type: "text" as const, text: `Autonomous run HALTED — ${reason}` }],
+        details: {
+          status: "halted" as const,
+          haltReason: reason,
+          results: [] as StepResult[],
+          stepsRun: 0,
+          spentUsd: 0,
+        },
+      });
 
-      // Validate every step's persona up front — fail fast before spawning.
-      const unknown = params.steps.map((s) => s.persona).filter((p) => !resolved.personas.get(p));
+      // Validate every step's cwd and persona up front — fail fast before
+      // spawning. Personas and config resolve per step cwd.
+      const stepCwds: string[] = [];
+      for (const [i, s] of params.steps.entries()) {
+        const r = resolveSpawnCwd(s.cwd, baseCwd);
+        if (!r.ok) return halted(`step ${i + 1}: ${r.error}`);
+        stepCwds.push(r.cwd);
+      }
+      const contexts = new Map<string, { cfg: typeof cfg; personas: Map<string, Persona> }>();
+      for (const c of new Set(stepCwds)) {
+        const stepCfg = c === baseCwd ? cfg : loadConfig(c);
+        const resolved = await resolvePersonas({ cwd: c, personaOverrides: stepCfg.personaOverrides });
+        contexts.set(c, { cfg: stepCfg, personas: resolved.personas });
+      }
+      const unknown = params.steps
+        .filter((s, i) => !contexts.get(stepCwds[i]!)!.personas.get(s.persona))
+        .map((s) => s.persona);
       if (unknown.length) {
-        const reason = `unknown persona(s) in plan: ${[...new Set(unknown)].join(", ")}. Run ensemble_list to see available personas.`;
-        return {
-          content: [{ type: "text" as const, text: `Autonomous run HALTED — ${reason}` }],
-          details: {
-            status: "halted" as const,
-            haltReason: reason,
-            results: [] as StepResult[],
-            stepsRun: 0,
-            spentUsd: 0,
-          },
-        };
+        return halted(
+          `unknown persona(s) in plan: ${[...new Set(unknown)].join(", ")}. Run ensemble_list to see available personas.`,
+        );
       }
 
       const plan: AutoPlan = {
         goal: params.goal,
-        steps: params.steps.map((s): AutoStep => ({ persona: s.persona, task: s.task, reevaluate: s.reevaluate })),
+        steps: params.steps.map(
+          (s, i): AutoStep => ({ persona: s.persona, task: s.task, reevaluate: s.reevaluate, cwd: stepCwds[i] }),
+        ),
       };
 
       // Auto mode is more autonomous than a supervised spawn: default to at
@@ -388,22 +455,29 @@ function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       const queue = opts.getQueue();
       const events = opts.getEvents?.();
 
-      const spawnStep = (a: { persona: string; task: string; retryAttempt: number }): Promise<SpawnedStepResult> => {
-        const personaObj = resolved.personas.get(a.persona)!;
-        const ov = cfg.personaOverrides[personaObj.name] ?? {};
+      const spawnStep = (a: {
+        persona: string;
+        task: string;
+        retryAttempt: number;
+        cwd?: string;
+      }): Promise<SpawnedStepResult> => {
+        const stepCwd = a.cwd ?? baseCwd;
+        const step = contexts.get(stepCwd)!;
+        const personaObj = step.personas.get(a.persona)!;
+        const ov = step.cfg.personaOverrides[personaObj.name] ?? {};
         const registry = opts.getRegistry();
         let settleRef: (run: Run) => void = () => {};
         const spawned = queue.enqueueOrSpawn({
           persona: personaObj,
           task: a.task,
           mode: "background",
-          cwd,
+          cwd: stepCwd,
           model: resolveModel(personaObj, ov),
           thinking: resolveThinking(personaObj, ov),
-          timeoutMs: resolveTimeoutMs(personaObj, ov, cfg),
+          timeoutMs: resolveTimeoutMs(personaObj, ov, step.cfg),
           parentMessages: opts.getParentMessages(),
           parentSessionId: opts.getSessionId?.(),
-          worktree: cfg.worktreeMode === "conductor" && personaObj.worktree === true,
+          worktree: step.cfg.worktreeMode === "conductor" && personaObj.worktree === true,
           retryAttempt: a.retryAttempt,
           // NO onRetry / onChain: the executor is the sole retry + sequencing
           // authority (avoids double-fire with S2's background retry and the
@@ -474,6 +548,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       "Pass timeout_minutes to override the per-persona / global default for a single risky run; default applies if omitted.",
       "Pass kill_on_stall=true on autonomous chains where you can't manually intervene; the v0.10 watchdog will hard-kill a sub-agent that goes silent past its hard threshold.",
       "Pass stall_threshold_seconds (≥ 30) on spawns whose tool calls are known-slow (npm install, brazil-build, big test suites) to suppress noisy soft-stall advisories.",
+      "Pass cwd for work in a repo other than your cwd, so write-capable personas get a worktree of that repo and its personas/config apply.",
     ],
     parameters: Type.Object({
       persona: Type.String({
@@ -483,6 +558,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         description:
           "Self-contained task prompt for the sub-agent. Include file paths, constraints, and acceptance criteria.",
       }),
+      cwd: Type.Optional(Type.String({ description: SPAWN_CWD_DESCRIPTION })),
       foreground: Type.Optional(
         Type.Boolean({
           description:
@@ -576,7 +652,9 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       );
       if (hookTimeoutRange) return errorResult(hookTimeoutRange);
 
-      const cwd = opts.getCwd();
+      const spawnCwd = resolveSpawnCwd(params.cwd, opts.getCwd());
+      if (!spawnCwd.ok) return errorResult(spawnCwd.error);
+      const cwd = spawnCwd.cwd;
       const cfg = loadConfig(cwd);
       const resolved = await resolvePersonas({ cwd, personaOverrides: cfg.personaOverrides });
       const persona = resolved.personas.get(params.persona);

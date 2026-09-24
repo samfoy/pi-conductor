@@ -29,8 +29,8 @@ pi-conductor closes that gap. The parent pi session is the conductor, sub-agents
   - **Review / verification:** `critic`, `redteam`, `finalizer`, `verifier`
   - **Debugging:** `investigator`
   - **Other:** `profiler`, `scribe`
-- **LLM tools:** `ensemble_list`, `ensemble_status`, `ensemble_spawn`, `ensemble_send`, `ensemble_pause`, `ensemble_resume`, `ensemble_kill`, `ensemble_focus`, `ensemble_recommend` (v0.18 memory-ranked persona suggestions), `ensemble_auto` (v0.18 autonomous plan execution).
-- **Slash commands:** `/conductor list | show | doctor | on | off | status | stop | pause | resume | queue | focus | history | pin | unpin | gc | reconcile | watchdog`.
+- **LLM tools:** `ensemble_list`, `ensemble_status`, `ensemble_spawn`, `ensemble_send`, `ensemble_pause`, `ensemble_resume`, `ensemble_kill`, `ensemble_focus`, `ensemble_recommend` (v0.18 memory-ranked persona suggestions), `ensemble_auto` (v0.18 autonomous plan execution), `ensemble_cwd` (show or change the default cwd for spawns).
+- **Slash commands:** `/conductor list | show | doctor | on | off | status | stop | pause | resume | queue | focus | history | pin | unpin | gc | reconcile | watchdog | cwd`.
 
 ### Spawning + lifecycle
 
@@ -39,6 +39,8 @@ pi-conductor closes that gap. The parent pi session is the conductor, sub-agents
 - **Esc detaches** a foreground spawn into a background run; the conductor gets a `detached-as-background` result so it doesn't re-spawn, and the eventual completion still arrives as a notification card. **Ctrl+C kills.**
 - **Concurrency cap + FIFO queue**; foreground-while-full auto-downgrades to background.
 - **Pause / resume** via SIGSTOP / SIGCONT; **stop** via SIGTERM. Works on running OR queued sub-agents.
+- **Per-spawn `cwd`** on `ensemble_spawn` and on each `ensemble_auto` step sets where the sub-agent runs and where personas, config, and the git root for `worktree: true` isolation resolve. `~` and relative paths resolve against the conductor's default cwd; a missing directory is rejected before any run starts. `ensemble_send` resumes and chain successors keep the original run's cwd.
+- **Conductor default cwd.** pi can't change a session's cwd, so the conductor keeps its own: `/conductor cwd [<path>|--reset]` or the `ensemble_cwd` tool (`{ path?, reset? }`) sets or clears an override for later spawns. With no argument, both report the effective cwd and its source. The override is saved as a `conductor-cwd` session entry, so it survives `/reload` and resume.
 
 ### Context inheritance
 
@@ -49,7 +51,7 @@ pi-conductor closes that gap. The parent pi session is the conductor, sub-agents
 
 ### TUI surface
 
-- **Ensemble panel** — always-visible widget below the editor when ≥1 sub-agent is active or recently finished.
+- **Ensemble panel** — always-visible widget below the editor when ≥1 sub-agent is active or recently finished, or a conductor cwd override is active (shown as `cwd: <path>`).
 - **Focused stream overlay (Ctrl+G)** — full-screen drilldown of one sub-agent's live transcript. Tab/Sh-Tab cycle, ↑↓ scroll, `c` collapse tool calls, `t` show thinking, `s` send a follow-up, `k` kill, Esc close.
 - **Conductor system prompt addendum** — auto-injected at every turn when conductor mode is ON. Documents the persona roster, the `ensemble_*` tools, parallelism rules, the queue auto-downgrade contract, parent-snapshot semantics, and **§10 — the delegation playbook** so the LLM acts as a strict overseer (v0.8: addendum §1 declares "you are not the implementer"; banned-tools list in §1.5).
 - **`/conductor history [N]`** — browses past runs from `~/.pi/agent/conductor/runs/`, sorted by mtime DESC, default 20.

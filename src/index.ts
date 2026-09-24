@@ -59,12 +59,22 @@ import { formatStallNotification } from "./notifications.ts";
 import { ConductorEventEmitter } from "./conductor-events.ts";
 import { createRpcDetach } from "./rpc-detach.ts";
 import { executePromptAndSend } from "./prompt-and-send.ts";
+import { CWD_ENTRY_TYPE, createCwdController } from "./conductor-cwd.ts";
 
 export default function (pi: ExtensionAPI): void {
   // ── Mutable session-scoped state ─────────────────────────────────────
-  let cwd = process.cwd();
   let ctxRef: ExtensionContext | null = null;
   let widget: EnsembleWidget | null = null;
+  // Default cwd for spawns: pi's ctx.cwd unless `/conductor cwd` or
+  // `ensemble_cwd` set an override. Persisted as a custom entry and
+  // restored on session_start; ctx.cwd updates never clobber it.
+  const cwdControl = createCwdController({
+    sessionCwd: process.cwd(),
+    persist: (data) => pi.appendEntry(CWD_ENTRY_TYPE, data),
+    onChange: () => widget?.refresh(),
+  });
+  const cwd = () => cwdControl.get();
+  const getCwdOverride = () => cwdControl.override();
 
   const registry = new RunRegistry();
   const queue = new SpawnQueue(registry, 4, 1);
@@ -215,7 +225,7 @@ export default function (pi: ExtensionAPI): void {
       {
         getCtx: () => ctxRef,
         registry,
-        cwd,
+        cwd: cwd(),
         validateSendable,
         loadConfig,
         resolvePersonas: (args) => resolvePersonas(args as any) as any,
@@ -235,13 +245,14 @@ export default function (pi: ExtensionAPI): void {
   // `/conductor on` per-session. Reading config at extension load
   // (rather than session_start) is fine for the initial value — the
   // user's pinned default doesn't change between session_starts.
-  const initialCfg = loadConfig(cwd);
+  const initialCfg = loadConfig(cwd());
   let conductorModeOn = resolveInitialConductorMode(process.env, {
     defaultMode: initialCfg.defaultMode,
   });
 
   const opts = {
-    getCwd: () => cwd,
+    getCwd: cwd,
+    cwdControl,
     getRegistry: () => registry,
     getQueue: () => queue,
     getModel: () => focusModel,
@@ -384,19 +395,27 @@ export default function (pi: ExtensionAPI): void {
   // ── Lifecycle ────────────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
-    cwd = ctx.cwd;
+    cwdControl.setSessionCwd(ctx.cwd);
+    let branch: readonly unknown[] = [];
+    try {
+      branch = ctx.sessionManager?.getBranch() ?? [];
+    } catch {
+      // no session entries to restore from
+    }
+    const cwdWarning = cwdControl.restore(branch);
+    if (cwdWarning) ctx.ui.notify(cwdWarning, "warning");
     ctxRef = ctx;
     if (widget) widget.dispose();
     widget = mountEnsembleWidget(registry, () => ctxRef, () => {
       // v0.10 Slice 4: feed live watchdog thresholds to the widget so it
       // can render `· STALLED Ns` glyphs that respect per-cwd config.
-      const cfg = loadConfig(cwd);
+      const cfg = loadConfig(cwd());
       return {
         softThresholdSeconds: cfg.watchdog.defaultSoftSeconds,
         hardThresholdSeconds: cfg.watchdog.defaultHardSeconds,
         graceSeconds: cfg.watchdog.graceSeconds,
       };
-    });
+    }, getCwdOverride);
     if (unsubFocusedShortcut) unsubFocusedShortcut();
     unsubFocusedShortcut = installFocusedOverlayShortcut(ctx, {
       openFocusedOverlay: () => openFocusedOverlay(),
@@ -463,7 +482,7 @@ export default function (pi: ExtensionAPI): void {
     // sweep + reclaim runs on the next event-loop tick. Per oracle R11
     // the marker lives at <conductorRoot>/.last-gc, NOT under runs/.
     setImmediate(() => {
-      const cfg = loadConfig(cwd);
+      const cfg = loadConfig(cwd());
       void maybeAutoRunGc({
         runsRoot: runsRoot(),
         config: cfg.gc,
@@ -483,7 +502,7 @@ export default function (pi: ExtensionAPI): void {
       watchdogDispose = null;
     }
     {
-      const cfg = loadConfig(cwd);
+      const cfg = loadConfig(cwd());
       const wd = new Watchdog({
         registry,
         config: {
@@ -635,9 +654,9 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("turn_start", async (_event, ctx) => {
-    cwd = ctx.cwd;
+    cwdControl.setSessionCwd(ctx.cwd);
     ctxRef = ctx;
-    if (!widget) widget = mountEnsembleWidget(registry, () => ctxRef);
+    if (!widget) widget = mountEnsembleWidget(registry, () => ctxRef, undefined, getCwdOverride);
     // Item 11 dead-man-switch: a turn fired — the wake notification
     // chain is proven to be working. Drop every pending entry; we don't
     // need to re-fire any of them.
@@ -648,11 +667,11 @@ export default function (pi: ExtensionAPI): void {
   pi.on("before_agent_start", async (event) => {
     if (!conductorModeOn) return undefined;
     try {
-      const cfg = loadConfig(cwd);
+      const cfg = loadConfig(cwd());
       queue.setMaxConcurrent(cfg.maxConcurrent);
       queue.setMaxConcurrentWriteCapable(cfg.maxConcurrentWriteCapable);
       const resolved = await resolvePersonas({
-        cwd,
+        cwd: cwd(),
         personaOverrides: cfg.personaOverrides,
       });
       const personas = [...resolved.personas.values()].sort((a, b) =>

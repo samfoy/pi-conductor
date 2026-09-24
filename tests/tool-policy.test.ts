@@ -119,7 +119,7 @@ function makePersona(overrides: Partial<Persona> = {}): Persona {
 
 test("CONDUCTOR_LLM_TOOL_NAMES is exactly the set of tools registerTools registers", () => {
   const registered = captureRegisteredToolNames();
-  assert.equal(registered.length, 10, "sanity: registerTools registers the ensemble_* surface");
+  assert.equal(registered.length, 11, "sanity: registerTools registers the ensemble_* surface");
   assert.deepEqual([...CONDUCTOR_LLM_TOOL_NAMES].sort(), [...registered].sort());
 });
 

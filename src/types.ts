@@ -43,6 +43,7 @@ export const CONDUCTOR_LLM_TOOLS = {
   focus: "ensemble_focus",
   recommend: "ensemble_recommend",
   auto: "ensemble_auto",
+  cwd: "ensemble_cwd",
 } as const;
 
 export const CONDUCTOR_LLM_TOOL_NAMES: readonly string[] = Object.values(CONDUCTOR_LLM_TOOLS);

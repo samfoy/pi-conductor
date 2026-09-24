@@ -639,6 +639,7 @@ Work that landed after the v0.18 capstone without its own phase number:
 - `5d2ccdb` — stop installing a second Pi runtime.
 - `cf527ef` — render sub-agent notifications as folded cards (see the 2026-06-20 decision-log entry).
 - Enforced persona tool policy (`tools` / `exclude_tools`); see the 2026-09-24 decision-log entry.
+- Per-spawn `cwd` on `ensemble_spawn` and each `ensemble_auto` step. It drives the child's process cwd, persona and config resolution, the git root for worktree isolation, and `run.cwd`. There is also a settable conductor default cwd: `/conductor cwd [<path>|--reset]` and the `ensemble_cwd` tool share one controller (`src/conductor-cwd.ts`), which persists a `conductor-cwd` session entry and restores it on `session_start`. pi's `ctx.cwd` updates never clobber the override. `ensemble_send` stays on `run.cwd`.
 
 ### v0.10+ — v2 ideas — _planned_
 - Run-record GC (open question #12).

@@ -69,7 +69,7 @@ function callRegisterTools(cwd: string): RegisteredTool[] {
   return cap.tools;
 }
 
-test("registerTools: parent context (CONDUCTOR_SUBAGENT unset) registers all 10 ensemble_* tools", () => {
+test("registerTools: parent context (CONDUCTOR_SUBAGENT unset) registers all 11 ensemble_* tools", () => {
   const cwd = mkdtempSync(join(tmpdir(), "conductor-tools-parent-"));
   const prev = process.env.CONDUCTOR_SUBAGENT;
   delete process.env.CONDUCTOR_SUBAGENT;
@@ -78,6 +78,7 @@ test("registerTools: parent context (CONDUCTOR_SUBAGENT unset) registers all 10 
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
       "ensemble_auto",
+      "ensemble_cwd",
       "ensemble_focus",
       "ensemble_kill",
       "ensemble_list",
@@ -129,7 +130,7 @@ test("registerTools: empty CONDUCTOR_SUBAGENT='' does NOT suppress (only literal
   process.env.CONDUCTOR_SUBAGENT = "";
   try {
     const tools = callRegisterTools(cwd);
-    assert.equal(tools.length, 10, `expected 10 tools when CONDUCTOR_SUBAGENT='', got ${tools.length}`);
+    assert.equal(tools.length, 11, `expected 11 tools when CONDUCTOR_SUBAGENT='', got ${tools.length}`);
   } finally {
     if (prev === undefined) delete process.env.CONDUCTOR_SUBAGENT;
     else process.env.CONDUCTOR_SUBAGENT = prev;

@@ -4,7 +4,8 @@
  * Always-visible widget rendered `belowEditor` whenever there is at least one
  * non-finished sub-agent. One line per sub-agent: glyph, name, elapsed, latest
  * tool-call hint, usage. Recently-finished runs hang around for a few seconds
- * so the user can see "✓ <persona> done" before the row disappears.
+ * so the user can see "✓ <persona> done" before the row disappears. While a
+ * conductor cwd override is active the panel also shows a `cwd: <path>` line.
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -47,6 +48,7 @@ export function mountEnsembleWidget(
   registry: RunRegistry,
   getCtx: () => ExtensionContext | null,
   getWatchdogConfig?: () => WatchdogConfig,
+  getCwdOverride?: () => string | undefined,
 ): EnsembleWidget {
   const recentlyFinished: RecentlyFinished[] = [];
   let lingerTimer: NodeJS.Timeout | undefined;
@@ -63,8 +65,9 @@ export function mountEnsembleWidget(
 
     const active = registry.list().filter(isActiveRun);
     const linger = recentlyFinished.map((e) => e.run);
+    const cwdOverride = getCwdOverride?.();
 
-    if (active.length === 0 && linger.length === 0) {
+    if (active.length === 0 && linger.length === 0 && !cwdOverride) {
       ctx.ui.setWidget(WIDGET_KEY, undefined);
       if (lingerTimer) {
         clearTimeout(lingerTimer);
@@ -78,6 +81,7 @@ export function mountEnsembleWidget(
       (_tui, theme) => {
         const lines: string[] = [];
         lines.push(theme.fg("dim", `── conductor ensemble (${active.length} active${linger.length ? `, ${linger.length} done` : ""}) ──`));
+        if (cwdOverride) lines.push(theme.fg("dim", `cwd: ${cwdOverride}`));
         const wdCfg = getWatchdogConfig?.();
         for (const r of active) lines.push(formatRow(r, theme, now, wdCfg));
         for (const r of linger) lines.push(formatRow(r, theme, now, wdCfg));

@@ -90,7 +90,8 @@ var init_types = __esm({
       kill: "ensemble_kill",
       focus: "ensemble_focus",
       recommend: "ensemble_recommend",
-      auto: "ensemble_auto"
+      auto: "ensemble_auto",
+      cwd: "ensemble_cwd"
     };
     CONDUCTOR_LLM_TOOL_NAMES = Object.values(CONDUCTOR_LLM_TOOLS);
     DEFAULT_CONFIG = {
@@ -417,8 +418,8 @@ import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
 
 // src/commands.ts
 init_types();
-import { existsSync as existsSync12, readdirSync as readdirSync2, readFileSync as readFileSync7, statSync as statSync4 } from "node:fs";
-import { join as join14, dirname as dirname9 } from "node:path";
+import { existsSync as existsSync12, readdirSync as readdirSync2, readFileSync as readFileSync7, statSync as statSync5 } from "node:fs";
+import { join as join15, dirname as dirname9 } from "node:path";
 
 // src/status-glyph.ts
 var STATUS_GLYPH = {
@@ -952,7 +953,7 @@ var RpcStdinQueue = class {
    * rejected synchronously (LF-only framing invariant).
    */
   enqueue(cmd) {
-    return new Promise((resolve3, reject) => {
+    return new Promise((resolve4, reject) => {
       if (this.destroyed) {
         reject(new Error("RpcStdinQueue is destroyed; cannot enqueue"));
         return;
@@ -977,7 +978,7 @@ var RpcStdinQueue = class {
         resolve: () => {
           if (entry.settled) return;
           entry.settled = true;
-          resolve3();
+          resolve4();
         },
         reject: (err) => {
           if (entry.settled) return;
@@ -1666,7 +1667,7 @@ function runHook(opts) {
     } catch {
     }
   }
-  return new Promise((resolve3) => {
+  return new Promise((resolve4) => {
     let resolved = false;
     let killReason;
     let timeoutHandle;
@@ -1730,7 +1731,7 @@ function runHook(opts) {
           } catch {
           }
         }
-        resolve3(hookResult);
+        resolve4(hookResult);
       });
     };
     const escalateToSigkill = () => {
@@ -1773,7 +1774,7 @@ function runHook(opts) {
         logStream.end();
       } catch {
       }
-      resolve3({
+      resolve4({
         passed: false,
         command: opts.resolved.command,
         exitCode: null,
@@ -3134,8 +3135,8 @@ function runPiSubprocess(run, piArgs, opts) {
   let stderr = "";
   let finalized = false;
   let donePromiseResolve;
-  const done = new Promise((resolve3) => {
-    donePromiseResolve = resolve3;
+  const done = new Promise((resolve4) => {
+    donePromiseResolve = resolve4;
   });
   const finalize2 = async (terminal, exitCode) => {
     if (finalized) return;
@@ -3389,7 +3390,7 @@ function enqueueRpcSendWithAck(run, type, message) {
   rpcSendCounter += 1;
   const id = `send-${run.id}-${rpcSendCounter}`;
   const ackPromise = new Promise(
-    (resolve3, reject) => {
+    (resolve4, reject) => {
       const timer = setTimeout(() => {
         run.pendingAcks?.delete(id);
         reject(
@@ -3399,7 +3400,7 @@ function enqueueRpcSendWithAck(run, type, message) {
         );
       }, RPC_ACK_TIMEOUT_MS);
       run.pendingAcks.set(id, {
-        resolve: (delivered) => resolve3({ delivered, deliveredAt: Date.now() }),
+        resolve: (delivered) => resolve4({ delivered, deliveredAt: Date.now() }),
         reject,
         timer
       });
@@ -3452,11 +3453,11 @@ function sendToRun(run, message, opts) {
     if (result.kind === "epipe") {
       return { kind: "rejected", reason: result.reason };
     }
-    const done2 = new Promise((resolve3) => {
+    const done2 = new Promise((resolve4) => {
       const unsub = opts.registry.onChange((r) => {
         if (r.id === run.id && isTerminal(r.status)) {
           unsub();
-          resolve3(r);
+          resolve4(r);
         }
       });
     });
@@ -5101,6 +5102,79 @@ var Watchdog = class {
 // src/commands.ts
 init_worktree();
 init_types();
+
+// src/conductor-cwd.ts
+import { statSync as statSync4 } from "node:fs";
+import { homedir as homedir7 } from "node:os";
+import { join as join14, resolve as resolve3 } from "node:path";
+var CWD_ENTRY_TYPE = "conductor-cwd";
+function resolveCwdArg(input, base) {
+  const raw = input.trim();
+  if (!raw) return { ok: false, error: "cwd must be a non-empty path" };
+  const expanded = raw === "~" ? homedir7() : raw.startsWith("~/") ? join14(homedir7(), raw.slice(2)) : raw;
+  const cwd = resolve3(base, expanded);
+  let isDir;
+  try {
+    isDir = statSync4(cwd).isDirectory();
+  } catch {
+    return { ok: false, error: `cwd ${cwd} does not exist` };
+  }
+  return isDir ? { ok: true, cwd } : { ok: false, error: `cwd ${cwd} is not a directory` };
+}
+function formatCwdInfo(info) {
+  return `cwd: ${info.cwd} (${info.source})`;
+}
+function latestCwdOverride(entries) {
+  let latest;
+  for (const e of entries) {
+    const entry = e;
+    if (entry?.type !== "custom" || entry.customType !== CWD_ENTRY_TYPE) continue;
+    latest = typeof entry.data?.cwd === "string" ? entry.data.cwd : void 0;
+  }
+  return latest;
+}
+function createCwdController(deps) {
+  let sessionCwd = deps.sessionCwd;
+  let override;
+  const get = () => override ?? sessionCwd;
+  const info = () => ({ cwd: get(), source: override ? "override" : "session start" });
+  return {
+    get,
+    override: () => override,
+    info,
+    setSessionCwd(cwd) {
+      sessionCwd = cwd;
+    },
+    change(req) {
+      if (req.reset && req.path !== void 0) {
+        return { ok: false, error: "pass a path or reset, not both" };
+      }
+      if (req.reset) {
+        override = void 0;
+      } else if (req.path !== void 0) {
+        const r = resolveCwdArg(req.path, get());
+        if (!r.ok) return r;
+        override = r.cwd;
+      } else {
+        return { ok: true, info: info() };
+      }
+      deps.persist({ cwd: override ?? null });
+      deps.onChange?.();
+      return { ok: true, info: info() };
+    },
+    restore(entries) {
+      const saved = latestCwdOverride(entries);
+      override = void 0;
+      if (saved === void 0) return void 0;
+      const r = resolveCwdArg(saved, sessionCwd);
+      if (!r.ok) return `conductor cwd override dropped: ${r.error}`;
+      override = r.cwd;
+      return void 0;
+    }
+  };
+}
+
+// src/commands.ts
 var SUBCOMMANDS = [
   "list",
   "show",
@@ -5120,11 +5194,12 @@ var SUBCOMMANDS = [
   "reconcile",
   "watchdog",
   "send",
-  "worktree"
+  "worktree",
+  "cwd"
 ];
 function registerCommands(pi, opts) {
   pi.registerCommand("conductor", {
-    description: "pi-conductor: list, show, doctor, on/off, status, stop/pause/resume/queue",
+    description: "pi-conductor: list, show, doctor, on/off, status, stop/pause/resume/queue, cwd",
     getArgumentCompletions: (prefix) => {
       const items = SUBCOMMANDS.map((s) => ({ value: s, label: s }));
       const head = prefix.split(/\s+/)[0] ?? "";
@@ -5199,6 +5274,9 @@ function registerCommands(pi, opts) {
         case "worktree":
           await runWorktreeCmd(opts, ctx, subRest);
           return;
+        case "cwd":
+          runCwd(opts, ctx, subRest);
+          return;
         default:
           ctx.ui.notify(
             `unknown subcommand: ${sub}. Try one of: ${SUBCOMMANDS.join(", ")}.`,
@@ -5207,6 +5285,14 @@ function registerCommands(pi, opts) {
       }
     }
   });
+}
+function runCwd(opts, ctx, arg) {
+  if (!opts.cwdControl) {
+    ctx.ui.notify("the conductor cwd override is unavailable in this context", "warning");
+    return;
+  }
+  const r = opts.cwdControl.change(arg === "" ? {} : arg === "--reset" ? { reset: true } : { path: arg });
+  ctx.ui.notify(r.ok ? formatCwdInfo(r.info) : r.error, r.ok ? "info" : "warning");
 }
 async function runList(opts, ctx) {
   const cwd = opts.getCwd();
@@ -5523,7 +5609,7 @@ function runHistory(_opts, ctx, arg) {
         }
       },
       readRecord: (id) => {
-        const p = join14(runDir(id), "record.json");
+        const p = join15(runDir(id), "record.json");
         try {
           return JSON.parse(readFileSync7(p, "utf8"));
         } catch {
@@ -5531,7 +5617,7 @@ function runHistory(_opts, ctx, arg) {
         }
       },
       readFinalText: (id) => {
-        const p = join14(runDir(id), "final.md");
+        const p = join15(runDir(id), "final.md");
         try {
           return readFileSync7(p, "utf8");
         } catch {
@@ -5540,17 +5626,17 @@ function runHistory(_opts, ctx, arg) {
       },
       statMtime: (id) => {
         try {
-          return statSync4(join14(runDir(id), "record.json")).mtimeMs;
+          return statSync5(join15(runDir(id), "record.json")).mtimeMs;
         } catch {
           try {
-            return statSync4(runDir(id)).mtimeMs;
+            return statSync5(runDir(id)).mtimeMs;
           } catch {
             return 0;
           }
         }
       },
-      isPinned: (id) => existsSync12(join14(runDir(id), ".pinned")),
-      isArchived: (id) => existsSync12(join14(runDir(id), ".archived"))
+      isPinned: (id) => existsSync12(join15(runDir(id), ".pinned")),
+      isArchived: (id) => existsSync12(join15(runDir(id), ".archived"))
     },
     { limit }
   );
@@ -5568,7 +5654,7 @@ async function runPin(ctx, arg) {
     return;
   }
   const root = runsRoot();
-  if (!existsSync12(join14(root, id))) {
+  if (!existsSync12(join15(root, id))) {
     ctx.ui.notify(`No such run: ${id}`, "warning");
     return;
   }
@@ -5594,7 +5680,7 @@ async function runUnpin(ctx, arg) {
     return;
   }
   const root = runsRoot();
-  if (!existsSync12(join14(root, id))) {
+  if (!existsSync12(join15(root, id))) {
     ctx.ui.notify(`No such run: ${id}`, "warning");
     return;
   }
@@ -6106,7 +6192,7 @@ async function runAutonomous(plan, cfg, deps) {
         if (gate.kind === "halt") state.haltReason = gate.reason;
         return finalize(state);
       }
-      const res = await deps.spawnStep({ persona: step.persona, task, retryAttempt: attempt });
+      const res = await deps.spawnStep({ persona: step.persona, task, retryAttempt: attempt, cwd: step.cwd });
       state.stepsRun += 1;
       state.spentUsd += res.costUsd;
       const decision = classifyStepOutcome(
@@ -6710,6 +6796,37 @@ function registerTools(pi, opts) {
   registerFocusTool(pi, opts);
   registerRecommendTool(pi, opts);
   registerAutoTool(pi, opts);
+  registerCwdTool(pi, opts);
+}
+function resolveSpawnCwd(arg, base) {
+  return arg === void 0 ? { ok: true, cwd: base } : resolveCwdArg(arg, base);
+}
+var SPAWN_CWD_DESCRIPTION = "Directory the sub-agent runs in; personas, config, and the git root for worktree isolation resolve from it. `~` and relative paths resolve against the conductor's cwd (see ensemble_cwd), which is also the default.";
+function registerCwdTool(pi, opts) {
+  pi.registerTool({
+    name: CONDUCTOR_LLM_TOOLS.cwd,
+    label: "Conductor cwd",
+    description: "Show or change the conductor's default cwd: where later ensemble_spawn / ensemble_auto sub-agents run and where worktree, personas, and config resolve. `path` sets an override (`~` and relative paths resolve against the current default); `reset: true` returns to the session's start cwd; no args reports the effective cwd and its source. The override survives /reload and resume. Existing runs and ensemble_send resumes keep their own cwd.",
+    promptSnippet: "Show or change the conductor's default cwd for spawns",
+    promptGuidelines: [
+      "Prefer a per-call `cwd` on ensemble_spawn for one-off repo work; use ensemble_cwd when a whole stretch of work targets another repo."
+    ],
+    parameters: Type.Object({
+      path: Type.Optional(Type.String({ description: "New default cwd. Must be an existing directory." })),
+      reset: Type.Optional(Type.Boolean({ description: "true clears the override and returns to the session's start cwd." }))
+    }),
+    async execute(_id, params) {
+      const r = opts.cwdControl?.change({ path: params.path, reset: params.reset }) ?? {
+        ok: false,
+        error: "the conductor cwd override is unavailable in this context"
+      };
+      const text = r.ok ? formatCwdInfo(r.info) : r.error;
+      return {
+        content: [{ type: "text", text }],
+        details: r.ok ? { ...r.info } : { error: r.error }
+      };
+    }
+  });
 }
 function registerListTool(pi, opts) {
   pi.registerTool({
@@ -6826,8 +6943,8 @@ function awaitTerminal(registry, runId) {
     unsub?.();
     resolveFn(run);
   };
-  const promise = new Promise((resolve3) => {
-    resolveFn = resolve3;
+  const promise = new Promise((resolve4) => {
+    resolveFn = resolve4;
   });
   unsub = registry.onChange((r) => {
     if (r.id === runId && isTerminal(r.status)) settle(r);
@@ -6855,7 +6972,8 @@ function registerAutoTool(pi, opts) {
           task: Type.String({ description: "Self-contained task for this step." }),
           reevaluate: Type.Optional(
             Type.Boolean({ description: "Re-evaluate this step's output before advancing (halt on a stop signal)." })
-          )
+          ),
+          cwd: Type.Optional(Type.String({ description: SPAWN_CWD_DESCRIPTION }))
         }),
         { minItems: 1, description: "Ordered plan steps." }
       ),
@@ -6871,26 +6989,41 @@ function registerAutoTool(pi, opts) {
       )
     }),
     async execute(_id, params) {
-      const cwd = opts.getCwd();
-      const cfg = loadConfig(cwd);
-      const resolved = await resolvePersonas({ cwd, personaOverrides: cfg.personaOverrides });
-      const unknown = params.steps.map((s) => s.persona).filter((p) => !resolved.personas.get(p));
+      const baseCwd = opts.getCwd();
+      const cfg = loadConfig(baseCwd);
+      const halted = (reason) => ({
+        content: [{ type: "text", text: `Autonomous run HALTED \u2014 ${reason}` }],
+        details: {
+          status: "halted",
+          haltReason: reason,
+          results: [],
+          stepsRun: 0,
+          spentUsd: 0
+        }
+      });
+      const stepCwds = [];
+      for (const [i, s] of params.steps.entries()) {
+        const r = resolveSpawnCwd(s.cwd, baseCwd);
+        if (!r.ok) return halted(`step ${i + 1}: ${r.error}`);
+        stepCwds.push(r.cwd);
+      }
+      const contexts = /* @__PURE__ */ new Map();
+      for (const c of new Set(stepCwds)) {
+        const stepCfg = c === baseCwd ? cfg : loadConfig(c);
+        const resolved = await resolvePersonas({ cwd: c, personaOverrides: stepCfg.personaOverrides });
+        contexts.set(c, { cfg: stepCfg, personas: resolved.personas });
+      }
+      const unknown = params.steps.filter((s, i) => !contexts.get(stepCwds[i]).personas.get(s.persona)).map((s) => s.persona);
       if (unknown.length) {
-        const reason = `unknown persona(s) in plan: ${[...new Set(unknown)].join(", ")}. Run ensemble_list to see available personas.`;
-        return {
-          content: [{ type: "text", text: `Autonomous run HALTED \u2014 ${reason}` }],
-          details: {
-            status: "halted",
-            haltReason: reason,
-            results: [],
-            stepsRun: 0,
-            spentUsd: 0
-          }
-        };
+        return halted(
+          `unknown persona(s) in plan: ${[...new Set(unknown)].join(", ")}. Run ensemble_list to see available personas.`
+        );
       }
       const plan = {
         goal: params.goal,
-        steps: params.steps.map((s) => ({ persona: s.persona, task: s.task, reevaluate: s.reevaluate }))
+        steps: params.steps.map(
+          (s, i) => ({ persona: s.persona, task: s.task, reevaluate: s.reevaluate, cwd: stepCwds[i] })
+        )
       };
       const basePolicy = resolveRetryPolicy({
         perCall: params.retry_max_attempts !== void 0 ? { maxAttempts: params.retry_max_attempts } : void 0,
@@ -6900,8 +7033,10 @@ function registerAutoTool(pi, opts) {
       const queue = opts.getQueue();
       const events = opts.getEvents?.();
       const spawnStep = (a) => {
-        const personaObj = resolved.personas.get(a.persona);
-        const ov = cfg.personaOverrides[personaObj.name] ?? {};
+        const stepCwd = a.cwd ?? baseCwd;
+        const step = contexts.get(stepCwd);
+        const personaObj = step.personas.get(a.persona);
+        const ov = step.cfg.personaOverrides[personaObj.name] ?? {};
         const registry = opts.getRegistry();
         let settleRef = () => {
         };
@@ -6909,13 +7044,13 @@ function registerAutoTool(pi, opts) {
           persona: personaObj,
           task: a.task,
           mode: "background",
-          cwd,
+          cwd: stepCwd,
           model: resolveModel(personaObj, ov),
           thinking: resolveThinking(personaObj, ov),
-          timeoutMs: resolveTimeoutMs(personaObj, ov, cfg),
+          timeoutMs: resolveTimeoutMs(personaObj, ov, step.cfg),
           parentMessages: opts.getParentMessages(),
           parentSessionId: opts.getSessionId?.(),
-          worktree: cfg.worktreeMode === "conductor" && personaObj.worktree === true,
+          worktree: step.cfg.worktreeMode === "conductor" && personaObj.worktree === true,
           retryAttempt: a.retryAttempt,
           // NO onRetry / onChain: the executor is the sole retry + sequencing
           // authority (avoids double-fire with S2's background retry and the
@@ -6965,7 +7100,8 @@ function registerSpawnTool(pi, opts) {
       "Foreground spawns may auto-downgrade to background under load \u2014 handle the queued-as-background return cleanly without re-spawning.",
       "Pass timeout_minutes to override the per-persona / global default for a single risky run; default applies if omitted.",
       "Pass kill_on_stall=true on autonomous chains where you can't manually intervene; the v0.10 watchdog will hard-kill a sub-agent that goes silent past its hard threshold.",
-      "Pass stall_threshold_seconds (\u2265 30) on spawns whose tool calls are known-slow (npm install, brazil-build, big test suites) to suppress noisy soft-stall advisories."
+      "Pass stall_threshold_seconds (\u2265 30) on spawns whose tool calls are known-slow (npm install, brazil-build, big test suites) to suppress noisy soft-stall advisories.",
+      "Pass cwd for work in a repo other than your cwd, so write-capable personas get a worktree of that repo and its personas/config apply."
     ],
     parameters: Type.Object({
       persona: Type.String({
@@ -6974,6 +7110,7 @@ function registerSpawnTool(pi, opts) {
       task: Type.String({
         description: "Self-contained task prompt for the sub-agent. Include file paths, constraints, and acceptance criteria."
       }),
+      cwd: Type.Optional(Type.String({ description: SPAWN_CWD_DESCRIPTION })),
       foreground: Type.Optional(
         Type.Boolean({
           description: "true (default) blocks until done and streams the sub-agent into the ensemble panel; false runs in background and notifies on completion."
@@ -7055,7 +7192,9 @@ function registerSpawnTool(pi, opts) {
         params.on_complete_hook_timeout_seconds
       );
       if (hookTimeoutRange) return errorResult(hookTimeoutRange);
-      const cwd = opts.getCwd();
+      const spawnCwd = resolveSpawnCwd(params.cwd, opts.getCwd());
+      if (!spawnCwd.ok) return errorResult(spawnCwd.error);
+      const cwd = spawnCwd.cwd;
       const cfg = loadConfig(cwd);
       const resolved = await resolvePersonas({ cwd, personaOverrides: cfg.personaOverrides });
       const persona = resolved.personas.get(params.persona);
@@ -7931,7 +8070,7 @@ function buildOnRetryCallback(args) {
 // src/queue.ts
 init_types();
 import { mkdirSync as mkdirSync6 } from "node:fs";
-import { join as join15 } from "node:path";
+import { join as join16 } from "node:path";
 var SpawnQueue = class {
   constructor(registry, maxConcurrent, maxConcurrentWriteCapable = 1) {
     this.registry = registry;
@@ -7991,9 +8130,9 @@ var SpawnQueue = class {
       messages: [],
       usage: emptyUsage(),
       cwd: opts.cwd,
-      recordPath: join15(dir, "record.json"),
-      transcriptPath: join15(dir, "transcript.jsonl"),
-      finalPath: join15(dir, "final.md")
+      recordPath: join16(dir, "record.json"),
+      transcriptPath: join16(dir, "transcript.jsonl"),
+      finalPath: join16(dir, "final.md")
     };
     registry.register(placeholder);
     const pending = {
@@ -8113,7 +8252,7 @@ var FINISHED_LINGER_MS = 8e3;
 function isActiveRun(run) {
   return !isTerminal(run.status);
 }
-function mountEnsembleWidget(registry, getCtx, getWatchdogConfig) {
+function mountEnsembleWidget(registry, getCtx, getWatchdogConfig, getCwdOverride) {
   const recentlyFinished = [];
   let lingerTimer;
   const render = () => {
@@ -8125,7 +8264,8 @@ function mountEnsembleWidget(registry, getCtx, getWatchdogConfig) {
     }
     const active = registry.list().filter(isActiveRun);
     const linger = recentlyFinished.map((e) => e.run);
-    if (active.length === 0 && linger.length === 0) {
+    const cwdOverride = getCwdOverride?.();
+    if (active.length === 0 && linger.length === 0 && !cwdOverride) {
       ctx.ui.setWidget(WIDGET_KEY, void 0);
       if (lingerTimer) {
         clearTimeout(lingerTimer);
@@ -8138,6 +8278,7 @@ function mountEnsembleWidget(registry, getCtx, getWatchdogConfig) {
       (_tui, theme) => {
         const lines = [];
         lines.push(theme.fg("dim", `\u2500\u2500 conductor ensemble (${active.length} active${linger.length ? `, ${linger.length} done` : ""}) \u2500\u2500`));
+        if (cwdOverride) lines.push(theme.fg("dim", `cwd: ${cwdOverride}`));
         const wdCfg = getWatchdogConfig?.();
         for (const r of active) lines.push(formatRow(r, theme, now, wdCfg));
         for (const r of linger) lines.push(formatRow(r, theme, now, wdCfg));
@@ -8759,6 +8900,7 @@ Each persona has its own system prompt (run \`/conductor show <name>\` to read i
 - **\`ensemble_spawn\`** \u2014 start a sub-agent with a persona and a task.
   - \`foreground: true\` (default) \u2014 your tool call blocks; the sub-agent's transcript streams into the ensemble panel; the result is returned to you.
   - \`foreground: false\` \u2014 the sub-agent runs in the background; your turn ends immediately; the completion arrives later as a \`<sub-agent-completed>\` user-role message that wakes you.
+  - \`cwd\` \u2014 for repo work, pass the repo path so write-capable personas get a worktree of that repo and its personas/config apply. \`ensemble_cwd\` changes the default for every later spawn.
 - **\`ensemble_send\`** \u2014 continue an existing sub-agent's session with a new user message. Works on finished sub-agents too (resumes their saved session). Pass \`agent_id\` from a previous spawn or from \`ensemble_status\`. Reuse a sub-agent's loaded context instead of re-spawning when you want a follow-up.
 - **\`ensemble_pause\`** / **\`ensemble_resume\`** \u2014 SIGSTOP / SIGCONT a sub-agent. Useful for cost control while you read partial output. Paused sub-agents still count against the concurrency cap.
 - **\`ensemble_list\`** \u2014 list available personas (most useful when introducing a new task).
@@ -10130,9 +10272,15 @@ async function executePromptAndSend(deps, agentId, presuppliedText) {
 
 // src/index.ts
 function index_default(pi) {
-  let cwd = process.cwd();
   let ctxRef = null;
   let widget = null;
+  const cwdControl = createCwdController({
+    sessionCwd: process.cwd(),
+    persist: (data) => pi.appendEntry(CWD_ENTRY_TYPE, data),
+    onChange: () => widget?.refresh()
+  });
+  const cwd = () => cwdControl.get();
+  const getCwdOverride = () => cwdControl.override();
   const registry = new RunRegistry();
   const queue = new SpawnQueue(registry, 4, 1);
   const focusModel = new FocusedStreamModel(registry);
@@ -10206,7 +10354,7 @@ function index_default(pi) {
       {
         getCtx: () => ctxRef,
         registry,
-        cwd,
+        cwd: cwd(),
         validateSendable,
         loadConfig,
         resolvePersonas: (args) => resolvePersonas(args),
@@ -10218,12 +10366,13 @@ function index_default(pi) {
       presuppliedText
     );
   }
-  const initialCfg = loadConfig(cwd);
+  const initialCfg = loadConfig(cwd());
   let conductorModeOn = resolveInitialConductorMode(process.env, {
     defaultMode: initialCfg.defaultMode
   });
   const opts = {
-    getCwd: () => cwd,
+    getCwd: cwd,
+    cwdControl,
     getRegistry: () => registry,
     getQueue: () => queue,
     getModel: () => focusModel,
@@ -10336,17 +10485,24 @@ function index_default(pi) {
     }
   };
   pi.on("session_start", async (_event, ctx) => {
-    cwd = ctx.cwd;
+    cwdControl.setSessionCwd(ctx.cwd);
+    let branch = [];
+    try {
+      branch = ctx.sessionManager?.getBranch() ?? [];
+    } catch {
+    }
+    const cwdWarning = cwdControl.restore(branch);
+    if (cwdWarning) ctx.ui.notify(cwdWarning, "warning");
     ctxRef = ctx;
     if (widget) widget.dispose();
     widget = mountEnsembleWidget(registry, () => ctxRef, () => {
-      const cfg = loadConfig(cwd);
+      const cfg = loadConfig(cwd());
       return {
         softThresholdSeconds: cfg.watchdog.defaultSoftSeconds,
         hardThresholdSeconds: cfg.watchdog.defaultHardSeconds,
         graceSeconds: cfg.watchdog.graceSeconds
       };
-    });
+    }, getCwdOverride);
     if (unsubFocusedShortcut) unsubFocusedShortcut();
     unsubFocusedShortcut = installFocusedOverlayShortcut(ctx, {
       openFocusedOverlay: () => openFocusedOverlay(),
@@ -10397,7 +10553,7 @@ function index_default(pi) {
       });
     });
     setImmediate(() => {
-      const cfg = loadConfig(cwd);
+      const cfg = loadConfig(cwd());
       void maybeAutoRunGc({
         runsRoot: runsRoot(),
         config: cfg.gc,
@@ -10411,7 +10567,7 @@ function index_default(pi) {
       watchdogDispose = null;
     }
     {
-      const cfg = loadConfig(cwd);
+      const cfg = loadConfig(cwd());
       const wd = new Watchdog({
         registry,
         config: {
@@ -10517,19 +10673,19 @@ function index_default(pi) {
     ctxRef = null;
   });
   pi.on("turn_start", async (_event, ctx) => {
-    cwd = ctx.cwd;
+    cwdControl.setSessionCwd(ctx.cwd);
     ctxRef = ctx;
-    if (!widget) widget = mountEnsembleWidget(registry, () => ctxRef);
+    if (!widget) widget = mountEnsembleWidget(registry, () => ctxRef, void 0, getCwdOverride);
     completionWakeTracker.clearOnTurnStart();
   });
   pi.on("before_agent_start", async (event) => {
     if (!conductorModeOn) return void 0;
     try {
-      const cfg = loadConfig(cwd);
+      const cfg = loadConfig(cwd());
       queue.setMaxConcurrent(cfg.maxConcurrent);
       queue.setMaxConcurrentWriteCapable(cfg.maxConcurrentWriteCapable);
       const resolved = await resolvePersonas({
-        cwd,
+        cwd: cwd(),
         personaOverrides: cfg.personaOverrides
       });
       const personas = [...resolved.personas.values()].sort(

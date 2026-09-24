@@ -39,6 +39,8 @@ export interface AutoStep {
   task: string;
   /** When true, re-evaluate the parent's output before advancing (S3). */
   reevaluate?: boolean;
+  /** Absolute cwd the step spawns in; undefined → the conductor's default. */
+  cwd?: string;
 }
 
 export interface AutoPlan {
@@ -191,6 +193,7 @@ export interface AutoDeps {
     persona: string;
     task: string;
     retryAttempt: number;
+    cwd?: string;
   }) => Promise<SpawnedStepResult>;
   /** Optional progress hook (per spawn terminal). */
   onStep?: (result: StepResult, state: AutoState) => void;
@@ -246,7 +249,7 @@ export async function runAutonomous(
         return finalize(state);
       }
 
-      const res = await deps.spawnStep({ persona: step.persona, task, retryAttempt: attempt });
+      const res = await deps.spawnStep({ persona: step.persona, task, retryAttempt: attempt, cwd: step.cwd });
       state.stepsRun += 1;
       state.spentUsd += res.costUsd;
 
