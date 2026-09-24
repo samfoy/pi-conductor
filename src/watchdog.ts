@@ -235,7 +235,7 @@ export interface WatchdogDeps {
   readonly log: WatchdogLog;
   /** Current wall-clock time in ms. Production: `Date.now`. */
   readonly now: () => number;
-  /** Force-terminate a stalled run. Production: `forceTerminate(run, reason, registry)`. */
+  /** Force-terminate a stalled run. Production: `forceTerminate(run, reason, registry, run.onComplete)`. */
   readonly kill: (run: Run, reason: TerminationReason) => void;
   /**
    * Per-spawn `kill_on_stall` policy. Default off (advisory-only). Slice

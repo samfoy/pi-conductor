@@ -829,6 +829,12 @@ export interface Run {
   proc?: ChildProcess;
   /** Hard timeout timer; cleared on close. */
   timeoutTimer?: NodeJS.Timeout;
+  /**
+   * The current subprocess's onComplete (its completion card, for a
+   * background run). The watchdog's stall kill fires it, as the timeout
+   * and turn-limit kills do; tool kills don't. In memory only.
+   */
+  onComplete?: (run: Run) => void;
   /** Watchers (intervals etc) that need cleanup. */
   watcher?: NodeJS.Timeout;
 

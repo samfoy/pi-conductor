@@ -1665,6 +1665,7 @@ function runPiSubprocess(
   // follow-ups, ext-ui-cancel envelopes) over stdin via the
   // `RpcStdinQueue`. See `docs/v0.12-steering-design.md` §4.2.
   const stdinKind: "ignore" | "pipe" = opts.steerable ? "pipe" : "ignore";
+  run.onComplete = opts.onComplete;
 
   let proc: ChildProcess;
   try {

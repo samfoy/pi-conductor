@@ -567,8 +567,10 @@ export default function (pi: ExtensionAPI): void {
           },
         },
         now: () => Date.now(),
+        // The run's own onComplete posts its card: the close handler skips
+        // onComplete once forceTerminate has settled the run.
         kill: (run, reason) => {
-          forceTerminate(run, reason, registry);
+          forceTerminate(run, reason, registry, run.onComplete);
         },
         // v0.10 Slice 3 + backlog item 2: per-run `kill_on_stall` overrides the
         // conductor-wide default. `resolveKillOnStallForPersona` adds a
