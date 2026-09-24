@@ -1346,11 +1346,12 @@ export async function runWorktreeCmd(
           run.status = "completed";
           run.mergeResult = result;
           run.errorMessage = undefined;
+          run.worktreeKept = undefined;
           // Same removal as finalize's auto-merge, so the worktree doesn't leak.
           releaseWorktree(run, { keepBranch: false });
           ctx.ui.notify(
             `✔ Merged ${run.id} → ${baseBranch}. Run is now completed.` +
-              (run.errorMessage ? `\n${run.errorMessage}` : ""),
+              (run.worktreeKept ? `\n${run.worktreeKept}` : ""),
             "info",
           );
         } else {

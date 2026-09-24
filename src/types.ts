@@ -643,6 +643,14 @@ export interface Run {
   /** v0.14 worktree auto-merge: result of the merge attempt on terminal. */
   mergeResult?: MergeResult;
   /**
+   * How to merge or discard a worktree or branch kept when the run settled.
+   * The completion card renders it as `<worktree-kept>`, apart from
+   * `<error>`, so a success that kept a leftover doesn't read as a failure
+   * (v0.20 W4). In-memory only: the path and branch persist in their own
+   * fields. Cleared on resume.
+   */
+  worktreeKept?: string;
+  /**
    * Set when startup reconcile rebuilt this Run from record.json rather
    * than this runtime spawning it. Its spawn-time hook gate can't be
    * rebuilt, so `applyMergeToTerminal` refuses to auto-merge it.

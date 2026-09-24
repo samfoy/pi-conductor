@@ -334,3 +334,10 @@ test("W15: every pi.sendMessage in index.ts routes through a message builder", (
     assert.match(fn, /^build(Completion|Stall)Message$/);
   }
 });
+
+test("W4b: a kept-worktree hint is a warning note, not an error note", () => {
+  const d = buildCompletionMessage(
+    runFx({ worktreePath: "/r/.worktrees/conductor-wt/builder-ab12", worktreeKept: "worktree kept: uncommitted changes" }),
+  ).details!;
+  assert.deepEqual(d.notes, [{ slot: "warning", text: "worktree kept: uncommitted changes" }]);
+});

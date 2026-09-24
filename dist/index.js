@@ -3564,6 +3564,7 @@ function sendToRun(run, message, opts) {
   run.finishedAt = void 0;
   run.exitCode = void 0;
   run.errorMessage = void 0;
+  run.worktreeKept = void 0;
   run.stopReason = void 0;
   run.lastToolCall = void 0;
   run.lastEventAt = Date.now();
@@ -3695,8 +3696,7 @@ async function settleWorktree(run, terminal) {
   const keepBranch = noMergeBack || terminal !== "completed" && branchHasUnmergedCommits(gitRoot2, run.worktreeBaseBranch ?? "master", branch);
   releaseWorktree(run, { keepBranch });
   if (terminal !== "completed" && keepBranch && !run.worktreePath) {
-    const hint = `branch ${branch} kept: merge it with cd ${gitRoot2} && git merge ${branch}, or delete it with git branch -D ${branch}`;
-    run.errorMessage = run.errorMessage ? `${run.errorMessage}; ${hint}` : hint;
+    run.worktreeKept = `branch ${branch} kept: merge it with cd ${gitRoot2} && git merge ${branch}, or delete it with git branch -D ${branch}`;
   }
   return terminal;
 }
@@ -3709,8 +3709,7 @@ function releaseWorktree(run, opts) {
     branch: run.worktreeBranch
   };
   if (worktreeHasUncommittedChanges(wtSpec.worktreePath)) {
-    const hint = `worktree kept: uncommitted changes in ${wtSpec.worktreePath}; commit them to ${wtSpec.branch} or discard them, then git worktree remove ${wtSpec.worktreePath}`;
-    run.errorMessage = run.errorMessage ? `${run.errorMessage}; ${hint}` : hint;
+    run.worktreeKept = `worktree kept: uncommitted changes in ${wtSpec.worktreePath}; commit them to ${wtSpec.branch} or discard them, then git worktree remove ${wtSpec.worktreePath}`;
     return;
   }
   if (removeWorktree(wtSpec, opts)) {
@@ -3898,8 +3897,7 @@ function forceTerminate(run, reason, registry, onComplete, killGroup = defaultKi
   });
   if (run.worktreePath && run.worktreeBranch) {
     const gitRoot2 = dirname7(dirname7(dirname7(run.worktreePath)));
-    const hint = `worktree kept with any partial work: ${run.worktreePath} (branch ${run.worktreeBranch}); keep it with cd ${gitRoot2} && git merge ${run.worktreeBranch}, or discard it (with every other kept worktree) via /conductor worktree clean`;
-    run.errorMessage = run.errorMessage ? `${run.errorMessage}; ${hint}` : hint;
+    run.worktreeKept = `worktree kept with any partial work: ${run.worktreePath} (branch ${run.worktreeBranch}); keep it with cd ${gitRoot2} && git merge ${run.worktreeBranch}, or discard it (with every other kept worktree) via /conductor worktree clean`;
   }
   registry.notify(run);
   void writeRecord(run);
@@ -6185,10 +6183,11 @@ async function runWorktreeCmd(opts, ctx, subRest) {
           run.status = "completed";
           run.mergeResult = result;
           run.errorMessage = void 0;
+          run.worktreeKept = void 0;
           releaseWorktree(run, { keepBranch: false });
           ctx.ui.notify(
-            `\u2714 Merged ${run.id} \u2192 ${baseBranch}. Run is now completed.` + (run.errorMessage ? `
-${run.errorMessage}` : ""),
+            `\u2714 Merged ${run.id} \u2192 ${baseBranch}. Run is now completed.` + (run.worktreeKept ? `
+${run.worktreeKept}` : ""),
             "info"
           );
         } else {
@@ -8662,6 +8661,13 @@ function formatCompletionNotification(run) {
   if (run.errorMessage) {
     lines.push(`  <error>${escapeXml(run.errorMessage)}</error>`);
   }
+  if (run.worktreeKept) {
+    const attrs = [
+      run.worktreePath && ` path="${escapeXmlAttr(run.worktreePath)}"`,
+      run.worktreeBranch && ` branch="${escapeXmlAttr(run.worktreeBranch)}"`
+    ].filter(Boolean).join("");
+    lines.push(`  <worktree-kept${attrs}>${escapeXml(run.worktreeKept)}</worktree-kept>`);
+  }
   if (run.hookResult) {
     const h = run.hookResult;
     const hookElapsed = elapsedStr(run.finishedAt - h.durationMs, run.finishedAt);
@@ -8727,6 +8733,9 @@ function headerLine(run, elapsed, usageStr, resumed) {
 function escapeXml(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
+function escapeXmlAttr(s) {
+  return escapeXml(s).replace(/"/g, "&quot;");
+}
 function formatStallNotification(run, args) {
   const elapsed = elapsedStr(run.startTime);
   const lines = [];
@@ -8773,6 +8782,7 @@ function buildCompletionMessage(run) {
   }
   const notes = [];
   if (run.errorMessage) notes.push({ slot: "error", text: run.errorMessage });
+  if (run.worktreeKept) notes.push({ slot: "warning", text: run.worktreeKept });
   if (run.nonSubstantiveFinal) {
     notes.push({
       slot: "warning",

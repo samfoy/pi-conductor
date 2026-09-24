@@ -23,6 +23,7 @@ import { join } from "node:path";
 
 import { forceTerminate, RunRegistry, sendToRun, settleWorktree, spawnRun } from "../src/runs.ts";
 import { runWorktreeCmd } from "../src/commands.ts";
+import { formatCompletionNotification } from "../src/notifications.ts";
 import { emptyUsage, type Persona, type Run } from "../src/types.ts";
 import { gitTestEnv } from "./helpers/git-env.ts";
 
@@ -211,7 +212,8 @@ for (const status of ["failed", "hook_failed"] as const) {
       assert.doesNotMatch(git(repo, "log --stat --oneline mainline"), /x\.ts/, "nothing merged");
       assert.equal(run.worktreePath, undefined, "no directory to point at");
       assert.equal(run.worktreeBranch, wt.branch, "the kept branch is recorded");
-      assert.ok(run.errorMessage?.includes(wt.branch), `the card names the kept branch: ${run.errorMessage}`);
+      assert.ok(run.worktreeKept?.includes(wt.branch), `the card names the kept branch: ${run.worktreeKept}`);
+      assert.equal(run.errorMessage, undefined, "the hint is not an error");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -279,9 +281,9 @@ test("settleWorktree: merge strategy none with uncommitted changes keeps worktre
     assert.equal(branchExists(repo, wt.branch), true);
     assert.equal(run.worktreePath, wt.path);
     assert.equal(run.worktreeBranch, wt.branch);
-    assert.match(run.errorMessage ?? "", /^pi subprocess exited with code 1; /, "the original error is kept");
-    assert.match(run.errorMessage ?? "", /uncommitted/);
-    assert.ok(run.errorMessage?.includes(wt.path), run.errorMessage);
+    assert.equal(run.errorMessage, "pi subprocess exited with code 1", "the genuine error, alone");
+    assert.match(run.worktreeKept ?? "", /uncommitted/);
+    assert.ok(run.worktreeKept?.includes(wt.path), run.worktreeKept);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -299,7 +301,11 @@ test("settleWorktree: a successful merge with an uncommitted leftover keeps the 
     assert.match(git(repo, "show --stat --oneline mainline"), /new\.ts/, "the committed work is merged");
     assert.equal(readFileSync(join(wt.path, "notes.txt"), "utf8"), "not part of the merge\n", "leftover kept");
     assert.equal(run.worktreePath, wt.path);
-    assert.match(run.errorMessage ?? "", /uncommitted/);
+    assert.equal(run.errorMessage, undefined, "a successful merge reports no error");
+    assert.match(run.worktreeKept ?? "", /uncommitted/);
+    const card = formatCompletionNotification(run);
+    assert.doesNotMatch(card, /<error>/, "the card doesn't read as a failure");
+    assert.ok(card.includes(`<worktree-kept path="${wt.path}" branch="${wt.branch}">worktree kept: uncommitted`), card);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -441,7 +447,8 @@ test("forceTerminate: a killed worktree run keeps its worktree, branch and field
     assert.match(git(repo, `log --oneline mainline..${branch}`), /partial/, "branch kept with the partial commit");
     assert.equal(run.worktreePath, wtPath);
     assert.equal(run.worktreeBranch, branch);
-    assert.ok(run.errorMessage?.includes(wtPath) && run.errorMessage.includes(branch), run.errorMessage);
+    assert.ok(run.worktreeKept?.includes(wtPath) && run.worktreeKept.includes(branch), run.worktreeKept);
+    assert.equal(run.errorMessage, undefined, "the hint is not an error");
     const record = JSON.parse(readFileSync(run.recordPath, "utf8"));
     assert.equal(record.worktreePath, wtPath, "record.json points GC at the worktree");
 
@@ -717,3 +724,27 @@ for (const gone of ["base branch", "repo"] as const) {
     }
   });
 }
+
+test("forceTerminate: a stalled worktree run keeps its error and failure class; the kept hint is separate", () => {
+  const dir = mkdtempSync(join(tmpdir(), "conductor-wt-finalize-stall-"));
+  try {
+    const bare = makeRun("builder-st01", { status: "running", recordPath: join(dir, "a.json"), finalPath: join(dir, "a.md") });
+    const kept = makeRun("builder-st02", {
+      status: "running",
+      recordPath: join(dir, "b.json"),
+      finalPath: join(dir, "b.md"),
+      worktreePath: "/r/.worktrees/conductor-wt/builder-st02",
+      worktreeBranch: "conductor-wt/builder-st02",
+    });
+    const registry = new RunRegistry();
+    forceTerminate(bare, "stalled", registry);
+    forceTerminate(kept, "stalled", registry);
+
+    assert.equal(kept.errorMessage, bare.errorMessage, "the stall error, untouched");
+    assert.equal(kept.failureClass, bare.failureClass);
+    assert.ok(kept.worktreeKept?.includes("/r/.worktrees/conductor-wt/builder-st02"), kept.worktreeKept);
+    assert.equal(bare.worktreeKept, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -2454,6 +2454,7 @@ export function sendToRun(
   run.finishedAt = undefined;
   run.exitCode = undefined;
   run.errorMessage = undefined;
+  run.worktreeKept = undefined;
   run.stopReason = undefined;
   run.lastToolCall = undefined;
   // Reseed watchdog timing so the next tick doesn't compute silentMs
@@ -2735,8 +2736,7 @@ export async function settleWorktree(run: Run, terminal: RunStatus): Promise<Run
     (terminal !== "completed" && branchHasUnmergedCommits(gitRoot, run.worktreeBaseBranch ?? "master", branch));
   releaseWorktree(run, { keepBranch });
   if (terminal !== "completed" && keepBranch && !run.worktreePath) {
-    const hint = `branch ${branch} kept: merge it with cd ${gitRoot} && git merge ${branch}, or delete it with git branch -D ${branch}`;
-    run.errorMessage = run.errorMessage ? `${run.errorMessage}; ${hint}` : hint;
+    run.worktreeKept = `branch ${branch} kept: merge it with cd ${gitRoot} && git merge ${branch}, or delete it with git branch -D ${branch}`;
   }
   return terminal;
 }
@@ -2745,7 +2745,7 @@ export async function settleWorktree(run: Run, terminal: RunStatus): Promise<Run
  * Remove a settled run's worktree directory and, unless `keepBranch`, its
  * branch, clearing the fields that no longer point anywhere. Shared by
  * finalize and `/conductor worktree merge`. A directory with uncommitted
- * changes is never force-removed: both stay, with a recovery hint.
+ * changes is never force-removed: both stay, with a hint in `run.worktreeKept`.
  * Best-effort: on failure the fields stay set so GC can find the orphan.
  */
 export function releaseWorktree(run: Run, opts: { keepBranch: boolean }): void {
@@ -2757,10 +2757,9 @@ export function releaseWorktree(run: Run, opts: { keepBranch: boolean }): void {
     branch: run.worktreeBranch,
   };
   if (worktreeHasUncommittedChanges(wtSpec.worktreePath)) {
-    const hint =
+    run.worktreeKept =
       `worktree kept: uncommitted changes in ${wtSpec.worktreePath}; commit them to ${wtSpec.branch} ` +
       `or discard them, then git worktree remove ${wtSpec.worktreePath}`;
-    run.errorMessage = run.errorMessage ? `${run.errorMessage}; ${hint}` : hint;
     return;
   }
   if (removeWorktree(wtSpec, opts)) {
@@ -3137,15 +3136,14 @@ export function forceTerminate(
     errorMessage: run.errorMessage,
   });
   // A killed run never reaches settleWorktree: its worktree and branch
-  // stay, since they may hold partial committed work. Stamped after the
-  // classification so the paths can't sway it; GC reclaims it on its TTL.
+  // stay, since they may hold partial committed work. GC reclaims it on
+  // its TTL. The hint is a card note, apart from errorMessage (v0.20 W4).
   if (run.worktreePath && run.worktreeBranch) {
     const gitRoot = dirname(dirname(dirname(run.worktreePath)));
-    const hint =
+    run.worktreeKept =
       `worktree kept with any partial work: ${run.worktreePath} (branch ${run.worktreeBranch}); ` +
       `keep it with cd ${gitRoot} && git merge ${run.worktreeBranch}, or discard it (with every other kept ` +
       `worktree) via /conductor worktree clean`;
-    run.errorMessage = run.errorMessage ? `${run.errorMessage}; ${hint}` : hint;
   }
   registry.notify(run);
   void writeRecord(run);

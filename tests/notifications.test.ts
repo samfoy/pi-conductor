@@ -563,3 +563,38 @@ test(
     assert.doesNotMatch(out, /<hook>/);
   },
 );
+
+// v0.20 W4: a kept worktree or branch is a note, not an error, so a
+// successful run that kept a leftover doesn't read as a failure.
+test("formatCompletionNotification: a kept-worktree hint renders in <worktree-kept>, not <error>", () => {
+  const out = formatCompletionNotification(makeRun({
+    status: "completed",
+    worktreePath: "/r/.worktrees/conductor-wt/oracle-abcd",
+    worktreeBranch: "conductor-wt/oracle-abcd",
+    worktreeKept: "worktree kept: uncommitted changes in /r/.worktrees/conductor-wt/oracle-abcd",
+  }));
+  assert.doesNotMatch(out, /<error>/);
+  assert.ok(
+    out.includes(
+      `  <worktree-kept path="/r/.worktrees/conductor-wt/oracle-abcd" branch="conductor-wt/oracle-abcd">` +
+        `worktree kept: uncommitted changes in /r/.worktrees/conductor-wt/oracle-abcd</worktree-kept>`,
+    ),
+    out,
+  );
+});
+
+test("formatCompletionNotification: a genuine error stays in <error>, apart from the kept-branch hint", () => {
+  const out = formatCompletionNotification(makeRun({
+    status: "killed",
+    errorMessage: "watchdog: hard-stalled (no events past hard threshold)",
+    worktreeBranch: "conductor-wt/oracle-abcd",
+    worktreeKept: "branch conductor-wt/oracle-abcd kept",
+  }));
+  assert.match(out, /<error>watchdog: hard-stalled \(no events past hard threshold\)<\/error>/);
+  assert.match(out, /<worktree-kept branch="conductor-wt\/oracle-abcd">branch conductor-wt\/oracle-abcd kept<\/worktree-kept>/);
+});
+
+test("formatCompletionNotification: no kept hint, no <worktree-kept>", () => {
+  const out = formatCompletionNotification(makeRun({ worktreeBranch: "conductor-wt/oracle-abcd" }));
+  assert.doesNotMatch(out, /<worktree-kept/);
+});

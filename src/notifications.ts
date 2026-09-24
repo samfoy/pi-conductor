@@ -149,6 +149,14 @@ export function formatCompletionNotification(run: Run): string {
   if (run.errorMessage) {
     lines.push(`  <error>${escapeXml(run.errorMessage)}</error>`);
   }
+  // v0.20 W4: a kept worktree or branch is a note, never an <error>.
+  if (run.worktreeKept) {
+    const attrs = [
+      run.worktreePath && ` path="${escapeXmlAttr(run.worktreePath)}"`,
+      run.worktreeBranch && ` branch="${escapeXmlAttr(run.worktreeBranch)}"`,
+    ].filter(Boolean).join("");
+    lines.push(`  <worktree-kept${attrs}>${escapeXml(run.worktreeKept)}</worktree-kept>`);
+  }
   // v0.11 slice 5 — <hook> block. Present when the run had a hook
   // (passed or failed); absent when no hook ran.
   if (run.hookResult) {
@@ -259,6 +267,10 @@ function escapeXml(s: string): string {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+function escapeXmlAttr(s: string): string {
+  return escapeXml(s).replace(/"/g, "&quot;");
 }
 
 // ── v0.10 watchdog stall advisory ───────────────────────────────
@@ -376,6 +388,7 @@ export function buildCompletionMessage(run: Run): NotificationMessage {
 
   const notes: NotificationNote[] = [];
   if (run.errorMessage) notes.push({ slot: "error", text: run.errorMessage });
+  if (run.worktreeKept) notes.push({ slot: "warning", text: run.worktreeKept });
   if (run.nonSubstantiveFinal) {
     notes.push({
       slot: "warning",
