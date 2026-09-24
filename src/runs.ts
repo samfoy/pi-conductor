@@ -1813,42 +1813,9 @@ function runPiSubprocess(
     applySubstanceCheck(run, terminal);
     discoverSessionPathIfMissing(run, opts.sessionDir);
     run.proc = undefined;
-    // v0.14 worktree auto-merge: call mergeWorktree on `completed` runs
-    // with a real merge strategy. On conflict, terminal flips to
-    // `merge_conflict` and worktreePath is intentionally kept so the
-    // user can resolve manually. applyMergeToTerminal clears worktreePath
-    // on success so the removeWorktree block below is a no-op.
-    if (run.worktreePath && run.mergeStrategy && run.mergeStrategy !== "none") {
-      const gitRoot = dirname(dirname(dirname(run.worktreePath)));
-      terminal = await applyMergeToTerminal(run, gitRoot, terminal);
-      // Re-apply the terminal to the run record now that merge may have flipped it.
-      if (terminal === "merge_conflict") {
-        run.status = terminal;
-      }
-    }
-    // v0.13 worktree-per-persona: remove the worktree on terminal.
-    // Best-effort: failure is logged but does NOT block finalize.
-    // worktreePath is cleared only on success so the GC delete path
-    // can find and clean up orphaned worktrees.
-    // Note: on merge_conflict, worktreePath is preserved by applyMergeToTerminal
-    // and we skip removal here intentionally.
-    if (run.worktreePath && run.worktreeBranch) {
-      const wtSpec = {
-        // Reconstruct gitRoot: <gitRoot>/.worktrees/conductor-wt/<run-id> → 3 levels up
-        gitRoot: dirname(dirname(dirname(run.worktreePath))),
-        worktreePath: run.worktreePath,
-        branch: run.worktreeBranch,
-      };
-      const removed = removeWorktree(wtSpec);
-      if (removed) {
-        run.worktreePath = undefined;
-        run.worktreeBranch = undefined;
-      } else {
-        process.stderr.write(
-          `[conductor] worktree removal failed for ${run.id}; GC will clean up\n`,
-        );
-      }
-    }
+    terminal = await settleWorktree(run, terminal);
+    // Re-apply the terminal to the run record now that merge may have flipped it.
+    if (terminal === "merge_conflict") run.status = terminal;
     // v0.18 failure classification: stamp non-completed terminals on the
     // natural-exit path (failed / hook_failed / merge_conflict). The
     // forceTerminate path stamps timeout/stall/turns itself and short-
@@ -2639,8 +2606,8 @@ export function applySubstanceCheck(run: Run, terminal: RunStatus): void {
  *     terminal !== "completed", no worktreePath, no mergeStrategy, or
  *     mergeStrategy === "none".
  *   - Calls `mergeWorktree` with the stored spec + strategy.
- *   - On success: clears `run.worktreePath` / `run.worktreeBranch` so the
- *     normal removeWorktree path in finalize is skipped (no double-remove).
+ *   - On success: records `run.mergeResult` and leaves the worktree fields
+ *     set; {@link settleWorktree} removes the worktree and clears them.
  *   - On conflict or error: sets `run.status` to `"merge_conflict"`, sets
  *     `run.errorMessage` with conflict file list and recovery hint, and
  *     returns `"merge_conflict"` (worktreePath is intentionally preserved).
@@ -2652,8 +2619,8 @@ export function applySubstanceCheck(run: Run, terminal: RunStatus): void {
  * The `gitRoot` argument is the repository root (derived from
  * `run.worktreePath` in production; injected in tests).
  *
- * Exported for unit-test access; production callsite is the `finalize`
- * closure inside `attachLifecycleHandlers`.
+ * Exported for unit-test access; production callsite is
+ * {@link settleWorktree}.
  */
 export async function applyMergeToTerminal(
   run: Run,
@@ -2693,14 +2660,7 @@ export async function applyMergeToTerminal(
 
   run.mergeResult = result;
 
-  if (result.success) {
-    // Worktree will be removed by the normal removeWorktree step in finalize.
-    // Clear the path fields here so the removal uses the already-set spec,
-    // and GC knows the work is done.
-    run.worktreePath = undefined;
-    run.worktreeBranch = undefined;
-    return terminal;
-  }
+  if (result.success) return terminal;
 
   // Conflict or unexpected error — preserve worktree for manual resolution.
   const conflictList = result.conflicts?.join(", ") ?? "(unknown)";
@@ -2709,6 +2669,38 @@ export async function applyMergeToTerminal(
     ? `merge conflict in: ${conflictList}; worktree preserved at ${run.worktreePath}; ${hint}`
     : (result.errorMessage ?? "merge failed");
   return "merge_conflict";
+}
+
+/**
+ * Finalize's worktree step: merge back (v0.14), then remove the worktree
+ * and delete its branch (v0.13). `merge_conflict` keeps both for manual
+ * resolution. Best-effort removal: failure is logged, and worktreePath
+ * stays set so the GC delete path can find the orphan. Exported for tests.
+ */
+export async function settleWorktree(run: Run, terminal: RunStatus): Promise<RunStatus> {
+  if (run.worktreePath && run.mergeStrategy && run.mergeStrategy !== "none") {
+    const gitRoot = dirname(dirname(dirname(run.worktreePath)));
+    terminal = await applyMergeToTerminal(run, gitRoot, terminal);
+  }
+  if (terminal === "merge_conflict") return terminal;
+  if (run.worktreePath && run.worktreeBranch) {
+    const wtSpec = {
+      // Reconstruct gitRoot: <gitRoot>/.worktrees/conductor-wt/<run-id> → 3 levels up
+      gitRoot: dirname(dirname(dirname(run.worktreePath))),
+      worktreePath: run.worktreePath,
+      branch: run.worktreeBranch,
+    };
+    const removed = removeWorktree(wtSpec);
+    if (removed) {
+      run.worktreePath = undefined;
+      run.worktreeBranch = undefined;
+    } else {
+      process.stderr.write(
+        `[conductor] worktree removal failed for ${run.id}; GC will clean up\n`,
+      );
+    }
+  }
+  return terminal;
 }
 
 /**

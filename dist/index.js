@@ -3222,31 +3222,8 @@ function runPiSubprocess(run, piArgs, opts) {
     applySubstanceCheck(run, terminal);
     discoverSessionPathIfMissing(run, opts.sessionDir);
     run.proc = void 0;
-    if (run.worktreePath && run.mergeStrategy && run.mergeStrategy !== "none") {
-      const gitRoot2 = dirname7(dirname7(dirname7(run.worktreePath)));
-      terminal = await applyMergeToTerminal(run, gitRoot2, terminal);
-      if (terminal === "merge_conflict") {
-        run.status = terminal;
-      }
-    }
-    if (run.worktreePath && run.worktreeBranch) {
-      const wtSpec = {
-        // Reconstruct gitRoot: <gitRoot>/.worktrees/conductor-wt/<run-id> → 3 levels up
-        gitRoot: dirname7(dirname7(dirname7(run.worktreePath))),
-        worktreePath: run.worktreePath,
-        branch: run.worktreeBranch
-      };
-      const removed = removeWorktree(wtSpec);
-      if (removed) {
-        run.worktreePath = void 0;
-        run.worktreeBranch = void 0;
-      } else {
-        process.stderr.write(
-          `[conductor] worktree removal failed for ${run.id}; GC will clean up
-`
-        );
-      }
-    }
+    terminal = await settleWorktree(run, terminal);
+    if (terminal === "merge_conflict") run.status = terminal;
     if (terminal !== "completed") {
       const tail = terminal === "hook_failed" ? run.hookResult?.tailText ?? stderr : stderr;
       run.failureClass = classifyFailure({
@@ -3636,15 +3613,37 @@ async function applyMergeToTerminal(run, gitRoot2, terminal) {
     { strategy: run.mergeStrategy, baseBranch, commitMessage }
   );
   run.mergeResult = result;
-  if (result.success) {
-    run.worktreePath = void 0;
-    run.worktreeBranch = void 0;
-    return terminal;
-  }
+  if (result.success) return terminal;
   const conflictList = result.conflicts?.join(", ") ?? "(unknown)";
   const hint = `resolve manually: cd ${gitRoot2} && git merge ${run.worktreeBranch}`;
   run.errorMessage = result.conflicts ? `merge conflict in: ${conflictList}; worktree preserved at ${run.worktreePath}; ${hint}` : result.errorMessage ?? "merge failed";
   return "merge_conflict";
+}
+async function settleWorktree(run, terminal) {
+  if (run.worktreePath && run.mergeStrategy && run.mergeStrategy !== "none") {
+    const gitRoot2 = dirname7(dirname7(dirname7(run.worktreePath)));
+    terminal = await applyMergeToTerminal(run, gitRoot2, terminal);
+  }
+  if (terminal === "merge_conflict") return terminal;
+  if (run.worktreePath && run.worktreeBranch) {
+    const wtSpec = {
+      // Reconstruct gitRoot: <gitRoot>/.worktrees/conductor-wt/<run-id> → 3 levels up
+      gitRoot: dirname7(dirname7(dirname7(run.worktreePath))),
+      worktreePath: run.worktreePath,
+      branch: run.worktreeBranch
+    };
+    const removed = removeWorktree(wtSpec);
+    if (removed) {
+      run.worktreePath = void 0;
+      run.worktreeBranch = void 0;
+    } else {
+      process.stderr.write(
+        `[conductor] worktree removal failed for ${run.id}; GC will clean up
+`
+      );
+    }
+  }
+  return terminal;
 }
 function applyChainIfPresent(run, terminal, onChain) {
   if (terminal !== "completed") return;
@@ -10700,6 +10699,7 @@ function index_default(pi) {
       });
       watchdogDispose = wd.start();
     }
+    if (completionWakeTimer) clearInterval(completionWakeTimer);
     completionWakeTimer = setInterval(() => {
       const result = completionWakeTracker.tick(Date.now());
       for (const runId of result.refire) {

@@ -581,7 +581,9 @@ export default function (pi: ExtensionAPI): void {
     // session_shutdown). The interval is independent of the watchdog's
     // 30s tick because the failure modes are independent: watchdog
     // detects silent sub-agents; this detects silent CONDUCTOR not
-    // waking after the sub-agent finished.
+    // waking after the sub-agent finished. pi can fire session_start again
+    // without a shutdown, so drop the previous start's timer first.
+    if (completionWakeTimer) clearInterval(completionWakeTimer);
     completionWakeTimer = setInterval(() => {
       const result = completionWakeTracker.tick(Date.now());
       for (const runId of result.refire) {

@@ -6,11 +6,12 @@
  * runs-hook-integration.test.ts / applyHookToTerminal.
  *
  * Coverage:
- *   - squash success: run.mergeResult.success, worktreePath cleared
+ *   - squash success: run.mergeResult.success, worktree fields left for
+ *     settleWorktree to remove (tests/worktree-finalize.test.ts)
  *   - merge conflict: run.status flips to merge_conflict, worktreePath kept
  *   - none strategy: no-op, run unchanged
  *   - terminal !== completed: no-op
- *   - empty diff (nothingToCommit): success, worktreePath cleared
+ *   - empty diff (nothingToCommit): success, worktree fields left set
  */
 
 import test from "node:test";
@@ -91,7 +92,7 @@ function makeRun(overrides: Partial<Run> = {}): Run {
 // ── Tests ──────────────────────────────────────────────────────────────
 
 test(
-  "applyMergeToTerminal: squash success — mergeResult.success, worktreePath cleared",
+  "applyMergeToTerminal: squash success — mergeResult.success, worktree fields left for removal",
   { timeout: 15_000 },
   async () => {
     const root = tmpDir();
@@ -110,8 +111,9 @@ test(
       assert.equal(terminal, "completed", "terminal should stay completed on success");
       assert.ok(run.mergeResult, "mergeResult should be set");
       assert.equal(run.mergeResult!.success, true, "mergeResult.success should be true");
-      assert.equal(run.worktreePath, undefined, "worktreePath should be cleared on success");
-      assert.equal(run.worktreeBranch, undefined, "worktreeBranch should be cleared on success");
+      // Clearing these before settleWorktree's removal left the worktree on disk.
+      assert.equal(run.worktreePath, wtPath, "worktreePath stays set until the worktree is removed");
+      assert.equal(run.worktreeBranch, "conductor-wt/builder-abc1", "worktreeBranch stays set until removal");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -223,7 +225,7 @@ test(
 );
 
 test(
-  "applyMergeToTerminal: empty diff (nothingToCommit) — success, worktreePath cleared",
+  "applyMergeToTerminal: empty diff (nothingToCommit) — success, worktree fields left for removal",
   { timeout: 15_000 },
   async () => {
     const root = tmpDir();
@@ -253,7 +255,7 @@ test(
       assert.ok(run.mergeResult, "mergeResult should be set");
       assert.equal(run.mergeResult!.success, true);
       assert.ok(run.mergeResult!.nothingToCommit === true, "nothingToCommit should be flagged");
-      assert.equal(run.worktreePath, undefined, "worktreePath cleared even on nothingToCommit");
+      assert.equal(run.worktreePath, wtPath, "worktreePath stays set until the worktree is removed");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

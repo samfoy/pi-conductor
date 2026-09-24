@@ -18,11 +18,11 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import conductor from "../src/index.ts";
 import { reconcileOrphansAtStartup } from "../src/reconcile-startup.ts";
 import { applyMergeToTerminal } from "../src/runs.ts";
 import { emptyUsage, toRunRecord, type Run, type RunRecord } from "../src/types.ts";
 import { gitTestEnv } from "./helpers/git-env.ts";
+import { loadConductor, stubCtx } from "./helpers/stub-pi.ts";
 
 function stubRegistry() {
   const runs = new Map<string, Run>();
@@ -189,33 +189,6 @@ test("reconcile then completion: a re-adopted worktree run lands in merge_confli
 
 // ── (a) a conductor child's session_start never reconciles ──────────
 
-function stubPi() {
-  const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
-  const pi = {
-    on: (ev: string, h: (event: unknown, ctx: unknown) => unknown) => void handlers.set(ev, [...(handlers.get(ev) ?? []), h]),
-    registerTool: () => {},
-    registerCommand: () => {},
-    registerMessageRenderer: () => {},
-    registerShortcut: () => {},
-    sendMessage: () => {},
-    appendEntry: () => {},
-  };
-  conductor(pi as any);
-  return async (ev: string, event: unknown, ctx: unknown) => {
-    for (const h of handlers.get(ev) ?? []) await h(event, ctx);
-  };
-}
-
-function stubCtx(cwd: string) {
-  const theme = { fg: (_s: string, t: string) => t, bold: (t: string) => t };
-  return {
-    cwd,
-    hasUI: false,
-    ui: { notify: () => {}, setWidget: () => {}, onTerminalInput: () => () => {}, theme },
-    sessionManager: { getBranch: () => [], getEntries: () => [], getLeafId: () => null, getSessionId: () => "sess" },
-  };
-}
-
 /**
  * Fire session_start against a runs root holding one dead `running`
  * record and return its on-disk status once session_start's deferred
@@ -240,7 +213,7 @@ async function statusAfterSessionStart(child: boolean): Promise<string> {
     );
     writeFileSync(record.recordPath, JSON.stringify(record));
 
-    const fire = stubPi();
+    const fire = loadConductor();
     const deferred: Array<() => unknown> = [];
     globalThis.setImmediate = ((cb: (...a: unknown[]) => unknown, ...args: unknown[]) => {
       deferred.push(() => cb(...args));
