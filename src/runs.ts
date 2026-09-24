@@ -29,7 +29,7 @@ import { noteAllocatedId } from "./gc/id-reuse.ts";
 import { applyEvent, qualifyModel } from "./event-handler.ts";
 import { filterParentContext, filterParentContextCompact } from "./context-filter.ts";
 import { resolveInheritContext } from "./inherit-context.ts";
-import { seedSessionFile } from "./session-seed.ts";
+import { seedSessionFile, sessionHeaderCwd } from "./session-seed.ts";
 import { isNonSubstantiveFinalMessage } from "./substance-check.ts";
 import { resolveOnCompleteHook, type HookCascadeInput } from "./hook-cascade.ts";
 import { resolveMaxTurns, resolveGraceTurns } from "./turn-limit.ts";
@@ -38,7 +38,7 @@ import { classifyFailure, shouldRetry } from "./failure-classify.ts";
 import { resolveRetryPolicy } from "./retry.ts";
 import { recordRunOutcome } from "./memory.ts";
 import { loadConfigWithErrors } from "./config.ts";
-import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage, currentBranch, worktreeHasUncommittedChanges, branchHasUnmergedCommits } from "./worktree.ts";
+import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage, currentBranch, worktreeHasUncommittedChanges, branchHasUnmergedCommits, restoreWorktree, refExists } from "./worktree.ts";
 import { readProcessStartTime } from "./reconcile-startup.ts";
 import { ConductorEventEmitter } from "./conductor-events.ts";
 import { builtinPersonasDir, effectiveExcludeTools } from "./personas.ts";
@@ -2309,6 +2309,43 @@ function enqueueRpcSendWithAck(
 }
 
 /**
+ * pi resumes in its session header's cwd, which for a worktree run is the
+ * worktree, and exits 1 when that directory is gone. A merge or a clean
+ * release removes it, so put a worktree back at that path first: on the
+ * kept branch when there is one, else on `conductor-wt/<id>-r<n>` from the
+ * base tip, which holds the merged work (v0.20 W3). The spawn's record
+ * write persists the fields. Returns a rejection reason, having changed
+ * nothing, when the repo or base branch is gone. Exported for tests.
+ */
+export function restoreResumeWorktree(run: Run, readSession: () => string): string | undefined {
+  let path: string | undefined;
+  try {
+    path = sessionHeaderCwd(readSession());
+  } catch {
+    return undefined;
+  }
+  if (!path || existsSync(path)) return undefined;
+  const gitRoot = dirname(dirname(dirname(path)));
+  if (path !== join(gitRoot, ".worktrees", "conductor-wt", run.id)) return undefined;
+  const spawnFresh = `spawn a fresh ${run.persona} instead`;
+  const kept = run.worktreeBranch && refExists(gitRoot, `refs/heads/${run.worktreeBranch}`) ? run.worktreeBranch : undefined;
+  const base = run.worktreeBaseBranch ?? "master";
+  if (!kept && !refExists(gitRoot, base)) {
+    const gone = existsSync(gitRoot) ? `its base branch ${base}` : `its repo ${gitRoot}`;
+    return `cannot resume ${run.id}: its worktree ${path} was removed, and ${gone} is gone; ${spawnFresh}.`;
+  }
+  const branch = kept ?? `conductor-wt/${run.id}-r${(run.resumeCount ?? 0) + 1}`;
+  try {
+    restoreWorktree({ gitRoot, worktreePath: path, branch }, kept ? undefined : base);
+  } catch (e) {
+    return `cannot resume ${run.id}: re-creating its worktree failed: ${(e as Error).message}; ${spawnFresh}.`;
+  }
+  run.worktreePath = path;
+  run.worktreeBranch = branch;
+  return undefined;
+}
+
+/**
  * Continue an existing sub-agent's pi session with a new user-role message.
  *
  * Spawns a fresh `pi` subprocess pointed at the run's `sessionPath` via
@@ -2406,6 +2443,11 @@ export function sendToRun(
       reason: `sub-agent ${run.id} session file is missing on disk: ${run.sessionPath}`,
     };
   }
+  // resolveSendStrategy guarantees sessionPath is set on spawn-resume,
+  // but TS can't see through a free-function call — capture it.
+  const sessionPath = run.sessionPath as string;
+  const worktreeBlocker = restoreResumeWorktree(run, () => readFileSync(sessionPath, "utf8"));
+  if (worktreeBlocker) return { kind: "rejected", reason: worktreeBlocker };
 
   // Reset terminal state so listeners and the panel see this as a fresh run.
   run.status = "running";
@@ -2434,10 +2476,6 @@ export function sendToRun(
   if (opts.onCompleteHookTimeoutSeconds !== undefined)
     run.onCompleteHookTimeoutSeconds = opts.onCompleteHookTimeoutSeconds;
   opts.registry.notify(run);
-
-  // resolveSendStrategy guarantees sessionPath is set on spawn-resume,
-  // but TS can't see through a free-function call — capture it.
-  const sessionPath = run.sessionPath as string;
 
   run.model = resumeModel(run.model, () => readFileSync(sessionPath, "utf8"), opts.isRegisteredModel);
   const piArgs = buildResumePiArgs(run, trimmed);
@@ -2613,8 +2651,7 @@ export function applySubstanceCheck(run: Run, terminal: RunStatus): void {
  *     returns `"merge_conflict"` (worktreePath is intentionally preserved).
  *   - On a run startup reconcile re-adopted: no merge attempt; returns
  *     `"merge_conflict"` with a review-then-merge hint. Its spawn-time
- *     hook gate is gone (the per-call hook isn't persisted) and the resume
- *     that completed it ran in `run.cwd`, not the worktree.
+ *     hook gate is gone (the per-call hook isn't persisted).
  *
  * The `gitRoot` argument is the repository root (derived from
  * `run.worktreePath` in production; injected in tests).
@@ -2674,15 +2711,15 @@ export async function applyMergeToTerminal(
 /**
  * Finalize's worktree step: merge back (v0.14), then {@link releaseWorktree}.
  * `merge_conflict` keeps the worktree and branch for manual resolution.
- * So does a startup-reconciled run on every terminal: its resume ran in
- * run.cwd, so the worktree holds the dead process's only copy of its
- * work. The fields stay set for `/conductor worktree` and GC. A resume
- * that doesn't complete keeps them too: it ran in the worktree a kill or
- * a conflict kept, and never merged it. Without a
- * merge-back (`none` or unset) the branch is the deliverable (v0.16
- * chains diff it), so only the directory goes (v0.20 B3). Any other run
- * that wasn't merged keeps a branch holding unmerged commits, recorded for
- * `/conductor worktree list` and GC rule 5b (v0.20 W2). Exported for tests.
+ * So does a startup-reconciled run on every terminal: its hook gate is
+ * gone, and the worktree holds the dead process's work. The fields stay
+ * set for `/conductor worktree` and GC. A resume that doesn't complete
+ * keeps them too: it ran in the worktree a kill or a conflict kept, and
+ * never merged it. Without a merge-back (`none` or unset) the branch is
+ * the deliverable (v0.16 chains diff it), so only the directory goes
+ * (v0.20 B3). Any other run that wasn't merged keeps a branch holding
+ * unmerged commits, recorded for `/conductor worktree list` and GC rule
+ * 5b (v0.20 W2). Exported for tests.
  */
 export async function settleWorktree(run: Run, terminal: RunStatus): Promise<RunStatus> {
   if (!run.worktreePath || !run.worktreeBranch) return terminal;

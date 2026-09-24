@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
-import { seedSessionFile } from "../src/session-seed.ts";
+import { seedSessionFile, sessionHeaderCwd } from "../src/session-seed.ts";
 
 function tmpSessionPath(): string {
   const dir = mkdtempSync(join(tmpdir(), "conductor-seed-"));
@@ -177,5 +177,19 @@ test("seedSessionFile: creates intermediate directories", () => {
     } catch {
       // best effort
     }
+  }
+});
+
+test("sessionHeaderCwd reads back the cwd seedSessionFile wrote, and is undefined without a header", () => {
+  const dir = mkdtempSync(join(tmpdir(), "session-seed-cwd-"));
+  try {
+    const path = join(dir, "s.jsonl");
+    seedSessionFile(path, [], "/repo/.worktrees/conductor-wt/builder-abcd");
+    assert.equal(sessionHeaderCwd(readFileSync(path, "utf8")), "/repo/.worktrees/conductor-wt/builder-abcd");
+    assert.equal(sessionHeaderCwd(`{"type":"message","cwd":"/x"}\n`), undefined);
+    assert.equal(sessionHeaderCwd("not json"), undefined);
+    assert.equal(sessionHeaderCwd(""), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -85,3 +85,17 @@ export function seedSessionFile(
 
   writeFileSync(path, lines.join("\n") + "\n");
 }
+
+/**
+ * The cwd in a session file's header (its first line), which is where
+ * `pi --session` resumes, whatever the process cwd. Undefined when the
+ * text has no parseable header.
+ */
+export function sessionHeaderCwd(text: string): string | undefined {
+  try {
+    const header = JSON.parse(text.split("\n", 1)[0] ?? "");
+    return header?.type === "session" && typeof header.cwd === "string" ? header.cwd : undefined;
+  } catch {
+    return undefined;
+  }
+}

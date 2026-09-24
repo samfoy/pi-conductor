@@ -6,6 +6,7 @@
  *   - `resolveWorktreeSpec`    — path computation + git root detection (I/O: git CLI only)
  *   - `createWorktree`         — `git worktree add` + `ensureWorktreeGitignore`
  *   - `removeWorktree`         — `git worktree remove --force` + `git branch -D` (best-effort)
+ *   - `restoreWorktree`        — re-create a removed worktree at its old path (resume)
  *   - `branchHasUnmergedCommits` — does a branch hold commits its base can't reach
  *   - `holdsKeptWorktree`      — does a record still hold a worktree or branch GC must reclaim
  *   - `worktreeHasUncommittedChanges` — `git status --porcelain` guard before a removal
@@ -114,11 +115,33 @@ export function createWorktree(
     ensureWorktreeGitignore(spec.gitRoot);
   }
 
+  addWorktree(spec, `-b ${JSON.stringify(spec.branch)} HEAD`);
+}
+
+/**
+ * Put a removed worktree back at its old path (v0.20 W3): on `spec.branch`
+ * as it stands, or, given `startPoint`, on a new `spec.branch` from there.
+ * Prunes first so a stale registration of the path can't block it. Throws
+ * on failure, like {@link createWorktree}.
+ */
+export function restoreWorktree(spec: WorktreeSpec, startPoint?: string): void {
+  tryGitExec("git worktree prune", spec.gitRoot);
+  const branch = JSON.stringify(spec.branch);
+  addWorktree(spec, startPoint === undefined ? branch : `-b ${branch} ${JSON.stringify(startPoint)}`);
+}
+
+/** Whether `ref` names a commit in the repo at `gitRoot`; false when the repo is gone. */
+export function refExists(gitRoot: string, ref: string): boolean {
+  return tryGitExec(`git rev-parse --verify --quiet ${JSON.stringify(`${ref}^{commit}`)}`, gitRoot) !== null;
+}
+
+/** `git worktree add <spec.worktreePath> <target>`, with git's stderr in the thrown error. */
+function addWorktree(spec: WorktreeSpec, target: string): void {
   mkdirSync(dirname(spec.worktreePath), { recursive: true });
 
   try {
     execSync(
-      `git worktree add ${JSON.stringify(spec.worktreePath)} -b ${JSON.stringify(spec.branch)} HEAD`,
+      `git worktree add ${JSON.stringify(spec.worktreePath)} ${target}`,
       { cwd: spec.gitRoot, stdio: "pipe", env: gitEnv() },
     );
   } catch (err: unknown) {

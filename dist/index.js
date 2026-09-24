@@ -171,9 +171,11 @@ __export(worktree_exports, {
   ensureWorktreeGitignore: () => ensureWorktreeGitignore,
   holdsKeptWorktree: () => holdsKeptWorktree,
   mergeWorktree: () => mergeWorktree,
+  refExists: () => refExists,
   removeWorktree: () => removeWorktree,
   resolveMergeStrategy: () => resolveMergeStrategy,
   resolveWorktreeSpec: () => resolveWorktreeSpec,
+  restoreWorktree: () => restoreWorktree,
   worktreeHasUncommittedChanges: () => worktreeHasUncommittedChanges,
   worktreeSpecFromRun: () => worktreeSpecFromRun
 });
@@ -217,10 +219,21 @@ function createWorktree(spec, opts = {}) {
   if (!opts.skipGitignore) {
     ensureWorktreeGitignore(spec.gitRoot);
   }
+  addWorktree(spec, `-b ${JSON.stringify(spec.branch)} HEAD`);
+}
+function restoreWorktree(spec, startPoint) {
+  tryGitExec("git worktree prune", spec.gitRoot);
+  const branch = JSON.stringify(spec.branch);
+  addWorktree(spec, startPoint === void 0 ? branch : `-b ${branch} ${JSON.stringify(startPoint)}`);
+}
+function refExists(gitRoot2, ref) {
+  return tryGitExec(`git rev-parse --verify --quiet ${JSON.stringify(`${ref}^{commit}`)}`, gitRoot2) !== null;
+}
+function addWorktree(spec, target) {
   mkdirSync4(dirname5(spec.worktreePath), { recursive: true });
   try {
     execSync(
-      `git worktree add ${JSON.stringify(spec.worktreePath)} -b ${JSON.stringify(spec.branch)} HEAD`,
+      `git worktree add ${JSON.stringify(spec.worktreePath)} ${target}`,
       { cwd: spec.gitRoot, stdio: "pipe", env: gitEnv() }
     );
   } catch (err) {
@@ -1494,6 +1507,14 @@ function seedSessionFile(path, messages, cwd) {
     parentId = id;
   }
   writeFileSync(path, lines.join("\n") + "\n");
+}
+function sessionHeaderCwd(text) {
+  try {
+    const header = JSON.parse(text.split("\n", 1)[0] ?? "");
+    return header?.type === "session" && typeof header.cwd === "string" ? header.cwd : void 0;
+  } catch {
+    return void 0;
+  }
 }
 
 // src/substance-check.ts
@@ -3467,6 +3488,33 @@ function enqueueRpcSendWithAck(run, type, message) {
   }
   return { kind: "queued", ack: ackPromise };
 }
+function restoreResumeWorktree(run, readSession) {
+  let path;
+  try {
+    path = sessionHeaderCwd(readSession());
+  } catch {
+    return void 0;
+  }
+  if (!path || existsSync6(path)) return void 0;
+  const gitRoot2 = dirname7(dirname7(dirname7(path)));
+  if (path !== join7(gitRoot2, ".worktrees", "conductor-wt", run.id)) return void 0;
+  const spawnFresh = `spawn a fresh ${run.persona} instead`;
+  const kept = run.worktreeBranch && refExists(gitRoot2, `refs/heads/${run.worktreeBranch}`) ? run.worktreeBranch : void 0;
+  const base = run.worktreeBaseBranch ?? "master";
+  if (!kept && !refExists(gitRoot2, base)) {
+    const gone = existsSync6(gitRoot2) ? `its base branch ${base}` : `its repo ${gitRoot2}`;
+    return `cannot resume ${run.id}: its worktree ${path} was removed, and ${gone} is gone; ${spawnFresh}.`;
+  }
+  const branch = kept ?? `conductor-wt/${run.id}-r${(run.resumeCount ?? 0) + 1}`;
+  try {
+    restoreWorktree({ gitRoot: gitRoot2, worktreePath: path, branch }, kept ? void 0 : base);
+  } catch (e) {
+    return `cannot resume ${run.id}: re-creating its worktree failed: ${e.message}; ${spawnFresh}.`;
+  }
+  run.worktreePath = path;
+  run.worktreeBranch = branch;
+  return void 0;
+}
 function sendToRun(run, message, opts) {
   const trimmed = message.trim();
   if (!trimmed) {
@@ -3509,6 +3557,9 @@ function sendToRun(run, message, opts) {
       reason: `sub-agent ${run.id} session file is missing on disk: ${run.sessionPath}`
     };
   }
+  const sessionPath = run.sessionPath;
+  const worktreeBlocker = restoreResumeWorktree(run, () => readFileSync6(sessionPath, "utf8"));
+  if (worktreeBlocker) return { kind: "rejected", reason: worktreeBlocker };
   run.status = "running";
   run.finishedAt = void 0;
   run.exitCode = void 0;
@@ -3524,7 +3575,6 @@ function sendToRun(run, message, opts) {
   if (opts.onCompleteHookTimeoutSeconds !== void 0)
     run.onCompleteHookTimeoutSeconds = opts.onCompleteHookTimeoutSeconds;
   opts.registry.notify(run);
-  const sessionPath = run.sessionPath;
   run.model = resumeModel(run.model, () => readFileSync6(sessionPath, "utf8"), opts.isRegisteredModel);
   const piArgs = buildResumePiArgs(run, trimmed);
   const done = runPiSubprocess(run, piArgs, {

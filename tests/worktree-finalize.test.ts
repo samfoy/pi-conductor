@@ -57,21 +57,26 @@ function worktreeWithCommit(repo: string, id: string, file: string, content: str
 const branchExists = (repo: string, branch: string): boolean => git(repo, `branch --list ${branch}`).trim() !== "";
 
 /**
- * A PI_BIN stub. `onResume` runs for `--session` (a resume) and `onSpawn`
- * for a fresh spawn, which first writes a session file whose header cwd is
- * the process cwd, as pi does, so the run is resumable.
+ * A PI_BIN stub that handles cwd the way pi 0.87.1 does. A fresh spawn
+ * writes a session file whose header cwd is the process cwd, then runs
+ * `onSpawn`. A resume (`--session`) moves to the header's cwd, or exits 1
+ * like pi's MissingSessionCwdError when it's gone, then runs `onResume`.
  */
 function writePiStub(root: string, parts: { onSpawn: string; onResume: string }): string {
   const stub = join(root, "pi-stub.mjs");
   writeFileSync(
     stub,
     `import { execSync } from "node:child_process";\n` +
-      `import { mkdirSync, writeFileSync } from "node:fs";\n` +
+      `import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";\n` +
       `import { join } from "node:path";\n` +
       `const args = process.argv.slice(2);\n` +
       `const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")));\n` +
       `const commit = (file, text, msg) => { writeFileSync(file, text); execSync(\`git add \${file} && git -c user.email=t@t -c user.name=T commit -m \${msg}\`, { env, stdio: "pipe" }); };\n` +
-      `if (args.includes("--session")) {\n${parts.onResume}\n} else {\n` +
+      `if (args.includes("--session")) {\n` +
+      `  const header = JSON.parse(readFileSync(args[args.indexOf("--session") + 1], "utf8").split("\\n")[0]);\n` +
+      `  if (!existsSync(header.cwd)) { process.stderr.write("Stored session working directory does not exist: " + header.cwd + "\\n"); process.exit(1); }\n` +
+      `  process.chdir(header.cwd);\n` +
+      `${parts.onResume}\n} else {\n` +
       `  const sd = args[args.indexOf("--session-dir") + 1];\n` +
       `  mkdirSync(sd, { recursive: true });\n` +
       `  writeFileSync(join(sd, "s.jsonl"), JSON.stringify({ type: "session", cwd: process.cwd() }) + "\\n");\n` +
@@ -577,3 +582,138 @@ test("spawnRun: a builder whose work fails the on_complete_hook keeps it on its 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// A merge removes the worktree, and pi resumes in the session header's cwd,
+// so a resume must put a worktree back at that path first (v0.20 W3).
+/** Resume body that waits for `<root>/go`, so the test can inspect the restored worktree mid-resume. */
+const gatedResume = (root: string, body: string): string =>
+  `const go = ${JSON.stringify(join(root, "go"))};\n` +
+  `const until = Date.now() + 10000;\n` +
+  `while (!existsSync(go)) { if (Date.now() > until) process.exit(3); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20); }\n` +
+  `writeFileSync(${JSON.stringify(join(root, "resume-cwd.txt"))}, process.cwd());\n` +
+  body;
+
+async function waitFor(what: string, check: () => boolean): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (!check()) {
+    assert.ok(Date.now() < deadline, `timed out waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+test("sendToRun: a merged builder's resume re-creates its worktree at the same path from the base tip, then merges back", { timeout: 30_000 }, async () => {
+  const { root, repo } = initRepo();
+  const stub = writePiStub(root, {
+    onSpawn: `commit("work.ts", "v1\\n", "work");`,
+    onResume: gatedResume(root, `if (!existsSync("work.ts")) process.exit(4);\ncommit("fix.ts", "critic fix\\n", "fix");`),
+  });
+  try {
+    await withPiStub(root, stub, async () => {
+      const registry = new RunRegistry();
+      const { run, done } = spawnRun({
+        registry, persona: builderPersona(), task: "probe", mode: "background", cwd: repo,
+        timeoutMs: 15_000, worktree: true, mergeStrategy: "squash",
+      });
+      const wtPath = run.worktreePath!;
+      await done;
+      assert.equal(run.status, "completed", run.errorMessage);
+      assert.equal(existsSync(wtPath), false, "precondition: the merge removed the worktree");
+      const baseTip = git(repo, "rev-parse mainline").trim();
+
+      const sent = sendToRun(run, "fix the critic findings", { registry, timeoutMs: 10_000 });
+      assert.equal(sent.kind, "started", sent.kind === "rejected" ? sent.reason : "");
+      const fresh = `conductor-wt/${run.id}-r1`;
+      assert.equal(run.worktreePath, wtPath, "the worktree is back at its old path");
+      assert.equal(run.worktreeBranch, fresh);
+      assert.equal(git(wtPath, "rev-parse HEAD").trim(), baseTip, "on a fresh branch from the base tip");
+      await waitFor("record.json to name the fresh branch", () =>
+        JSON.parse(readFileSync(run.recordPath, "utf8")).worktreeBranch === fresh);
+      writeFileSync(join(root, "go"), "");
+      await sent.done;
+
+      assert.equal(run.status, "completed", run.errorMessage);
+      assert.equal(readFileSync(join(root, "resume-cwd.txt"), "utf8"), wtPath, "the resume ran in the worktree");
+      assert.match(git(repo, "show --stat --oneline mainline"), /fix\.ts/, "the fix merged back");
+      assert.equal(existsSync(wtPath), false, "removed again after the merge");
+      assert.equal(branchExists(repo, fresh), false);
+      assert.equal(run.worktreePath, undefined);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("sendToRun: a hook_failed builder's resume continues on its kept branch, and both commits land", { timeout: 30_000 }, async () => {
+  const { root, repo } = initRepo();
+  const stub = writePiStub(root, {
+    onSpawn: `commit("work.ts", "v1\\n", "work");`,
+    onResume: `if (!existsSync("work.ts")) process.exit(4);\ncommit("fix.ts", "gate fix\\n", "fix");`,
+  });
+  try {
+    await withPiStub(root, stub, async () => {
+      const registry = new RunRegistry();
+      const { run, done } = spawnRun({
+        registry, persona: builderPersona(), task: "probe", mode: "background", cwd: repo,
+        timeoutMs: 15_000, worktree: true, mergeStrategy: "squash", onCompleteHook: "test -f fix.ts",
+      });
+      const wtPath = run.worktreePath!;
+      const branch = run.worktreeBranch!;
+      await done;
+      assert.equal(run.status, "hook_failed", run.errorMessage);
+      assert.equal(existsSync(wtPath), false, "precondition: the clean directory went");
+
+      const sent = sendToRun(run, "make the gate pass", { registry, timeoutMs: 10_000 });
+      assert.equal(sent.kind, "started", sent.kind === "rejected" ? sent.reason : "");
+      assert.equal(run.worktreeBranch, branch, "the kept branch, not a fresh one");
+      await sent.done;
+
+      assert.equal(run.status, "completed", run.errorMessage ?? run.hookResult?.tailText);
+      assert.match(git(repo, "show --stat --oneline mainline"), /work\.ts[\s\S]*fix\.ts|fix\.ts[\s\S]*work\.ts/, "both commits merged");
+      assert.equal(existsSync(wtPath), false);
+      assert.equal(branchExists(repo, branch), false);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const gone of ["base branch", "repo"] as const) {
+  test(`sendToRun: resuming a merged builder whose ${gone} is gone fails before spawning, and changes nothing`, { timeout: 30_000 }, async () => {
+    const { root, repo } = initRepo();
+    const resumed = join(root, "resumed.txt");
+    const stub = writePiStub(root, {
+      onSpawn: `commit("work.ts", "v1\\n", "work");`,
+      onResume: `writeFileSync(${JSON.stringify(resumed)}, "");`,
+    });
+    try {
+      await withPiStub(root, stub, async () => {
+        const registry = new RunRegistry();
+        const { run, done } = spawnRun({
+          registry, persona: builderPersona(), task: "probe", mode: "background", cwd: repo,
+          timeoutMs: 15_000, worktree: true, mergeStrategy: "squash",
+        });
+        const wtPath = run.worktreePath!;
+        await done;
+        assert.equal(run.status, "completed", run.errorMessage);
+        if (gone === "base branch") {
+          git(repo, "checkout -b elsewhere");
+          git(repo, "branch -D mainline");
+        } else {
+          rmSync(repo, { recursive: true, force: true });
+        }
+        const before = JSON.stringify(run, (k, v) => (k === "proc" ? undefined : v));
+
+        const sent = sendToRun(run, "fix the critic findings", { registry, timeoutMs: 10_000 });
+
+        assert.equal(sent.kind, "rejected");
+        assert.match(sent.kind === "rejected" ? sent.reason : "", new RegExp(`${gone}[\\s\\S]*spawn a fresh builder`));
+        assert.equal(JSON.stringify(run, (k, v) => (k === "proc" ? undefined : v)), before, "no Run mutation");
+        assert.equal(existsSync(wtPath), false, "no worktree created");
+        await new Promise((r) => setTimeout(r, 200));
+        assert.equal(existsSync(resumed), false, "pi was never spawned");
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
