@@ -3691,7 +3691,10 @@ async function settleWorktree(run, terminal) {
   const noMergeBack = !run.mergeStrategy || run.mergeStrategy === "none";
   if (!noMergeBack) terminal = await applyMergeToTerminal(run, gitRoot2, terminal);
   if (terminal === "merge_conflict" || run.reconciledAtStartup) return terminal;
-  if (terminal !== "completed" && (run.resumeCount ?? 0) > 0) return terminal;
+  if (terminal !== "completed" && (run.resumeCount ?? 0) > 0) {
+    run.worktreeKept = keptWorktreeHint(run.worktreePath, run.worktreeBranch);
+    return terminal;
+  }
   const branch = run.worktreeBranch;
   const keepBranch = noMergeBack || terminal !== "completed" && branchHasUnmergedCommits(gitRoot2, run.worktreeBaseBranch ?? "master", branch);
   releaseWorktree(run, { keepBranch });
@@ -3699,6 +3702,10 @@ async function settleWorktree(run, terminal) {
     run.worktreeKept = `branch ${branch} kept: merge it with cd ${gitRoot2} && git merge ${branch}, or delete it with git branch -D ${branch}`;
   }
   return terminal;
+}
+function keptWorktreeHint(worktreePath, branch) {
+  const gitRoot2 = dirname7(dirname7(dirname7(worktreePath)));
+  return `worktree kept with any partial work: ${worktreePath} (branch ${branch}); keep it with cd ${gitRoot2} && git merge ${branch}, or discard it (with every other kept worktree) via /conductor worktree clean`;
 }
 function releaseWorktree(run, opts) {
   if (!run.worktreePath || !run.worktreeBranch) return;
@@ -3896,8 +3903,7 @@ function forceTerminate(run, reason, registry, onComplete, killGroup = defaultKi
     errorMessage: run.errorMessage
   });
   if (run.worktreePath && run.worktreeBranch) {
-    const gitRoot2 = dirname7(dirname7(dirname7(run.worktreePath)));
-    run.worktreeKept = `worktree kept with any partial work: ${run.worktreePath} (branch ${run.worktreeBranch}); keep it with cd ${gitRoot2} && git merge ${run.worktreeBranch}, or discard it (with every other kept worktree) via /conductor worktree clean`;
+    run.worktreeKept = keptWorktreeHint(run.worktreePath, run.worktreeBranch);
   }
   registry.notify(run);
   void writeRecord(run);
@@ -6773,6 +6779,7 @@ function countToolResultMessages(run) {
   return n;
 }
 var SUMMARY_EXCERPT_MAX = 120;
+var SUMMARY_HINT_MAX = 400;
 var STREAM_MAX_CHARS = 32 * 1024;
 function renderForegroundStream(run, width, theme) {
   const headerLines = renderHeader(run, width);
@@ -6826,6 +6833,9 @@ function renderForegroundSummary(run) {
     }
   } else if (run.errorMessage) {
     lines.push(`  \u2192 ${truncate2(collapseWhitespace2(run.errorMessage), SUMMARY_EXCERPT_MAX)}`);
+  }
+  if (run.worktreeKept) {
+    lines.push(`  \u26A0 ${truncate2(collapseWhitespace2(run.worktreeKept), SUMMARY_HINT_MAX)}`);
   }
   if (run.transcriptPath) {
     lines.push(`  Transcript: ${run.transcriptPath}`);
@@ -8085,6 +8095,7 @@ function foregroundFinalResult(r) {
         agent_id: r.id,
         persona: r.persona,
         errorMessage: r.errorMessage,
+        worktreeKept: r.worktreeKept,
         transcriptPath: r.transcriptPath
       }
     };
@@ -8098,6 +8109,7 @@ function foregroundFinalResult(r) {
       persona: r.persona,
       finalText,
       usage: r.usage,
+      worktreeKept: r.worktreeKept,
       transcriptPath: r.transcriptPath
     }
   };

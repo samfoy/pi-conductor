@@ -45,6 +45,13 @@ export function countToolResultMessages(run: Run): number {
 const SUMMARY_EXCERPT_MAX = 120;
 
 /**
+ * Maximum characters in the kept-worktree hint line. Every hint names the
+ * worktree path and branch before its advice, so this keeps both whole at
+ * any realistic repo depth; the excerpt cap would cut the branch.
+ */
+const SUMMARY_HINT_MAX = 400;
+
+/**
  * Maximum characters in the streamed transcript output. pi's tool-call
  * cards re-render the entire text on every onUpdate; sending a 200KB
  * transcript many times per second would melt the TUI. We tail-truncate
@@ -98,7 +105,8 @@ export function renderForegroundStream(
  *     Transcript: /path/to/transcript.jsonl
  *
  * Failure variants substitute the error message (or stop reason) for the
- * excerpt and use the appropriate status glyph.
+ * excerpt and use the appropriate status glyph. A kept worktree or branch
+ * adds a `  ⚠ <hint>` line on any status (v0.20 W4).
  */
 export function renderForegroundSummary(run: Run): string {
   const glyph = STATUS_GLYPH[run.status] ?? "·";
@@ -143,6 +151,10 @@ export function renderForegroundSummary(run: Run): string {
     }
   } else if (run.errorMessage) {
     lines.push(`  → ${truncate(collapseWhitespace(run.errorMessage), SUMMARY_EXCERPT_MAX)}`);
+  }
+  // Any status, completed included: a merged run can still leave a dirty worktree.
+  if (run.worktreeKept) {
+    lines.push(`  ⚠ ${truncate(collapseWhitespace(run.worktreeKept), SUMMARY_HINT_MAX)}`);
   }
 
   if (run.transcriptPath) {

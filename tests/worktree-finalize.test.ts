@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { forceTerminate, RunRegistry, sendToRun, settleWorktree, spawnRun } from "../src/runs.ts";
 import { runWorktreeCmd } from "../src/commands.ts";
 import { formatCompletionNotification } from "../src/notifications.ts";
+import { renderForegroundSummary } from "../src/foreground-stream.ts";
 import { emptyUsage, type Persona, type Run } from "../src/types.ts";
 import { gitTestEnv } from "./helpers/git-env.ts";
 
@@ -506,6 +507,8 @@ test("sendToRun: a killed worktree run's worktree and branch survive a failed re
       assert.equal(run.worktreePath, wtPath);
       assert.equal(run.worktreeBranch, branch);
       assert.equal(danglingCommits(repo), 0, "no commit left dangling");
+      assert.ok(run.worktreeKept?.includes(wtPath) && run.worktreeKept.includes(branch), `the resume's own hint: ${run.worktreeKept}`);
+      assert.ok(renderForegroundSummary(run).includes(`(branch ${branch})`), renderForegroundSummary(run));
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -545,6 +548,8 @@ test("sendToRun: a merge_conflict run's worktree and branch survive a failed res
       assert.equal(run.worktreePath, wtPath);
       assert.equal(run.worktreeBranch, branch);
       assert.equal(danglingCommits(repo), 0, "no commit left dangling");
+      // The resume cleared the conflict's errorMessage hint, so the run needs its own.
+      assert.ok(run.worktreeKept?.includes(wtPath) && run.worktreeKept.includes(branch), `the resume's own hint: ${run.worktreeKept}`);
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -746,5 +751,106 @@ test("forceTerminate: a stalled worktree run keeps its error and failure class; 
     assert.equal(bare.worktreeKept, undefined);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Foreground is the default mode, and its tool result is the summary, not
+// the notification card, so the kept hints have to reach it too.
+test("forceTerminate: a killed foreground worktree run's summary names the kept worktree and branch", () => {
+  const dir = mkdtempSync(join(tmpdir(), "conductor-wt-finalize-fg-"));
+  try {
+    const gitRoot = "/home/someone/workplace/AVeryLongWorkspaceName/src/AVeryLongPackageNameForTesting";
+    const run = makeRun("builder-fg01", {
+      mode: "foreground",
+      status: "running",
+      startTime: Date.now() - 5000,
+      recordPath: join(dir, "record.json"),
+      finalPath: join(dir, "final.md"),
+      worktreePath: `${gitRoot}/.worktrees/conductor-wt/builder-fg01`,
+      worktreeBranch: "conductor-wt/builder-fg01",
+    });
+
+    forceTerminate(run, "killed", new RunRegistry());
+
+    const summary = renderForegroundSummary(run);
+    assert.ok(summary.includes(`${gitRoot}/.worktrees/conductor-wt/builder-fg01`), summary);
+    assert.ok(summary.includes("(branch conductor-wt/builder-fg01)"), summary);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("settleWorktree: a foreground hook_failed run's summary shows the kept-branch hint", { timeout: 15_000 }, async () => {
+  const { root, repo } = initRepo();
+  try {
+    const wt = worktreeWithCommit(repo, "builder-fh01", "x.ts", "x\n");
+    const run = makeRun("builder-fh01", {
+      mode: "foreground",
+      status: "hook_failed",
+      errorMessage: "on_complete_hook failed (exit 1)",
+      worktreePath: wt.path,
+      worktreeBranch: wt.branch,
+    });
+
+    assert.equal(await settleWorktree(run, "hook_failed"), "hook_failed");
+
+    const summary = renderForegroundSummary(run);
+    assert.ok(summary.includes(`  ⚠ branch ${wt.branch} kept`), summary);
+    assert.match(summary, /on_complete_hook failed/, "the error stays");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// A git error counts as unmerged commits, so a renamed or deleted base
+// branch never costs a failed run its work.
+test("settleWorktree: a failed run whose base branch was renamed keeps its branch", { timeout: 15_000 }, async () => {
+  const { root, repo } = initRepo();
+  try {
+    const wt = worktreeWithCommit(repo, "builder-rb01", "x.ts", "x\n");
+    git(repo, "branch -m mainline trunk");
+    const run = makeRun("builder-rb01", { status: "failed", worktreePath: wt.path, worktreeBranch: wt.branch });
+
+    assert.equal(await settleWorktree(run, "failed"), "failed");
+
+    assert.equal(branchExists(repo, wt.branch), true, "the branch survives the git error");
+    assert.match(git(repo, `log --stat --oneline trunk..${wt.branch}`), /x\.ts/);
+    assert.equal(run.worktreeBranch, wt.branch);
+    assert.ok(run.worktreeKept?.includes(wt.branch), run.worktreeKept);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("sendToRun: a resume that completes and merges drops the kill's stale kept hint", { timeout: 30_000 }, async () => {
+  const { root, repo } = initRepo();
+  const stub = writePiStub(root, {
+    onSpawn: `commit("partial.ts", "half done\\n", "partial"); setInterval(() => {}, 1000);`,
+    onResume: `commit("rest.ts", "the rest\\n", "rest");`,
+  });
+  try {
+    await withPiStub(root, stub, async () => {
+      const registry = new RunRegistry();
+      const { run, done } = spawnRun({
+        registry, persona: builderPersona(), task: "probe", mode: "foreground", cwd: repo,
+        timeoutMs: 15_000, worktree: true, mergeStrategy: "squash",
+      });
+      const branch = run.worktreeBranch!;
+      await waitFor("the partial commit", () => git(repo, `log --oneline mainline..${branch}`).trim() !== "");
+      forceTerminate(run, "killed", registry);
+      await done;
+      assert.ok(run.worktreeKept, "precondition: the kill left a hint");
+
+      const sent = sendToRun(run, "please continue", { registry, timeoutMs: 10_000 });
+      assert.equal(sent.kind, "started", sent.kind === "rejected" ? sent.reason : "");
+      await sent.done;
+
+      assert.equal(run.status, "completed", run.errorMessage);
+      assert.match(git(repo, "show --stat --oneline mainline"), /rest\.ts/, "merged back");
+      assert.equal(run.worktreeKept, undefined, "no stale hint");
+      assert.doesNotMatch(renderForegroundSummary(run), /⚠/);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

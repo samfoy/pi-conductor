@@ -1558,6 +1558,7 @@ function foregroundFinalResult(r: Run) {
         agent_id: r.id,
         persona: r.persona,
         errorMessage: r.errorMessage,
+        worktreeKept: r.worktreeKept,
         transcriptPath: r.transcriptPath,
       },
     };
@@ -1571,6 +1572,7 @@ function foregroundFinalResult(r: Run) {
       persona: r.persona,
       finalText,
       usage: r.usage,
+      worktreeKept: r.worktreeKept,
       transcriptPath: r.transcriptPath,
     },
   };

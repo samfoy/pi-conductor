@@ -2715,10 +2715,10 @@ export async function applyMergeToTerminal(
  * So does a startup-reconciled run on every terminal: its hook gate is
  * gone, and the worktree holds the dead process's work. The fields stay
  * set for `/conductor worktree` and GC. A resume that doesn't complete
- * keeps them too: it ran in the worktree a kill or a conflict kept, and
- * never merged it. Without a merge-back (`none` or unset) the branch is
- * the deliverable (v0.16 chains diff it), so only the directory goes
- * (v0.20 B3). Any other run that wasn't merged keeps a branch holding
+ * keeps them too, with a fresh hint: it ran in the worktree a kill or a
+ * conflict kept, and never merged it. Without a merge-back (`none` or
+ * unset) the branch is the deliverable (v0.16 chains diff it), so only the
+ * directory goes (v0.20 B3). Any other run that wasn't merged keeps a branch holding
  * unmerged commits, recorded for `/conductor worktree list` and GC rule
  * 5b (v0.20 W2). Exported for tests.
  */
@@ -2728,7 +2728,11 @@ export async function settleWorktree(run: Run, terminal: RunStatus): Promise<Run
   const noMergeBack = !run.mergeStrategy || run.mergeStrategy === "none";
   if (!noMergeBack) terminal = await applyMergeToTerminal(run, gitRoot, terminal);
   if (terminal === "merge_conflict" || run.reconciledAtStartup) return terminal;
-  if (terminal !== "completed" && (run.resumeCount ?? 0) > 0) return terminal;
+  if (terminal !== "completed" && (run.resumeCount ?? 0) > 0) {
+    // The resume cleared the kill's or conflict's hint; this one replaces it.
+    run.worktreeKept = keptWorktreeHint(run.worktreePath, run.worktreeBranch);
+    return terminal;
+  }
   // A merge-back run that completed and got here merged; nothing else did.
   const branch = run.worktreeBranch;
   const keepBranch =
@@ -2739,6 +2743,16 @@ export async function settleWorktree(run: Run, terminal: RunStatus): Promise<Run
     run.worktreeKept = `branch ${branch} kept: merge it with cd ${gitRoot} && git merge ${branch}, or delete it with git branch -D ${branch}`;
   }
   return terminal;
+}
+
+/** The hint for a worktree and branch kept whole, naming both before the advice. */
+function keptWorktreeHint(worktreePath: string, branch: string): string {
+  const gitRoot = dirname(dirname(dirname(worktreePath)));
+  return (
+    `worktree kept with any partial work: ${worktreePath} (branch ${branch}); ` +
+    `keep it with cd ${gitRoot} && git merge ${branch}, or discard it (with every other kept ` +
+    `worktree) via /conductor worktree clean`
+  );
 }
 
 /**
@@ -3139,11 +3153,7 @@ export function forceTerminate(
   // stay, since they may hold partial committed work. GC reclaims it on
   // its TTL. The hint is a card note, apart from errorMessage (v0.20 W4).
   if (run.worktreePath && run.worktreeBranch) {
-    const gitRoot = dirname(dirname(dirname(run.worktreePath)));
-    run.worktreeKept =
-      `worktree kept with any partial work: ${run.worktreePath} (branch ${run.worktreeBranch}); ` +
-      `keep it with cd ${gitRoot} && git merge ${run.worktreeBranch}, or discard it (with every other kept ` +
-      `worktree) via /conductor worktree clean`;
+    run.worktreeKept = keptWorktreeHint(run.worktreePath, run.worktreeBranch);
   }
   registry.notify(run);
   void writeRecord(run);

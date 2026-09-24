@@ -310,3 +310,38 @@ test(
     assert.doesNotMatch(perSendHalf!, /\$16\.190/);
   },
 );
+
+// ── v0.20 W4 follow-up: the kept-worktree hint in foreground results ──
+//
+// W4 moved the hint out of errorMessage into Run.worktreeKept. Foreground
+// is the default mode, so its summary must carry the hint on every status.
+
+test("renderForegroundSummary: a completed run's kept-worktree hint shows as a ⚠ line", () => {
+  const hint = "worktree kept: uncommitted changes in /r/.worktrees/conductor-wt/oracle-7f3a; commit them";
+  const run = makeRun({
+    status: "completed",
+    finishedAt: Date.now(),
+    messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] } as any],
+    worktreeKept: hint,
+  });
+  const out = renderForegroundSummary(run);
+  assert.ok(out.split("\n").includes(`  ⚠ ${hint}`), out);
+  assert.match(out, /→ "done"/, "the final-text excerpt stays");
+});
+
+test("renderForegroundSummary: a long kept-worktree hint keeps its path and branch readable, and is still capped", () => {
+  const gitRoot = "/home/someone/workplace/AVeryLongWorkspaceName/src/AVeryLongPackageNameForTesting";
+  const path = `${gitRoot}/.worktrees/conductor-wt/builder-ab12`;
+  const branch = "conductor-wt/builder-ab12";
+  const hint =
+    `worktree kept with any partial work: ${path} (branch ${branch}); keep it with cd ${gitRoot} && ` +
+    `git merge ${branch}, or discard it (with every other kept worktree) via /conductor worktree clean`;
+  const out = renderForegroundSummary(makeRun({ status: "killed", finishedAt: Date.now(), worktreeKept: hint }));
+  const line = out.split("\n").find((l) => l.startsWith("  ⚠ "));
+  assert.ok(line, out);
+  assert.ok(line.includes(path) && line.includes(`(branch ${branch})`), line);
+
+  const huge = makeRun({ status: "failed", finishedAt: Date.now(), worktreeKept: `${hint} ${"x".repeat(2000)}` });
+  const capped = renderForegroundSummary(huge).split("\n").find((l) => l.startsWith("  ⚠ "));
+  assert.ok(capped && capped.length < 1000 && capped.endsWith("…"), capped);
+});
