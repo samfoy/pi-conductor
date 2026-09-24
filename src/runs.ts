@@ -17,7 +17,7 @@
  * may be called either directly (slot available) or by the queue draining.
  */
 
-import { spawn, execSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { mkdir, writeFile, appendFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -37,7 +37,7 @@ import { classifyFailure, shouldRetry } from "./failure-classify.ts";
 import { resolveRetryPolicy } from "./retry.ts";
 import { recordRunOutcome } from "./memory.ts";
 import { loadConfigWithErrors } from "./config.ts";
-import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage } from "./worktree.ts";
+import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage, currentBranch } from "./worktree.ts";
 import { readProcessStartTime } from "./reconcile-startup.ts";
 import { ConductorEventEmitter } from "./conductor-events.ts";
 import { builtinPersonasDir } from "./personas.ts";
@@ -1289,17 +1289,8 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     } else {
       try {
         // v0.14: capture the base branch before creating the worktree.
-        // git rev-parse --abbrev-ref HEAD gives us the branch name at spawn time.
-        let baseBranch: string | undefined;
-        try {
-          baseBranch = execSync("git rev-parse --abbrev-ref HEAD", {
-            cwd: spec.gitRoot,
-            encoding: "utf8",
-            stdio: "pipe",
-          }).trim();
-        } catch {
-          // Non-fatal: fallback leaves worktreeBaseBranch undefined.
-        }
+        // Non-fatal: undefined leaves worktreeBaseBranch unset.
+        const baseBranch = currentBranch(spec.gitRoot);
         createWorktree(spec);
         run.worktreePath = spec.worktreePath;
         run.worktreeBranch = spec.branch;

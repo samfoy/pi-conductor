@@ -25,6 +25,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
+import { gitTestEnv } from "./helpers/git-env.ts";
 
 import { applyMergeToTerminal } from "../src/runs.ts";
 import { emptyUsage, type Run } from "../src/types.ts";
@@ -35,16 +36,8 @@ function tmpDir(): string {
   return realpathSync(mkdtempSync(join(tmpdir(), "conductor-runs-merge-")));
 }
 
-function cleanEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  for (const k of Object.keys(env)) {
-    if (k.startsWith("GIT_") && k !== "GIT_EDITOR") delete env[k];
-  }
-  return env;
-}
-
 function initRepo(dir: string): void {
-  const env = cleanEnv();
+  const env = gitTestEnv();
   const opts = { cwd: dir, stdio: "pipe" as const, env };
   execSync("git init -b mainline", opts);
   execSync("git config user.email test@test.com", opts);
@@ -60,7 +53,7 @@ function makeWorktreeBranch(
   filename: string,
   content: string,
 ): string {
-  const env = cleanEnv();
+  const env = gitTestEnv();
   const wtPath = join(gitRoot, ".worktrees", "conductor-wt", branch.replace("/", "-"));
   mkdirSync(wtPath, { recursive: true });
   execSync(`git worktree add -b ${branch} ${JSON.stringify(wtPath)}`, {
@@ -134,7 +127,7 @@ test(
       initRepo(root);
       const wtPath = makeWorktreeBranch(root, "conductor-wt/builder-abc2", "README.md", "from branch\n");
       // Create conflict on base
-      const env = cleanEnv();
+      const env = gitTestEnv();
       writeFileSync(join(root, "README.md"), "from base\n");
       execSync("git add README.md", { cwd: root, env, stdio: "pipe" });
       execSync("git commit -m 'base conflict'", { cwd: root, env, stdio: "pipe" });
@@ -237,7 +230,7 @@ test(
     try {
       initRepo(root);
       // Worktree with no new commits
-      const env = cleanEnv();
+      const env = gitTestEnv();
       const wtPath = join(root, ".worktrees", "conductor-wt", "builder-abc6");
       mkdirSync(wtPath, { recursive: true });
       execSync(`git worktree add -b conductor-wt/builder-abc6 ${JSON.stringify(wtPath)}`, {

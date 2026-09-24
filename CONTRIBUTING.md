@@ -79,6 +79,8 @@ npm run typecheck             # tsc --noEmit
 
 Target wall time for the unit suite: **under 5 seconds**. If a single test pushes that over, mark it `{ skip: true }` with a justification or move it into a gated suite.
 
+**Tests that run git must pass `env: gitTestEnv()`** (`tests/helpers/git-env.ts`) to every git subprocess and to any script that shells out to git. A commit from a linked worktree exports `GIT_DIR` / `GIT_INDEX_FILE` to the pre-commit hook, and an inheriting child git rewrites the real repo's config and index instead of the temp repo's. `tests/git-env.test.ts` pins this.
+
 **Tests that fork real subprocesses must set an explicit timeout** (either `--test-timeout=<ms>` on the runner or `{ timeout: <ms> }` on the test) — tsx defaults to `--test-timeout=0` (no timeout), so a buggy helper that never resolves hangs the runner indefinitely. See `personas/builder.md` "Test discipline."
 
 **v0.11 dogfood note:** do not set `npm test` as the `on_complete_hook` for this repo — the host pre-commit already runs `npm test`, so setting it as the hook would run the full suite twice per commit and waste ~15 s per slice.

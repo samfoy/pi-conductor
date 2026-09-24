@@ -20,6 +20,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { gitTestEnv } from "./helpers/git-env.ts";
 
 const SCRIPT = resolve(
   new URL(".", import.meta.url).pathname,
@@ -35,7 +36,7 @@ interface Fx {
 function setup(): Fx {
   const repo = mkdtempSync(join(tmpdir(), "conductor-mutmark-"));
   // Init a clean git repo with a deterministic identity.
-  const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" };
+  const env = gitTestEnv({ GIT_CONFIG_GLOBAL: "/dev/null" });
   spawnSync("git", ["init", "-q"], { cwd: repo, env });
   spawnSync("git", ["config", "user.email", "t@t"], { cwd: repo, env });
   spawnSync("git", ["config", "user.name", "t"], { cwd: repo, env });
@@ -52,7 +53,7 @@ function run(fx: Fx): { code: number; stdout: string; stderr: string } {
   const r = spawnSync("bash", [SCRIPT], {
     cwd: fx.repo,
     encoding: "utf8",
-    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" },
+    env: gitTestEnv({ GIT_CONFIG_GLOBAL: "/dev/null" }),
   });
   return {
     code: r.status ?? -1,
@@ -64,7 +65,7 @@ function run(fx: Fx): { code: number; stdout: string; stderr: string } {
 function gitAdd(fx: Fx, path: string): void {
   spawnSync("git", ["add", path], {
     cwd: fx.repo,
-    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" },
+    env: gitTestEnv({ GIT_CONFIG_GLOBAL: "/dev/null" }),
   });
 }
 

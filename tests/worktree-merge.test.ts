@@ -21,6 +21,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
+import { gitTestEnv } from "./helpers/git-env.ts";
 
 import {
   resolveMergeStrategy,
@@ -35,20 +36,12 @@ function tmpDir(): string {
   return realpathSync(mkdtempSync(join(tmpdir(), "conductor-wm-test-")));
 }
 
-function cleanEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  for (const k of Object.keys(env)) {
-    if (k.startsWith("GIT_") && k !== "GIT_EDITOR") delete env[k];
-  }
-  return env;
-}
-
 /**
  * Create a minimal git repo at `dir` with one commit on `mainline`.
  * Returns `dir`.
  */
 function initRepo(dir: string): void {
-  const env = cleanEnv();
+  const env = gitTestEnv();
   const opts = { cwd: dir, stdio: "pipe" as const, env };
   execSync("git init -b mainline", opts);
   execSync("git config user.email test@test.com", opts);
@@ -68,7 +61,7 @@ function makeWorktreeBranch(
   filename: string,
   content: string,
 ): string {
-  const env = cleanEnv();
+  const env = gitTestEnv();
   const wtPath = join(gitRoot, ".worktrees", "conductor-wt", branch);
   mkdirSync(wtPath, { recursive: true });
   execSync(`git worktree add -b ${branch} ${wtPath}`, {
@@ -220,7 +213,7 @@ test(
       // squash commit should be on mainline
       const log = execSync("git log --oneline mainline", {
         cwd: root,
-        env: cleanEnv(),
+        env: gitTestEnv(),
         encoding: "utf8",
       });
       assert.ok(log.includes("builder(builder-t1): new.ts"), `log: ${log}`);
@@ -243,7 +236,7 @@ test(
       // Create the worktree branch (changes README.md)
       const wtPath = makeWorktreeBranch(root, "conductor-wt/builder-t2", "README.md", "from branch\n");
       // Also mutate README.md on the base branch (conflict)
-      const env = cleanEnv();
+      const env = gitTestEnv();
       writeFileSync(join(root, "README.md"), "from base\n");
       execSync("git add README.md", { cwd: root, env, stdio: "pipe" });
       execSync("git commit -m 'base change'", { cwd: root, env, stdio: "pipe" });
@@ -276,7 +269,7 @@ test(
     try {
       initRepo(root);
       // Create a worktree branch but don't add any new commits (no-op)
-      const env = cleanEnv();
+      const env = gitTestEnv();
       const wtPath = join(root, ".worktrees", "conductor-wt", "builder-t3");
       mkdirSync(wtPath, { recursive: true });
       execSync(`git worktree add -b conductor-wt/builder-t3 ${wtPath}`, {
@@ -318,7 +311,7 @@ test(
       initRepo(root);
       // Create worktree branch, then commit *to base branch* (mainline) directly
       // simulating a builder that bypassed the worktree branch.
-      const env = cleanEnv();
+      const env = gitTestEnv();
       const wtPath = join(root, ".worktrees", "conductor-wt", "builder-t-direct");
       mkdirSync(wtPath, { recursive: true });
       execSync(
@@ -362,7 +355,7 @@ test(
       const wtPath = makeWorktreeBranch(
         root, "conductor-wt/builder-t-spurious", "ghost.ts", "ghost\n",
       );
-      const env = cleanEnv();
+      const env = gitTestEnv();
       writeFileSync(join(root, "ghost.ts"), "ghost\n");
       const opts = { cwd: root, stdio: "pipe" as const, env };
       execSync("git add ghost.ts", opts);
@@ -403,7 +396,7 @@ test(
       assert.ok(result.success, `expected success, got: ${JSON.stringify(result)}`);
       const log = execSync("git log --oneline mainline", {
         cwd: root,
-        env: cleanEnv(),
+        env: gitTestEnv(),
         encoding: "utf8",
       });
       assert.ok(log.includes("builder(builder-t4): feat.ts"), `log: ${log}`);

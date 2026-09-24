@@ -329,16 +329,11 @@ test("executeReclaim: cold-archive on missing runDir collects to failed[] (F-S3.
 // ── v0.13 worktree-per-persona: GC delete cleans up orphaned worktree ─
 
 import { execSync } from "node:child_process";
-
-function cleanGitEnvForTest(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  for (const k of Object.keys(env)) { if (k.startsWith("GIT_") && k !== "GIT_EDITOR") delete env[k]; }
-  return env;
-}
+import { gitTestEnv } from "./helpers/git-env.ts";
 
 function tmpGitRepoForGC(): string {
   const dir = mkdtempSync(join(tmpdir(), "conductor-gc-wt-"));
-  const gitOpts = { cwd: dir, stdio: "pipe" as const, env: cleanGitEnvForTest() };
+  const gitOpts = { cwd: dir, stdio: "pipe" as const, env: gitTestEnv() };
   execSync("git init", gitOpts);
   execSync("git config user.email test@test.com", gitOpts);
   execSync("git config user.name Test", gitOpts);
@@ -364,7 +359,7 @@ test(
       execSync(`git worktree add ${JSON.stringify(worktreePath)} -b ${JSON.stringify(branch)} HEAD`, {
         cwd: gitRoot,
         stdio: "pipe",
-        env: cleanGitEnvForTest(),
+        env: gitTestEnv(),
       });
       assert.ok(existsSync(worktreePath), "orphaned worktree exists before GC");
 
@@ -407,7 +402,7 @@ test(
       // Run dir should also be gone
       assert.ok(!existsSync(runDir), "run dir removed by GC delete");
     } finally {
-      execSync(`git worktree prune`, { cwd: gitRoot, stdio: "pipe", env: cleanGitEnvForTest() }).toString();
+      execSync(`git worktree prune`, { cwd: gitRoot, stdio: "pipe", env: gitTestEnv() }).toString();
       rmSync(runsRoot, { recursive: true, force: true });
       rmSync(gitRoot, { recursive: true, force: true });
     }

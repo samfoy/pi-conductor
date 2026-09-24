@@ -18,6 +18,7 @@ import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
+import { gitTestEnv } from "./helpers/git-env.ts";
 
 import {
   resolveWorktreeSpec,
@@ -26,6 +27,7 @@ import {
   ensureWorktreeGitignore,
   detectBrazilWorkspaceRoot,
   worktreeSpecFromRun,
+  currentBranch,
 } from "../src/worktree.ts";
 import { emptyUsage, type RunRecord } from "../src/types.ts";
 
@@ -35,17 +37,9 @@ function tmpDir(): string {
   return mkdtempSync(join(tmpdir(), "conductor-wt-test-"));
 }
 
-function cleanGitEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  for (const k of Object.keys(env)) { if (k.startsWith("GIT_") && k !== "GIT_EDITOR") delete env[k]; }
-  return env;
-}
-
 /** Create a minimal git repo with one commit so worktree add works. */
 function initGitRepo(dir: string): void {
-  const env = { ...process.env };
-  for (const k of Object.keys(env)) { if (k.startsWith("GIT_") && k !== "GIT_EDITOR") delete env[k]; }
-  const opts = { cwd: dir, stdio: "pipe" as const, env };
+  const opts = { cwd: dir, stdio: "pipe" as const, env: gitTestEnv() };
   execSync("git init", opts);
   execSync("git config user.email test@test.com", opts);
   execSync("git config user.name Test", opts);
@@ -72,6 +66,37 @@ function stubRunRecord(overrides: Partial<RunRecord> = {}): RunRecord {
 }
 
 // ── resolveWorktreeSpec ────────────────────────────────────────────────
+
+// spawnRun stamps worktreeBaseBranch from currentBranch(spec.gitRoot); it must
+// read the same repo resolveWorktreeSpec resolved, even under a hook's GIT_DIR.
+test("currentBranch: reads the repo at gitRoot even when an inherited GIT_DIR points elsewhere", { timeout: 10_000 }, () => {
+  const target = tmpDir();
+  const decoy = tmpDir();
+  const savedGitDir = process.env.GIT_DIR;
+  try {
+    initGitRepo(target);
+    execSync("git checkout -q -b target-branch", { cwd: target, stdio: "pipe", env: gitTestEnv() });
+    initGitRepo(decoy);
+    execSync("git checkout -q -b decoy-branch", { cwd: decoy, stdio: "pipe", env: gitTestEnv() });
+
+    process.env.GIT_DIR = join(decoy, ".git");
+    assert.equal(currentBranch(target), "target-branch");
+  } finally {
+    if (savedGitDir === undefined) delete process.env.GIT_DIR;
+    else process.env.GIT_DIR = savedGitDir;
+    rmSync(target, { recursive: true, force: true });
+    rmSync(decoy, { recursive: true, force: true });
+  }
+});
+
+test("currentBranch: returns undefined outside a git repo", () => {
+  const dir = tmpDir();
+  try {
+    assert.equal(currentBranch(dir), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("resolveWorktreeSpec: returns null when cwd is not a git repo", () => {
   const dir = tmpDir();
@@ -247,7 +272,7 @@ test(
       assert.ok(existsSync(spec!.worktreePath), "worktree dir exists after create");
 
       // Branch should appear in git branch list
-      const branches = execSync("git branch", { cwd: dir, encoding: "utf-8", stdio: "pipe", env: cleanGitEnv() });
+      const branches = execSync("git branch", { cwd: dir, encoding: "utf-8", stdio: "pipe", env: gitTestEnv() });
       assert.ok(
         branches.includes("conductor-wt/builder-integ1"),
         "worktree branch created",
@@ -262,7 +287,7 @@ test(
         cwd: dir,
         encoding: "utf-8",
         stdio: "pipe",
-        env: cleanGitEnv(),
+        env: gitTestEnv(),
       });
       assert.ok(
         !branchesAfter.includes("conductor-wt/builder-integ1"),

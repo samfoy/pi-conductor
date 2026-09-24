@@ -31,6 +31,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
+import { gitTestEnv } from "./helpers/git-env.ts";
 import { fileURLToPath } from "node:url";
 
 const HOOK_PATH = fileURLToPath(new URL("../hooks/pre-commit", import.meta.url));
@@ -59,9 +60,9 @@ function setup(opts: { npmExitCode?: number; failOn?: string } = {}): Fx {
   chmodSync(mutationCheck, 0o755);
 
   // Initialize a real git repo so `git diff --cached` and `git add` work.
-  execFileSync("git", ["init", "-q"], { cwd: root });
-  execFileSync("git", ["config", "user.email", "test@test.invalid"], { cwd: root });
-  execFileSync("git", ["config", "user.name", "Test"], { cwd: root });
+  execFileSync("git", ["init", "-q"], { cwd: root, env: gitTestEnv() });
+  execFileSync("git", ["config", "user.email", "test@test.invalid"], { cwd: root, env: gitTestEnv() });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: root, env: gitTestEnv() });
 
   // Minimum the hook expects: package.json + node_modules placeholder.
   writeFileSync(join(root, "package.json"), JSON.stringify({ name: "fixture", version: "0.0.0" }));
@@ -78,8 +79,8 @@ function setup(opts: { npmExitCode?: number; failOn?: string } = {}): Fx {
 
   // Initial commit so `git diff --cached` works against HEAD.
   writeFileSync(join(root, "README.md"), "fixture\n");
-  execFileSync("git", ["add", "README.md"], { cwd: root });
-  execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: root });
+  execFileSync("git", ["add", "README.md"], { cwd: root, env: gitTestEnv() });
+  execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: root, env: gitTestEnv() });
 
   // Stub `npm` on PATH. Records every invocation; can be told to fail on
   // a specific subcommand via NPM_FAIL_ON env.
@@ -113,10 +114,9 @@ function teardown(fx: Fx): void {
 function runHook(fx: Fx): { status: number; stdout: string; stderr: string } {
   const result = spawnSync("bash", [fx.hook], {
     cwd: fx.root,
-    env: {
-      ...process.env,
-      PATH: `${fx.stubBin}:${process.env.PATH ?? ""}`,
-    },
+    // The hook shells out to git (diff --cached, add dist/); scrub GIT_* so
+    // it stages into the fixture, not the outer commit's index.
+    env: gitTestEnv({ PATH: `${fx.stubBin}:${process.env.PATH ?? ""}` }),
     encoding: "utf8",
   });
   return {
@@ -134,6 +134,7 @@ function npmCalls(fx: Fx): string[] {
 function stagedFiles(fx: Fx): string[] {
   const out = execFileSync("git", ["diff", "--cached", "--name-only"], {
     cwd: fx.root,
+    env: gitTestEnv(),
     encoding: "utf8",
   });
   return out.split("\n").filter((l) => l.length > 0).sort();
@@ -143,7 +144,7 @@ test("pre-commit hook: src/ change triggers `npm run build` and stages dist/", (
   const fx = setup();
   try {
     writeFileSync(join(fx.root, "src", "foo.ts"), "export const x = 1;\n");
-    execFileSync("git", ["add", "src/foo.ts"], { cwd: fx.root });
+    execFileSync("git", ["add", "src/foo.ts"], { cwd: fx.root, env: gitTestEnv() });
 
     const result = runHook(fx);
     assert.equal(result.status, 0, `hook should pass, got: ${result.stderr}`);
@@ -167,7 +168,7 @@ test("pre-commit hook: docs-only change does NOT trigger `npm run build`", () =>
   const fx = setup();
   try {
     writeFileSync(join(fx.root, "docs", "note.md"), "doc content\n");
-    execFileSync("git", ["add", "docs/note.md"], { cwd: fx.root });
+    execFileSync("git", ["add", "docs/note.md"], { cwd: fx.root, env: gitTestEnv() });
 
     const result = runHook(fx);
     assert.equal(result.status, 0, `hook should pass, got: ${result.stderr}`);
@@ -195,7 +196,7 @@ test("pre-commit hook: still runs `npm test` regardless of staged paths", () => 
   const fx = setup();
   try {
     writeFileSync(join(fx.root, "docs", "note.md"), "doc content\n");
-    execFileSync("git", ["add", "docs/note.md"], { cwd: fx.root });
+    execFileSync("git", ["add", "docs/note.md"], { cwd: fx.root, env: gitTestEnv() });
 
     const result = runHook(fx);
     assert.equal(result.status, 0, `hook should pass, got: ${result.stderr}`);
@@ -212,7 +213,7 @@ test("pre-commit hook: build failure aborts before tests run", () => {
   const fx = setup({ failOn: "run build" });
   try {
     writeFileSync(join(fx.root, "src", "foo.ts"), "export const x = 1;\n");
-    execFileSync("git", ["add", "src/foo.ts"], { cwd: fx.root });
+    execFileSync("git", ["add", "src/foo.ts"], { cwd: fx.root, env: gitTestEnv() });
 
     const result = runHook(fx);
     assert.notEqual(result.status, 0, "hook should reject when build fails");

@@ -132,6 +132,15 @@ export function createWorktree(
 }
 
 /**
+ * Branch checked out at `gitRoot`, or `undefined` when it can't be read.
+ * Scrubbed like every other call here, so it reads the repo that
+ * `resolveWorktreeSpec` resolved rather than an inherited GIT_DIR.
+ */
+export function currentBranch(gitRoot: string): string | undefined {
+  return tryGitExec("git rev-parse --abbrev-ref HEAD", gitRoot) ?? undefined;
+}
+
+/**
  * Remove a worktree and its branch. Best-effort — swallows ENOENT and
  * git errors so callers (finalize, GC) are not blocked.
  *

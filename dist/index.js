@@ -147,6 +147,7 @@ var worktree_exports = {};
 __export(worktree_exports, {
   buildMergeCommitMessage: () => buildMergeCommitMessage,
   createWorktree: () => createWorktree,
+  currentBranch: () => currentBranch,
   detectBrazilWorkspaceRoot: () => detectBrazilWorkspaceRoot,
   ensureWorktreeGitignore: () => ensureWorktreeGitignore,
   mergeWorktree: () => mergeWorktree,
@@ -208,6 +209,9 @@ function createWorktree(spec, opts = {}) {
       `git worktree add failed for ${spec.worktreePath}: ${stderr || msg}`
     );
   }
+}
+function currentBranch(gitRoot2) {
+  return tryGitExec("git rev-parse --abbrev-ref HEAD", gitRoot2) ?? void 0;
 }
 function removeWorktree(spec) {
   let ok = true;
@@ -849,7 +853,7 @@ function loadConfig(cwd) {
 }
 
 // src/runs.ts
-import { spawn, execSync as execSync2 } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync6, readdirSync, statSync as statSync2 } from "node:fs";
 import { mkdir, writeFile as writeFile2, appendFile } from "node:fs/promises";
 import { homedir as homedir5 } from "node:os";
@@ -2851,15 +2855,7 @@ function spawnRun(opts) {
       );
     } else {
       try {
-        let baseBranch;
-        try {
-          baseBranch = execSync2("git rev-parse --abbrev-ref HEAD", {
-            cwd: spec.gitRoot,
-            encoding: "utf8",
-            stdio: "pipe"
-          }).trim();
-        } catch {
-        }
+        const baseBranch = currentBranch(spec.gitRoot);
         createWorktree(spec);
         run.worktreePath = spec.worktreePath;
         run.worktreeBranch = spec.branch;
@@ -3766,7 +3762,7 @@ function elapsedStr(start, end) {
 
 // src/doctor.ts
 import { existsSync as existsSync9 } from "node:fs";
-import { execSync as execSync3 } from "node:child_process";
+import { execSync as execSync2 } from "node:child_process";
 import { homedir as homedir6 } from "node:os";
 import { join as join10 } from "node:path";
 
@@ -4344,7 +4340,7 @@ function isBinaryOnPath(command) {
   const bin = command.trim().split(/\s+/)[0];
   if (!bin || bin.startsWith("/")) return true;
   try {
-    execSync3(`command -v ${JSON.stringify(bin)}`, { stdio: "pipe" });
+    execSync2(`command -v ${JSON.stringify(bin)}`, { stdio: "pipe" });
     return true;
   } catch {
     return false;

@@ -18,6 +18,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
+import { gitTestEnv } from "./helpers/git-env.ts";
 
 import { registerTools } from "../src/tools.ts";
 import { RunRegistry, spawnRun } from "../src/runs.ts";
@@ -36,12 +37,13 @@ interface RegisteredTool {
 
 function tmpGitRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "conductor-wt-runs-"));
-  execSync("git init", { cwd: dir, stdio: "pipe" });
-  execSync("git config user.email test@test.com", { cwd: dir, stdio: "pipe" });
-  execSync("git config user.name Test", { cwd: dir, stdio: "pipe" });
+  const opts = { cwd: dir, stdio: "pipe" as const, env: gitTestEnv() };
+  execSync("git init", opts);
+  execSync("git config user.email test@test.com", opts);
+  execSync("git config user.name Test", opts);
   writeFileSync(join(dir, "README.md"), "init\n");
-  execSync("git add README.md", { cwd: dir, stdio: "pipe" });
-  execSync("git commit -m init", { cwd: dir, stdio: "pipe" });
+  execSync("git add README.md", opts);
+  execSync("git commit -m init", opts);
   return dir;
 }
 
