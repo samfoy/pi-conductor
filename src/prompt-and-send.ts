@@ -91,6 +91,13 @@ export async function executePromptAndSend(
     }
     return;
   }
+  // Read ctx before any await: a reload mid-input makes its getters throw.
+  let modelRegistry: PromptAndSendCtx["modelRegistry"];
+  try {
+    modelRegistry = ctx.modelRegistry;
+  } catch {
+    return; // ctx already stale
+  }
   let message: string | undefined;
   // Slice 7: when the InputPane forwarded a buffer, skip the modal.
   // Empty / whitespace `presuppliedText` returns early without
@@ -125,7 +132,7 @@ export async function executePromptAndSend(
     registry: deps.registry,
     timeoutMs,
     onComplete: (r) => deps.pushCompletionNotification(r),
-    isRegisteredModel: modelRegistryPredicate(ctx.modelRegistry),
+    isRegisteredModel: modelRegistryPredicate(modelRegistry),
   });
   if (result.kind === "rejected") {
     try {

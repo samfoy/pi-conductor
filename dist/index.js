@@ -10393,6 +10393,12 @@ async function executePromptAndSend(deps, agentId, presuppliedText) {
     }
     return;
   }
+  let modelRegistry;
+  try {
+    modelRegistry = ctx.modelRegistry;
+  } catch {
+    return;
+  }
   let message;
   if (presuppliedText !== void 0) {
     const trimmed = presuppliedText.trim();
@@ -10422,7 +10428,7 @@ async function executePromptAndSend(deps, agentId, presuppliedText) {
     registry: deps.registry,
     timeoutMs,
     onComplete: (r) => deps.pushCompletionNotification(r),
-    isRegisteredModel: modelRegistryPredicate(ctx.modelRegistry)
+    isRegisteredModel: modelRegistryPredicate(modelRegistry)
   });
   if (result.kind === "rejected") {
     try {
@@ -10698,34 +10704,40 @@ function index_default(pi) {
       notify: (message, level) => ctx.ui.notify(message, level)
     });
     if (process.env.CONDUCTOR_SUBAGENT !== "1") {
+      const selfSessionId = opts.getSessionId();
       setImmediate(
-        () => reconcileOrphansAtStartup({
-          runsRoot: runsRoot(),
-          registry,
-          isAlive: defaultLivenessProbe,
-          // pi-dashboard multi-slot: scope ownership on the pi session id
-          // so sibling slots sharing this pid aren't readopted here.
-          selfSessionId: ctx.sessionManager?.getSessionId(),
-          now: Date.now()
-        }).then((result) => {
-          lastReconcile = result;
-        }).catch((err) => {
-          console.error(
-            `reconcile-startup: failed: ${err?.message ?? String(err)}`
-          );
-        })
+        () => (
+          // Promise.resolve().then turns a synchronous throw into the
+          // rejection .catch reports; thrown from setImmediate, it kills pi.
+          Promise.resolve().then(
+            () => reconcileOrphansAtStartup({
+              runsRoot: runsRoot(),
+              registry,
+              isAlive: defaultLivenessProbe,
+              selfSessionId,
+              now: Date.now()
+            })
+          ).then((result) => {
+            lastReconcile = result;
+          }).catch((err) => {
+            console.error(
+              `reconcile-startup: failed: ${err?.message ?? String(err)}`
+            );
+          })
+        )
       );
     }
-    setImmediate(() => {
-      const cfg = loadConfig(cwd());
-      void maybeAutoRunGc({
-        runsRoot: runsRoot(),
-        config: cfg.gc,
-        registry
-      }).catch((err) => {
+    setImmediate(
+      () => Promise.resolve().then(
+        () => maybeAutoRunGc({
+          runsRoot: runsRoot(),
+          config: loadConfig(cwd()).gc,
+          registry
+        })
+      ).catch((err) => {
         console.error(`gc auto: failed: ${err?.message ?? String(err)}`);
-      });
-    });
+      })
+    );
     if (watchdogDispose) {
       watchdogDispose();
       watchdogDispose = null;

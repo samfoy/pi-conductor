@@ -460,16 +460,23 @@ export default function (pi: ExtensionAPI): void {
     // runs, so it must not readopt or reclassify them. The callback
     // returns the promise so tests capturing setImmediate can await it.
     if (process.env.CONDUCTOR_SUBAGENT !== "1") {
+      // pi-dashboard multi-slot: scope ownership on the pi session id so
+      // sibling slots sharing this pid aren't readopted here. Read it now:
+      // by the next tick a reload or print-mode exit can make ctx stale.
+      const selfSessionId = opts.getSessionId();
       setImmediate(() =>
-        reconcileOrphansAtStartup({
-          runsRoot: runsRoot(),
-          registry,
-          isAlive: defaultLivenessProbe,
-          // pi-dashboard multi-slot: scope ownership on the pi session id
-          // so sibling slots sharing this pid aren't readopted here.
-          selfSessionId: ctx.sessionManager?.getSessionId(),
-          now: Date.now(),
-        })
+        // Promise.resolve().then turns a synchronous throw into the
+        // rejection .catch reports; thrown from setImmediate, it kills pi.
+        Promise.resolve()
+          .then(() =>
+            reconcileOrphansAtStartup({
+              runsRoot: runsRoot(),
+              registry,
+              isAlive: defaultLivenessProbe,
+              selfSessionId,
+              now: Date.now(),
+            }),
+          )
           .then((result) => {
             lastReconcile = result;
           })
@@ -486,17 +493,20 @@ export default function (pi: ExtensionAPI): void {
     // and-forget. Bootstrap MUST NOT block on disk I/O — the orphan
     // sweep + reclaim runs on the next event-loop tick. Per oracle R11
     // the marker lives at <conductorRoot>/.last-gc, NOT under runs/.
-    setImmediate(() => {
-      const cfg = loadConfig(cwd());
-      void maybeAutoRunGc({
-        runsRoot: runsRoot(),
-        config: cfg.gc,
-        registry,
-      }).catch((err: unknown) => {
-        // Best-effort: never let GC break session bootstrap.
-        console.error(`gc auto: failed: ${(err as Error)?.message ?? String(err)}`);
-      });
-    });
+    setImmediate(() =>
+      Promise.resolve()
+        .then(() =>
+          maybeAutoRunGc({
+            runsRoot: runsRoot(),
+            config: loadConfig(cwd()).gc,
+            registry,
+          }),
+        )
+        .catch((err: unknown) => {
+          // Best-effort: never let GC break session bootstrap.
+          console.error(`gc auto: failed: ${(err as Error)?.message ?? String(err)}`);
+        }),
+    );
 
     // v0.10 Slice 2: start the watchdog. Subscribes to registry +
     // ticks every 30s; escalates hard-stalls to forceTerminate when
