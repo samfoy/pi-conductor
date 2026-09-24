@@ -23,6 +23,7 @@ import {
   isTerminal,
 } from "../types.ts";
 import type { RunRegistry } from "../runs.ts";
+import { holdsKeptWorktree } from "../worktree.ts";
 
 /**
  * One entry per run-dir under `runsRoot`. Includes both the on-disk
@@ -63,7 +64,10 @@ export interface InventoryEntry {
   inMemory: Run | undefined;
   /** True if `record.json` is missing or unparseable. Other fields are best-effort. */
   malformed: boolean;
-  /** The record's `worktreePath` still exists on disk (a kept worktree). */
+  /**
+   * The record's `worktreePath` still exists on disk (a kept worktree), or
+   * a run that didn't complete kept its branch after the directory went.
+   */
   holdsWorktree?: boolean;
 }
 
@@ -196,7 +200,7 @@ async function buildEntry(
     sessionPathPresent,
     inMemory,
     malformed: false,
-    holdsWorktree: record.worktreePath !== undefined && existsSync(record.worktreePath),
+    holdsWorktree: holdsKeptWorktree(record),
   };
 }
 

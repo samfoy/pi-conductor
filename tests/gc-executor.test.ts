@@ -450,3 +450,47 @@ test(
     }
   },
 );
+
+test(
+  "executeReclaim: delete action deletes the kept branch of a run whose worktree directory is gone",
+  { timeout: 15_000 },
+  async () => {
+    const runsRoot = makeTempRunsRoot();
+    const gitRoot = tmpGitRepoForGC();
+    try {
+      const runId = "builder-kept-branch1";
+      const branch = `conductor-wt/${runId}`;
+      execSync(`git branch ${JSON.stringify(branch)}`, { cwd: gitRoot, stdio: "pipe", env: gitTestEnv() });
+      const runDir = join(runsRoot, runId);
+      mkdirSync(runDir, { recursive: true });
+      writeFileSync(
+        join(runDir, "record.json"),
+        JSON.stringify({
+          id: runId,
+          persona: "builder",
+          task: "test",
+          mode: "background",
+          status: "hook_failed",
+          startTime: Date.now() - 60_000,
+          finishedAt: Date.now() - 30_000,
+          usage: { turns: 1, input: 10, output: 100, cacheRead: 0, cacheWrite: 0, cost: 0 },
+          cwd: gitRoot,
+          recordPath: join(runDir, "record.json"),
+          transcriptPath: join(runDir, "transcript.jsonl"),
+          finalPath: join(runDir, "final.md"),
+          worktreeBranch: branch,
+        }),
+      );
+
+      const result = await executeReclaim([deleteAction(runId, 100)], runsRoot, new Set(), Date.now());
+
+      assert.equal(result.failed.length, 0);
+      assert.equal(result.deleted.length, 1);
+      const branches = execSync(`git branch --list ${JSON.stringify(branch)}`, { cwd: gitRoot, stdio: "pipe", env: gitTestEnv() }).toString();
+      assert.equal(branches.trim(), "", "the kept branch is deleted with its record");
+    } finally {
+      rmSync(runsRoot, { recursive: true, force: true });
+      rmSync(gitRoot, { recursive: true, force: true });
+    }
+  },
+);

@@ -162,11 +162,14 @@ var init_types = __esm({
 // src/worktree.ts
 var worktree_exports = {};
 __export(worktree_exports, {
+  branchHasUnmergedCommits: () => branchHasUnmergedCommits,
   buildMergeCommitMessage: () => buildMergeCommitMessage,
   createWorktree: () => createWorktree,
   currentBranch: () => currentBranch,
+  deleteBranch: () => deleteBranch,
   detectBrazilWorkspaceRoot: () => detectBrazilWorkspaceRoot,
   ensureWorktreeGitignore: () => ensureWorktreeGitignore,
+  holdsKeptWorktree: () => holdsKeptWorktree,
   mergeWorktree: () => mergeWorktree,
   removeWorktree: () => removeWorktree,
   resolveMergeStrategy: () => resolveMergeStrategy,
@@ -241,21 +244,23 @@ function removeWorktree(spec, opts = {}) {
   } catch {
     ok = false;
   }
-  if (!opts.keepBranch) {
-    try {
-      execSync(
-        `git branch -D ${JSON.stringify(spec.branch)}`,
-        { cwd: spec.gitRoot, stdio: "pipe", env: gitEnv() }
-      );
-    } catch {
-      ok = false;
-    }
-  }
+  if (!opts.keepBranch && !deleteBranch(spec.gitRoot, spec.branch)) ok = false;
   try {
     execSync("git worktree prune", { cwd: spec.gitRoot, stdio: "pipe", env: gitEnv() });
   } catch {
   }
   return ok;
+}
+function deleteBranch(cwd, branch) {
+  return tryGitExec(`git branch -D ${JSON.stringify(branch)}`, cwd) !== null;
+}
+function branchHasUnmergedCommits(gitRoot2, baseBranch, branch) {
+  const count = tryGitExec(`git rev-list --count ${JSON.stringify(`${baseBranch}..${branch}`)}`, gitRoot2);
+  return count === null || Number(count) > 0;
+}
+function holdsKeptWorktree(record) {
+  if (record.worktreePath !== void 0) return existsSync4(record.worktreePath);
+  return record.worktreeBranch !== void 0 && record.status !== "completed";
 }
 function worktreeHasUncommittedChanges(worktreePath) {
   if (!existsSync4(worktreePath)) return false;
@@ -427,7 +432,7 @@ import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
 
 // src/commands.ts
 init_types();
-import { existsSync as existsSync12, readdirSync as readdirSync2, readFileSync as readFileSync7, statSync as statSync5 } from "node:fs";
+import { existsSync as existsSync11, readdirSync as readdirSync2, readFileSync as readFileSync7, statSync as statSync5 } from "node:fs";
 import { join as join15, dirname as dirname9 } from "node:path";
 
 // src/status-glyph.ts
@@ -3630,13 +3635,19 @@ async function applyMergeToTerminal(run, gitRoot2, terminal) {
   return "merge_conflict";
 }
 async function settleWorktree(run, terminal) {
-  if (run.worktreePath && run.mergeStrategy && run.mergeStrategy !== "none") {
-    const gitRoot2 = dirname7(dirname7(dirname7(run.worktreePath)));
-    terminal = await applyMergeToTerminal(run, gitRoot2, terminal);
-  }
+  if (!run.worktreePath || !run.worktreeBranch) return terminal;
+  const gitRoot2 = dirname7(dirname7(dirname7(run.worktreePath)));
+  const noMergeBack = !run.mergeStrategy || run.mergeStrategy === "none";
+  if (!noMergeBack) terminal = await applyMergeToTerminal(run, gitRoot2, terminal);
   if (terminal === "merge_conflict" || run.reconciledAtStartup) return terminal;
   if (terminal !== "completed" && (run.resumeCount ?? 0) > 0) return terminal;
-  releaseWorktree(run, { keepBranch: !run.mergeStrategy || run.mergeStrategy === "none" });
+  const branch = run.worktreeBranch;
+  const keepBranch = noMergeBack || terminal !== "completed" && branchHasUnmergedCommits(gitRoot2, run.worktreeBaseBranch ?? "master", branch);
+  releaseWorktree(run, { keepBranch });
+  if (terminal !== "completed" && keepBranch && !run.worktreePath) {
+    const hint = `branch ${branch} kept: merge it with cd ${gitRoot2} && git merge ${branch}, or delete it with git branch -D ${branch}`;
+    run.errorMessage = run.errorMessage ? `${run.errorMessage}; ${hint}` : hint;
+  }
   return terminal;
 }
 function releaseWorktree(run, opts) {
@@ -3969,6 +3980,7 @@ function writeLastGcMtime(runsRoot2, now) {
 
 // src/gc/inventory.ts
 init_types();
+init_worktree();
 import { readdir as readdir3, readFile as readFile3, stat as stat3 } from "node:fs/promises";
 import { existsSync as existsSync8 } from "node:fs";
 import { join as join9 } from "node:path";
@@ -4076,7 +4088,7 @@ async function buildEntry(id, runDir2, registry) {
     sessionPathPresent,
     inMemory,
     malformed: false,
-    holdsWorktree: record.worktreePath !== void 0 && existsSync8(record.worktreePath)
+    holdsWorktree: holdsKeptWorktree(record)
   };
 }
 
@@ -4704,7 +4716,6 @@ async function reconcileOrphans(actions, runsRoot2, now) {
 init_types();
 init_worktree();
 import { readFile as readFile5, rm, stat as stat5, unlink as unlink2, utimes, writeFile as writeFile5, readdir as readdir4 } from "node:fs/promises";
-import { existsSync as existsSync11 } from "node:fs";
 import { join as join13 } from "node:path";
 async function executeReclaim(actions, runsRoot2, registryActive, now) {
   const archived = [];
@@ -4807,11 +4818,10 @@ async function coldArchive(runDir2, now) {
   return bytes;
 }
 async function fullDelete(runDir2, record) {
-  if (record) {
+  if (record && holdsKeptWorktree(record)) {
     const spec = worktreeSpecFromRun(record);
-    if (spec && existsSync11(spec.worktreePath)) {
-      removeWorktree(spec);
-    }
+    if (spec) removeWorktree(spec);
+    else if (record.worktreeBranch) deleteBranch(record.cwd, record.worktreeBranch);
   }
   let bytes = 0;
   try {
@@ -5698,7 +5708,7 @@ function formatRunRow(r, livenessProbe = defaultLivenessProbe) {
 }
 function runHistory(_opts, ctx, arg) {
   const root = runsRoot();
-  if (!existsSync12(root)) {
+  if (!existsSync11(root)) {
     ctx.ui.notify(
       "no run history yet. Spawn a sub-agent and it'll show up here.",
       "info"
@@ -5743,8 +5753,8 @@ function runHistory(_opts, ctx, arg) {
           }
         }
       },
-      isPinned: (id) => existsSync12(join15(runDir(id), ".pinned")),
-      isArchived: (id) => existsSync12(join15(runDir(id), ".archived"))
+      isPinned: (id) => existsSync11(join15(runDir(id), ".pinned")),
+      isArchived: (id) => existsSync11(join15(runDir(id), ".archived"))
     },
     { limit }
   );
@@ -5762,7 +5772,7 @@ async function runPin(ctx, arg) {
     return;
   }
   const root = runsRoot();
-  if (!existsSync12(join15(root, id))) {
+  if (!existsSync11(join15(root, id))) {
     ctx.ui.notify(`No such run: ${id}`, "warning");
     return;
   }
@@ -5788,7 +5798,7 @@ async function runUnpin(ctx, arg) {
     return;
   }
   const root = runsRoot();
-  if (!existsSync12(join15(root, id))) {
+  if (!existsSync11(join15(root, id))) {
     ctx.ui.notify(`No such run: ${id}`, "warning");
     return;
   }
@@ -6063,7 +6073,7 @@ async function runWorktreeCmd(opts, ctx, subRest) {
   switch (sub ?? "list") {
     case "list": {
       const runs = opts.getRegistry().list();
-      const withWt = runs.filter((r) => r.worktreePath);
+      const withWt = runs.filter((r) => r.worktreePath || r.worktreeBranch);
       if (withWt.length === 0) {
         ctx.ui.notify("No active worktrees.", "info");
         return;
@@ -6073,7 +6083,7 @@ async function runWorktreeCmd(opts, ctx, subRest) {
       ];
       for (const r of withWt) {
         const branch = r.worktreeBranch ?? "(unknown branch)";
-        const path = r.worktreePath ?? "";
+        const path = r.worktreePath ?? "(directory removed; branch kept)";
         lines.push(`\u2502 ${r.status.padEnd(14)} ${r.id.padEnd(24)} ${branch}`);
         lines.push(`\u2502                           path: ${path}`);
       }
@@ -6185,10 +6195,10 @@ Resolve manually in the worktree and run /conductor worktree merge ${runId} agai
 // src/tools.ts
 init_types();
 import { Type } from "@sinclair/typebox";
-import { readFileSync as readFileSync9, existsSync as existsSync14 } from "node:fs";
+import { readFileSync as readFileSync9, existsSync as existsSync13 } from "node:fs";
 
 // src/chain.ts
-import { readFileSync as readFileSync8, existsSync as existsSync13 } from "node:fs";
+import { readFileSync as readFileSync8, existsSync as existsSync12 } from "node:fs";
 var DEFAULT_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nOriginal task:\n{task}\n\n---\nFinal output:\n{final}";
 var WORKTREE_CHAIN_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nThe work is on branch `{worktreeBranch}` (not yet merged to `{baseBranch}`).\nRun the following to inspect the changes:\n\n```bash\ngit diff {baseBranch}...{worktreeBranch}\n```\n\nOriginal task:\n{task}";
 var FINAL_PLACEHOLDER = "(no final output)";
@@ -6208,7 +6218,7 @@ function buildChainTask(taskTemplate, context) {
     template = DEFAULT_TEMPLATE;
   }
   let finalContent = FINAL_PLACEHOLDER;
-  if (existsSync13(context.finalPath)) {
+  if (existsSync12(context.finalPath)) {
     try {
       finalContent = readFileSync8(context.finalPath, "utf-8");
     } catch {
@@ -8084,7 +8094,7 @@ function buildOnChainCallback(args) {
     let overrideTask;
     if (step.reevaluate) {
       let parentFinal = "";
-      if (existsSync14(parentRun.finalPath)) {
+      if (existsSync13(parentRun.finalPath)) {
         try {
           parentFinal = readFileSync9(parentRun.finalPath, "utf-8");
         } catch {
@@ -10264,7 +10274,7 @@ var ConductorEventEmitter = class {
 };
 
 // src/rpc-detach.ts
-import { existsSync as existsSync15, unlinkSync } from "node:fs";
+import { existsSync as existsSync14, unlinkSync } from "node:fs";
 function createRpcDetach(filePath, intervalMs = 200) {
   let resolveDetach = () => {
   };
@@ -10272,7 +10282,7 @@ function createRpcDetach(filePath, intervalMs = 200) {
     resolveDetach = res;
   });
   const pollTimer = setInterval(() => {
-    if (existsSync15(filePath)) {
+    if (existsSync14(filePath)) {
       try {
         unlinkSync(filePath);
       } catch {
@@ -10284,7 +10294,7 @@ function createRpcDetach(filePath, intervalMs = 200) {
   const unregister = () => {
     clearInterval(pollTimer);
     try {
-      if (existsSync15(filePath)) unlinkSync(filePath);
+      if (existsSync14(filePath)) unlinkSync(filePath);
     } catch {
     }
   };

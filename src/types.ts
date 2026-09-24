@@ -629,7 +629,8 @@ export interface Run {
   worktreePath?: string;
   /**
    * v0.13 worktree-per-persona: git branch for the worktree
-   * (e.g. `"conductor-wt/builder-abc1"`). Cleared with `worktreePath`.
+   * (e.g. `"conductor-wt/builder-abc1"`). Outlives `worktreePath` when the
+   * branch is kept without its directory (v0.20 B3 `none`, W2 unmerged).
    */
   worktreeBranch?: string;
   /**
@@ -975,7 +976,8 @@ export interface RunRecord {
   worktreePath?: string;
   /**
    * v0.13 worktree-per-persona: git branch name for the worktree
-   * (e.g. `"conductor-wt/builder-abc1"`). Cleared with `worktreePath`.
+   * (e.g. `"conductor-wt/builder-abc1"`). Outlives `worktreePath` when the
+   * branch is kept without its directory (v0.20 B3 `none`, W2 unmerged).
    */
   worktreeBranch?: string;
   /** v0.14 worktree auto-merge: base branch at spawn time. */

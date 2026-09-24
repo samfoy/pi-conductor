@@ -316,3 +316,16 @@ test("walkInventory: holdsWorktree is true only while the record's worktree is o
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("walkInventory: a run that didn't complete holds its kept branch after the directory is gone", async () => {
+  const root = tempRoot();
+  try {
+    makeRunDir(root, "builder-hf01", { status: "hook_failed", worktreeBranch: "conductor-wt/builder-hf01" });
+    makeRunDir(root, "builder-nd01", { status: "completed", worktreeBranch: "conductor-wt/builder-nd01" });
+    const byId = Object.fromEntries((await walkInventory(root, new RunRegistry())).map((e) => [e.id, e]));
+    assert.equal(byId["builder-hf01"]!.holdsWorktree, true, "GC rule 5b reclaims the kept branch");
+    assert.equal(byId["builder-nd01"]!.holdsWorktree, false, "a completed run's branch is its deliverable");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

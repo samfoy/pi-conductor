@@ -1,8 +1,9 @@
 /**
  * Finalize's worktree step (`settleWorktree`): a successful merge-back
  * removes the worktree directory and deletes its branch; a merge_conflict
- * keeps both for manual resolution; a non-completed run still gets its
- * worktree removed (v0.13). With no merge-back (`none`), the branch is
+ * keeps both for manual resolution; a run that isn't merged keeps a branch
+ * holding unmerged commits and loses only its clean directory (v0.20 W2).
+ * With no merge-back (`none`), the branch is
  * the deliverable: only a clean worktree directory goes (v0.20 B3). The
  * on_complete_hook gate runs in the worktree, not the main checkout (B4).
  * A leftover uncommitted change is never force-removed, and a run settled
@@ -190,17 +191,43 @@ test("settleWorktree: a re-adopted run's refused merge keeps its worktree and br
   }
 });
 
-test("settleWorktree: a failed run's worktree is still removed (no merge attempted)", { timeout: 15_000 }, async () => {
+for (const status of ["failed", "hook_failed"] as const) {
+  test(`settleWorktree: a ${status} run keeps its branch with the unmerged commit; only the clean directory goes`, { timeout: 15_000 }, async () => {
+    const { root, repo } = initRepo();
+    try {
+      const wt = worktreeWithCommit(repo, "builder-fl01", "x.ts", "x\n");
+      const run = makeRun("builder-fl01", { status, worktreePath: wt.path, worktreeBranch: wt.branch });
+
+      assert.equal(await settleWorktree(run, status), status);
+
+      assert.equal(run.mergeResult, undefined, "no merge attempted");
+      assert.equal(existsSync(wt.path), false, "clean worktree directory removed");
+      assert.match(git(repo, `log --stat --oneline mainline..${wt.branch}`), /x\.ts/, "the branch still holds the work");
+      assert.doesNotMatch(git(repo, "log --stat --oneline mainline"), /x\.ts/, "nothing merged");
+      assert.equal(run.worktreePath, undefined, "no directory to point at");
+      assert.equal(run.worktreeBranch, wt.branch, "the kept branch is recorded");
+      assert.ok(run.errorMessage?.includes(wt.branch), `the card names the kept branch: ${run.errorMessage}`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("settleWorktree: a failed run whose branch has no unmerged commits loses the branch too", { timeout: 15_000 }, async () => {
   const { root, repo } = initRepo();
   try {
-    const wt = worktreeWithCommit(repo, "builder-fl01", "x.ts", "x\n");
-    const run = makeRun("builder-fl01", { status: "failed", worktreePath: wt.path, worktreeBranch: wt.branch });
+    const branch = "conductor-wt/builder-fl02";
+    const path = join(repo, ".worktrees", "conductor-wt", "builder-fl02");
+    git(repo, `worktree add -b ${branch} ${JSON.stringify(path)}`);
+    const run = makeRun("builder-fl02", { status: "failed", worktreePath: path, worktreeBranch: branch });
 
     assert.equal(await settleWorktree(run, "failed"), "failed");
 
-    assert.equal(run.mergeResult, undefined);
-    assert.equal(existsSync(wt.path), false);
-    assert.equal(branchExists(repo, wt.branch), false);
+    assert.equal(existsSync(path), false);
+    assert.equal(branchExists(repo, branch), false, "nothing to lose, so the branch goes");
+    assert.equal(run.worktreePath, undefined);
+    assert.equal(run.worktreeBranch, undefined);
+    assert.equal(run.errorMessage, undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -506,6 +533,45 @@ test("sendToRun: a merge_conflict run's worktree and branch survive a failed res
       assert.equal(run.worktreePath, wtPath);
       assert.equal(run.worktreeBranch, branch);
       assert.equal(danglingCommits(repo), 0, "no commit left dangling");
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// v0.20 B4 runs the hook gate against the worktree, so hook_failed is the
+// normal outcome for work that fails it. That work must survive.
+test("spawnRun: a builder whose work fails the on_complete_hook keeps it on its branch", { timeout: 20_000 }, async () => {
+  const { root, repo } = initRepo();
+  const stub = writePiStub(root, {
+    onSpawn: `commit("work.ts", "rejected by the gate\\n", "work");`,
+    onResume: `process.exit(0);`,
+  });
+  try {
+    await withPiStub(root, stub, async () => {
+      const registry = new RunRegistry();
+      const { run, done } = spawnRun({
+        registry, persona: builderPersona(), task: "probe", mode: "background", cwd: repo,
+        timeoutMs: 15_000, worktree: true, mergeStrategy: "squash", onCompleteHook: "exit 1",
+      });
+      const wtPath = run.worktreePath!;
+      const branch = run.worktreeBranch!;
+      await done;
+
+      assert.equal(run.status, "hook_failed", run.errorMessage);
+      assert.match(git(repo, `log --stat --oneline mainline..${branch}`), /work\.ts/, "the rejected work is on its branch");
+      assert.equal(existsSync(wtPath), false, "the clean directory is removed");
+      assert.equal(run.worktreeBranch, branch);
+      const record = JSON.parse(readFileSync(run.recordPath, "utf8"));
+      assert.equal(record.worktreeBranch, branch, "record.json keeps the branch for GC");
+
+      const notes: string[] = [];
+      await runWorktreeCmd(
+        { getRegistry: () => registry, getCwd: () => repo } as any,
+        { ui: { notify: (m: string) => notes.push(m) } } as any,
+        "list",
+      );
+      assert.ok(notes.join("\n").includes(run.id) && notes.join("\n").includes(branch), notes.join("\n"));
     });
   } finally {
     rmSync(root, { recursive: true, force: true });

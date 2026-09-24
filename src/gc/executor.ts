@@ -37,12 +37,11 @@
  */
 
 import { readFile, rm, stat, unlink, utimes, writeFile, readdir } from "node:fs/promises";
-import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 import { isTerminal, type RunRecord } from "../types.ts";
 import type { ReclaimAction } from "./policy.ts";
-import { worktreeSpecFromRun, removeWorktree } from "../worktree.ts";
+import { worktreeSpecFromRun, removeWorktree, deleteBranch, holdsKeptWorktree } from "../worktree.ts";
 
 export interface ReclaimResult {
   /** Successfully cold-archived runs. `bytesReclaimed` is the size of the unlinked transcript. */
@@ -206,12 +205,13 @@ async function coldArchive(runDir: string, now: number): Promise<number> {
 async function fullDelete(runDir: string, record?: RunRecord): Promise<number> {
   // v0.13 worktree-per-persona: clean up any orphaned worktree before
   // removing the run directory. `finalize` already removes the worktree
-  // on healthy runs; this path handles crash/force-kill survivors.
-  if (record) {
+  // on healthy runs; this path handles crash/force-kill survivors, and a
+  // branch kept without its directory (v0.20 W2), deleted from record.cwd.
+  // Best-effort: a failure does not block the delete.
+  if (record && holdsKeptWorktree(record)) {
     const spec = worktreeSpecFromRun(record);
-    if (spec && existsSync(spec.worktreePath)) {
-      removeWorktree(spec); // best-effort; failure does not block delete
-    }
+    if (spec) removeWorktree(spec);
+    else if (record.worktreeBranch) deleteBranch(record.cwd, record.worktreeBranch);
   }
 
   let bytes = 0;

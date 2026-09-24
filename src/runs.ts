@@ -38,7 +38,7 @@ import { classifyFailure, shouldRetry } from "./failure-classify.ts";
 import { resolveRetryPolicy } from "./retry.ts";
 import { recordRunOutcome } from "./memory.ts";
 import { loadConfigWithErrors } from "./config.ts";
-import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage, currentBranch, worktreeHasUncommittedChanges } from "./worktree.ts";
+import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage, currentBranch, worktreeHasUncommittedChanges, branchHasUnmergedCommits } from "./worktree.ts";
 import { readProcessStartTime } from "./reconcile-startup.ts";
 import { ConductorEventEmitter } from "./conductor-events.ts";
 import { builtinPersonasDir, effectiveExcludeTools } from "./personas.ts";
@@ -2680,16 +2680,27 @@ export async function applyMergeToTerminal(
  * that doesn't complete keeps them too: it ran in the worktree a kill or
  * a conflict kept, and never merged it. Without a
  * merge-back (`none` or unset) the branch is the deliverable (v0.16
- * chains diff it), so only the directory goes (v0.20 B3). Exported for tests.
+ * chains diff it), so only the directory goes (v0.20 B3). Any other run
+ * that wasn't merged keeps a branch holding unmerged commits, recorded for
+ * `/conductor worktree list` and GC rule 5b (v0.20 W2). Exported for tests.
  */
 export async function settleWorktree(run: Run, terminal: RunStatus): Promise<RunStatus> {
-  if (run.worktreePath && run.mergeStrategy && run.mergeStrategy !== "none") {
-    const gitRoot = dirname(dirname(dirname(run.worktreePath)));
-    terminal = await applyMergeToTerminal(run, gitRoot, terminal);
-  }
+  if (!run.worktreePath || !run.worktreeBranch) return terminal;
+  const gitRoot = dirname(dirname(dirname(run.worktreePath)));
+  const noMergeBack = !run.mergeStrategy || run.mergeStrategy === "none";
+  if (!noMergeBack) terminal = await applyMergeToTerminal(run, gitRoot, terminal);
   if (terminal === "merge_conflict" || run.reconciledAtStartup) return terminal;
   if (terminal !== "completed" && (run.resumeCount ?? 0) > 0) return terminal;
-  releaseWorktree(run, { keepBranch: !run.mergeStrategy || run.mergeStrategy === "none" });
+  // A merge-back run that completed and got here merged; nothing else did.
+  const branch = run.worktreeBranch;
+  const keepBranch =
+    noMergeBack ||
+    (terminal !== "completed" && branchHasUnmergedCommits(gitRoot, run.worktreeBaseBranch ?? "master", branch));
+  releaseWorktree(run, { keepBranch });
+  if (terminal !== "completed" && keepBranch && !run.worktreePath) {
+    const hint = `branch ${branch} kept: merge it with cd ${gitRoot} && git merge ${branch}, or delete it with git branch -D ${branch}`;
+    run.errorMessage = run.errorMessage ? `${run.errorMessage}; ${hint}` : hint;
+  }
   return terminal;
 }
 

@@ -1277,7 +1277,8 @@ export async function runWorktreeCmd(
   switch (sub ?? "list") {
     case "list": {
       const runs = opts.getRegistry().list();
-      const withWt = runs.filter((r: Run) => r.worktreePath);
+      // A kept branch whose clean directory went is listed too (v0.20 W2).
+      const withWt = runs.filter((r: Run) => r.worktreePath || r.worktreeBranch);
       if (withWt.length === 0) {
         ctx.ui.notify("No active worktrees.", "info");
         return;
@@ -1287,7 +1288,7 @@ export async function runWorktreeCmd(
       ];
       for (const r of withWt) {
         const branch = r.worktreeBranch ?? "(unknown branch)";
-        const path = r.worktreePath ?? "";
+        const path = r.worktreePath ?? "(directory removed; branch kept)";
         lines.push(`│ ${r.status.padEnd(14)} ${r.id.padEnd(24)} ${branch}`);
         lines.push(`│                           path: ${path}`);
       }

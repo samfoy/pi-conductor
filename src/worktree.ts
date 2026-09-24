@@ -6,6 +6,8 @@
  *   - `resolveWorktreeSpec`    — path computation + git root detection (I/O: git CLI only)
  *   - `createWorktree`         — `git worktree add` + `ensureWorktreeGitignore`
  *   - `removeWorktree`         — `git worktree remove --force` + `git branch -D` (best-effort)
+ *   - `branchHasUnmergedCommits` — does a branch hold commits its base can't reach
+ *   - `holdsKeptWorktree`      — does a record still hold a worktree or branch GC must reclaim
  *   - `worktreeHasUncommittedChanges` — `git status --porcelain` guard before a removal
  *   - `ensureWorktreeGitignore` — idempotent `.gitignore` append
  *   - `detectBrazilWorkspaceRoot` — walks up dir tree looking for `.brazil` marker
@@ -162,16 +164,7 @@ export function removeWorktree(spec: WorktreeSpec, opts: { keepBranch?: boolean 
     ok = false;
   }
 
-  if (!opts.keepBranch) {
-    try {
-      execSync(
-        `git branch -D ${JSON.stringify(spec.branch)}`,
-        { cwd: spec.gitRoot, stdio: "pipe", env: gitEnv() },
-      );
-    } catch {
-      ok = false;
-    }
-  }
+  if (!opts.keepBranch && !deleteBranch(spec.gitRoot, spec.branch)) ok = false;
 
   // Best-effort prune of stale worktree metadata.
   try {
@@ -181,6 +174,31 @@ export function removeWorktree(spec: WorktreeSpec, opts: { keepBranch?: boolean 
   }
 
   return ok;
+}
+
+/** `git branch -D` from `cwd`, any directory in the repo. Best-effort: false on failure. */
+export function deleteBranch(cwd: string, branch: string): boolean {
+  return tryGitExec(`git branch -D ${JSON.stringify(branch)}`, cwd) !== null;
+}
+
+/**
+ * Whether `branch` has commits `baseBranch` can't reach, so deleting it
+ * would lose work. A git error counts as yes, so callers keep the branch.
+ */
+export function branchHasUnmergedCommits(gitRoot: string, baseBranch: string, branch: string): boolean {
+  const count = tryGitExec(`git rev-list --count ${JSON.stringify(`${baseBranch}..${branch}`)}`, gitRoot);
+  return count === null || Number(count) > 0;
+}
+
+/**
+ * Whether a record still holds something GC rule 5b reclaims: a worktree
+ * directory on disk, or the branch a run that didn't complete kept after
+ * its clean directory went (v0.20 W2). A completed run's branch without a
+ * directory is a `none` deliverable, so it doesn't count.
+ */
+export function holdsKeptWorktree(record: Pick<RunRecord, "status" | "worktreePath" | "worktreeBranch">): boolean {
+  if (record.worktreePath !== undefined) return existsSync(record.worktreePath);
+  return record.worktreeBranch !== undefined && record.status !== "completed";
 }
 
 /**
