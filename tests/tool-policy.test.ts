@@ -24,6 +24,7 @@ import {
 import { buildPiArgs, buildResumePiArgs, planSpawnPiArgs, RunRegistry } from "../src/runs.ts";
 import { formatPersonaListForLLM, registerTools } from "../src/tools.ts";
 import { formatPersonaDetail } from "../src/commands.ts";
+import { reconcileOrphansAtStartup } from "../src/reconcile-startup.ts";
 import { loadConfig } from "../src/config.ts";
 import { SpawnQueue } from "../src/queue.ts";
 import { FocusedStreamModel } from "../src/focused-stream-model.ts";
@@ -209,6 +210,57 @@ test("buildResumePiArgs: a legacy run without tool fields still excludes the con
   assert.equal(args.includes("--tools"), false);
   assert.equal(flagValue(args, "--exclude-tools"), CONDUCTOR_LLM_TOOL_NAMES.join(","));
 });
+
+// Critic REJECT on A1: `buildOrphanRun` copied systemPrompt but not the
+// tool policy, so a resume after crash or /reload dropped the persona's
+// allowlist and exclusions. Covers every branch that registers an orphan.
+for (const [label, onDisk, alive, status] of [
+  ["killed", "running", false, "killed"],
+  ["readopt", "running", true, "running"],
+  ["failed-queued", "queued", false, "failed"],
+] as const) {
+  test(`reconcile (${label}): the re-adopted run keeps the persisted tool policy on resume`, async () => {
+    const runsRoot = mkdtempSync(join(tmpdir(), "conductor-tool-policy-reconcile-"));
+    try {
+      const id = "critic-orph";
+      const dir = join(runsRoot, id);
+      mkdirSync(join(dir, "session"), { recursive: true });
+      const sessionPath = join(dir, "session", "s.jsonl");
+      writeFileSync(sessionPath, '{"type":"session"}\n');
+      const record = toRunRecord(
+        makeRun({
+          id,
+          status: onDisk,
+          pid: 999_999,
+          recordPath: join(dir, "record.json"),
+          sessionPath,
+          tools: ["read", "bash"],
+          excludeTools: effectiveExcludeTools(READ_ONLY_EXCLUSIONS),
+        }),
+      );
+      writeFileSync(record.recordPath, JSON.stringify(record, null, 2));
+
+      const runs = new Map<string, Run>();
+      await reconcileOrphansAtStartup({
+        runsRoot,
+        registry: { has: (k) => runs.has(k), get: (k) => runs.get(k), register: (r) => void runs.set(r.id, r) },
+        isAlive: () => alive,
+        now: 2_000,
+      });
+
+      const registered = runs.get(id);
+      assert.equal(registered?.status, status);
+      const args = buildResumePiArgs(registered!, "x");
+      assert.equal(flagValue(args, "--tools"), "read,bash");
+      const excluded = (flagValue(args, "--exclude-tools") ?? "").split(",");
+      for (const name of [...READ_ONLY_EXCLUSIONS, ...CONDUCTOR_LLM_TOOL_NAMES]) {
+        assert.ok(excluded.includes(name), `--exclude-tools must contain ${name}; got ${excluded.join(",")}`);
+      }
+    } finally {
+      rmSync(runsRoot, { recursive: true, force: true });
+    }
+  });
+}
 
 test("toRunRecord persists the effective tool policy", () => {
   const rec = toRunRecord(makeRun({ tools: ["read"], excludeTools: ["edit", "ensemble_list"] }));

@@ -2337,6 +2337,10 @@ function buildOrphanRun(record, status) {
     finalPath: record.finalPath,
     sessionPath: record.sessionPath,
     systemPrompt: record.systemPrompt,
+    // Tool policy must survive re-adoption, or a resumed read-only persona
+    // loses its exclusions (buildResumePiArgs reads these).
+    tools: record.tools,
+    excludeTools: record.excludeTools,
     hookResult: record.hookResult,
     // v0.17-S3: restore turn-limit fields from the persisted record.
     maxTurns: record.maxTurns,
