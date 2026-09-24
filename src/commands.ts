@@ -320,7 +320,7 @@ function runStatus(opts: RegisterCommandsOpts, ctx: ExtensionCommandContext): vo
     lines.push("");
     lines.push(`Queue (${queue.size()}):`);
     for (const p of queue.list()) {
-      lines.push(`  ${p.id.padEnd(20)} ${p.persona.name.padEnd(14)} (requested=${p.requestedMode})`);
+      lines.push(`  ${p.id.padEnd(20)} ${p.spawn.persona.name.padEnd(14)} (requested=${p.requestedMode})`);
     }
   }
   ctx.ui.notify(lines.join("\n"), "info");
@@ -402,7 +402,7 @@ function runQueueCmd(opts: RegisterCommandsOpts, ctx: ExtensionCommandContext): 
   for (const [i, p] of queue.list().entries()) {
     const waited = elapsedStr(p.enqueuedAt);
     lines.push(
-      `  ${i + 1}. ${p.id.padEnd(20)} ${p.persona.name.padEnd(14)} requested=${p.requestedMode} waited=${waited}`,
+      `  ${i + 1}. ${p.id.padEnd(20)} ${p.spawn.persona.name.padEnd(14)} requested=${p.requestedMode} waited=${waited}`,
     );
   }
   ctx.ui.notify(lines.join("\n"), "info");

@@ -5464,7 +5464,7 @@ function runStatus(opts, ctx) {
     lines.push("");
     lines.push(`Queue (${queue.size()}):`);
     for (const p of queue.list()) {
-      lines.push(`  ${p.id.padEnd(20)} ${p.persona.name.padEnd(14)} (requested=${p.requestedMode})`);
+      lines.push(`  ${p.id.padEnd(20)} ${p.spawn.persona.name.padEnd(14)} (requested=${p.requestedMode})`);
     }
   }
   ctx.ui.notify(lines.join("\n"), "info");
@@ -5528,7 +5528,7 @@ function runQueueCmd(opts, ctx) {
   for (const [i, p] of queue.list().entries()) {
     const waited = elapsedStr(p.enqueuedAt);
     lines.push(
-      `  ${i + 1}. ${p.id.padEnd(20)} ${p.persona.name.padEnd(14)} requested=${p.requestedMode} waited=${waited}`
+      `  ${i + 1}. ${p.id.padEnd(20)} ${p.spawn.persona.name.padEnd(14)} requested=${p.requestedMode} waited=${waited}`
     );
   }
   ctx.ui.notify(lines.join("\n"), "info");
@@ -6980,7 +6980,7 @@ function registerStatusTool(pi, opts) {
       const groups = groupByStatus(filtered);
       const queueList = queue.list().map((p) => ({
         id: p.id,
-        persona: p.persona.name,
+        persona: p.spawn.persona.name,
         requestedMode: p.requestedMode,
         enqueuedAt: p.enqueuedAt
       }));
@@ -7125,6 +7125,7 @@ function registerAutoTool(pi, opts) {
           parentMessages: opts.getParentMessages(),
           parentSessionId: opts.getSessionId?.(),
           worktree: step.cfg.worktreeMode === "conductor" && personaObj.worktree === true,
+          mergeStrategy: resolveSpawnMergeStrategy(step.cfg, personaObj),
           retryAttempt: a.retryAttempt,
           // NO onRetry / onChain: the executor is the sole retry + sequencing
           // authority (avoids double-fire with S2's background retry and the
@@ -7317,15 +7318,7 @@ function registerSpawnTool(pi, opts) {
         // v0.13 worktree-per-persona: collapse from persona frontmatter.
         worktree: cfg.worktreeMode === "conductor" && persona.worktree === true,
         // v0.14 worktree auto-merge: resolve the merge strategy cascade.
-        // Cascade: per-call > project > user > persona-frontmatter > built-in class default.
-        mergeStrategy: cfg.worktreeMode === "conductor" && persona.worktree === true ? resolveMergeStrategy({
-          perCall: params.merge_strategy,
-          projectOverride: cfg.personaOverrides[persona.name]?.mergeStrategy,
-          userOverride: void 0,
-          // user config merged into cfg.personaOverrides at load time
-          personaFrontmatter: persona.mergeStrategy,
-          personaName: persona.name
-        }) : void 0,
+        mergeStrategy: resolveSpawnMergeStrategy(cfg, persona, params.merge_strategy),
         // Item 12 candidate #3 — per-call inherit_context override.
         // Wins above persona.inheritContext (which already merges
         // project/user personaOverrides). Resolved in planSpawnPiArgs
@@ -7360,6 +7353,7 @@ function registerSpawnTool(pi, opts) {
           queue,
           cwd,
           retryMaxAttempts: params.retry_max_attempts,
+          mergeStrategy: params.merge_strategy,
           pushNotification: opts.pushCompletionNotification,
           getParentMessages: opts.getParentMessages,
           getSessionId: opts.getSessionId,
@@ -7869,6 +7863,17 @@ function registerFocusTool(pi, opts) {
     }
   });
 }
+function resolveSpawnMergeStrategy(cfg, persona, perCall) {
+  if (cfg.worktreeMode !== "conductor" || persona.worktree !== true) return void 0;
+  return resolveMergeStrategy({
+    perCall,
+    projectOverride: cfg.personaOverrides[persona.name]?.mergeStrategy,
+    userOverride: void 0,
+    // user config merged into cfg.personaOverrides at load time
+    personaFrontmatter: persona.mergeStrategy,
+    personaName: persona.name
+  });
+}
 function resolveModel(p, ov) {
   return ov.model ?? p.model;
 }
@@ -8130,6 +8135,7 @@ function buildOnRetryCallback(args) {
       parentSessionId: args.getSessionId?.(),
       // Preserve worktree isolation across retries for write-capable personas.
       worktree: args.cfg.worktreeMode === "conductor" && args.persona.worktree === true,
+      mergeStrategy: resolveSpawnMergeStrategy(args.cfg, args.persona, args.mergeStrategy),
       // Carry the incremented attempt + the same per-call budget so the
       // re-spawned run resolves the same policy and can retry again.
       retryAttempt: failedAttempt + 1,
@@ -8147,15 +8153,17 @@ init_types();
 import { mkdirSync as mkdirSync6 } from "node:fs";
 import { join as join16 } from "node:path";
 var SpawnQueue = class {
-  constructor(registry, maxConcurrent, maxConcurrentWriteCapable = 1) {
+  constructor(registry, maxConcurrent, maxConcurrentWriteCapable = 1, spawn2 = spawnRun) {
     this.registry = registry;
     this.maxConcurrent = maxConcurrent;
     this.maxConcurrentWriteCapable = maxConcurrentWriteCapable;
+    this.spawn = spawn2;
     this.registry.onChange(() => this.drain());
   }
   registry;
   maxConcurrent;
   maxConcurrentWriteCapable;
+  spawn;
   pending = [];
   setMaxConcurrent(n) {
     this.maxConcurrent = Math.max(1, Math.floor(n));
@@ -8179,13 +8187,14 @@ var SpawnQueue = class {
    *   - { queued: PendingSpawn, downgraded }     if queued (downgraded=true means foreground→background)
    */
   enqueueOrSpawn(opts) {
-    const registry = opts.registry ?? this.registry;
+    const { registry: callerRegistry, ...spawn2 } = opts;
+    const registry = callerRegistry ?? this.registry;
     const slotsFree = this.maxConcurrent - registry.countActive();
     const writeCapable = WRITE_CAPABLE_PERSONAS2.has(opts.persona.name);
     const writeSlotsFree = this.maxConcurrentWriteCapable - registry.countActiveBy(WRITE_CAPABLE_PERSONAS2);
     const canSpawnNow = slotsFree > 0 && (!writeCapable || writeSlotsFree > 0);
     if (canSpawnNow) {
-      const result = spawnRun({ ...opts, registry });
+      const result = this.spawn({ ...spawn2, registry });
       return { kind: "spawned", run: result.run, done: result.done };
     }
     const id = allocateRunId(opts.persona.name, mapFromRegistry2(registry));
@@ -8212,34 +8221,10 @@ var SpawnQueue = class {
     registry.register(placeholder);
     const pending = {
       id,
-      persona: opts.persona,
-      task: opts.task,
       requestedMode: opts.mode,
       effectiveMode: "background",
-      cwd: opts.cwd,
-      model: opts.model,
-      thinking: opts.thinking,
-      timeoutMs: opts.timeoutMs,
       enqueuedAt: Date.now(),
-      parentMessages: opts.parentMessages,
-      parentSessionId: opts.parentSessionId,
-      onComplete: opts.onComplete,
-      // NOTE (v0.18): retryAttempt/onRetry are intentionally NOT captured here.
-      // A queued-then-drained run persists retryAttempt=0 regardless of the
-      // autonomous executor's real attempt — observability drift only. The
-      // executor's local `attempt` counter is authoritative (it drives
-      // buildRetryTask + shouldRetry); the auto path never reads
-      // run.retryAttempt. Not a correctness path.
-      killOnStall: opts.killOnStall,
-      softStallSeconds: opts.softStallSeconds,
-      steerable: opts.steerable,
-      inheritContextOverride: opts.inheritContextOverride,
-      onCompleteHook: opts.onCompleteHook,
-      onCompleteHookTimeoutSeconds: opts.onCompleteHookTimeoutSeconds,
-      worktree: opts.worktree,
-      events: opts.events,
-      maxTurns: opts.maxTurns,
-      graceTurns: opts.graceTurns
+      spawn: spawn2
     };
     opts.events?.emitCreated({
       id,
@@ -8274,7 +8259,7 @@ var SpawnQueue = class {
       const next = this.pending[i];
       const slotsFree = this.maxConcurrent - this.registry.countActive();
       if (slotsFree <= 0) return;
-      const writeCapable = WRITE_CAPABLE_PERSONAS2.has(next.persona.name);
+      const writeCapable = WRITE_CAPABLE_PERSONAS2.has(next.spawn.persona.name);
       const writeSlotsFree = this.maxConcurrentWriteCapable - this.registry.countActiveBy(WRITE_CAPABLE_PERSONAS2);
       if (writeCapable && writeSlotsFree <= 0) {
         i++;
@@ -8285,30 +8270,11 @@ var SpawnQueue = class {
       if (!placeholder || placeholder.status !== "queued") {
         continue;
       }
-      spawnRun({
-        registry: this.registry,
-        persona: next.persona,
-        task: next.task,
+      this.spawn({
+        ...next.spawn,
         mode: next.effectiveMode,
-        cwd: next.cwd,
-        model: next.model,
-        thinking: next.thinking,
-        timeoutMs: next.timeoutMs,
-        preAllocatedId: next.id,
-        parentMessages: next.parentMessages,
-        parentSessionId: next.parentSessionId,
-        onComplete: next.onComplete,
-        killOnStall: next.killOnStall,
-        softStallSeconds: next.softStallSeconds,
-        steerable: next.steerable,
-        inheritContextOverride: next.inheritContextOverride,
-        onCompleteHook: next.onCompleteHook,
-        onCompleteHookTimeoutSeconds: next.onCompleteHookTimeoutSeconds,
-        worktree: next.worktree,
-        // v0.16-S2: thread events so emitStarted fires at drain time.
-        events: next.events,
-        maxTurns: next.maxTurns,
-        graceTurns: next.graceTurns
+        registry: this.registry,
+        preAllocatedId: next.id
       });
     }
   }

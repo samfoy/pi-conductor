@@ -287,7 +287,7 @@ function registerStatusTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       const groups = groupByStatus(filtered);
       const queueList = queue.list().map((p) => ({
         id: p.id,
-        persona: p.persona.name,
+        persona: p.spawn.persona.name,
         requestedMode: p.requestedMode,
         enqueuedAt: p.enqueuedAt,
       }));
@@ -478,6 +478,7 @@ function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           parentMessages: opts.getParentMessages(),
           parentSessionId: opts.getSessionId?.(),
           worktree: step.cfg.worktreeMode === "conductor" && personaObj.worktree === true,
+          mergeStrategy: resolveSpawnMergeStrategy(step.cfg, personaObj),
           retryAttempt: a.retryAttempt,
           // NO onRetry / onChain: the executor is the sole retry + sequencing
           // authority (avoids double-fire with S2's background retry and the
@@ -719,16 +720,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         // v0.13 worktree-per-persona: collapse from persona frontmatter.
         worktree: cfg.worktreeMode === "conductor" && persona.worktree === true,
         // v0.14 worktree auto-merge: resolve the merge strategy cascade.
-        // Cascade: per-call > project > user > persona-frontmatter > built-in class default.
-        mergeStrategy: (cfg.worktreeMode === "conductor" && persona.worktree === true)
-          ? resolveMergeStrategy({
-              perCall: params.merge_strategy as MergeStrategy | undefined,
-              projectOverride: (cfg.personaOverrides[persona.name] as any)?.mergeStrategy,
-              userOverride: undefined, // user config merged into cfg.personaOverrides at load time
-              personaFrontmatter: (persona as any).mergeStrategy,
-              personaName: persona.name,
-            })
-          : undefined,
+        mergeStrategy: resolveSpawnMergeStrategy(cfg, persona, params.merge_strategy as MergeStrategy | undefined),
         // Item 12 candidate #3 — per-call inherit_context override.
         // Wins above persona.inheritContext (which already merges
         // project/user personaOverrides). Resolved in planSpawnPiArgs
@@ -763,6 +755,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           queue,
           cwd,
           retryMaxAttempts: params.retry_max_attempts,
+          mergeStrategy: params.merge_strategy as MergeStrategy | undefined,
           pushNotification: opts.pushCompletionNotification,
           getParentMessages: opts.getParentMessages,
           getSessionId: opts.getSessionId,
@@ -1402,6 +1395,27 @@ function registerFocusTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 
 // ── Formatting / helpers ─────────────────────────────────────────────
 
+/**
+ * v0.14 merge strategy for a spawn, or undefined when it gets no worktree.
+ * Cascade: per-call > project > user > persona-frontmatter > class default.
+ * ensemble_spawn, ensemble_auto steps and classified retries all use it:
+ * a worktree run without a strategy lost its branch unmerged (v0.20 B1).
+ */
+function resolveSpawnMergeStrategy(
+  cfg: ReturnType<typeof loadConfig>,
+  persona: Persona,
+  perCall?: MergeStrategy,
+): MergeStrategy | undefined {
+  if (cfg.worktreeMode !== "conductor" || persona.worktree !== true) return undefined;
+  return resolveMergeStrategy({
+    perCall,
+    projectOverride: (cfg.personaOverrides[persona.name] as { mergeStrategy?: MergeStrategy } | undefined)?.mergeStrategy,
+    userOverride: undefined, // user config merged into cfg.personaOverrides at load time
+    personaFrontmatter: (persona as { mergeStrategy?: MergeStrategy }).mergeStrategy,
+    personaName: persona.name,
+  });
+}
+
 function resolveModel(p: Persona, ov: PersonaOverride): string | undefined {
   return ov.model ?? p.model;
 }
@@ -1739,6 +1753,8 @@ export interface OnRetryCallbackOpts {
   cwd: string;
   /** Per-call retry budget (highest cascade layer); threaded to the re-spawn. */
   retryMaxAttempts?: number;
+  /** Per-call merge strategy (highest cascade layer); re-resolved for the re-spawn. */
+  mergeStrategy?: MergeStrategy;
   pushNotification: (run: Run) => void;
   getParentMessages: () => AgentMessage[];
   /** Spawning slot's pi session id; stamped as `parentSessionId`. */
@@ -1785,6 +1801,7 @@ export function buildOnRetryCallback(
       parentSessionId: args.getSessionId?.(),
       // Preserve worktree isolation across retries for write-capable personas.
       worktree: args.cfg.worktreeMode === "conductor" && args.persona.worktree === true,
+      mergeStrategy: resolveSpawnMergeStrategy(args.cfg, args.persona, args.mergeStrategy),
       // Carry the incremented attempt + the same per-call budget so the
       // re-spawned run resolves the same policy and can retry again.
       retryAttempt: failedAttempt + 1,

@@ -6,7 +6,7 @@
  *   - foreground spawns auto-downgrade to background and also queue
  *
  * The queue drains automatically on every run-state change. Each pending
- * entry holds enough metadata to spawn when a slot opens.
+ * entry holds the caller's spawn options, passed through unchanged.
  */
 
 import {
@@ -15,84 +15,32 @@ import {
   spawnRun,
   type SpawnOptions,
 } from "./runs.ts";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ContextInheritance, Persona, Run, SpawnMode, ThinkingLevel } from "./types.ts";
+import type { Run, SpawnMode } from "./types.ts";
 import { emptyUsage } from "./types.ts";
-import { ConductorEventEmitter } from "./conductor-events.ts";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { runDir } from "./runs.ts";
 import { allocateRunId } from "./runs.ts";
 import { WRITE_CAPABLE_PERSONAS } from "./personas.ts";
 
+/** Spawn options a queued entry hands to the spawner on drain. */
+export type QueuedSpawnOptions = Omit<SpawnOptions, "registry" | "preAllocatedId">;
+
 export interface PendingSpawn {
   /** Pre-allocated id, so the LLM has a stable id to reference even before spawn. */
   id: string;
-  persona: Persona;
-  task: string;
   /** Original requested mode. Foreground requests are auto-downgraded to background when queued. */
   requestedMode: SpawnMode;
   /** Mode the run will actually start with after dequeue (always background once queued). */
   effectiveMode: SpawnMode;
-  cwd: string;
-  model?: string;
-  thinking?: ThinkingLevel;
-  timeoutMs: number;
   enqueuedAt: number;
   /**
-   * Snapshot of the parent conductor's messages at enqueue time. Plumbed
-   * through to the eventual spawnRun so a queued sub-agent inherits the
-   * conductor's intent at the moment it was queued, not at drain time.
+   * The caller's options, captured at enqueue time and passed through
+   * verbatim on drain (only `mode` becomes `effectiveMode`). The whole
+   * object, not a field list: the list dropped `mergeStrategy` and a
+   * queued builder's branch was deleted unmerged (v0.20 B1).
    */
-  parentMessages?: AgentMessage[];
-  /**
-   * Session-scoped ownership identity captured at enqueue time and
-   * threaded to `spawnRun` on drain. MUST be preserved through the
-   * queue: a queued-then-drained run that loses this reverts to
-   * pid-based ownership scoping in reconcile, reintroducing the
-   * cross-slot readopt bug for every sub-agent that hits the
-   * concurrency cap (pi-dashboard shares one pid across slots).
-   */
-  parentSessionId?: string;
-  /** Non-foreground onComplete plumbed through from the spawner. */
-  onComplete?: (run: Run) => void;
-  /** v0.10 watchdog (Slice 3) per-spawn override; threaded to spawnRun. */
-  killOnStall?: boolean;
-  /** v0.10 watchdog (Slice 3) per-spawn soft-threshold (seconds). */
-  softStallSeconds?: number;
-  /**
-   * v0.12 slice 4 — cascade-collapsed steerable boolean threaded
-   * through to spawnRun on dequeue. See `SpawnOptions.steerable`.
-   */
-  steerable?: boolean;
-  /**
-   * Item 12 candidate #3 — per-call `inherit_context` override from
-   * `ensemble_spawn`. Threaded through to spawnRun on dequeue. See
-   * `SpawnOptions.inheritContextOverride` and `src/inherit-context.ts`.
-   */
-  inheritContextOverride?: ContextInheritance;
-  /**
-   * v0.11 on_complete_hook (slice 3) — per-call layer threaded through
-   * to spawnRun on dequeue. See `SpawnOptions.onCompleteHook`.
-   */
-  onCompleteHook?: string;
-  /** v0.11 on_complete_hook (slice 3) — per-call timeout (seconds). */
-  onCompleteHookTimeoutSeconds?: number;
-  /**
-   * v0.13 worktree-per-persona — collapses from `persona.worktree`;
-   * threaded through to `spawnRun` on dequeue.
-   */
-  worktree?: boolean;
-  /**
-   * v0.16-S2 event bus adapter. Threaded through to spawnRun on dequeue so
-   * emitStarted fires at drain time. emitCreated fires immediately in
-   * enqueueOrSpawn when the placeholder is created.
-   */
-  events?: ConductorEventEmitter;
-  /** v0.17 turn limits — per-call maxTurns, threaded to spawnRun on dequeue. */
-  maxTurns?: number;
-  /** v0.17 turn limits — per-call graceTurns, threaded to spawnRun on dequeue. */
-  graceTurns?: number;
+  spawn: QueuedSpawnOptions;
 }
 
 export class SpawnQueue {
@@ -107,6 +55,8 @@ export class SpawnQueue {
      * foreground) even if there are general slots free.
      */
     private maxConcurrentWriteCapable: number = 1,
+    /** Spawner seam; tests inject a spy. */
+    private spawn: (opts: SpawnOptions) => { run: Run; done: Promise<Run> } = spawnRun,
   ) {
     this.registry.onChange(() => this.drain());
   }
@@ -137,9 +87,10 @@ export class SpawnQueue {
    *   - { queued: PendingSpawn, downgraded }     if queued (downgraded=true means foreground→background)
    */
   enqueueOrSpawn(
-    opts: Omit<SpawnOptions, "registry" | "preAllocatedId"> & { registry?: RunRegistry },
+    opts: QueuedSpawnOptions & { registry?: RunRegistry },
   ): SpawnOrQueueResult {
-    const registry = opts.registry ?? this.registry;
+    const { registry: callerRegistry, ...spawn } = opts;
+    const registry = callerRegistry ?? this.registry;
     const slotsFree = this.maxConcurrent - registry.countActive();
     const writeCapable = WRITE_CAPABLE_PERSONAS.has(opts.persona.name);
     const writeSlotsFree =
@@ -147,7 +98,7 @@ export class SpawnQueue {
     const canSpawnNow = slotsFree > 0 && (!writeCapable || writeSlotsFree > 0);
 
     if (canSpawnNow) {
-      const result = spawnRun({ ...opts, registry });
+      const result = this.spawn({ ...spawn, registry });
       return { kind: "spawned", run: result.run, done: result.done };
     }
 
@@ -178,34 +129,10 @@ export class SpawnQueue {
 
     const pending: PendingSpawn = {
       id,
-      persona: opts.persona,
-      task: opts.task,
       requestedMode: opts.mode,
       effectiveMode: "background",
-      cwd: opts.cwd,
-      model: opts.model,
-      thinking: opts.thinking,
-      timeoutMs: opts.timeoutMs,
       enqueuedAt: Date.now(),
-      parentMessages: opts.parentMessages,
-      parentSessionId: opts.parentSessionId,
-      onComplete: opts.onComplete,
-      // NOTE (v0.18): retryAttempt/onRetry are intentionally NOT captured here.
-      // A queued-then-drained run persists retryAttempt=0 regardless of the
-      // autonomous executor's real attempt — observability drift only. The
-      // executor's local `attempt` counter is authoritative (it drives
-      // buildRetryTask + shouldRetry); the auto path never reads
-      // run.retryAttempt. Not a correctness path.
-      killOnStall: opts.killOnStall,
-      softStallSeconds: opts.softStallSeconds,
-      steerable: opts.steerable,
-      inheritContextOverride: opts.inheritContextOverride,
-      onCompleteHook: opts.onCompleteHook,
-      onCompleteHookTimeoutSeconds: opts.onCompleteHookTimeoutSeconds,
-      worktree: opts.worktree,
-      events: opts.events,
-      maxTurns: opts.maxTurns,
-      graceTurns: opts.graceTurns,
+      spawn,
     };
     // v0.16-S2: emit emitCreated at queue time (before the run actually starts).
     // emitStarted will fire in spawnRun when drain dequeues this entry.
@@ -247,7 +174,7 @@ export class SpawnQueue {
       const next = this.pending[i]!;
       const slotsFree = this.maxConcurrent - this.registry.countActive();
       if (slotsFree <= 0) return;
-      const writeCapable = WRITE_CAPABLE_PERSONAS.has(next.persona.name);
+      const writeCapable = WRITE_CAPABLE_PERSONAS.has(next.spawn.persona.name);
       const writeSlotsFree =
         this.maxConcurrentWriteCapable -
         this.registry.countActiveBy(WRITE_CAPABLE_PERSONAS);
@@ -265,30 +192,11 @@ export class SpawnQueue {
         continue;
       }
 
-      spawnRun({
-        registry: this.registry,
-        persona: next.persona,
-        task: next.task,
+      this.spawn({
+        ...next.spawn,
         mode: next.effectiveMode,
-        cwd: next.cwd,
-        model: next.model,
-        thinking: next.thinking,
-        timeoutMs: next.timeoutMs,
+        registry: this.registry,
         preAllocatedId: next.id,
-        parentMessages: next.parentMessages,
-        parentSessionId: next.parentSessionId,
-        onComplete: next.onComplete,
-        killOnStall: next.killOnStall,
-        softStallSeconds: next.softStallSeconds,
-        steerable: next.steerable,
-        inheritContextOverride: next.inheritContextOverride,
-        onCompleteHook: next.onCompleteHook,
-        onCompleteHookTimeoutSeconds: next.onCompleteHookTimeoutSeconds,
-        worktree: next.worktree,
-        // v0.16-S2: thread events so emitStarted fires at drain time.
-        events: next.events,
-        maxTurns: next.maxTurns,
-        graceTurns: next.graceTurns,
       });
     }
   }

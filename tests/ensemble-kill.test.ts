@@ -133,13 +133,10 @@ test("ensemble_kill on a queued sub-agent flips status and removes from pending"
   // created. SpawnQueue.removeQueued matches by id and splices.
   (queue as any).pending.push({
     id: run.id,
-    persona: run.persona,
-    task: run.task,
     requestedMode: "background",
     effectiveMode: "background",
-    cwd: run.cwd,
-    timeoutMs: 60_000,
     enqueuedAt: Date.now(),
+    spawn: { persona: { name: run.persona }, task: run.task, mode: "background", cwd: run.cwd, timeoutMs: 60_000 },
   });
   assert.equal(queue.size(), 1, "precondition: pending list contains one");
   const result = await killTool.execute("call-1", { agent_id: run.id });

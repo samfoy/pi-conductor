@@ -336,6 +336,6 @@ test("SpawnQueue.enqueueOrSpawn: parentMessages snapshot is captured on the Pend
     assert.equal(r.kind, "queued");
     if (r.kind !== "queued") return;
     // The pending entry should carry the snapshot through to drain time.
-    assert.deepEqual(r.pending.parentMessages, parentMessages);
+    assert.deepEqual(r.pending.spawn.parentMessages, parentMessages);
   });
 });
