@@ -458,7 +458,11 @@ export interface Run {
   persona: string;
   /** The task prompt the LLM gave us. default_reads contents are NOT inlined — they are passed as separate prompt prefix. */
   task: string;
-  /** Resolved model id at spawn time (after persona/override resolution). May be undefined when inheriting. */
+  /**
+   * Resolved model id at spawn time (after persona/override resolution). When
+   * inheriting, the event handler fills it from the first assistant message as
+   * `provider/model`, which resume passes to `pi --model`.
+   */
   model?: string;
   /** Resolved thinking level at spawn time. */
   thinking?: ThinkingLevel;

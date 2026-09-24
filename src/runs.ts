@@ -25,7 +25,7 @@ import { RpcStdinQueue } from "./rpc-stdin.ts";
 import { dirname, join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { noteAllocatedId } from "./gc/id-reuse.ts";
-import { applyEvent } from "./event-handler.ts";
+import { applyEvent, qualifyModel } from "./event-handler.ts";
 import { filterParentContext, filterParentContextCompact } from "./context-filter.ts";
 import { resolveInheritContext } from "./inherit-context.ts";
 import { seedSessionFile } from "./session-seed.ts";
@@ -539,6 +539,48 @@ export function buildResumePiArgs(run: Run, message: string): string[] {
     // "resume into RPC" is deliberately not exposed in v0.12.
     steerable: false,
   });
+}
+
+/**
+ * Provider that served `model` according to a pi session JSONL: the latest
+ * assistant message or `model_change` entry naming that exact id. Latest,
+ * because a seeded session opens with the parent's messages. Pure.
+ */
+export function sessionProviderForModel(sessionText: string, model: string): string | undefined {
+  let provider: string | undefined;
+  for (const line of sessionText.split("\n")) {
+    if (!line.includes('"provider"')) continue;
+    let entry: any;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const served =
+      entry?.type === "model_change"
+        ? { provider: entry.provider, model: entry.modelId }
+        : entry?.type === "message" && entry.message?.role === "assistant"
+          ? entry.message
+          : undefined;
+    if (served?.model === model && typeof served.provider === "string" && served.provider) {
+      provider = served.provider;
+    }
+  }
+  return provider;
+}
+
+/**
+ * Model for a resume argv. Records written before the event handler
+ * qualified models hold pi's bare id; qualify it from the session when it
+ * names the provider, otherwise pass it through as before.
+ */
+function resumeModel(model: string | undefined, sessionPath: string): string | undefined {
+  if (!model) return model;
+  try {
+    return qualifyModel(model, sessionProviderForModel(readFileSync(sessionPath, "utf8"), model));
+  } catch {
+    return model;
+  }
 }
 
 // ── Spawn invocation planner (inherit_context) ──────────────────────
@@ -2363,6 +2405,7 @@ export function sendToRun(
   // but TS can't see through a free-function call — capture it.
   const sessionPath = run.sessionPath as string;
 
+  run.model = resumeModel(run.model, sessionPath);
   const piArgs = buildResumePiArgs(run, trimmed);
 
   const done = runPiSubprocess(run, piArgs, {

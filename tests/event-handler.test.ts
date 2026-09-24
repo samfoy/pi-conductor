@@ -205,6 +205,52 @@ test("applyEvent: message_end model is set only on first assistant message (stic
   assert.equal(run.model, "first/model", "first model wins");
 });
 
+// A bare id served by two authenticated providers is ambiguous to pi, so
+// the resume argv (`--model run.model`) must carry the provider.
+test("applyEvent: message_end records provider/model when the message carries a provider", () => {
+  const run = makeRun();
+  applyEvent(run, {
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: [],
+      api: "anthropic-messages",
+      provider: "pi-amazon-claude-provider",
+      model: "anthropic.claude-opus-5-5",
+    },
+  });
+  assert.equal(run.model, "pi-amazon-claude-provider/anthropic.claude-opus-5-5");
+});
+
+test("applyEvent: message_end does not re-prefix a model already under its provider", () => {
+  const run = makeRun();
+  applyEvent(run, {
+    type: "message_end",
+    message: { role: "assistant", content: [], provider: "amazon-bedrock", model: "amazon-bedrock/us.x" },
+  });
+  assert.equal(run.model, "amazon-bedrock/us.x");
+});
+
+test("applyEvent: message_end qualifies a slash-bearing model id from another provider", () => {
+  // OpenRouter-style ids contain a slash; pi resolves `openrouter/openai/gpt-4o`
+  // as provider=openrouter, id=openai/gpt-4o.
+  const run = makeRun();
+  applyEvent(run, {
+    type: "message_end",
+    message: { role: "assistant", content: [], provider: "openrouter", model: "openai/gpt-4o" },
+  });
+  assert.equal(run.model, "openrouter/openai/gpt-4o");
+});
+
+test("applyEvent: message_end keeps a configured model even when the message names a provider", () => {
+  const run = { ...makeRun(), model: "us.anthropic.claude-opus-4-7" };
+  applyEvent(run, {
+    type: "message_end",
+    message: { role: "assistant", content: [], provider: "amazon-bedrock", model: "us.anthropic.claude-opus-4-7" },
+  });
+  assert.equal(run.model, "us.anthropic.claude-opus-4-7");
+});
+
 test("applyEvent: message_end errorMessage is sticky on first occurrence", () => {
   const run = makeRun();
   applyEvent(run, {

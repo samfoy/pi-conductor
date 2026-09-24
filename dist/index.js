@@ -1112,6 +1112,9 @@ function shorten(s, max) {
 // src/event-handler.ts
 var NONE = { kind: "none" };
 var UPDATED = { kind: "updated" };
+function qualifyModel(model, provider) {
+  return !provider || model.startsWith(`${provider}/`) ? model : `${provider}/${model}`;
+}
 function applyEvent(run, event) {
   if (!event || typeof event !== "object") return NONE;
   const e = event;
@@ -1163,7 +1166,7 @@ function applyEvent(run, event) {
         run.usage.cost += u.cost?.total || 0;
       }
       const m = msg.model;
-      if (m && !run.model) run.model = m;
+      if (m && !run.model) run.model = qualifyModel(m, msg.provider);
       const sr = msg.stopReason;
       if (sr) run.stopReason = sr;
       const em = msg.errorMessage;
@@ -2630,6 +2633,31 @@ function buildResumePiArgs(run, message) {
     steerable: false
   });
 }
+function sessionProviderForModel(sessionText, model) {
+  let provider;
+  for (const line of sessionText.split("\n")) {
+    if (!line.includes('"provider"')) continue;
+    let entry;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const served = entry?.type === "model_change" ? { provider: entry.provider, model: entry.modelId } : entry?.type === "message" && entry.message?.role === "assistant" ? entry.message : void 0;
+    if (served?.model === model && typeof served.provider === "string" && served.provider) {
+      provider = served.provider;
+    }
+  }
+  return provider;
+}
+function resumeModel(model, sessionPath) {
+  if (!model) return model;
+  try {
+    return qualifyModel(model, sessionProviderForModel(readFileSync6(sessionPath, "utf8"), model));
+  } catch {
+    return model;
+  }
+}
 function trimLeadingNonUser(messages) {
   let i = 0;
   while (i < messages.length && messages[i]?.role !== "user") i++;
@@ -3453,6 +3481,7 @@ function sendToRun(run, message, opts) {
     run.onCompleteHookTimeoutSeconds = opts.onCompleteHookTimeoutSeconds;
   opts.registry.notify(run);
   const sessionPath = run.sessionPath;
+  run.model = resumeModel(run.model, sessionPath);
   const piArgs = buildResumePiArgs(run, trimmed);
   const done = runPiSubprocess(run, piArgs, {
     registry: opts.registry,

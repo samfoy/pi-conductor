@@ -25,6 +25,15 @@ const NONE: EventEffect = { kind: "none" };
 const UPDATED: EventEffect = { kind: "updated" };
 
 /**
+ * `provider/model` when the provider is known, so `pi --model` can't hit
+ * "ambiguous across providers" when two authenticated providers serve the
+ * same bare id. An id already under that provider is returned as-is.
+ */
+export function qualifyModel(model: string, provider: string | undefined): string {
+  return !provider || model.startsWith(`${provider}/`) ? model : `${provider}/${model}`;
+}
+
+/**
  * Apply a single parsed JSON event to a run. Mutates `run` in place.
  *
  * Returns:
@@ -120,7 +129,7 @@ export function applyEvent(run: Run, event: unknown): EventEffect {
         run.usage.cost += u.cost?.total || 0;
       }
       const m = (msg as any).model;
-      if (m && !run.model) run.model = m;
+      if (m && !run.model) run.model = qualifyModel(m, (msg as any).provider);
       const sr = (msg as any).stopReason;
       if (sr) run.stopReason = sr;
       const em = (msg as any).errorMessage;

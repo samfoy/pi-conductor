@@ -19,6 +19,7 @@ import {
   RunRegistry,
   buildResumePiArgs,
   sendToRun,
+  sessionProviderForModel,
   validateSendable,
   type SendToRunResult,
 } from "../src/runs.ts";
@@ -250,6 +251,62 @@ test("buildResumePiArgs: omits --append-system-prompt when run.systemPrompt is u
   assert.ok(!args.includes("--append-system-prompt"));
   assert.ok(args.includes("--session"));
   assert.equal(args[args.length - 1], "hi");
+});
+
+test("buildResumePiArgs: passes a provider-qualified run.model through to --model", () => {
+  const run = makeRun({
+    sessionPath: "/tmp/x.jsonl",
+    model: "pi-amazon-claude-provider/anthropic.claude-opus-5-5",
+  });
+  const args = buildResumePiArgs(run, "hi");
+  assert.equal(args[args.indexOf("--model") + 1], "pi-amazon-claude-provider/anthropic.claude-opus-5-5");
+});
+
+// ── Legacy records: find the provider that served a bare run.model ──
+
+function sessionText(...entries: object[]): string {
+  return entries.map((e) => JSON.stringify(e)).join("\n") + "\n";
+}
+const assistant = (provider: string | undefined, model: string) => ({
+  type: "message",
+  message: { role: "assistant", content: [], api: "anthropic-messages", provider, model },
+});
+
+test("sessionProviderForModel: reads the provider off an assistant message with the same model id", () => {
+  const text = sessionText(
+    { type: "session", version: 3, id: "s" },
+    { type: "message", message: { role: "user", content: [] } },
+    assistant("pi-amazon-claude-provider", "anthropic.claude-opus-5-5"),
+  );
+  assert.equal(sessionProviderForModel(text, "anthropic.claude-opus-5-5"), "pi-amazon-claude-provider");
+});
+
+test("sessionProviderForModel: reads a model_change entry", () => {
+  const text = sessionText({ type: "model_change", provider: "amazon-bedrock", modelId: "anthropic.claude-opus-5-5" });
+  assert.equal(sessionProviderForModel(text, "anthropic.claude-opus-5-5"), "amazon-bedrock");
+});
+
+test("sessionProviderForModel: the latest match wins over a seeded parent prefix", () => {
+  // Seeded sessions start with the parent's messages; the child's own turns
+  // come after them.
+  const text = sessionText(
+    assistant("amazon-bedrock", "anthropic.claude-opus-5-5"),
+    assistant("pi-amazon-claude-provider", "anthropic.claude-opus-5-5"),
+  );
+  assert.equal(sessionProviderForModel(text, "anthropic.claude-opus-5-5"), "pi-amazon-claude-provider");
+});
+
+test("sessionProviderForModel: undefined when no entry names a provider for that model", () => {
+  const text = sessionText(
+    assistant("amazon-bedrock", "some.other-model"),
+    assistant(undefined, "anthropic.claude-opus-5-5"),
+  );
+  assert.equal(sessionProviderForModel(text, "anthropic.claude-opus-5-5"), undefined);
+});
+
+test("sessionProviderForModel: skips malformed lines", () => {
+  const text = `{not json\n${JSON.stringify(assistant("amazon-bedrock", "m"))}\n\n`;
+  assert.equal(sessionProviderForModel(text, "m"), "amazon-bedrock");
 });
 
 test("sendToRun reseeds lastEventAt to now", () => {
