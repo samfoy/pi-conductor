@@ -14,7 +14,14 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { CONDUCTOR_LLM_TOOL_NAMES, toRunRecord, type Persona, type PersonaOverride, type Run } from "../src/types.ts";
+import {
+  CONDUCTOR_LLM_TOOL_NAMES,
+  FOREIGN_SPAWN_TOOLS,
+  toRunRecord,
+  type Persona,
+  type PersonaOverride,
+  type Run,
+} from "../src/types.ts";
 import {
   builtinPersonasDir,
   effectiveExcludeTools,
@@ -30,6 +37,8 @@ import { SpawnQueue } from "../src/queue.ts";
 import { FocusedStreamModel } from "../src/focused-stream-model.ts";
 
 const READ_ONLY_EXCLUSIONS = ["edit", "write", "insert_before", "insert_after"];
+/** What every child excludes after the persona's own list. */
+const ALWAYS_EXCLUDED = [...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS];
 
 /** Value following `flag`, asserting the flag appears at most once. */
 function flagValue(args: string[], flag: string): string | undefined {
@@ -123,13 +132,18 @@ test("CONDUCTOR_LLM_TOOL_NAMES is exactly the set of tools registerTools registe
   assert.deepEqual([...CONDUCTOR_LLM_TOOL_NAMES].sort(), [...registered].sort());
 });
 
-test("effectiveExcludeTools: persona exclusions first, then every conductor tool, deduped", () => {
-  assert.deepEqual(effectiveExcludeTools(undefined), [...CONDUCTOR_LLM_TOOL_NAMES]);
-  assert.deepEqual(effectiveExcludeTools(["edit", "ensemble_spawn", "edit"]), [
+test("effectiveExcludeTools: persona exclusions first, then every conductor tool, then the foreign spawn tools, deduped", () => {
+  assert.deepEqual(effectiveExcludeTools(undefined), ALWAYS_EXCLUDED);
+  assert.deepEqual(effectiveExcludeTools(["edit", "ensemble_spawn", "agent", "edit"]), [
     "edit",
     "ensemble_spawn",
-    ...CONDUCTOR_LLM_TOOL_NAMES.filter((n) => n !== "ensemble_spawn"),
+    "agent",
+    ...ALWAYS_EXCLUDED.filter((n) => n !== "ensemble_spawn" && n !== "agent"),
   ]);
+});
+
+test("FOREIGN_SPAWN_TOOLS names pi's subagent example and pi-herdsman's agent tool", () => {
+  assert.deepEqual([...FOREIGN_SPAWN_TOOLS], ["subagent", "agent"]);
 });
 
 // ── buildPiArgs ──────────────────────────────────────────────────────
@@ -155,9 +169,17 @@ for (const kind of ["fresh", "resume"] as const) {
     assert.equal(flagValue(args, "--tools"), "read,grep");
     assert.equal(
       flagValue(args, "--exclude-tools"),
-      ["edit", "write", ...CONDUCTOR_LLM_TOOL_NAMES].join(","),
+      ["edit", "write", ...ALWAYS_EXCLUDED].join(","),
     );
     assert.equal(args[args.length - 1], "PROMPT");
+  });
+
+  test(`buildPiArgs(${kind}): --exclude-tools always carries the foreign spawn tools, even over an allowlist`, () => {
+    for (const policy of [{}, { tools: ["read", "subagent", "agent"], excludeTools: ["edit"] }]) {
+      const excluded = (flagValue(buildPiArgs({ ...base, ...policy }), "--exclude-tools") ?? "").split(",");
+      assert.ok(excluded.includes("subagent"), `subagent excluded; got ${excluded.join(",")}`);
+      assert.ok(excluded.includes("agent"), `agent excluded; got ${excluded.join(",")}`);
+    }
   });
 }
 
@@ -202,13 +224,19 @@ test("buildResumePiArgs: re-applies the run's persisted tool policy", () => {
     "follow up",
   );
   assert.equal(flagValue(args, "--tools"), "read,bash");
-  assert.equal(flagValue(args, "--exclude-tools"), ["edit", ...CONDUCTOR_LLM_TOOL_NAMES].join(","));
+  assert.equal(flagValue(args, "--exclude-tools"), ["edit", ...ALWAYS_EXCLUDED].join(","));
+});
+
+test("buildResumePiArgs: a run persisted before the foreign spawn tools were excluded gets them on resume", () => {
+  const args = buildResumePiArgs(makeRun({ excludeTools: ["edit", ...CONDUCTOR_LLM_TOOL_NAMES] }), "follow up");
+  const excluded = (flagValue(args, "--exclude-tools") ?? "").split(",");
+  assert.ok(excluded.includes("subagent") && excluded.includes("agent"), excluded.join(","));
 });
 
 test("buildResumePiArgs: a legacy run without tool fields still excludes the conductor tools", () => {
   const args = buildResumePiArgs(makeRun(), "follow up");
   assert.equal(args.includes("--tools"), false);
-  assert.equal(flagValue(args, "--exclude-tools"), CONDUCTOR_LLM_TOOL_NAMES.join(","));
+  assert.equal(flagValue(args, "--exclude-tools"), ALWAYS_EXCLUDED.join(","));
 });
 
 // Critic REJECT on A1: `buildOrphanRun` copied systemPrompt but not the
@@ -235,7 +263,8 @@ for (const [label, onDisk, alive, status] of [
           recordPath: join(dir, "record.json"),
           sessionPath,
           tools: ["read", "bash"],
-          excludeTools: effectiveExcludeTools(READ_ONLY_EXCLUSIONS),
+          // Stamped before the foreign spawn tools were always excluded.
+          excludeTools: [...READ_ONLY_EXCLUSIONS, ...CONDUCTOR_LLM_TOOL_NAMES],
         }),
       );
       writeFileSync(record.recordPath, JSON.stringify(record, null, 2));
@@ -253,7 +282,7 @@ for (const [label, onDisk, alive, status] of [
       const args = buildResumePiArgs(registered!, "x");
       assert.equal(flagValue(args, "--tools"), "read,bash");
       const excluded = (flagValue(args, "--exclude-tools") ?? "").split(",");
-      for (const name of [...READ_ONLY_EXCLUSIONS, ...CONDUCTOR_LLM_TOOL_NAMES]) {
+      for (const name of [...READ_ONLY_EXCLUSIONS, ...CONDUCTOR_LLM_TOOL_NAMES, "subagent", "agent"]) {
         assert.ok(excluded.includes(name), `--exclude-tools must contain ${name}; got ${excluded.join(",")}`);
       }
     } finally {
@@ -287,7 +316,7 @@ test("planSpawnPiArgs: threads the persona's tool policy into fresh AND seeded-r
       assert.equal(flagValue(plan.piArgs, "--tools"), "read");
       assert.equal(
         flagValue(plan.piArgs, "--exclude-tools"),
-        ["edit", ...CONDUCTOR_LLM_TOOL_NAMES].join(","),
+        ["edit", ...ALWAYS_EXCLUDED].join(","),
       );
     }
   } finally {
@@ -425,6 +454,7 @@ test("ensemble_list lines show each persona's tool policy and the always-exclude
   assert.doesNotMatch(block("scout"), /exclude_tools=/);
   assert.match(block("builder"), /tools=default/);
   assert.match(text, /ensemble_spawn/, "always-excluded conductor tools are named");
+  assert.match(text, /subagent, agent/, "always-excluded foreign spawn tools are named");
 });
 
 test("/conductor show: renders tools, exclude_tools, and the always-excluded conductor tools", () => {
@@ -432,6 +462,7 @@ test("/conductor show: renders tools, exclude_tools, and the always-excluded con
   assert.match(withPolicy, /^tools: read$/m);
   assert.match(withPolicy, /^exclude_tools: edit$/m);
   assert.match(withPolicy, new RegExp(`^always excluded: ${CONDUCTOR_LLM_TOOL_NAMES.join(", ")}`, "m"));
+  assert.match(withPolicy, /^always excluded: .*\bsubagent, agent \(foreign spawn tools\)$/m);
 
   const bare = formatPersonaDetail(makePersona());
   assert.match(bare, /^tools: \(pi default set\)$/m);

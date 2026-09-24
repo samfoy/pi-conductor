@@ -49,6 +49,14 @@ export const CONDUCTOR_LLM_TOOLS = {
 export const CONDUCTOR_LLM_TOOL_NAMES: readonly string[] = Object.values(CONDUCTOR_LLM_TOOLS);
 
 /**
+ * Spawn-capable tools other extensions register: pi's bundled `subagent`
+ * example (loaded globally from settings.json on some hosts) and
+ * pi-herdsman's `agent`. A child that keeps one can start agents the
+ * conductor never sees, so every sub-agent spawn excludes these too.
+ */
+export const FOREIGN_SPAWN_TOOLS: readonly string[] = ["subagent", "agent"];
+
+/**
  * A persona definition resolved from a markdown file with YAML-ish frontmatter.
  * `model` and `thinking` are intentionally optional — when omitted, the
  * sub-agent inherits the parent session's configuration.

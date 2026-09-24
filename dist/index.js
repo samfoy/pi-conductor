@@ -62,7 +62,7 @@ function toRunRecord(r) {
 function isTerminal(s) {
   return TERMINAL_STATUSES.includes(s);
 }
-var THINKING_LEVELS, CONTEXT_INHERITANCE, CONDUCTOR_LLM_TOOLS, CONDUCTOR_LLM_TOOL_NAMES, DEFAULT_CONFIG, WRITE_CAPABLE_PERSONAS, TERMINAL_STATUSES;
+var THINKING_LEVELS, CONTEXT_INHERITANCE, CONDUCTOR_LLM_TOOLS, CONDUCTOR_LLM_TOOL_NAMES, FOREIGN_SPAWN_TOOLS, DEFAULT_CONFIG, WRITE_CAPABLE_PERSONAS, TERMINAL_STATUSES;
 var init_types = __esm({
   "src/types.ts"() {
     "use strict";
@@ -94,6 +94,7 @@ var init_types = __esm({
       cwd: "ensemble_cwd"
     };
     CONDUCTOR_LLM_TOOL_NAMES = Object.values(CONDUCTOR_LLM_TOOLS);
+    FOREIGN_SPAWN_TOOLS = ["subagent", "agent"];
     DEFAULT_CONFIG = {
       defaultTimeoutMinutes: 60,
       maxConcurrent: 4,
@@ -606,7 +607,7 @@ function parseToolList(value, field) {
   return [...new Set(names)];
 }
 function effectiveExcludeTools(excludeTools) {
-  return [.../* @__PURE__ */ new Set([...excludeTools ?? [], ...CONDUCTOR_LLM_TOOL_NAMES])];
+  return [.../* @__PURE__ */ new Set([...excludeTools ?? [], ...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS])];
 }
 function requireString(fm, key) {
   const v = fm[key];
@@ -4165,6 +4166,23 @@ function decideForEntry(entry, config, now, orphanThresholdMs) {
 }
 
 // src/doctor.ts
+var SPAWN_NAME_TOKENS = /* @__PURE__ */ new Set(["agent", "agents", "subagent", "subagents", "spawn", "delegate"]);
+function looksSpawnCapable(name) {
+  return name.split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])/).some((token) => SPAWN_NAME_TOKENS.has(token.toLowerCase()));
+}
+function spawnToolLines(loaded) {
+  const excluded = effectiveExcludeTools();
+  const lines = [`  always excluded: ${excluded.join(", ")}`];
+  if (loaded === void 0) return [...lines, "  \xB7 loaded tools unavailable; spawn-capable check skipped"];
+  const suspects = [...new Set(loaded)].filter((n) => !excluded.includes(n) && looksSpawnCapable(n));
+  if (suspects.length === 0) return [...lines, "  \u2713 no other loaded tool looks spawn-capable (name heuristic)"];
+  return [
+    ...lines,
+    ...suspects.map(
+      (n) => `  \u26A0 ${n} looks spawn-capable (name heuristic) and every sub-agent keeps it; add it to a persona's exclude_tools to remove it`
+    )
+  ];
+}
 async function buildDoctorReport(opts) {
   const { config: cfg, errors: configErrors } = loadConfigWithErrors(opts.cwd);
   const resolved = await resolvePersonas({
@@ -4284,6 +4302,9 @@ async function buildDoctorReport(opts) {
     const lastStr = lastMs === null ? "never" : new Date(lastMs).toISOString().replace("T", " ").slice(0, 19) + " UTC";
     lines.push(`  gc last run:           ${lastStr} (${lastGcMarkerPath(root)})`);
   }
+  lines.push("");
+  lines.push("## Sub-agent tool exclusions");
+  lines.push(...spawnToolLines(opts.loadedToolNames));
   {
     const runsRoot2 = opts.runsRoot ?? join10(opts.homeDir ?? homedir6(), ".pi", "agent", "conductor", "runs");
     lines.push("");
@@ -5231,7 +5252,7 @@ function registerCommands(pi, opts) {
           await runShow(opts, ctx, subRest);
           return;
         case "doctor":
-          await runDoctor(opts, ctx);
+          await runDoctor(opts, ctx, pi);
           return;
         case "on":
           opts.setConductorMode(true);
@@ -5372,20 +5393,23 @@ function formatPersonaDetail(p) {
   lines.push(
     `exclude_tools: ${p.excludeTools && p.excludeTools.length > 0 ? p.excludeTools.join(", ") : "(none)"}`
   );
-  lines.push(`always excluded: ${CONDUCTOR_LLM_TOOL_NAMES.join(", ")} (conductor tools)`);
+  lines.push(
+    `always excluded: ${CONDUCTOR_LLM_TOOL_NAMES.join(", ")} (conductor tools), ${FOREIGN_SPAWN_TOOLS.join(", ")} (foreign spawn tools)`
+  );
   lines.push("");
   lines.push("## System prompt");
   lines.push("");
   lines.push(p.systemPrompt);
   return lines.join("\n");
 }
-async function runDoctor(opts, ctx) {
+async function runDoctor(opts, ctx, pi) {
   const report = await buildDoctorReport({
     cwd: opts.getCwd(),
     registry: opts.getRegistry(),
     queue: opts.getQueue(),
     conductorMode: opts.getConductorMode(),
-    lastReconcile: opts.getLastReconcile?.()
+    lastReconcile: opts.getLastReconcile?.(),
+    loadedToolNames: pi.getAllTools?.().map((t) => t.name)
   });
   ctx.ui.notify(report, "info");
 }
@@ -7834,7 +7858,7 @@ function formatPersonaListForLLM(personas) {
   }
   const lines = [
     `${personas.length} personas:`,
-    `(every sub-agent also runs with the conductor tools excluded: ${CONDUCTOR_LLM_TOOL_NAMES.join(", ")})`,
+    `(every sub-agent also runs with the conductor tools excluded: ${CONDUCTOR_LLM_TOOL_NAMES.join(", ")}; and the foreign spawn tools: ${FOREIGN_SPAWN_TOOLS.join(", ")})`,
     ""
   ];
   for (const p of personas) {

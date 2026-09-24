@@ -22,7 +22,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { Persona, PersonaResolution, Run, RunRecord, RunStatus } from "./types.ts";
-import { CONDUCTOR_LLM_TOOL_NAMES } from "./types.ts";
+import { CONDUCTOR_LLM_TOOL_NAMES, FOREIGN_SPAWN_TOOLS } from "./types.ts";
 import { STATUS_GLYPH } from "./status-glyph.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig, projectConfigPath, userConfigPath } from "./config.ts";
@@ -124,7 +124,7 @@ export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): 
           await runShow(opts, ctx, subRest);
           return;
         case "doctor":
-          await runDoctor(opts, ctx);
+          await runDoctor(opts, ctx, pi);
           return;
         case "on":
           opts.setConductorMode(true);
@@ -278,7 +278,10 @@ export function formatPersonaDetail(p: Persona): string {
   lines.push(
     `exclude_tools: ${p.excludeTools && p.excludeTools.length > 0 ? p.excludeTools.join(", ") : "(none)"}`,
   );
-  lines.push(`always excluded: ${CONDUCTOR_LLM_TOOL_NAMES.join(", ")} (conductor tools)`);
+  lines.push(
+    `always excluded: ${CONDUCTOR_LLM_TOOL_NAMES.join(", ")} (conductor tools), ` +
+      `${FOREIGN_SPAWN_TOOLS.join(", ")} (foreign spawn tools)`,
+  );
   lines.push("");
   lines.push("## System prompt");
   lines.push("");
@@ -289,6 +292,7 @@ export function formatPersonaDetail(p: Persona): string {
 async function runDoctor(
   opts: RegisterCommandsOpts,
   ctx: ExtensionCommandContext,
+  pi: ExtensionAPI,
 ): Promise<void> {
   const report = await buildDoctorReport({
     cwd: opts.getCwd(),
@@ -296,6 +300,7 @@ async function runDoctor(
     queue: opts.getQueue(),
     conductorMode: opts.getConductorMode(),
     lastReconcile: opts.getLastReconcile?.(),
+    loadedToolNames: pi.getAllTools?.().map((t) => t.name),
   });
   ctx.ui.notify(report, "info");
 }

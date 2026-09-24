@@ -746,3 +746,92 @@ test("doctor: warns when hook binary not on PATH", async () => {
     teardown(fx);
   }
 });
+
+// ── Spawn-capable tools a child would keep ──────────────────────────
+//
+// Children always exclude the conductor's tools and FOREIGN_SPAWN_TOOLS.
+// Another loaded tool whose name reads as spawning or delegating to an
+// agent would still reach every child, so doctor names it.
+
+async function doctorWithTools(loadedToolNames: string[] | undefined): Promise<string> {
+  const fx = setup();
+  try {
+    const reg = new RunRegistry();
+    return await buildDoctorReport({
+      cwd: fx.projectDir,
+      registry: reg,
+      queue: new SpawnQueue(reg, 4),
+      conductorMode: false,
+      loadedToolNames,
+    });
+  } finally {
+    teardown(fx);
+  }
+}
+
+const section = (out: string, heading: string): string =>
+  out.split("\n## ").find((s) => s.startsWith(heading)) ?? "";
+
+test("doctor: warns about loaded tools whose names look spawn-capable and are not excluded", async () => {
+  const out = await doctorWithTools([
+    "read",
+    "bash",
+    "subagent",
+    "agent",
+    "ensemble_spawn",
+    "spawn_worker",
+    "delegate_task",
+    "run_agent",
+    "spawnSubagents",
+  ]);
+  const body = section(out, "Sub-agent tool exclusions");
+  assert.ok(body, "section present");
+  assert.match(body, /always excluded: .*ensemble_spawn.*subagent, agent/);
+  for (const name of ["spawn_worker", "delegate_task", "run_agent", "spawnSubagents"]) {
+    assert.match(body, new RegExp(`⚠ ${name}\\b`), `${name} flagged`);
+  }
+  for (const name of ["read", "bash", "subagent", "agent", "ensemble_spawn"]) {
+    assert.doesNotMatch(body, new RegExp(`⚠ ${name}\\b`), `${name} not flagged`);
+  }
+});
+
+test("doctor: the spawn heuristic matches whole name tokens only", async () => {
+  // Real tools on this host plus near-misses: none spawns an agent.
+  const body = section(
+    await doctorWithTools(["agentic_search", "ask_owner", "staff", "process", "task", "session_search", "reagent_mix"]),
+    "Sub-agent tool exclusions",
+  );
+  assert.doesNotMatch(body, /⚠/);
+  assert.match(body, /no other loaded tool looks spawn-capable/);
+});
+
+test("doctor: without the loaded tool list the section says it could not check", async () => {
+  const body = section(await doctorWithTools(undefined), "Sub-agent tool exclusions");
+  assert.match(body, /always excluded: /);
+  assert.match(body, /loaded tools unavailable/);
+});
+
+test("/conductor doctor passes pi's loaded tool names to the report", async () => {
+  const fx = setup();
+  try {
+    const { registerCommands } = await import("../src/commands.ts");
+    let handler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+    registerCommands(
+      {
+        registerCommand: (name: string, spec: any) => name === "conductor" && (handler = spec.handler),
+        getAllTools: () => [{ name: "read" }, { name: "spawn_worker" }],
+      } as any,
+      {
+        getCwd: () => fx.projectDir,
+        getRegistry: () => new RunRegistry(),
+        getQueue: () => new SpawnQueue(new RunRegistry(), 4),
+        getConductorMode: () => false,
+      } as any,
+    );
+    const notes: string[] = [];
+    await handler!("doctor", { ui: { notify: (m: string) => notes.push(m) } });
+    assert.match(notes.join("\n"), /⚠ spawn_worker\b/);
+  } finally {
+    teardown(fx);
+  }
+});

@@ -51,7 +51,7 @@ test("spawnRun: stamps tools/excludeTools on the Run and record, and passes them
       cwd: root,
       timeoutMs: 10_000,
     });
-    const expectedExclude = ["edit", ...CONDUCTOR_LLM_TOOL_NAMES];
+    const expectedExclude = ["edit", ...CONDUCTOR_LLM_TOOL_NAMES, "subagent", "agent"];
     assert.deepEqual(run.tools, ["read", "bash"]);
     assert.deepEqual(run.excludeTools, expectedExclude);
 

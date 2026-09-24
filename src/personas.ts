@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import {
   CONDUCTOR_LLM_TOOL_NAMES,
   CONTEXT_INHERITANCE,
+  FOREIGN_SPAWN_TOOLS,
   THINKING_LEVELS,
   type ContextInheritance,
   type Persona,
@@ -295,10 +296,11 @@ function parseToolList(value: unknown, field: "tools" | "exclude_tools"): string
 
 /**
  * The `--exclude-tools` list a sub-agent actually gets: the persona's own
- * exclusions (first, in order) plus every conductor LLM tool, deduped.
+ * exclusions (first, in order), every conductor LLM tool, then the foreign
+ * spawn tools, deduped.
  */
 export function effectiveExcludeTools(excludeTools?: readonly string[]): string[] {
-  return [...new Set([...(excludeTools ?? []), ...CONDUCTOR_LLM_TOOL_NAMES])];
+  return [...new Set([...(excludeTools ?? []), ...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS])];
 }
 
 function requireString(fm: Record<string, unknown>, key: string): string {

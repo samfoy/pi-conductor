@@ -9,7 +9,7 @@ import { existsSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { resolvePersonas } from "./personas.ts";
+import { effectiveExcludeTools, resolvePersonas } from "./personas.ts";
 import {
   loadConfigWithErrors,
   projectConfigPath,
@@ -52,6 +52,39 @@ export interface DoctorReportOptions {
    * first reconcile fires; doctor renders "never" in that case.
    */
   lastReconcile?: PostStartupReconcileResult;
+  /**
+   * Names of every tool loaded in this pi session (`pi.getAllTools()`),
+   * checked for spawn-capable tools a child would keep. Undefined skips
+   * the check.
+   */
+  loadedToolNames?: readonly string[];
+}
+
+const SPAWN_NAME_TOKENS = new Set(["agent", "agents", "subagent", "subagents", "spawn", "delegate"]);
+
+/**
+ * Conservative name heuristic: some `_`/`-`/`.`/`:`/camelCase token of the
+ * name is agent/spawn/delegate (`run_agent`, `spawnWorker`). Misses
+ * generically named tools; `agentic_search` does not match.
+ */
+function looksSpawnCapable(name: string): boolean {
+  return name
+    .split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])/)
+    .some((token) => SPAWN_NAME_TOKENS.has(token.toLowerCase()));
+}
+
+function spawnToolLines(loaded: readonly string[] | undefined): string[] {
+  const excluded = effectiveExcludeTools();
+  const lines = [`  always excluded: ${excluded.join(", ")}`];
+  if (loaded === undefined) return [...lines, "  · loaded tools unavailable; spawn-capable check skipped"];
+  const suspects = [...new Set(loaded)].filter((n) => !excluded.includes(n) && looksSpawnCapable(n));
+  if (suspects.length === 0) return [...lines, "  ✓ no other loaded tool looks spawn-capable (name heuristic)"];
+  return [
+    ...lines,
+    ...suspects.map(
+      (n) => `  ⚠ ${n} looks spawn-capable (name heuristic) and every sub-agent keeps it; add it to a persona's exclude_tools to remove it`,
+    ),
+  ];
 }
 
 export async function buildDoctorReport(opts: DoctorReportOptions): Promise<string> {
@@ -217,6 +250,10 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
         : new Date(lastMs).toISOString().replace("T", " ").slice(0, 19) + " UTC";
     lines.push(`  gc last run:           ${lastStr} (${lastGcMarkerPath(root)})`);
   }
+
+  lines.push("");
+  lines.push("## Sub-agent tool exclusions");
+  lines.push(...spawnToolLines(opts.loadedToolNames));
 
   // v0.9 Slice 7: Run-record disk usage + next-eviction preview.
   // Reads the runs/ directory once via walkInventory, then runs a

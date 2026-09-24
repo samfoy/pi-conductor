@@ -11,7 +11,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { readFileSync, existsSync } from "node:fs";
 import type { Persona, PersonaOverride, Run, RunStatus, ThinkingLevel, MergeStrategy } from "./types.ts";
-import { CONDUCTOR_LLM_TOOLS, CONDUCTOR_LLM_TOOL_NAMES } from "./types.ts";
+import { CONDUCTOR_LLM_TOOLS, CONDUCTOR_LLM_TOOL_NAMES, FOREIGN_SPAWN_TOOLS } from "./types.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
 import { resolveChain, buildChainTask } from "./chain.ts";
@@ -1430,7 +1430,7 @@ export function formatPersonaListForLLM(personas: Persona[]): string {
   }
   const lines: string[] = [
     `${personas.length} personas:`,
-    `(every sub-agent also runs with the conductor tools excluded: ${CONDUCTOR_LLM_TOOL_NAMES.join(", ")})`,
+    `(every sub-agent also runs with the conductor tools excluded: ${CONDUCTOR_LLM_TOOL_NAMES.join(", ")}; and the foreign spawn tools: ${FOREIGN_SPAWN_TOOLS.join(", ")})`,
     "",
   ];
   for (const p of personas) {
