@@ -14,7 +14,7 @@
  */
 
 import { compactEnvelopeBlock } from "./compaction-hook.ts";
-import { elapsedStr, formatUsage, getFinalText } from "./runs.ts";
+import { elapsedStr, formatUsage, getFinalText, sendsSinceSpawn } from "./runs.ts";
 import type { Run, RunStatus } from "./types.ts";
 
 /** Theme slot for an annotation row under a notification card. */
@@ -74,7 +74,7 @@ export interface NotificationMessage {
  *   - `thisInvocationUsageBaseline` (snapshot of `Run.usage` at the
  *     moment the current invocation began).
  *   - `resumeCount` (number of `ensemble_send` resumes; 0 for an
- *     initial spawn).
+ *     initial spawn) and `steerCount` (RPC steers and follow_ups).
  *
  * Readers fall back defensively when the fields are unset — see
  * `docs/backlog.md` item 15 for the witness and locked design.
@@ -121,7 +121,7 @@ export function formatCompletionNotification(run: Run): string {
     output: perSend.output,
     cost: perSend.cost,
   });
-  const resumed = (run.resumeCount ?? 0) >= 1;
+  const resumed = sendsSinceSpawn(run) >= 1;
 
   const lines: string[] = [];
   lines.push("```xml");
@@ -144,6 +144,7 @@ export function formatCompletionNotification(run: Run): string {
     );
     lines.push(`    <cost>${run.usage.cost.toFixed(4)}</cost>`);
     lines.push(`    <resumes>${run.resumeCount ?? 0}</resumes>`);
+    if (run.steerCount) lines.push(`    <steers>${run.steerCount}</steers>`);
     lines.push("  </lifetime>");
   }
   if (run.errorMessage) {
@@ -380,10 +381,14 @@ export function buildCompletionMessage(run: Run): NotificationMessage {
   const usageStr = formatUsage(perSend);
   if (usageStr) stats.push(usageStr);
   stats.push(run.id);
-  if ((run.resumeCount ?? 0) >= 1) {
+  if (sendsSinceSpawn(run) >= 1) {
     const cost = run.usage.cost ? ` $${run.usage.cost.toFixed(3)}` : "";
-    const resumes = run.resumeCount === 1 ? "1 resume" : `${run.resumeCount} resumes`;
-    stats.push(`lifetime ${elapsedStr(run.startTime, run.finishedAt)}${cost} (${resumes})`);
+    const plural = (n: number, noun: string) => `${n} ${noun}${n === 1 ? "" : "s"}`;
+    const sends = [
+      run.resumeCount && plural(run.resumeCount, "resume"),
+      run.steerCount && plural(run.steerCount, "steer"),
+    ].filter(Boolean).join(", ");
+    stats.push(`lifetime ${elapsedStr(run.startTime, run.finishedAt)}${cost} (${sends})`);
   }
 
   const notes: NotificationNote[] = [];

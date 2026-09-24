@@ -18,7 +18,7 @@
  * Both helpers are pure (no I/O, no TUI).
  */
 
-import { elapsedStr, formatUsage, getFinalText, type RunRegistry } from "./runs.ts";
+import { elapsedStr, formatUsage, getFinalText, sendsSinceSpawn, type RunRegistry } from "./runs.ts";
 import { renderHeader, renderTranscript } from "./transcript.ts";
 import { isTerminal, type Run } from "./types.ts";
 import { STATUS_GLYPH } from "./status-glyph.ts";
@@ -115,9 +115,8 @@ export function renderForegroundSummary(run: Run): string {
     run.status === "killed" ? "killed" :
     run.status === "timeout" ? "timed out" : run.status;
   // Item 15: per-send numbers in the brackets; optional ` · lifetime
-  // <duration> $<cost>` suffix when the run has been resumed at least
-  // once. Initial-spawn runs have resumeCount undefined or 0, in
-  // which case per-send IS the lifetime.
+  // <duration> $<cost>` suffix when the run has been resumed or steered
+  // at least once. Otherwise per-send IS the lifetime.
   const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
   const baseline = run.thisInvocationUsageBaseline ?? {
     turns: 0,
@@ -137,7 +136,7 @@ export function renderForegroundSummary(run: Run): string {
   const lines: string[] = [];
 
   let headline = `${glyph} ${run.persona}:${run.id} ${verb} in ${elapsed}${usagePart}`;
-  if ((run.resumeCount ?? 0) >= 1) {
+  if (sendsSinceSpawn(run) >= 1) {
     const lifetimeElapsed = elapsedStr(run.startTime, run.finishedAt);
     const lifetimeCost = run.usage.cost ? ` $${run.usage.cost.toFixed(3)}` : "";
     headline += ` · lifetime ${lifetimeElapsed}${lifetimeCost}`;

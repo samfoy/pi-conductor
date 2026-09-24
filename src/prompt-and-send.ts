@@ -36,6 +36,8 @@ export interface PromptAndSendCtx {
   };
   /** pi's ModelRegistry; the resume checks its `provider/id` against it. */
   modelRegistry?: { find(provider: string, id: string): unknown };
+  /** The conductor's own model; its provider settles an ambiguous bare id. */
+  model?: { provider: string };
 }
 
 export interface PromptAndSendDeps {
@@ -62,6 +64,7 @@ export interface PromptAndSendDeps {
       timeoutMs: number;
       onComplete: (r: Run) => void;
       isRegisteredModel?: ModelRegisteredPredicate;
+      currentModelProvider?: string;
       persona?: Persona;
     },
   ) => { kind: "queued" } | { kind: "rejected"; reason: string };
@@ -95,8 +98,10 @@ export async function executePromptAndSend(
   }
   // Read ctx before any await: a reload mid-input makes its getters throw.
   let modelRegistry: PromptAndSendCtx["modelRegistry"];
+  let currentModelProvider: string | undefined;
   try {
     modelRegistry = ctx.modelRegistry;
+    currentModelProvider = ctx.model?.provider;
   } catch {
     return; // ctx already stale
   }
@@ -136,6 +141,7 @@ export async function executePromptAndSend(
     timeoutMs,
     onComplete: (r) => deps.pushCompletionNotification(r),
     isRegisteredModel: modelRegistryPredicate(modelRegistry),
+    currentModelProvider,
     persona,
   });
   if (result.kind === "rejected") {

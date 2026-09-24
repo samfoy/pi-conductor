@@ -1034,6 +1034,7 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         // v0.16 event bus: thread through for emitSteered / emitCompleted / emitFailed.
         events: opts.getEvents?.(),
         isRegisteredModel: modelRegistryPredicate(ctx?.modelRegistry),
+        currentModelProvider: ctx?.model?.provider,
         persona,
       });
 

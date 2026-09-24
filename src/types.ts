@@ -535,9 +535,16 @@ export interface Run {
    * `spawnRun`; incremented by `sendToRun` BEFORE the new turn fires.
    * Surfaced as `<resumes>` inside the optional `<lifetime>` block of
    * the completion envelope when `>= 1`. Optional for back-compat;
-   * readers default to 0.
+   * readers default to 0. Only a new pi process (`--session`) counts:
+   * an RPC steer or follow_up counts in {@link Run.steerCount}.
    */
   resumeCount?: number;
+  /**
+   * RPC steers and follow_ups sent into the live subprocess. They restart
+   * the per-send numbers like a resume, so the card's `<lifetime>` block
+   * counts them too. In memory only: an RPC run is never readopted.
+   */
+  steerCount?: number;
   /**
    * v0.16-S4: monotone counter incremented on each compaction event
    * (either JSON `message_end`+`compactionSummary` or RPC `response`+`compact`).

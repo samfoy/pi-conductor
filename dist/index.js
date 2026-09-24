@@ -2717,7 +2717,7 @@ var latestProviderFor = (served, model) => served.filter((s) => s.model === mode
 function modelRegistryPredicate(registry) {
   return registry && ((provider, id) => registry.find(provider, id) !== void 0);
 }
-function resumeModel(model, readSession, isRegistered) {
+function resumeModel(model, readSession, isRegistered, currentProvider) {
   if (!model) return model;
   const slash = model.indexOf("/");
   if (isRegistered && slash > 0 && isRegistered(model.slice(0, slash), model.slice(slash + 1))) return model;
@@ -2731,7 +2731,12 @@ function resumeModel(model, readSession, isRegistered) {
   if (!isRegistered) return qualifyModel(model, provider);
   if (provider && isRegistered(provider, model)) return qualifyModel(model, provider);
   const retired = served.find((s) => `${s.provider}/${s.model}` === model && !isRegistered(s.provider, s.model));
-  return retired ? retired.model : model;
+  const bare = retired ? retired.model : model;
+  const sessionProviderGone = provider !== void 0 || retired !== void 0;
+  if (sessionProviderGone && currentProvider && isRegistered(currentProvider, bare)) {
+    return qualifyModel(bare, currentProvider);
+  }
+  return bare;
 }
 function trimLeadingNonUser(messages) {
   let i = 0;
@@ -2882,7 +2887,7 @@ function recordSpawnedProc(run, proc) {
   run.proc = proc;
   run.pid = proc.pid;
 }
-function snapshotInvocationMarkers(run) {
+function snapshotInvocationMarkers(run, counter) {
   run.thisInvocationStartedAt = Date.now();
   run.thisInvocationUsageBaseline = {
     turns: run.usage.turns,
@@ -2890,7 +2895,10 @@ function snapshotInvocationMarkers(run) {
     output: run.usage.output,
     cost: run.usage.cost
   };
-  run.resumeCount = (run.resumeCount ?? 0) + 1;
+  run[counter] = (run[counter] ?? 0) + 1;
+}
+function sendsSinceSpawn(run) {
+  return (run.resumeCount ?? 0) + (run.steerCount ?? 0);
 }
 function stampSpawnStreamingMode(run, steerable) {
   run.steerable = steerable;
@@ -3541,7 +3549,7 @@ function sendToRun(run, message, opts) {
     if (opts.onCompleteHook !== void 0) run.onCompleteHook = opts.onCompleteHook;
     if (opts.onCompleteHookTimeoutSeconds !== void 0)
       run.onCompleteHookTimeoutSeconds = opts.onCompleteHookTimeoutSeconds;
-    snapshotInvocationMarkers(run);
+    snapshotInvocationMarkers(run, "steerCount");
     const result = enqueueRpcSendWithAck(run, cmdType, trimmed);
     if (result.kind === "epipe") {
       return { kind: "rejected", reason: result.reason };
@@ -3575,14 +3583,19 @@ function sendToRun(run, message, opts) {
   run.lastToolCall = void 0;
   run.lastEventAt = Date.now();
   run.stalledSince = void 0;
-  snapshotInvocationMarkers(run);
+  snapshotInvocationMarkers(run, "resumeCount");
   if (opts.killOnStall !== void 0) run.killOnStall = opts.killOnStall;
   if (opts.softStallSeconds !== void 0) run.softStallSeconds = opts.softStallSeconds;
   if (opts.onCompleteHook !== void 0) run.onCompleteHook = opts.onCompleteHook;
   if (opts.onCompleteHookTimeoutSeconds !== void 0)
     run.onCompleteHookTimeoutSeconds = opts.onCompleteHookTimeoutSeconds;
   opts.registry.notify(run);
-  run.model = resumeModel(run.model, () => readFileSync6(sessionPath, "utf8"), opts.isRegisteredModel);
+  run.model = resumeModel(
+    run.model,
+    () => readFileSync6(sessionPath, "utf8"),
+    opts.isRegisteredModel,
+    opts.currentModelProvider
+  );
   const piArgs = buildResumePiArgs(run, trimmed);
   const done = runPiSubprocess(run, piArgs, {
     registry: opts.registry,
@@ -5723,6 +5736,7 @@ async function runSendCmd(opts, ctx, arg) {
     timeoutMs,
     streamingBehavior: behavior,
     isRegisteredModel: modelRegistryPredicate(ctx.modelRegistry),
+    currentModelProvider: ctx.model?.provider,
     persona
   });
   if (result.kind === "rejected") {
@@ -6828,7 +6842,7 @@ function renderForegroundSummary(run) {
   const usagePart = usage ? ` [${usage}]` : "";
   const lines = [];
   let headline = `${glyph} ${run.persona}:${run.id} ${verb} in ${elapsed}${usagePart}`;
-  if ((run.resumeCount ?? 0) >= 1) {
+  if (sendsSinceSpawn(run) >= 1) {
     const lifetimeElapsed = elapsedStr(run.startTime, run.finishedAt);
     const lifetimeCost = run.usage.cost ? ` $${run.usage.cost.toFixed(3)}` : "";
     headline += ` \xB7 lifetime ${lifetimeElapsed}${lifetimeCost}`;
@@ -7683,6 +7697,7 @@ function registerSendTool(pi, opts) {
         // v0.16 event bus: thread through for emitSteered / emitCompleted / emitFailed.
         events: opts.getEvents?.(),
         isRegisteredModel: modelRegistryPredicate(ctx?.modelRegistry),
+        currentModelProvider: ctx?.model?.provider,
         persona
       });
       if (result.kind === "rejected") {
@@ -8657,7 +8672,7 @@ function formatCompletionNotification(run) {
     output: perSend.output,
     cost: perSend.cost
   });
-  const resumed = (run.resumeCount ?? 0) >= 1;
+  const resumed = sendsSinceSpawn(run) >= 1;
   const lines = [];
   lines.push("```xml");
   lines.push("<sub-agent-completed>");
@@ -8677,6 +8692,7 @@ function formatCompletionNotification(run) {
     );
     lines.push(`    <cost>${run.usage.cost.toFixed(4)}</cost>`);
     lines.push(`    <resumes>${run.resumeCount ?? 0}</resumes>`);
+    if (run.steerCount) lines.push(`    <steers>${run.steerCount}</steers>`);
     lines.push("  </lifetime>");
   }
   if (run.errorMessage) {
@@ -8796,10 +8812,14 @@ function buildCompletionMessage(run) {
   const usageStr = formatUsage(perSend);
   if (usageStr) stats.push(usageStr);
   stats.push(run.id);
-  if ((run.resumeCount ?? 0) >= 1) {
+  if (sendsSinceSpawn(run) >= 1) {
     const cost = run.usage.cost ? ` $${run.usage.cost.toFixed(3)}` : "";
-    const resumes = run.resumeCount === 1 ? "1 resume" : `${run.resumeCount} resumes`;
-    stats.push(`lifetime ${elapsedStr(run.startTime, run.finishedAt)}${cost} (${resumes})`);
+    const plural = (n, noun) => `${n} ${noun}${n === 1 ? "" : "s"}`;
+    const sends = [
+      run.resumeCount && plural(run.resumeCount, "resume"),
+      run.steerCount && plural(run.steerCount, "steer")
+    ].filter(Boolean).join(", ");
+    stats.push(`lifetime ${elapsedStr(run.startTime, run.finishedAt)}${cost} (${sends})`);
   }
   const notes = [];
   if (run.errorMessage) notes.push({ slot: "error", text: run.errorMessage });
@@ -10400,8 +10420,10 @@ async function executePromptAndSend(deps, agentId, presuppliedText) {
     return;
   }
   let modelRegistry;
+  let currentModelProvider;
   try {
     modelRegistry = ctx.modelRegistry;
+    currentModelProvider = ctx.model?.provider;
   } catch {
     return;
   }
@@ -10436,6 +10458,7 @@ async function executePromptAndSend(deps, agentId, presuppliedText) {
     timeoutMs,
     onComplete: (r) => deps.pushCompletionNotification(r),
     isRegisteredModel: modelRegistryPredicate(modelRegistry),
+    currentModelProvider,
     persona
   });
   if (result.kind === "rejected") {

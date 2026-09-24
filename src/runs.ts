@@ -599,11 +599,14 @@ export function modelRegistryPredicate(
  * names the provider. With `isRegistered`, qualify only with a provider pi
  * still loads, and strip a session-vouched prefix it no longer loads: most
  * legacy records name retired providers, and only their bare id resolves.
+ * pi rejects a bare id two authenticated providers serve, so that case
+ * names `currentProvider` (the conductor's own) when it serves the id.
  */
 export function resumeModel(
   model: string | undefined,
   readSession: () => string,
   isRegistered?: ModelRegisteredPredicate,
+  currentProvider?: string,
 ): string | undefined {
   if (!model) return model;
   const slash = model.indexOf("/");
@@ -618,7 +621,12 @@ export function resumeModel(
   if (!isRegistered) return qualifyModel(model, provider);
   if (provider && isRegistered(provider, model)) return qualifyModel(model, provider);
   const retired = served.find((s) => `${s.provider}/${s.model}` === model && !isRegistered(s.provider, s.model));
-  return retired ? retired.model : model;
+  const bare = retired ? retired.model : model;
+  const sessionProviderGone = provider !== undefined || retired !== undefined;
+  if (sessionProviderGone && currentProvider && isRegistered(currentProvider, bare)) {
+    return qualifyModel(bare, currentProvider);
+  }
+  return bare;
 }
 
 // ── Spawn invocation planner (inherit_context) ──────────────────────
@@ -1147,13 +1155,14 @@ export function recordSpawnedProc(run: Run, proc: ChildProcess): void {
  *   - `thisInvocationStartedAt` ← `Date.now()` (wall-clock at re-fire)
  *   - `thisInvocationUsageBaseline` ← deep-copy snapshot of the
  *     four delta-relevant fields of `run.usage` AS-OF call time
- *   - `resumeCount` ← `(prev ?? 0) + 1`
+ *   - `counter` (`resumeCount` for a spawn-resume, `steerCount` for an
+ *     RPC send) ← `(prev ?? 0) + 1`
  *
  * Cumulative `run.usage` is NOT mutated; the run's lifetime totals
  * stay live and the optional `<lifetime>` block in the envelope reads
  * them directly.
  */
-export function snapshotInvocationMarkers(run: Run): void {
+export function snapshotInvocationMarkers(run: Run, counter: "resumeCount" | "steerCount"): void {
   run.thisInvocationStartedAt = Date.now();
   run.thisInvocationUsageBaseline = {
     turns: run.usage.turns,
@@ -1161,7 +1170,12 @@ export function snapshotInvocationMarkers(run: Run): void {
     output: run.usage.output,
     cost: run.usage.cost,
   };
-  run.resumeCount = (run.resumeCount ?? 0) + 1;
+  run[counter] = (run[counter] ?? 0) + 1;
+}
+
+/** Sends since spawn, resumes and RPC steers alike: when > 0, per-send ≠ lifetime. */
+export function sendsSinceSpawn(run: Run): number {
+  return (run.resumeCount ?? 0) + (run.steerCount ?? 0);
 }
 
 /**
@@ -2025,6 +2039,11 @@ export interface SendToRunOptions {
    */
   isRegisteredModel?: ModelRegisteredPredicate;
   /**
+   * Provider of the conductor's own model (`ctx.model?.provider`), for
+   * {@link resumeModel}'s ambiguous-bare-id case.
+   */
+  currentModelProvider?: string;
+  /**
    * The run's persona, resolved from {@link sendCwd}. Its frontmatter
    * `on_complete_hook` gates the resumed terminal, as it gates a spawn.
    */
@@ -2426,8 +2445,9 @@ export function sendToRun(
     // Item 15: re-stamp per-invocation markers BEFORE we touch the
     // queue. RPC steering re-uses the same subprocess but the
     // operator still expects per-most-recent-send accounting in the
-    // completion envelope when the run eventually terminates.
-    snapshotInvocationMarkers(run);
+    // completion envelope when the run eventually terminates. Not a
+    // resume: the subprocess is the same one.
+    snapshotInvocationMarkers(run, "steerCount");
     const result = enqueueRpcSendWithAck(run, cmdType, trimmed);
     if (result.kind === "epipe") {
       return { kind: "rejected", reason: result.reason };
@@ -2481,7 +2501,7 @@ export function sendToRun(
   // Item 15: re-stamp per-invocation markers BEFORE the new pi
   // subprocess fires. The completion envelope reads these to compute
   // per-most-recent-send <duration> / <usage> / <cost>.
-  snapshotInvocationMarkers(run);
+  snapshotInvocationMarkers(run, "resumeCount");
   // v0.10 watchdog (Slice 3) per-send overrides. Replace prior values
   // when provided; leave the spawn-time values alone otherwise.
   if (opts.killOnStall !== undefined) run.killOnStall = opts.killOnStall;
@@ -2495,7 +2515,12 @@ export function sendToRun(
     run.onCompleteHookTimeoutSeconds = opts.onCompleteHookTimeoutSeconds;
   opts.registry.notify(run);
 
-  run.model = resumeModel(run.model, () => readFileSync(sessionPath, "utf8"), opts.isRegisteredModel);
+  run.model = resumeModel(
+    run.model,
+    () => readFileSync(sessionPath, "utf8"),
+    opts.isRegisteredModel,
+    opts.currentModelProvider,
+  );
   const piArgs = buildResumePiArgs(run, trimmed);
 
   const done = runPiSubprocess(run, piArgs, {

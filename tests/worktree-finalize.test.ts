@@ -517,6 +517,37 @@ test("sendToRun: a killed worktree run's worktree and branch survive a failed re
   }
 });
 
+test("settleWorktree: a steered run that was never resumed fails like any other: branch kept, clean directory gone", { timeout: 15_000 }, async () => {
+  // W1's keep-everything branch is for a resume that ran in a worktree a
+  // kill or conflict kept. An RPC steer rides the original subprocess.
+  const { root, repo } = initRepo();
+  try {
+    const wt = worktreeWithCommit(repo, "builder-st01", "s.ts", "s\n");
+    const run = makeRun("builder-st01", {
+      status: "running",
+      streamingMode: "rpc",
+      steerable: true,
+      rpcStdinQueue: { enqueue: async () => {}, destroy: () => {} } as any,
+      worktreePath: wt.path,
+      worktreeBranch: wt.branch,
+    });
+    const registry = new RunRegistry();
+    registry.register(run);
+    const sent = sendToRun(run, "change course", { registry, timeoutMs: 10_000, streamingBehavior: "steer" });
+    assert.equal(sent.kind, "started", sent.kind === "rejected" ? sent.reason : "");
+    for (const entry of run.pendingAcks?.values() ?? []) clearTimeout(entry.timer);
+
+    assert.equal(await settleWorktree(run, "failed"), "failed");
+
+    assert.equal(existsSync(wt.path), false, "clean worktree directory removed, as for an unsteered failure");
+    assert.match(git(repo, `log --oneline mainline..${wt.branch}`), /work s\.ts/, "the branch still holds the work");
+    assert.equal(run.worktreeBranch, wt.branch);
+    assert.match(run.worktreeKept ?? "", /^branch conductor-wt\/builder-st01 kept/, `the W2 kept-branch hint: ${run.worktreeKept}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("sendToRun: a merge_conflict run's worktree and branch survive a failed resume", { timeout: 30_000 }, async () => {
   const { root, repo } = initRepo();
   // The spawn commits one side of a conflict in the worktree and the other on mainline.

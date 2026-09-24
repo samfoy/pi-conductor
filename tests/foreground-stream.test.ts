@@ -279,6 +279,20 @@ test("renderForegroundSummary: initial spawn (no resumes) omits ' · lifetime' s
   assert.doesNotMatch(out, /· lifetime/);
 });
 
+test("renderForegroundSummary: a steered run that was never resumed still gets the ' · lifetime' suffix", () => {
+  const now = Date.now();
+  const run = makeRun({
+    status: "completed",
+    startTime: now - 3_600_000,
+    thisInvocationStartedAt: now - 720_000,
+    finishedAt: now,
+    resumeCount: 0,
+    steerCount: 1,
+    usage: { ...emptyUsage(), turns: 28, input: 6400, output: 7200, cost: 16.19 },
+  });
+  assert.match(renderForegroundSummary(run).split("\n")[0]!, /completed in 12\.0m.* · lifetime 1\.0h \$16\.190/);
+});
+
 test(
   "renderForegroundSummary: after a resume, brackets carry per-send numbers and ' · lifetime' suffix is appended",
   () => {

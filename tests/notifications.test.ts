@@ -16,7 +16,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { formatCompletionNotification, formatCompletionNotificationCompact } from "../src/notifications.ts";
+import { buildCompletionMessage, formatCompletionNotification, formatCompletionNotificationCompact } from "../src/notifications.ts";
 import { emptyUsage, type HookResult, type Run, type RunStatus } from "../src/types.ts";
 
 const T0 = 1_700_000_000_000; // fixed epoch ms
@@ -465,6 +465,30 @@ test(
     assert.match(out, /<lifetime>[\s\S]*<resumes>3<\/resumes>[\s\S]*<\/lifetime>/);
   },
 );
+
+test("formatCompletionNotification: a steered run keeps its <lifetime> block and counts steers apart from resumes", () => {
+  const run = makeRun({
+    startTime: T0,
+    thisInvocationStartedAt: T0 + 1_800_000,
+    finishedAt: T0 + 3_600_000,
+    resumeCount: 0,
+    steerCount: 2,
+    thisInvocationUsageBaseline: { turns: 4, input: 100, output: 200, cost: 1.5 },
+    usage: { input: 200, output: 400, cacheRead: 0, cacheWrite: 0, cost: 3.0, turns: 8 },
+  });
+  const out = formatCompletionNotification(run);
+  assert.match(out, /<lifetime>[\s\S]*<duration>1\.0h<\/duration>[\s\S]*<\/lifetime>/, "per-send differs from lifetime");
+  assert.match(out, /<resumes>0<\/resumes>\n\s*<steers>2<\/steers>\n\s*<\/lifetime>/);
+  assert.match(buildCompletionMessage(run).details.stats.join(" "), /lifetime 1\.0h \$3\.000 \(2 steers\)/);
+  const both = buildCompletionMessage({ ...run, resumeCount: 1, steerCount: 1 }).details.stats.join(" ");
+  assert.match(both, /\(1 resume, 1 steer\)/);
+});
+
+test("formatCompletionNotification: a resumed run that was never steered has no <steers> tag", () => {
+  const out = formatCompletionNotification(makeRun({ resumeCount: 1, thisInvocationStartedAt: T0 + 1_000 }));
+  assert.match(out, /<resumes>1<\/resumes>/);
+  assert.doesNotMatch(out, /<steers>/);
+});
 
 test(
   "formatCompletionNotification: header line on resumed run uses per-send numbers",

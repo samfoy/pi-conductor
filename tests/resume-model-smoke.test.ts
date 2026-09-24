@@ -223,3 +223,105 @@ test("overlay send (executePromptAndSend): passes the ctx's modelRegistry to the
   const { argv } = await resumeArgv(`amazon-claude-code/${OPUS}`, goneProviderSession, send);
   assert.equal(modelArg(argv), OPUS);
 });
+
+// ── An ambiguous bare id resumes on the conductor's own provider ─────
+//
+// 91 legacy records on the dev host name a provider pi no longer loads,
+// and their bare id is served by two authenticated providers, so pi
+// rejects it as ambiguous. Each call site hands sendToRun its
+// ctx.model.provider alongside the registry predicate.
+
+/** A registry where both authenticated providers serve OPUS. */
+const bothRegistry = {
+  find: (provider: string, id: string) =>
+    (provider === "amazon-bedrock" || provider === "pi-amazon-claude-provider") && id === OPUS ? { provider, id } : undefined,
+};
+const currentModel = { provider: "pi-amazon-claude-provider", id: OPUS };
+const AMBIGUOUS_FIX = `pi-amazon-claude-provider/${OPUS}`;
+
+test("sendToRun: an ambiguous bare id resumes on the conductor's provider", { timeout: 15_000 }, async () => {
+  const send: Send = async (run, registry) => {
+    const result = sendToRun(run, "continue", {
+      registry,
+      timeoutMs: 10_000,
+      isRegisteredModel: (p, id) => bothRegistry.find(p, id) !== undefined,
+      currentModelProvider: currentModel.provider,
+    });
+    assert.equal(result.kind, "started", result.kind === "rejected" ? result.reason : "");
+    if (result.kind === "started") await result.done;
+  };
+  const { argv, run } = await resumeArgv(OPUS, goneProviderSession, send);
+  assert.equal(modelArg(argv), AMBIGUOUS_FIX);
+  assert.equal(run.model, AMBIGUOUS_FIX);
+});
+
+test("ensemble_send: passes ctx.model's provider to the resume", { timeout: 15_000 }, async () => {
+  const send: Send = async (run, registry) => {
+    const tools: Array<{ name: string; execute: (...a: any[]) => Promise<any> }> = [];
+    registerTools({ registerTool: (t: any) => tools.push(t) } as any, {
+      getCwd: () => run.cwd,
+      getRegistry: () => registry,
+      getQueue: () => new SpawnQueue(registry, 4),
+      getModel: () => new FocusedStreamModel(registry),
+      getParentMessages: () => [],
+      openFocusedOverlay: () => {},
+      registerForegroundDetach: () => ({ detachSignal: new Promise<void>(() => {}), unregister: () => {} }),
+      pushCompletionNotification: () => {},
+    } as any);
+    const tool = tools.find((t) => t.name === "ensemble_send")!;
+    const ctx = { modelRegistry: bothRegistry, model: currentModel };
+    const out = await tool.execute("call-1", { agent_id: run.id, message: "continue" }, undefined, undefined, ctx);
+    assert.ok(!out.isError, JSON.stringify(out.content));
+  };
+  const { argv } = await resumeArgv(OPUS, goneProviderSession, send);
+  assert.equal(modelArg(argv), AMBIGUOUS_FIX);
+});
+
+test("/conductor send: passes ctx.model's provider to the resume", { timeout: 15_000 }, async () => {
+  const send: Send = async (run, registry) => {
+    let handler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+    registerCommands(
+      { registerCommand: (name: string, spec: any) => name === "conductor" && (handler = spec.handler) } as any,
+      { getCwd: () => run.cwd, getRegistry: () => registry, getQueue: () => new SpawnQueue(registry, 4) } as any,
+    );
+    await handler!(`send ${run.id} continue`, {
+      modelRegistry: bothRegistry,
+      model: currentModel,
+      ui: { notify: () => {} },
+    });
+    await new Promise<void>((resolve) => {
+      if (run.status !== "running") return resolve();
+      const unsub = registry.onChange((r) => r.status !== "running" && (unsub(), resolve()));
+    });
+  };
+  const { argv } = await resumeArgv(OPUS, goneProviderSession, send);
+  assert.equal(modelArg(argv), AMBIGUOUS_FIX);
+});
+
+test("overlay send (executePromptAndSend): passes ctx.model's provider to the resume", { timeout: 15_000 }, async () => {
+  const send: Send = async (run, registry) => {
+    let done: Promise<unknown> = Promise.resolve();
+    await executePromptAndSend(
+      {
+        getCtx: () => ({ modelRegistry: bothRegistry, model: currentModel, ui: { input: async () => undefined, notify: () => {} } }),
+        registry,
+        cwd: run.cwd,
+        validateSendable: () => ({ ok: true }),
+        loadConfig: () => ({ personaOverrides: {} }),
+        resolvePersonas: async () => ({ personas: new Map() }),
+        resolveTimeoutMs: () => 10_000,
+        sendToRun: (r, m, o) => {
+          const result = sendToRun(r, m, o);
+          if (result.kind === "started") done = result.done;
+          return result as any;
+        },
+        pushCompletionNotification: () => {},
+      },
+      run.id,
+      "continue",
+    );
+    await done;
+  };
+  const { argv } = await resumeArgv(OPUS, goneProviderSession, send);
+  assert.equal(modelArg(argv), AMBIGUOUS_FIX);
+});

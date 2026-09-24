@@ -370,6 +370,42 @@ test("resumeModel: without a registry predicate, the session provider is prefixe
   assert.equal(resumeModel(`amazon-claude-code/${OPUS}`, () => text), `amazon-claude-code/${OPUS}`);
 });
 
+// pi rejects a bare id two authenticated providers serve ("is ambiguous
+// across providers"). When the session's provider is gone, the resume
+// names the conductor's own provider if it serves the id.
+const BOTH = [`amazon-bedrock/${OPUS}`, `pi-amazon-claude-provider/${OPUS}`];
+
+test("resumeModel: an unregistered session provider resumes on the conductor's provider when it serves the id", () => {
+  const text = sessionText(assistant("amazon-claude-code", OPUS));
+  const isRegistered = registeredOnly(...BOTH);
+  assert.equal(resumeModel(OPUS, () => text, isRegistered, "pi-amazon-claude-provider"), `pi-amazon-claude-provider/${OPUS}`);
+  assert.equal(
+    resumeModel(`amazon-claude-code/${OPUS}`, () => text, isRegistered, "amazon-bedrock"),
+    `amazon-bedrock/${OPUS}`,
+    "a persisted retired prefix is replaced, not just stripped",
+  );
+});
+
+test("resumeModel: the conductor's provider is ignored when it doesn't serve the id, or the session's still loads", () => {
+  const gone = sessionText(assistant("amazon-claude-code", OPUS));
+  assert.equal(resumeModel(OPUS, () => gone, registeredOnly(...BOTH), "openai"), OPUS, "doesn't serve it: bare, as before");
+  const live = sessionText(assistant("pi-amazon-claude-provider", OPUS));
+  assert.equal(
+    resumeModel(OPUS, () => live, registeredOnly(...BOTH), "amazon-bedrock"),
+    `pi-amazon-claude-provider/${OPUS}`,
+    "the session's registered provider still wins",
+  );
+});
+
+test("resumeModel: without a session-named provider the conductor's provider changes nothing", () => {
+  const text = sessionText({ type: "message", message: { role: "assistant", content: [], model: OPUS } });
+  assert.equal(resumeModel(OPUS, () => text, registeredOnly(...BOTH), "amazon-bedrock"), OPUS);
+  assert.equal(
+    resumeModel("custom-provider/some-model", () => text, registeredOnly(...BOTH), "amazon-bedrock"),
+    "custom-provider/some-model",
+  );
+});
+
 test("resumeModel: an unreadable session passes the id through", () => {
   const boom = () => {
     throw new Error("ENOENT");
@@ -413,6 +449,40 @@ test("sendToRun reseeds lastEventAt to now", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ── An RPC steer or follow_up is not a resume ─────────────────────────
+//
+// It rides the live subprocess, so it re-stamps the per-send markers but
+// counts in steerCount: resumeCount means "a new pi process via
+// --session", which W1's keep-the-worktree guard relies on.
+
+for (const behavior of ["steer", "follow_up"] as const) {
+  test(`sendToRun: an RPC ${behavior} re-stamps the per-send markers without counting a resume`, () => {
+    const enqueued: unknown[] = [];
+    const run = makeRun({
+      status: "running",
+      streamingMode: "rpc",
+      steerable: true,
+      rpcStdinQueue: { enqueue: async (cmd: unknown) => void enqueued.push(cmd), destroy: () => {} } as any,
+      usage: { ...emptyUsage(), turns: 3, input: 10, output: 20, cost: 0.5 },
+      thisInvocationStartedAt: 1,
+      resumeCount: 0,
+    });
+    const reg = new RunRegistry();
+    reg.register(run);
+    try {
+      const result = sendToRun(run, "turn left", { registry: reg, timeoutMs: 60_000, streamingBehavior: behavior });
+      assert.equal(result.kind, "started", result.kind === "rejected" ? result.reason : "");
+      assert.equal(enqueued.length, 1, "delivered to the live subprocess");
+      assert.equal(run.resumeCount, 0, "no new pi process, so no resume");
+      assert.equal(run.steerCount, 1);
+      assert.ok((run.thisInvocationStartedAt ?? 0) > 1, "the per-send clock restarts");
+      assert.deepEqual(run.thisInvocationUsageBaseline, { turns: 3, input: 10, output: 20, cost: 0.5 });
+    } finally {
+      for (const entry of run.pendingAcks?.values() ?? []) clearTimeout(entry.timer);
+    }
+  });
+}
 
 // ── Item 15 — sendToRun resets per-invocation markers BEFORE the new turn fires ──
 //

@@ -553,6 +553,7 @@ async function runSendCmd(
     timeoutMs,
     streamingBehavior: behavior,
     isRegisteredModel: modelRegistryPredicate(ctx.modelRegistry),
+    currentModelProvider: ctx.model?.provider,
     persona,
   });
 
