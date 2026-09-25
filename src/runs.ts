@@ -1550,6 +1550,49 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
   return { run, done };
 }
 
+/**
+ * Register and persist a run refused before it starts: status failed with
+ * `errorMessage`, no subprocess. `onComplete` fires, so the refusal reaches
+ * the conductor as the run's own card (e.g. a chain successor's).
+ */
+export function failBeforeSpawn(
+  opts: Pick<SpawnOptions, "registry" | "persona" | "task" | "mode" | "cwd" | "model" | "thinking" | "parentSessionId" | "onComplete">,
+  errorMessage: string,
+): Run {
+  const id = allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
+  const dir = runDir(id);
+  mkdirSync(dir, { recursive: true });
+  const now = Date.now();
+  const run: Run = {
+    id,
+    persona: opts.persona.name,
+    task: opts.task,
+    model: opts.model,
+    thinking: opts.thinking,
+    mode: opts.mode,
+    status: "failed",
+    startTime: now,
+    lastEventAt: now,
+    finishedAt: now,
+    messages: [],
+    usage: emptyUsage(),
+    cwd: opts.cwd,
+    recordPath: join(dir, "record.json"),
+    transcriptPath: join(dir, "transcript.jsonl"),
+    finalPath: join(dir, "final.md"),
+    parentPid: process.pid,
+    parentStartTime: readProcessStartTime(process.pid),
+    parentSessionId: opts.parentSessionId,
+    errorMessage,
+    failureClass: classifyFailure({ terminal: "failed", errorMessage }),
+  };
+  opts.registry.register(run);
+  void writeRecord(run);
+  void writeFinal(run);
+  opts.onComplete?.(run);
+  return run;
+}
+
 // ── Shared subprocess plumbing ─────────────────────────────────────────
 
 interface RunPiSubprocessOpts {
@@ -2830,9 +2873,14 @@ export async function settleWorktree(run: Run, terminal: RunStatus): Promise<Run
     (terminal !== "completed" && branchHasUnmergedCommits(gitRoot, run.worktreeBaseBranch ?? "master", branch));
   releaseWorktree(run, { keepBranch });
   if (terminal !== "completed" && keepBranch && !run.worktreePath) {
-    run.worktreeKept = `branch ${branch} kept: merge it with cd ${gitRoot} && git merge ${branch}, or delete it with git branch -D ${branch}`;
+    run.worktreeKept = keptBranchHint(gitRoot, branch);
   }
   return terminal;
+}
+
+/** The hint for a branch kept after its worktree directory went. */
+export function keptBranchHint(gitRoot: string, branch: string): string {
+  return `branch ${branch} kept: merge it with cd ${gitRoot} && git merge ${branch}, or delete it with git branch -D ${branch}`;
 }
 
 /** The hint for a worktree and branch kept whole, naming both before the advice. */

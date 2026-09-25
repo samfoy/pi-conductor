@@ -10,8 +10,9 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { readFileSync, existsSync } from "node:fs";
+import { dirname } from "node:path";
 import type { Persona, PersonaOverride, Run, RunStatus, ThinkingLevel, MergeStrategy } from "./types.ts";
-import { CONDUCTOR_LLM_TOOLS, CONDUCTOR_LLM_TOOL_NAMES, FOREIGN_SPAWN_TOOLS } from "./types.ts";
+import { CONDUCTOR_LLM_TOOLS, CONDUCTOR_LLM_TOOL_NAMES, FOREIGN_SPAWN_TOOLS, WRITE_CAPABLE_PERSONAS } from "./types.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
 import { resolveChain, buildChainTask } from "./chain.ts";
@@ -27,10 +28,10 @@ import {
 } from "./autonomous.ts";
 import { resolveRetryPolicy } from "./retry.ts";
 import { collapseSteerableCascade } from "./steerable.ts";
-import { elapsedStr, forceTerminate, formatUsage, getFinalText, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendCwd, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
+import { elapsedStr, failBeforeSpawn, forceTerminate, formatUsage, getFinalText, keptBranchHint, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendCwd, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
 import { isTerminal } from "./types.ts";
 import { SpawnQueue } from "./queue.ts";
-import { resolveMergeStrategy } from "./worktree.ts";
+import { resolveMergeStrategy, resolveWorktreeSpec } from "./worktree.ts";
 import { formatCwdInfo, resolveCwdArg, type CwdController, type CwdResolution } from "./conductor-cwd.ts";
 import { ConductorEventEmitter } from "./conductor-events.ts";
 import {
@@ -738,6 +739,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           personaName: persona.name,
           cfg,
           queue,
+          registry,
           cwd,
           pushNotification: opts.pushCompletionNotification,
           getParentMessages: opts.getParentMessages,
@@ -1643,6 +1645,8 @@ export interface OnChainCallbackOpts {
   personaName: string;
   cfg: ReturnType<typeof import("./config.ts").loadConfig>;
   queue: SpawnQueue;
+  /** Where a refused successor is recorded (see failBeforeSpawn). */
+  registry: RunRegistry;
   cwd: string;
   pushNotification: (run: Run) => void;
   getParentMessages: () => AgentMessage[];
@@ -1732,21 +1736,51 @@ export function buildOnChainCallback(
     const chainTimeoutMs = step.timeoutMinutes
       ? step.timeoutMinutes * 60 * 1000
       : resolveTimeoutMs(chainPersona, baseOv, chainCfg);
-    args.queue.enqueueOrSpawn({
+    const spawn = {
       persona: chainPersona,
       task,
-      mode: "background",
+      mode: "background" as const,
       cwd: chainCwd,
       model: resolveModel(chainPersona, baseOv),
       thinking: resolveThinking(chainPersona, baseOv),
       timeoutMs: chainTimeoutMs,
       parentMessages: args.getParentMessages(),
       parentSessionId: args.getSessionId?.(),
-      onComplete: (run) => args.pushNotification(run),
+      // ensemble_spawn's worktree decision. A merged parent's work is on
+      // HEAD by now, which is where the successor's worktree branches from.
+      worktree: chainCfg.worktreeMode === "conductor" && chainPersona.worktree === true,
+      mergeStrategy: resolveSpawnMergeStrategy(chainCfg, chainPersona),
+      onComplete: (run: Run) => args.pushNotification(run),
       // no onChain: depth-1 cap (chain-spawned runs do not chain further)
       events: args.events,
-    } as SpawnOptions);
+    };
+    const refusal = WRITE_CAPABLE_PERSONAS.has(chainPersona.name) ? keptParentRefusal(parentRun, chainPersona.name) : undefined;
+    if (refusal) {
+      failBeforeSpawn({ ...spawn, registry: args.registry }, refusal);
+      return;
+    }
+    args.queue.enqueueOrSpawn(spawn as SpawnOptions);
   };
+}
+
+/**
+ * Why a write-capable successor can't start after `parent`: the parent's
+ * branch was kept unmerged (mergeStrategy none), so a worktree from HEAD
+ * would lack its work. Undefined when the work is on HEAD or never branched.
+ */
+function keptParentRefusal(parent: Run, successor: string): string | undefined {
+  const branch = parent.worktreeBranch;
+  if (!branch || parent.mergeResult?.success === true) return undefined;
+  const base = parent.worktreeBaseBranch ?? "its base branch";
+  const gitRoot = parent.worktreePath
+    ? dirname(dirname(dirname(parent.worktreePath)))
+    : (resolveWorktreeSpec(parent.cwd, parent.id)?.gitRoot ?? parent.cwd);
+  const hint = parent.worktreeKept ?? keptBranchHint(gitRoot, branch);
+  return (
+    `chain: ${successor} not started after ${parent.id}: its work is on the kept branch ${branch}, ` +
+    `not merged into ${base}, and a ${successor} branched from ${base} would lack it. ` +
+    `${hint}; then spawn ${successor} again.`
+  );
 }
 
 // ── v0.18 classified retry ───────────────────────────────────────────────

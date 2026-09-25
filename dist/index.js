@@ -3166,6 +3166,40 @@ function spawnRun(opts) {
   });
   return { run, done };
 }
+function failBeforeSpawn(opts, errorMessage) {
+  const id = allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
+  const dir = runDir(id);
+  mkdirSync5(dir, { recursive: true });
+  const now = Date.now();
+  const run = {
+    id,
+    persona: opts.persona.name,
+    task: opts.task,
+    model: opts.model,
+    thinking: opts.thinking,
+    mode: opts.mode,
+    status: "failed",
+    startTime: now,
+    lastEventAt: now,
+    finishedAt: now,
+    messages: [],
+    usage: emptyUsage(),
+    cwd: opts.cwd,
+    recordPath: join7(dir, "record.json"),
+    transcriptPath: join7(dir, "transcript.jsonl"),
+    finalPath: join7(dir, "final.md"),
+    parentPid: process.pid,
+    parentStartTime: readProcessStartTime(process.pid),
+    parentSessionId: opts.parentSessionId,
+    errorMessage,
+    failureClass: classifyFailure({ terminal: "failed", errorMessage })
+  };
+  opts.registry.register(run);
+  void writeRecord(run);
+  void writeFinal(run);
+  opts.onComplete?.(run);
+  return run;
+}
 function resolveCloseHook(cwd, personaName, perCall, personaFrontmatter) {
   const layered = loadConfigWithErrors(cwd);
   const project = hookSpecFromOverride(
@@ -3757,9 +3791,12 @@ async function settleWorktree(run, terminal) {
   const keepBranch = noMergeBack || terminal !== "completed" && branchHasUnmergedCommits(gitRoot2, run.worktreeBaseBranch ?? "master", branch);
   releaseWorktree(run, { keepBranch });
   if (terminal !== "completed" && keepBranch && !run.worktreePath) {
-    run.worktreeKept = `branch ${branch} kept: merge it with cd ${gitRoot2} && git merge ${branch}, or delete it with git branch -D ${branch}`;
+    run.worktreeKept = keptBranchHint(gitRoot2, branch);
   }
   return terminal;
+}
+function keptBranchHint(gitRoot2, branch) {
+  return `branch ${branch} kept: merge it with cd ${gitRoot2} && git merge ${branch}, or delete it with git branch -D ${branch}`;
 }
 function keptWorktreeHint(worktreePath, branch) {
   const gitRoot2 = dirname7(dirname7(dirname7(worktreePath)));
@@ -6311,6 +6348,7 @@ Resolve manually in the worktree and run /conductor worktree merge ${runId} agai
 init_types();
 import { Type } from "@sinclair/typebox";
 import { readFileSync as readFileSync9, existsSync as existsSync13 } from "node:fs";
+import { dirname as dirname10 } from "node:path";
 
 // src/chain.ts
 import { readFileSync as readFileSync8, existsSync as existsSync12 } from "node:fs";
@@ -7500,6 +7538,7 @@ function registerSpawnTool(pi, opts) {
           personaName: persona.name,
           cfg,
           queue,
+          registry,
           cwd,
           pushNotification: opts.pushCompletionNotification,
           getParentMessages: opts.getParentMessages,
@@ -8265,7 +8304,7 @@ function buildOnChainCallback(args) {
     });
     const baseOv = chainCfg.personaOverrides[chainPersona.name] ?? {};
     const chainTimeoutMs = step.timeoutMinutes ? step.timeoutMinutes * 60 * 1e3 : resolveTimeoutMs(chainPersona, baseOv, chainCfg);
-    args.queue.enqueueOrSpawn({
+    const spawn2 = {
       persona: chainPersona,
       task,
       mode: "background",
@@ -8275,11 +8314,29 @@ function buildOnChainCallback(args) {
       timeoutMs: chainTimeoutMs,
       parentMessages: args.getParentMessages(),
       parentSessionId: args.getSessionId?.(),
+      // ensemble_spawn's worktree decision. A merged parent's work is on
+      // HEAD by now, which is where the successor's worktree branches from.
+      worktree: chainCfg.worktreeMode === "conductor" && chainPersona.worktree === true,
+      mergeStrategy: resolveSpawnMergeStrategy(chainCfg, chainPersona),
       onComplete: (run) => args.pushNotification(run),
       // no onChain: depth-1 cap (chain-spawned runs do not chain further)
       events: args.events
-    });
+    };
+    const refusal = WRITE_CAPABLE_PERSONAS.has(chainPersona.name) ? keptParentRefusal(parentRun, chainPersona.name) : void 0;
+    if (refusal) {
+      failBeforeSpawn({ ...spawn2, registry: args.registry }, refusal);
+      return;
+    }
+    args.queue.enqueueOrSpawn(spawn2);
   };
+}
+function keptParentRefusal(parent, successor) {
+  const branch = parent.worktreeBranch;
+  if (!branch || parent.mergeResult?.success === true) return void 0;
+  const base = parent.worktreeBaseBranch ?? "its base branch";
+  const gitRoot2 = parent.worktreePath ? dirname10(dirname10(dirname10(parent.worktreePath))) : resolveWorktreeSpec(parent.cwd, parent.id)?.gitRoot ?? parent.cwd;
+  const hint = parent.worktreeKept ?? keptBranchHint(gitRoot2, branch);
+  return `chain: ${successor} not started after ${parent.id}: its work is on the kept branch ${branch}, not merged into ${base}, and a ${successor} branched from ${base} would lack it. ${hint}; then spawn ${successor} again.`;
 }
 function buildOnRetryCallback(args) {
   const self = (failedRun) => {

@@ -17,6 +17,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { buildOnChainCallback } from "../src/tools.ts";
+import { RunRegistry } from "../src/runs.ts";
 import { DEFAULT_CONFIG, emptyUsage, type Run, type ConductorConfig } from "../src/types.ts";
 
 function makeParent(finalText: string, dir: string): Run {
@@ -52,6 +53,7 @@ function makeArgs(cfg: ConductorConfig, captured: any[]) {
     personaName: "builder",
     cfg,
     queue: { enqueueOrSpawn: (o: any) => captured.push(o) } as any,
+    registry: new RunRegistry(),
     cwd: process.cwd(),
     pushNotification: () => {},
     getParentMessages: () => [],
