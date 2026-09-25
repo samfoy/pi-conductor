@@ -14,12 +14,12 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import conductor from "../src/index.ts";
 import { stubCtx } from "./helpers/stub-pi.ts";
+import { tmpDir } from "./helpers/tmp.ts";
 
 const HARD_MS = 600_000; // DEFAULT_CONFIG.watchdog.defaultHardSeconds
 const WATCHDOG_TICK_MS = 30_000; // DEFAULT_CONFIG.watchdog.tickIntervalSeconds
@@ -62,7 +62,7 @@ async function until(what: string, ok: () => boolean, ms = 10_000): Promise<void
 }
 
 async function stallKill(tool: "watchdog" | "ensemble_kill"): Promise<Harness["messages"]> {
-  const root = mkdtempSync(join(tmpdir(), "conductor-watchdog-card-"));
+  const root = tmpDir("conductor-watchdog-card-");
   const memoryPath = join(root, "memory.jsonl");
   const saved = {
     HOME: process.env.HOME,

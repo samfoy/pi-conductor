@@ -1,7 +1,6 @@
 import { strict as assert } from "node:assert";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -13,9 +12,10 @@ import {
   MAX_WALK_DEPTH,
   loadWorkspaceDoctrine,
 } from "../src/workspace-doctrine.ts";
+import { tmpDir } from "./helpers/tmp.ts";
 
 function tree(doctrine = "RULE: redirect every build to a log file.\n") {
-  const sandbox = mkdtempSync(join(tmpdir(), "pi-conductor-doctrine-"));
+  const sandbox = tmpDir("pi-conductor-doctrine-");
   const root = join(sandbox, "Workspace");
   const pkg = join(root, "src", "Package");
   mkdirSync(join(pkg, ".git"), { recursive: true });
@@ -53,7 +53,7 @@ test("skips AGENTS.md that the child loads natively", () => {
 });
 
 test("stops at the bounded ancestor depth", () => {
-  const sandbox = mkdtempSync(join(tmpdir(), "pi-conductor-depth-"));
+  const sandbox = tmpDir("pi-conductor-depth-");
   writeFileSync(join(sandbox, "AGENTS.md"), "TOO FAR");
   let deep = sandbox;
   for (let i = 0; i < MAX_WALK_DEPTH + 2; i++) deep = join(deep, `d${i}`);

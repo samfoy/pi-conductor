@@ -20,6 +20,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { spawnRun, RunRegistry } from "../src/runs.ts";
+import { sandboxPi } from "./helpers/tmp.ts";
+
+// Its spawns would otherwise start the real pi, with the real HOME.
+sandboxPi();
 
 function makePersona(overrides: { retryMaxAttempts?: number } = {}) {
   return {

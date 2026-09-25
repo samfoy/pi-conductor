@@ -19,6 +19,10 @@ import { tmpdir } from "node:os";
 import { spawnRun } from "../src/runs.ts";
 import { RunRegistry } from "../src/runs.ts";
 import { toRunRecord } from "../src/types.ts";
+import { sandboxPi } from "./helpers/tmp.ts";
+
+// Its spawns would otherwise start the real pi, with the real HOME.
+sandboxPi();
 
 const createRegistry = () => new RunRegistry();
 

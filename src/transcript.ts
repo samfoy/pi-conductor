@@ -68,7 +68,8 @@ function capBlock(block: string[], limit: number, width: number): string[] {
 
 // ── Header ────────────────────────────────────────────────────────────
 
-export function renderHeader(run: Run, width: number): string[] {
+/** `now` dates the activity field (idle vs responding); tests inject it. */
+export function renderHeader(run: Run, width: number, now: number = Date.now()): string[] {
   const elapsed = elapsedStr(run.startTime, run.finishedAt);
   const usage = formatUsage(run.usage);
   const glyph = STATUS_GLYPH[run.status] ?? "·";
@@ -81,7 +82,7 @@ export function renderHeader(run: Run, width: number): string[] {
   // load-bearing — if appending the activity (with separator) would push the
   // header past the requested width, we shrink the activity (or drop it
   // entirely), never the persona/id/status/elapsed prefix.
-  const activity = deriveActivity(run, Date.now());
+  const activity = deriveActivity(run, now);
   let left = baseLeft;
   if (activity !== undefined) {
     const sepText = " · ";

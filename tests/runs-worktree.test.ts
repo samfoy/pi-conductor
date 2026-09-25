@@ -26,6 +26,10 @@ import { SpawnQueue } from "../src/queue.ts";
 import { FocusedStreamModel } from "../src/focused-stream-model.ts";
 import { DEFAULT_CONFIG, emptyUsage, type Run, type Persona } from "../src/types.ts";
 import { resolvePersonas, projectPersonasDir } from "../src/personas.ts";
+import { sandboxPi } from "./helpers/tmp.ts";
+
+// Its spawns would otherwise start the real pi, with the real HOME.
+sandboxPi();
 
 // ── Helpers ────────────────────────────────────────────────────────────
 

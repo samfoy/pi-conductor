@@ -21,8 +21,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -37,6 +36,10 @@ import {
 } from "../src/runs.ts";
 import { SpawnQueue } from "../src/queue.ts";
 import { emptyUsage, type Persona, type Run } from "../src/types.ts";
+import { sandboxPi, tmpDir } from "./helpers/tmp.ts";
+
+// Its spawns would otherwise start the real pi, with the real HOME.
+sandboxPi();
 
 // ── Shared helpers ──────────────────────────────────────────────────────────
 
@@ -57,8 +60,7 @@ function makePersona(name = "oracle"): Persona {
 }
 
 function makeRun(id: string, overrides: Partial<Run> = {}): Run {
-  const dir = join(tmpdir(), "conductor-events-emit-" + id);
-  mkdirSync(dir, { recursive: true });
+  const dir = tmpDir(`conductor-events-emit-${id}-`);
   return {
     id,
     persona: "builder",
@@ -92,11 +94,7 @@ function makeFakeBus() {
 }
 
 function withFakeHome<T>(fn: (home: string) => T): T {
-  const root = join(
-    tmpdir(),
-    "conductor-emit-home-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8),
-  );
-  mkdirSync(root, { recursive: true });
+  const root = tmpDir("conductor-emit-home-");
   const realHome = process.env.HOME;
   process.env.HOME = root;
   try {

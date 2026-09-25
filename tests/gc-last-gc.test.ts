@@ -6,14 +6,14 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 
 import { lastGcMarkerPath, readLastGcMtime, writeLastGcMtime } from "../src/gc/last-gc.ts";
+import { tmpDir } from "./helpers/tmp.ts";
 
 function makeFakeRoot(): { root: string; runsRoot: string } {
-  const root = mkdtempSync(join(tmpdir(), "pi-conductor-last-gc-"));
+  const root = tmpDir("pi-conductor-last-gc-");
   const runsRoot = join(root, "runs");
   mkdirSync(runsRoot, { recursive: true });
   return { root, runsRoot };

@@ -20,17 +20,17 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 
 import { applyChainIfPresent } from "../src/runs.ts";
 import { emptyUsage, type Run } from "../src/types.ts";
+import { tmpDir } from "./helpers/tmp.ts";
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 function makeRun(overrides: Partial<Run> = {}): Run {
-  const dir = mkdtempSync(join(tmpdir(), "conductor-chain-test-"));
+  const dir = tmpDir("conductor-chain-test-");
   return {
     id: "builder-test",
     persona: "builder",
@@ -50,7 +50,7 @@ function makeRun(overrides: Partial<Run> = {}): Run {
 // ── W1: onChain called when completed ──────────────────────────────────
 
 test("applyChainIfPresent: calls onChain when terminal is completed", () => {
-  const dir = mkdtempSync(join(tmpdir(), "chain-test-"));
+  const dir = tmpDir("chain-test-");
   try {
     const run = makeRun({ cwd: dir });
     let called = false;
@@ -71,7 +71,7 @@ test("applyChainIfPresent: calls onChain when terminal is completed", () => {
 // ── W2: onChain NOT called when failed ─────────────────────────────────
 
 test("applyChainIfPresent: does NOT call onChain when terminal is failed", () => {
-  const dir = mkdtempSync(join(tmpdir(), "chain-test-"));
+  const dir = tmpDir("chain-test-");
   try {
     const run = makeRun({ cwd: dir, status: "failed" });
     let called = false;
@@ -85,7 +85,7 @@ test("applyChainIfPresent: does NOT call onChain when terminal is failed", () =>
 // ── W3: onChain NOT called when killed ─────────────────────────────────
 
 test("applyChainIfPresent: does NOT call onChain when terminal is killed", () => {
-  const dir = mkdtempSync(join(tmpdir(), "chain-test-"));
+  const dir = tmpDir("chain-test-");
   try {
     const run = makeRun({ cwd: dir, status: "killed" });
     let called = false;
@@ -99,7 +99,7 @@ test("applyChainIfPresent: does NOT call onChain when terminal is killed", () =>
 // ── W4: onChain NOT called when hook_failed ────────────────────────────
 
 test("applyChainIfPresent: does NOT call onChain when terminal is hook_failed", () => {
-  const dir = mkdtempSync(join(tmpdir(), "chain-test-"));
+  const dir = tmpDir("chain-test-");
   try {
     const run = makeRun({ cwd: dir, status: "hook_failed" });
     let called = false;
@@ -113,7 +113,7 @@ test("applyChainIfPresent: does NOT call onChain when terminal is hook_failed", 
 // ── W5: no-op when onChain is undefined ───────────────────────────────
 
 test("applyChainIfPresent: no-op when callback is undefined", () => {
-  const dir = mkdtempSync(join(tmpdir(), "chain-test-"));
+  const dir = tmpDir("chain-test-");
   try {
     const run = makeRun({ cwd: dir, status: "completed" });
     // should not throw
@@ -126,7 +126,7 @@ test("applyChainIfPresent: no-op when callback is undefined", () => {
 // ── W6: exception in onChain is swallowed (never crashes finalize) ─────
 
 test("applyChainIfPresent: swallows exceptions thrown by onChain", () => {
-  const dir = mkdtempSync(join(tmpdir(), "chain-test-"));
+  const dir = tmpDir("chain-test-");
   try {
     const run = makeRun({ cwd: dir, status: "completed" });
     assert.doesNotThrow(() =>

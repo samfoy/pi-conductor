@@ -8,15 +8,15 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, existsSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, existsSync, statSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { pinRun, unpinRun, isPinned } from "../src/gc/pinning.ts";
+import { tmpDir } from "./helpers/tmp.ts";
 
 function makeRoot(): string {
-  return mkdtempSync(join(tmpdir(), "pi-conductor-pinning-"));
+  return tmpDir("pi-conductor-pinning-");
 }
 
 function makeRunDir(root: string, id: string): string {

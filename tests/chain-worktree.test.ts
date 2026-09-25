@@ -14,8 +14,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { SpawnQueue } from "../src/queue.ts";
@@ -24,6 +23,7 @@ import { resolvePersonas } from "../src/personas.ts";
 import { buildOnChainCallback } from "../src/tools.ts";
 import { DEFAULT_CONFIG, type MergeStrategy, type Run } from "../src/types.ts";
 import { gitTestEnv } from "./helpers/git-env.ts";
+import { tmpDir } from "./helpers/tmp.ts";
 
 const git = (cwd: string, cmd: string): string =>
   execSync(`git ${cmd}`, { cwd, env: gitTestEnv(), stdio: "pipe" }).toString();
@@ -65,7 +65,7 @@ interface Chained {
 
 /** Run a builder parent with `mergeStrategy`, chained to `then`, until the successor settles. */
 async function chainAfterBuilder(then: string, mergeStrategy: MergeStrategy, check: (c: Chained) => void): Promise<void> {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "conductor-chain-wt-")));
+  const root = realpathSync(tmpDir("conductor-chain-wt-"));
   const repo = join(root, "repo");
   mkdirSync(repo);
   git(repo, "init -b mainline");
@@ -153,7 +153,7 @@ test("chain: a critic after a kept builder branch still starts, unisolated, with
 
 /** Call the chain callback for a synthetic `parent`, with a queue spy, under a temp HOME. */
 async function chainSpy(then: string, parent: Partial<Run>): Promise<{ spawned: any[]; cards: Run[]; registry: RunRegistry }> {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "conductor-chain-spy-")));
+  const root = realpathSync(tmpDir("conductor-chain-spy-"));
   const saved = process.env.HOME;
   process.env.HOME = join(root, "home");
   try {

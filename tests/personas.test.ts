@@ -4,8 +4,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -15,6 +14,7 @@ import {
   resolvePersonas,
 } from "../src/personas.ts";
 import { readdir } from "node:fs/promises";
+import { tmpDir } from "./helpers/tmp.ts";
 
 test("parseFrontmatter: empty body without frontmatter", () => {
   const r = parseFrontmatter("hello world");
@@ -75,7 +75,7 @@ body without closing fence`,
 });
 
 test("resolvePersonas: project overrides user", async () => {
-  const root = mkdtempSync(join(tmpdir(), "conductor-test-"));
+  const root = tmpDir("conductor-test-");
   const homeDir = join(root, "home");
   const projectDir = join(root, "proj");
   const userPersonaDir = join(homeDir, ".pi", "agent", "conductor", "personas");
@@ -118,7 +118,7 @@ project prompt body`,
 });
 
 test("resolvePersonas: persona override applies model + thinking", async () => {
-  const root = mkdtempSync(join(tmpdir(), "conductor-test-"));
+  const root = tmpDir("conductor-test-");
   const homeDir = join(root, "home");
   const userPersonaDir = join(homeDir, ".pi", "agent", "conductor", "personas");
   mkdirSync(userPersonaDir, { recursive: true });
@@ -152,7 +152,7 @@ prompt body`,
 });
 
 test("resolvePersonas: disabled override removes persona", async () => {
-  const root = mkdtempSync(join(tmpdir(), "conductor-test-"));
+  const root = tmpDir("conductor-test-");
   const homeDir = join(root, "home");
   const userPersonaDir = join(homeDir, ".pi", "agent", "conductor", "personas");
   mkdirSync(userPersonaDir, { recursive: true });
@@ -181,7 +181,7 @@ prompt body`,
 });
 
 test("resolvePersonas: malformed file recorded as error, not crash", async () => {
-  const root = mkdtempSync(join(tmpdir(), "conductor-test-"));
+  const root = tmpDir("conductor-test-");
   const homeDir = join(root, "home");
   const userPersonaDir = join(homeDir, ".pi", "agent", "conductor", "personas");
   mkdirSync(userPersonaDir, { recursive: true });
@@ -364,7 +364,7 @@ test("resolveBuiltinPersonasDir: canonicalizes through legacy symlink layout", (
   // symlink path lands on ~/.pi/agent/extensions/, which has no
   // personas/ dir, so 0 personas resolve.
   // Use realpathSync on root so macOS /var→/private/var symlink doesn't cause mismatches.
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "conductor-symlink-test-")));
+  const root = realpathSync(tmpDir("conductor-symlink-test-"));
   // Real package layout: <root>/pkg/{dist/index.js, personas/<name>.md}
   const pkgDir = join(root, "pkg");
   const distDir = join(pkgDir, "dist");
@@ -397,7 +397,7 @@ test("resolveBuiltinPersonasDir: passes through non-symlink paths unchanged", ()
   // Sanity: realpathSync on a real file is a no-op (modulo absolute-path
   // canonicalization). The walk still lands on <pkg>/personas/.
   // Use realpathSync on root so macOS /var→/private/var symlink doesn't cause mismatches.
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "conductor-realpath-test-")));
+  const root = realpathSync(tmpDir("conductor-realpath-test-"));
   const distDir = join(root, "dist");
   const personasDir = join(root, "personas");
   mkdirSync(distDir, { recursive: true });
@@ -427,7 +427,7 @@ test("personas: v0.12 schema accepts no `steerable` field (parser does not exten
   // through the public parse → build pipeline. The resulting object
   // MUST NOT carry a `steerable` property; if a future slice silently
   // adds frontmatter parsing, this test catches it.
-  const tempDir = mkdtempSync(join(tmpdir(), "persona-steerable-neg-"));
+  const tempDir = tmpDir("persona-steerable-neg-");
   const file = join(tempDir, "with-steerable.md");
   writeFileSync(
     file,
@@ -513,7 +513,7 @@ body`,
 });
 
 test("Persona: on_complete_hook surfaces from frontmatter via validateAndBuild", async () => {
-  const tempDir = mkdtempSync(join(tmpdir(), "conductor-slice4-frontmatter-"));
+  const tempDir = tmpDir("conductor-slice4-frontmatter-");
   mkdirSync(join(tempDir, ".pi", "conductor", "personas"), { recursive: true });
   writeFileSync(
     join(tempDir, ".pi", "conductor", "personas", "gated.md"),
@@ -546,7 +546,7 @@ test("Persona: on_complete_hook=\"\" preserves empty string (disable sentinel)",
   // The cascade resolver short-circuits on empty `command`. The
   // frontmatter parser must not coerce `""` to undefined — doing so
   // would silently fall through to lower cascade layers.
-  const tempDir = mkdtempSync(join(tmpdir(), "conductor-slice4-empty-"));
+  const tempDir = tmpDir("conductor-slice4-empty-");
   mkdirSync(join(tempDir, ".pi", "conductor", "personas"), { recursive: true });
   writeFileSync(
     join(tempDir, ".pi", "conductor", "personas", "disabled.md"),
@@ -574,7 +574,7 @@ You are disabled.
 });
 
 test("Persona: on_complete_hook_timeout_seconds rejects zero", async () => {
-  const tempDir = mkdtempSync(join(tmpdir(), "conductor-slice4-zero-"));
+  const tempDir = tmpDir("conductor-slice4-zero-");
   mkdirSync(join(tempDir, ".pi", "conductor", "personas"), { recursive: true });
   writeFileSync(
     join(tempDir, ".pi", "conductor", "personas", "bad.md"),

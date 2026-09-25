@@ -17,12 +17,13 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir, homedir } from "node:os";
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { resolveCloseHook } from "../src/runs.ts";
 import { resolvePersonas } from "../src/personas.ts";
+import { tmpDir } from "./helpers/tmp.ts";
 
 interface FixtureLayers {
   perCall?: { command: string; timeoutSeconds?: number };
@@ -36,8 +37,8 @@ function setupCascadeFixture(personaName: string, layers: FixtureLayers): {
   fakeHome: string;
   cleanup: () => void;
 } {
-  const cwd = mkdtempSync(join(tmpdir(), "conductor-slice4-cascade-cwd-"));
-  const fakeHome = mkdtempSync(join(tmpdir(), "conductor-slice4-cascade-home-"));
+  const cwd = tmpDir("conductor-slice4-cascade-cwd-");
+  const fakeHome = tmpDir("conductor-slice4-cascade-home-");
 
   // Project config layer.
   if (layers.projectOverride !== undefined) {

@@ -27,8 +27,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -43,6 +42,7 @@ import {
   validateSendable,
 } from "../src/runs.ts";
 import { emptyUsage, type Run, type RunRecord } from "../src/types.ts";
+import { tmpDir } from "./helpers/tmp.ts";
 
 interface OrphanFixture {
   runsRoot: string;
@@ -58,7 +58,7 @@ interface OrphanFixture {
  */
 function plantOrphan(opts: { id?: string; sessionPresent?: boolean } = {}): OrphanFixture {
   const id = opts.id ?? "builder-orphan";
-  const runsRoot = mkdtempSync(join(tmpdir(), "reconcile-resume-"));
+  const runsRoot = tmpDir("reconcile-resume-");
   const dir = join(runsRoot, id);
   mkdirSync(dir, { recursive: true });
 

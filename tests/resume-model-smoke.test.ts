@@ -12,8 +12,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { RunRegistry, sendToRun } from "../src/runs.ts";
@@ -23,6 +22,7 @@ import { executePromptAndSend } from "../src/prompt-and-send.ts";
 import { SpawnQueue } from "../src/queue.ts";
 import { FocusedStreamModel } from "../src/focused-stream-model.ts";
 import { emptyUsage, type Run } from "../src/types.ts";
+import { tmpDir } from "./helpers/tmp.ts";
 
 type Send = (run: Run, registry: RunRegistry) => Promise<void>;
 
@@ -39,7 +39,7 @@ async function resumeArgv(
   sessionLines: object[],
   send: Send = directSend(),
 ): Promise<{ argv: string[]; run: Run }> {
-  const root = mkdtempSync(join(tmpdir(), "conductor-resume-model-smoke-"));
+  const root = tmpDir("conductor-resume-model-smoke-");
   const argvOut = join(root, "argv.json");
   const stub = join(root, "pi-stub.mjs");
   writeFileSync(

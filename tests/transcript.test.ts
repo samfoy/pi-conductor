@@ -606,23 +606,25 @@ test("renderHeader: running run idle ≥60s shows '· idle Nm' in minutes", () =
   assert.match(joined, /· idle 1m/);
 });
 
+// An injected clock: against the real one, the 1 ms margins flaked under load.
 test("renderHeader: idle threshold — 4999ms ago shows activity, 5001ms ago shows idle", () => {
+  const now = 1_000_000;
   const justBeforeThreshold = makeRun({
     status: "running",
-    lastEventAt: Date.now() - 4999,
+    lastEventAt: now - 4999,
     messages: [
       { role: "assistant", content: [{ type: "text", text: "hi" }] } as any,
     ],
   });
   const justAfterThreshold = makeRun({
     status: "running",
-    lastEventAt: Date.now() - 5001,
+    lastEventAt: now - 5001,
     messages: [
       { role: "assistant", content: [{ type: "text", text: "hi" }] } as any,
     ],
   });
-  const beforeJoined = renderHeader(justBeforeThreshold, 120).join("\n");
-  const afterJoined = renderHeader(justAfterThreshold, 120).join("\n");
+  const beforeJoined = renderHeader(justBeforeThreshold, 120, now).join("\n");
+  const afterJoined = renderHeader(justAfterThreshold, 120, now).join("\n");
   assert.match(beforeJoined, /· responding/);
   assert.doesNotMatch(beforeJoined, /· idle/);
   assert.match(afterJoined, /· idle 5s/);

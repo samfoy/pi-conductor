@@ -6551,14 +6551,14 @@ function capBlock(block, limit, width) {
   const hidden = block.length - limit;
   return [...block.slice(0, limit), truncateOrPad(foldMarker(hidden), width)];
 }
-function renderHeader(run, width) {
+function renderHeader(run, width, now = Date.now()) {
   const elapsed = elapsedStr(run.startTime, run.finishedAt);
   const usage = formatUsage(run.usage);
   const glyph = STATUS_GLYPH[run.status] ?? "\xB7";
   const baseLeft = `${glyph} ${run.persona} (${run.id}) \u2014 ${run.status} ${elapsed}`;
   const right = usage ? `[${usage}]` : "";
   const sep4 = "\u2500".repeat(Math.max(0, width));
-  const activity = deriveActivity(run, Date.now());
+  const activity = deriveActivity(run, now);
   let left = baseLeft;
   if (activity !== void 0) {
     const sepText = " \xB7 ";

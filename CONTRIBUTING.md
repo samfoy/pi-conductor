@@ -83,6 +83,8 @@ Target wall time for the unit suite: **under 5 seconds**. If a single test pushe
 
 **Tests that run git must pass `env: gitTestEnv()`** (`tests/helpers/git-env.ts`) to every git subprocess and to any script that shells out to git. A commit from a linked worktree exports `GIT_DIR` / `GIT_INDEX_FILE` to the pre-commit hook, and an inheriting child git rewrites the real repo's config and index instead of the temp repo's. `tests/git-env.test.ts` pins this.
 
+**Tests that make a temp dir use `tmpDir()`** (`tests/helpers/tmp.ts`), which removes it when the file's process exits, after any late record write has landed. A file whose spawns would otherwise start the real `pi` (npm puts `node_modules/.bin/pi` on PATH) calls `sandboxPi()` at module level, which points HOME and PI_BIN at temp stand-ins, so no test writes into your `~/.pi/agent/conductor/runs`. `tests/tmp-helper.test.ts` pins the cleanup.
+
 **Tests that fork real subprocesses must set an explicit timeout** (either `--test-timeout=<ms>` on the runner or `{ timeout: <ms> }` on the test) — tsx defaults to `--test-timeout=0` (no timeout), so a buggy helper that never resolves hangs the runner indefinitely. See `personas/builder.md` "Test discipline."
 
 **v0.11 dogfood note:** do not set `npm test` as the `on_complete_hook` for this repo — the host pre-commit already runs `npm test`, so setting it as the hook would run the full suite twice per commit and waste ~15 s per slice.

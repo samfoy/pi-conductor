@@ -22,9 +22,8 @@
 
 import test, { mock } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync } from "node:fs";
+import { rmSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChildProcess } from "node:child_process";
 
@@ -39,9 +38,10 @@ import {
   type ResolvedHook,
   type Run,
 } from "../src/types.ts";
+import { tmpDir } from "./helpers/tmp.ts";
 
 function tmpRunPaths(): { dir: string; recordPath: string; transcriptPath: string; finalPath: string } {
-  const dir = mkdtempSync(join(tmpdir(), "conductor-runs-hook-"));
+  const dir = tmpDir("conductor-runs-hook-");
   return {
     dir,
     recordPath: join(dir, "record.json"),

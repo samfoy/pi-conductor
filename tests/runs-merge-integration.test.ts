@@ -17,24 +17,23 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  mkdtempSync,
   mkdirSync,
   writeFileSync,
   rmSync,
   realpathSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
 import { gitTestEnv } from "./helpers/git-env.ts";
 
 import { applyMergeToTerminal } from "../src/runs.ts";
 import { emptyUsage, type Run } from "../src/types.ts";
+import { tmpDir } from "./helpers/tmp.ts";
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
-function tmpDir(): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), "conductor-runs-merge-")));
+function repoDir(): string {
+  return realpathSync(tmpDir("conductor-runs-merge-"));
 }
 
 function initRepo(dir: string): void {
@@ -70,7 +69,7 @@ function makeWorktreeBranch(
 }
 
 function makeRun(overrides: Partial<Run> = {}): Run {
-  const dir = mkdtempSync(join(tmpdir(), "conductor-run-paths-"));
+  const dir = tmpDir("conductor-run-paths-");
   return {
     id: "builder-abc1",
     persona: "builder",
@@ -95,7 +94,7 @@ test(
   "applyMergeToTerminal: squash success — mergeResult.success, worktree fields left for removal",
   { timeout: 15_000 },
   async () => {
-    const root = tmpDir();
+    const root = repoDir();
     try {
       initRepo(root);
       const wtPath = makeWorktreeBranch(root, "conductor-wt/builder-abc1", "new.ts", "hello\n");
@@ -124,7 +123,7 @@ test(
   "applyMergeToTerminal: conflict — status flips to merge_conflict, worktreePath kept",
   { timeout: 15_000 },
   async () => {
-    const root = tmpDir();
+    const root = repoDir();
     try {
       initRepo(root);
       const wtPath = makeWorktreeBranch(root, "conductor-wt/builder-abc2", "README.md", "from branch\n");
@@ -228,7 +227,7 @@ test(
   "applyMergeToTerminal: empty diff (nothingToCommit) — success, worktree fields left for removal",
   { timeout: 15_000 },
   async () => {
-    const root = tmpDir();
+    const root = repoDir();
     try {
       initRepo(root);
       // Worktree with no new commits

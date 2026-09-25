@@ -19,8 +19,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { forceTerminate, RunRegistry, sendToRun, settleWorktree, spawnRun } from "../src/runs.ts";
@@ -31,13 +30,14 @@ import { resolvePersonas } from "../src/personas.ts";
 import { sessionHeaderCwd } from "../src/session-seed.ts";
 import { emptyUsage, type Persona, type Run } from "../src/types.ts";
 import { gitTestEnv } from "./helpers/git-env.ts";
+import { tmpDir } from "./helpers/tmp.ts";
 
 function git(cwd: string, cmd: string): string {
   return execSync(`git ${cmd}`, { cwd, env: gitTestEnv(), stdio: "pipe" }).toString();
 }
 
 function initRepo(): { root: string; repo: string } {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "conductor-wt-finalize-")));
+  const root = realpathSync(tmpDir("conductor-wt-finalize-"));
   const repo = join(root, "repo");
   mkdirSync(repo);
   git(repo, "init -b mainline");
@@ -126,7 +126,7 @@ function builderPersona(): Persona {
 }
 
 function makeRun(id: string, over: Partial<Run>): Run {
-  const dir = mkdtempSync(join(tmpdir(), "conductor-wt-finalize-run-"));
+  const dir = tmpDir("conductor-wt-finalize-run-");
   return {
     id,
     persona: "builder",
@@ -767,7 +767,7 @@ for (const gone of ["base branch", "repo"] as const) {
 }
 
 test("forceTerminate: a stalled worktree run keeps its error and failure class; the kept hint is separate", () => {
-  const dir = mkdtempSync(join(tmpdir(), "conductor-wt-finalize-stall-"));
+  const dir = tmpDir("conductor-wt-finalize-stall-");
   try {
     const bare = makeRun("builder-st01", { status: "running", recordPath: join(dir, "a.json"), finalPath: join(dir, "a.md") });
     const kept = makeRun("builder-st02", {
@@ -793,7 +793,7 @@ test("forceTerminate: a stalled worktree run keeps its error and failure class; 
 // Foreground is the default mode, and its tool result is the summary, not
 // the notification card, so the kept hints have to reach it too.
 test("forceTerminate: a killed foreground worktree run's summary names the kept worktree and branch", () => {
-  const dir = mkdtempSync(join(tmpdir(), "conductor-wt-finalize-fg-"));
+  const dir = tmpDir("conductor-wt-finalize-fg-");
   try {
     const gitRoot = "/home/someone/workplace/AVeryLongWorkspaceName/src/AVeryLongPackageNameForTesting";
     const run = makeRun("builder-fg01", {

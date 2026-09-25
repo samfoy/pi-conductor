@@ -11,8 +11,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { gitTestEnv } from "./helpers/git-env.ts";
@@ -20,6 +19,7 @@ import { awaitTerminal, registerTools } from "../src/tools.ts";
 import { RunRegistry } from "../src/runs.ts";
 import { SpawnQueue } from "../src/queue.ts";
 import { FocusedStreamModel } from "../src/focused-stream-model.ts";
+import { tmpDir } from "./helpers/tmp.ts";
 
 const STUB = (log: string) => `import { appendFileSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
@@ -35,7 +35,7 @@ try {
 async function withSmoke(
   fn: (s: { conductorCwd: string; repo: string; plain: string; cwdLog: () => string[]; spawn: (cwd: string) => Promise<any> }) => Promise<void>,
 ): Promise<void> {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "conductor-spawn-cwd-smoke-")));
+  const root = realpathSync(tmpDir("conductor-spawn-cwd-smoke-"));
   const log = join(root, "cwd.log");
   const stub = join(root, "pi-stub.mjs");
   writeFileSync(stub, STUB(log));

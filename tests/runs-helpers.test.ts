@@ -29,8 +29,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
@@ -56,9 +55,10 @@ import {
   resumeRun,
 } from "../src/runs.ts";
 import { emptyUsage, toRunRecord, type Persona, type Run } from "../src/types.ts";
+import { tmpDir } from "./helpers/tmp.ts";
 
 function tmpRunPaths(): { dir: string; recordPath: string; transcriptPath: string; finalPath: string } {
-  const dir = mkdtempSync(join(tmpdir(), "conductor-runs-"));
+  const dir = tmpDir("conductor-runs-");
   return {
     dir,
     recordPath: join(dir, "record.json"),
@@ -962,7 +962,7 @@ test("buildSubagentEnv: defaults to process.env when no base provided", () => {
 // ── inherit_skills (PRD #15) ────────────────────────────────
 
 test("collectInheritedSkillPaths: both dirs absent → [] (no error)", () => {
-  const tmp = mkdtempSync(join(tmpdir(), "pic-skills-none-"));
+  const tmp = tmpDir("pic-skills-none-");
   try {
     const fakeHome = join(tmp, "home");
     const fakeCwd = join(tmp, "proj");
@@ -974,7 +974,7 @@ test("collectInheritedSkillPaths: both dirs absent → [] (no error)", () => {
 });
 
 test("collectInheritedSkillPaths: user dir exists, project dir absent → ONE path (user only)", () => {
-  const tmp = mkdtempSync(join(tmpdir(), "pic-skills-user-"));
+  const tmp = tmpDir("pic-skills-user-");
   try {
     const fakeHome = join(tmp, "home");
     const userSkills = join(fakeHome, ".pi", "agent", "skills");
@@ -988,7 +988,7 @@ test("collectInheritedSkillPaths: user dir exists, project dir absent → ONE pa
 });
 
 test("collectInheritedSkillPaths: both dirs exist → TWO paths in user-then-project order", () => {
-  const tmp = mkdtempSync(join(tmpdir(), "pic-skills-both-"));
+  const tmp = tmpDir("pic-skills-both-");
   try {
     const fakeHome = join(tmp, "home");
     const fakeCwd = join(tmp, "proj");
@@ -1004,7 +1004,7 @@ test("collectInheritedSkillPaths: both dirs exist → TWO paths in user-then-pro
 });
 
 test("collectInheritedSkillPaths: project dir exists, user dir absent → ONE path (project only)", () => {
-  const tmp = mkdtempSync(join(tmpdir(), "pic-skills-proj-"));
+  const tmp = tmpDir("pic-skills-proj-");
   try {
     const fakeHome = join(tmp, "home");
     const fakeCwd = join(tmp, "proj");

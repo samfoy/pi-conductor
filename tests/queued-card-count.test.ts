@@ -16,12 +16,12 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import conductor from "../src/index.ts";
 import { stubCtx } from "./helpers/stub-pi.ts";
+import { tmpDir } from "./helpers/tmp.ts";
 
 const HARD_MS = 600_000; // DEFAULT_CONFIG.watchdog.defaultHardSeconds
 const WATCHDOG_TICK_MS = 30_000; // DEFAULT_CONFIG.watchdog.tickIntervalSeconds
@@ -67,7 +67,7 @@ async function until(what: string, ok: () => boolean, ms = 15_000): Promise<void
  * completion cards once every terminal path has run.
  */
 async function queuedB(end: End, bForeground = false): Promise<{ cards: Card[]; bStatus: string | undefined }> {
-  const root = mkdtempSync(join(tmpdir(), "conductor-queued-card-"));
+  const root = tmpDir("conductor-queued-card-");
   const memoryPath = join(root, "memory.jsonl");
   const saved = {
     HOME: process.env.HOME,

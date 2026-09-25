@@ -4,12 +4,15 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { RunRegistry, runDir } from "../src/runs.ts";
 import { SpawnQueue } from "../src/queue.ts";
 import { emptyUsage, type Persona, type Run } from "../src/types.ts";
+import { sandboxPi, tmpDir } from "./helpers/tmp.ts";
+
+// Its spawns would otherwise start the real pi, with the real HOME.
+sandboxPi();
 
 function makePersona(name: string, body = "you are the " + name): Persona {
   return {
@@ -198,9 +201,7 @@ test("SpawnQueue: drain promotes a queued spawn when a slot opens (mocked)", asy
 });
 
 function mkdirSyncTmp(): string {
-  const root = join(tmpdir(), "conductor-queue-test-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8));
-  mkdirSync(root, { recursive: true });
-  return root;
+  return tmpDir("conductor-queue-test-");
 }
 
 // ── v0.9 Item 2(c): maxConcurrentWriteCapable cap ────────────────────

@@ -13,17 +13,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, statSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { executeReclaim } from "../src/gc/executor.ts";
 import type { ReclaimAction } from "../src/gc/policy.ts";
 import type { RunRecord } from "../src/types.ts";
+import { tmpDir } from "./helpers/tmp.ts";
 
 const NOW = 1_750_000_000_000;
 
 function makeTempRunsRoot(): string {
-  return mkdtempSync(join(tmpdir(), "pi-conductor-gc-exec-"));
+  return tmpDir("pi-conductor-gc-exec-");
 }
 
 interface RunDirOpts {
@@ -332,7 +332,7 @@ import { execSync } from "node:child_process";
 import { gitTestEnv } from "./helpers/git-env.ts";
 
 function tmpGitRepoForGC(): string {
-  const dir = mkdtempSync(join(tmpdir(), "conductor-gc-wt-"));
+  const dir = tmpDir("conductor-gc-wt-");
   const gitOpts = { cwd: dir, stdio: "pipe" as const, env: gitTestEnv() };
   execSync("git init", gitOpts);
   execSync("git config user.email test@test.com", gitOpts);

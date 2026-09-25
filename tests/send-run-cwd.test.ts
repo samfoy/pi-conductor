@@ -17,8 +17,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { loadConfig } from "../src/config.ts";
@@ -30,6 +29,7 @@ import { FocusedStreamModel } from "../src/focused-stream-model.ts";
 import { resolveTimeoutMs, RunRegistry, sendCwd, sendToRun } from "../src/runs.ts";
 import { registerTools } from "../src/tools.ts";
 import { emptyUsage, isTerminal, type Run } from "../src/types.ts";
+import { tmpDir } from "./helpers/tmp.ts";
 
 const GATE = "exit 7";
 
@@ -43,7 +43,7 @@ interface Fixture {
 }
 
 async function withResumableRun(fn: (f: Fixture) => Promise<void>): Promise<void> {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "conductor-send-run-cwd-")));
+  const root = realpathSync(tmpDir("conductor-send-run-cwd-"));
   const project = join(root, "project");
   const elsewhere = join(root, "elsewhere");
   const personas = join(project, ".pi", "conductor", "personas");
@@ -89,7 +89,9 @@ async function withResumableRun(fn: (f: Fixture) => Promise<void>): Promise<void
       if (v === undefined) delete process.env[k];
       else process.env[k] = v;
     }
-    rmSync(root, { recursive: true, force: true });
+    // No rmSync here: the ensemble_send tests settle on the registry flip,
+    // before the run's record writes land, and an rm racing them failed
+    // with ENOTEMPTY. tmpDir removes root at exit.
   }
 }
 

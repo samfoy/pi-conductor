@@ -21,12 +21,15 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { RunRegistry } from "../src/runs.ts";
 import { SpawnQueue } from "../src/queue.ts";
 import { emptyUsage, type Persona, type Run } from "../src/types.ts";
+import { sandboxPi, tmpDir } from "./helpers/tmp.ts";
+
+// Its spawns would otherwise start the real pi, with the real HOME.
+sandboxPi();
 
 function makePersona(name = "oracle"): Persona {
   return {
@@ -80,12 +83,7 @@ function withFakeHome<T>(fn: (home: string) => T): T {
 }
 
 function mkdirSyncTmp(): string {
-  const root = join(
-    tmpdir(),
-    "conductor-queue-extra-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8),
-  );
-  mkdirSync(root, { recursive: true });
-  return root;
+  return tmpDir("conductor-queue-extra-");
 }
 
 test("SpawnQueue.removeQueued: returns false for an unknown id", () => {

@@ -29,6 +29,10 @@ import { RunRegistry } from "../src/runs.ts";
 import { SpawnQueue } from "../src/queue.ts";
 import { FocusedStreamModel } from "../src/focused-stream-model.ts";
 import type { Run } from "../src/types.ts";
+import { sandboxPi } from "./helpers/tmp.ts";
+
+// Its spawns would otherwise start the real pi, with the real HOME.
+sandboxPi();
 
 interface RegisteredTool {
   name: string;

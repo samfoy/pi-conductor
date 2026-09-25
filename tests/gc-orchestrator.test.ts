@@ -17,7 +17,6 @@ import {
   utimesSync,
   readFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { maybeAutoRunGc, runGc } from "../src/gc/index.ts";
@@ -25,6 +24,7 @@ import { _resetRecentlyDeletedIdsForTest, _peekRecentlyDeletedForTest } from "..
 import { lastGcMarkerPath, writeLastGcMtime } from "../src/gc/last-gc.ts";
 import { RunRegistry } from "../src/runs.ts";
 import { DEFAULT_CONFIG, emptyUsage, type GcConfig, type Run, type RunRecord } from "../src/types.ts";
+import { tmpDir } from "./helpers/tmp.ts";
 
 const NOW = 1_750_000_000_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -34,7 +34,7 @@ function makeFakeRoot(): { root: string; runsRoot: string } {
   // The real layout is `<conductorRoot>/runs/<id>/...`. The marker
   // lives at `<conductorRoot>/.last-gc`. Build the same shape so the
   // marker write doesn't escape the tmp dir.
-  const root = mkdtempSync(join(tmpdir(), "pi-conductor-gc-orch-"));
+  const root = tmpDir("pi-conductor-gc-orch-");
   const runsRoot = join(root, "runs");
   mkdirSync(runsRoot, { recursive: true });
   return { root, runsRoot };
