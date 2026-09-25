@@ -7492,12 +7492,14 @@ function registerSpawnTool(pi, opts) {
       if (result.kind === "queued") {
         const p = result.placeholderRun;
         const downgradedNote = result.downgraded ? "Foreground spawn auto-downgraded to background because the concurrency cap is full. The sub-agent is queued; completion will arrive as a <sub-agent-completed> notification." : "Spawn queued; completion will arrive as a <sub-agent-completed> notification.";
-        const unsub = registry.onChange((run) => {
-          if (run.id === p.id && isTerminalStatus(run.status)) {
-            unsub();
-            opts.pushCompletionNotification(run);
-          }
-        });
+        if (result.downgraded) {
+          const unsub = registry.onChange((run) => {
+            if (run.id === p.id && isTerminalStatus(run.status)) {
+              unsub();
+              opts.pushCompletionNotification(run);
+            }
+          });
+        }
         return {
           content: [
             {

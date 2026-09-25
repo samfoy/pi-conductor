@@ -771,16 +771,19 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           ? "Foreground spawn auto-downgraded to background because the concurrency cap is full. " +
             "The sub-agent is queued; completion will arrive as a <sub-agent-completed> notification."
           : "Spawn queued; completion will arrive as a <sub-agent-completed> notification.";
-        // Fire the completion notification exactly once when this queued
-        // run eventually finishes. Using a self-unsubscribing listener so
-        // a later ensemble_send on the same run doesn't re-fire this
-        // (sendToRun has its own onComplete plumbing).
-        const unsub = registry.onChange((run) => {
-          if (run.id === p.id && isTerminalStatus(run.status)) {
-            unsub();
-            opts.pushCompletionNotification(run);
-          }
-        });
+        // A downgraded foreground spawn has no onComplete, so this listener
+        // is its one card. A background spawn already carries onComplete
+        // through the queue: a listener would double its card and break
+        // the tool-kills-are-silent contract. Self-unsubscribes so a later
+        // ensemble_send (own onComplete) doesn't re-fire it.
+        if (result.downgraded) {
+          const unsub = registry.onChange((run) => {
+            if (run.id === p.id && isTerminalStatus(run.status)) {
+              unsub();
+              opts.pushCompletionNotification(run);
+            }
+          });
+        }
         return {
           content: [
             {
