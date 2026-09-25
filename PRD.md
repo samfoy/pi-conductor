@@ -640,6 +640,7 @@ Work that landed after the v0.18 capstone without its own phase number:
 - `cf527ef` — render sub-agent notifications as folded cards (see the 2026-06-20 decision-log entry).
 - Enforced persona tool policy (`tools` / `exclude_tools`); see the 2026-09-24 decision-log entry.
 - Per-spawn `cwd` on `ensemble_spawn` and each `ensemble_auto` step. It drives the child's process cwd, persona and config resolution, the git root for worktree isolation, and `run.cwd`. There is also a settable conductor default cwd: `/conductor cwd [<path>|--reset]` and the `ensemble_cwd` tool share one controller (`src/conductor-cwd.ts`), which persists a `conductor-cwd` session entry and restores it on `session_start`. pi's `ctx.cwd` updates never clobber the override. `ensemble_send` stays on `run.cwd`.
+- Worktree children stay inside their worktree. A `worktree: true` spawn from a repo subdirectory works in the same subdirectory of its worktree (process cwd, seeded session header, `on_complete_hook`, resume restore), or at the worktree root when that directory isn't in the worktree. Persona `default_reads` reach the child as absolute paths: the child's own copy when it has one, else the requested cwd's, so untracked `context.md` / `plan.md` stay visible. The spawn prompt names the worktree, its branch, and the main checkout the child must not modify.
 
 ### v0.10+ — v2 ideas — _planned_
 - Run-record GC (open question #12).

@@ -23,7 +23,7 @@ import { mkdir, writeFile, appendFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { StringDecoder } from "node:string_decoder";
 import { RpcStdinQueue } from "./rpc-stdin.ts";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { noteAllocatedId } from "./gc/id-reuse.ts";
 import { applyEvent, qualifyModel } from "./event-handler.ts";
@@ -38,7 +38,7 @@ import { classifyFailure, shouldRetry } from "./failure-classify.ts";
 import { resolveRetryPolicy } from "./retry.ts";
 import { recordRunOutcome } from "./memory.ts";
 import { loadConfigWithErrors } from "./config.ts";
-import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage, currentBranch, worktreeHasUncommittedChanges, branchHasUnmergedCommits, restoreWorktree, refExists } from "./worktree.ts";
+import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage, currentBranch, worktreeHasUncommittedChanges, branchHasUnmergedCommits, restoreWorktree, refExists, worktreeCwd } from "./worktree.ts";
 import { readProcessStartTime } from "./reconcile-startup.ts";
 import { ConductorEventEmitter } from "./conductor-events.ts";
 import { builtinPersonasDir, effectiveExcludeTools } from "./personas.ts";
@@ -357,18 +357,53 @@ export function assemblePersonaSystemPrompt(persona: Persona, cwd?: string): str
   return blocks.join("\n\n");
 }
 
+/** Where the child works, for {@link buildSubAgentPrompt}. */
+export interface SubAgentPromptPlace {
+  /** The child's cwd: the requested cwd, or its counterpart in the worktree. */
+  cwd: string;
+  /** The spawn's requested cwd, on the main checkout side. */
+  requestedCwd: string;
+  worktree?: { path: string; branch: string; gitRoot: string };
+}
+
+/**
+ * Absolute default_reads: each resolved against the requested cwd, unless
+ * the child's cwd has its own copy. A fresh worktree lacks untracked files
+ * (a conductor's context.md, plan.md), so those come from the main checkout.
+ * A copy in both is tracked, and the child's is the one its branch edits,
+ * commits and merges back; the main copy would invite edits outside the fence.
+ */
+export function resolveDefaultReads(reads: readonly string[], childCwd: string, requestedCwd: string): string[] {
+  return reads.map((f) => {
+    const own = resolve(childCwd, f);
+    return existsSync(own) ? own : resolve(requestedCwd, f);
+  });
+}
+
 /**
  * Build the prompt sent to the sub-agent.
  *
  * The persona's system prompt body is passed via `pi --system-prompt-replace`
  * (see buildPiArgs). The user-facing prompt here is the task plus a
- * nesting-guard preface and any default_reads instructions.
+ * nesting-guard preface, the worktree fence when there is a worktree, and
+ * any default_reads instructions. Without `place` the reads stay as written.
  */
-export function buildSubAgentPrompt(persona: Persona, task: string): string {
+export function buildSubAgentPrompt(persona: Persona, task: string, place?: SubAgentPromptPlace): string {
   const parts: string[] = [SUBAGENT_NESTING_GUARD, ""];
+  if (place?.worktree) {
+    const wt = place.worktree;
+    parts.push(
+      `You are working in the git worktree ${wt.path} (branch ${wt.branch}). ` +
+        `Edit and commit only there; do not modify the main checkout at ${wt.gitRoot}.`,
+      "",
+    );
+  }
   if (persona.defaultReads.length > 0) {
     parts.push("Read these files first if they exist (they are part of your context):");
-    for (const f of persona.defaultReads) parts.push(`  - ${f}`);
+    const reads = place
+      ? resolveDefaultReads(persona.defaultReads, place.cwd, place.requestedCwd)
+      : persona.defaultReads;
+    for (const f of reads) parts.push(`  - ${f}`);
     parts.push("");
   }
   parts.push("## Task");
@@ -1393,6 +1428,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
   // opts.worktree is true. resolveWorktreeSpec returns null for non-git
   // cwds — fall back to shared cwd with a warning rather than failing.
   let effectiveCwd = opts.cwd;
+  let worktreeFence: SubAgentPromptPlace["worktree"];
   if (opts.worktree) {
     const spec = resolveWorktreeSpec(opts.cwd, run.id);
     if (spec === null) {
@@ -1409,7 +1445,8 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
         run.worktreePath = spec.worktreePath;
         run.worktreeBranch = spec.branch;
         if (baseBranch) run.worktreeBaseBranch = baseBranch;
-        effectiveCwd = spec.worktreePath;
+        effectiveCwd = worktreeCwd(spec, opts.cwd);
+        worktreeFence = { path: spec.worktreePath, branch: spec.branch, gitRoot: spec.gitRoot };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         process.stderr.write(`[conductor] worktree creation failed for ${run.id}: ${msg}\n`);
@@ -1423,7 +1460,11 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
   // Construct prompt + args. When the persona has inherit_context=filtered
   // (or full) and we have a parent-message snapshot, planSpawnPiArgs seeds a
   // session file with the filtered transcript and we boot resuming it.
-  const prompt = buildSubAgentPrompt(opts.persona, opts.task);
+  const prompt = buildSubAgentPrompt(opts.persona, opts.task, {
+    cwd: effectiveCwd,
+    requestedCwd: opts.cwd,
+    worktree: worktreeFence,
+  });
   const sessionDir = join(dir, "session");
   mkdirSync(sessionDir, { recursive: true });
   const plan = planSpawnPiArgs({
@@ -1471,7 +1512,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
 
   const done = runPiSubprocess(run, plan.piArgs, {
     registry: opts.registry,
-    cwd: effectiveCwd, // v0.13: worktree path when worktree was created, else opts.cwd
+    cwd: effectiveCwd, // v0.13: opts.cwd's counterpart in the worktree when one was created
     timeoutMs: opts.timeoutMs,
     onUpdate: opts.onUpdate,
     onComplete: opts.onComplete,
@@ -2347,11 +2388,11 @@ function enqueueRpcSendWithAck(
 
 /**
  * pi resumes in its session header's cwd, which for a worktree run is the
- * worktree, and exits 1 when that directory is gone. A merge or a clean
- * release removes it, so put a worktree back at that path first: on the
- * kept branch when there is one, else on `conductor-wt/<id>-r<n>` from the
- * base tip, which holds the merged work (v0.20 W3). The spawn's record
- * write persists the fields. Returns a rejection reason, having changed
+ * worktree or a subdirectory of it, and exits 1 when that directory is
+ * gone. A merge or a clean release removes it, so put a worktree back at
+ * that path first: on the kept branch when there is one, else on
+ * `conductor-wt/<id>-r<n>` from the base tip, which holds the merged work
+ * (v0.20 W3). The spawn's record write persists the fields. Returns a rejection reason, having changed
  * nothing, when the repo or base branch is gone. Exported for tests.
  */
 export function restoreResumeWorktree(run: Run, readSession: () => string): string | undefined {
@@ -2362,22 +2403,27 @@ export function restoreResumeWorktree(run: Run, readSession: () => string): stri
     return undefined;
   }
   if (!path || existsSync(path)) return undefined;
-  const gitRoot = dirname(dirname(dirname(path)));
-  if (path !== join(gitRoot, ".worktrees", "conductor-wt", run.id)) return undefined;
+  // The header names the worktree root or a subdirectory of it (worktreeCwd).
+  const layout = `${sep}${join(".worktrees", "conductor-wt", run.id)}`;
+  const at = `${path}${sep}`.lastIndexOf(`${layout}${sep}`);
+  if (at < 0) return undefined;
+  const gitRoot = path.slice(0, at);
+  const root = path.slice(0, at + layout.length);
+  if (existsSync(root)) return undefined; // only the subdirectory is gone; pi reports it
   const spawnFresh = `spawn a fresh ${run.persona} instead`;
   const kept = run.worktreeBranch && refExists(gitRoot, `refs/heads/${run.worktreeBranch}`) ? run.worktreeBranch : undefined;
   const base = run.worktreeBaseBranch ?? "master";
   if (!kept && !refExists(gitRoot, base)) {
     const gone = existsSync(gitRoot) ? `its base branch ${base}` : `its repo ${gitRoot}`;
-    return `cannot resume ${run.id}: its worktree ${path} was removed, and ${gone} is gone; ${spawnFresh}.`;
+    return `cannot resume ${run.id}: its worktree ${root} was removed, and ${gone} is gone; ${spawnFresh}.`;
   }
   const branch = kept ?? `conductor-wt/${run.id}-r${(run.resumeCount ?? 0) + 1}`;
   try {
-    restoreWorktree({ gitRoot, worktreePath: path, branch }, kept ? undefined : base);
+    restoreWorktree({ gitRoot, worktreePath: root, branch }, kept ? undefined : base);
   } catch (e) {
     return `cannot resume ${run.id}: re-creating its worktree failed: ${(e as Error).message}; ${spawnFresh}.`;
   }
-  run.worktreePath = path;
+  run.worktreePath = root;
   run.worktreeBranch = branch;
   return undefined;
 }

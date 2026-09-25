@@ -23,7 +23,7 @@
 import { execSync } from "node:child_process";
 import { existsSync, appendFileSync, readFileSync, realpathSync } from "node:fs";
 import { mkdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, isAbsolute, relative, sep } from "node:path";
 import type { RunRecord, MergeStrategy, MergeResult } from "./types.ts";
 import { WRITE_CAPABLE_PERSONAS } from "./types.ts";
 
@@ -93,6 +93,24 @@ export function resolveWorktreeSpec(cwd: string, runId: string): WorktreeSpec | 
   const worktreePath = join(gitRoot, ".worktrees", "conductor-wt", runId);
 
   return { gitRoot, worktreePath, branch };
+}
+
+/**
+ * Where a child spawned at `cwd` works in its worktree: the same repo-relative
+ * directory there, or the worktree root when `cwd` is the repo root, lies
+ * outside the repo, or has no counterpart in the worktree (e.g. untracked).
+ */
+export function worktreeCwd(spec: Pick<WorktreeSpec, "gitRoot" | "worktreePath">, cwd: string): string {
+  let real = cwd;
+  try {
+    real = realpathSync(cwd); // gitRoot is a real path
+  } catch {
+    // a missing cwd maps to the root below
+  }
+  const rel = relative(spec.gitRoot, real);
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return spec.worktreePath;
+  const mapped = join(spec.worktreePath, rel);
+  return existsSync(mapped) ? mapped : spec.worktreePath;
 }
 
 /**

@@ -176,13 +176,14 @@ __export(worktree_exports, {
   resolveMergeStrategy: () => resolveMergeStrategy,
   resolveWorktreeSpec: () => resolveWorktreeSpec,
   restoreWorktree: () => restoreWorktree,
+  worktreeCwd: () => worktreeCwd,
   worktreeHasUncommittedChanges: () => worktreeHasUncommittedChanges,
   worktreeSpecFromRun: () => worktreeSpecFromRun
 });
 import { execSync } from "node:child_process";
-import { existsSync as existsSync4, appendFileSync as appendFileSync2, readFileSync as readFileSync3, realpathSync as realpathSync2 } from "node:fs";
-import { mkdirSync as mkdirSync4 } from "node:fs";
-import { join as join4, dirname as dirname5 } from "node:path";
+import { existsSync as existsSync3, appendFileSync, readFileSync as readFileSync2, realpathSync as realpathSync2 } from "node:fs";
+import { mkdirSync as mkdirSync2 } from "node:fs";
+import { join as join3, dirname as dirname3, isAbsolute, relative, sep } from "node:path";
 function gitEnv() {
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
@@ -212,8 +213,19 @@ function resolveWorktreeSpec(cwd, runId) {
     gitRoot2 = rawRoot;
   }
   const branch = `conductor-wt/${runId}`;
-  const worktreePath = join4(gitRoot2, ".worktrees", "conductor-wt", runId);
+  const worktreePath = join3(gitRoot2, ".worktrees", "conductor-wt", runId);
   return { gitRoot: gitRoot2, worktreePath, branch };
+}
+function worktreeCwd(spec, cwd) {
+  let real = cwd;
+  try {
+    real = realpathSync2(cwd);
+  } catch {
+  }
+  const rel = relative(spec.gitRoot, real);
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return spec.worktreePath;
+  const mapped = join3(spec.worktreePath, rel);
+  return existsSync3(mapped) ? mapped : spec.worktreePath;
 }
 function createWorktree(spec, opts = {}) {
   if (!opts.skipGitignore) {
@@ -230,7 +242,7 @@ function refExists(gitRoot2, ref) {
   return tryGitExec(`git rev-parse --verify --quiet ${JSON.stringify(`${ref}^{commit}`)}`, gitRoot2) !== null;
 }
 function addWorktree(spec, target) {
-  mkdirSync4(dirname5(spec.worktreePath), { recursive: true });
+  mkdirSync2(dirname3(spec.worktreePath), { recursive: true });
   try {
     execSync(
       `git worktree add ${JSON.stringify(spec.worktreePath)} ${target}`,
@@ -272,35 +284,35 @@ function branchHasUnmergedCommits(gitRoot2, baseBranch, branch) {
   return count === null || Number(count) > 0;
 }
 function holdsKeptWorktree(record) {
-  if (record.worktreePath !== void 0) return existsSync4(record.worktreePath);
+  if (record.worktreePath !== void 0) return existsSync3(record.worktreePath);
   return record.worktreeBranch !== void 0 && record.status !== "completed";
 }
 function worktreeHasUncommittedChanges(worktreePath) {
-  if (!existsSync4(worktreePath)) return false;
+  if (!existsSync3(worktreePath)) return false;
   const status = tryGitExec("git status --porcelain", worktreePath);
   return status === null || status !== "";
 }
 function ensureWorktreeGitignore(gitRoot2) {
-  const ignorePath = join4(gitRoot2, ".gitignore");
+  const ignorePath = join3(gitRoot2, ".gitignore");
   const pattern = ".worktrees/";
-  if (existsSync4(ignorePath)) {
-    const content = readFileSync3(ignorePath, "utf-8");
+  if (existsSync3(ignorePath)) {
+    const content = readFileSync2(ignorePath, "utf-8");
     if (content.split("\n").some((line) => line.trim() === pattern.trim())) {
       return;
     }
     const prefix = content.endsWith("\n") ? "" : "\n";
-    appendFileSync2(ignorePath, `${prefix}${pattern}
+    appendFileSync(ignorePath, `${prefix}${pattern}
 `, "utf-8");
   } else {
-    appendFileSync2(ignorePath, `${pattern}
+    appendFileSync(ignorePath, `${pattern}
 `, "utf-8");
   }
 }
 function detectBrazilWorkspaceRoot(cwd) {
   let dir = cwd;
   for (let i = 0; i < 32; i++) {
-    if (existsSync4(join4(dir, ".brazil"))) return dir;
-    const parent = dirname5(dir);
+    if (existsSync3(join3(dir, ".brazil"))) return dir;
+    const parent = dirname3(dir);
     if (parent === dir) return null;
     dir = parent;
   }
@@ -308,7 +320,7 @@ function detectBrazilWorkspaceRoot(cwd) {
 }
 function worktreeSpecFromRun(record) {
   if (!record.worktreePath || !record.worktreeBranch) return void 0;
-  const gitRoot2 = dirname5(dirname5(dirname5(record.worktreePath)));
+  const gitRoot2 = dirname3(dirname3(dirname3(record.worktreePath)));
   return {
     gitRoot: gitRoot2,
     worktreePath: record.worktreePath,
@@ -981,7 +993,7 @@ var RpcStdinQueue = class {
    * rejected synchronously (LF-only framing invariant).
    */
   enqueue(cmd) {
-    return new Promise((resolve4, reject) => {
+    return new Promise((resolve5, reject) => {
       if (this.destroyed) {
         reject(new Error("RpcStdinQueue is destroyed; cannot enqueue"));
         return;
@@ -1006,7 +1018,7 @@ var RpcStdinQueue = class {
         resolve: () => {
           if (entry.settled) return;
           entry.settled = true;
-          resolve4();
+          resolve5();
         },
         reject: (err) => {
           if (entry.settled) return;
@@ -1082,7 +1094,7 @@ var RpcStdinQueue = class {
 };
 
 // src/runs.ts
-import { dirname as dirname7, join as join7 } from "node:path";
+import { dirname as dirname7, join as join7, resolve as resolve3, sep as sep3 } from "node:path";
 
 // src/gc/id-reuse.ts
 var recentlyDeletedIds = /* @__PURE__ */ new Set();
@@ -1623,11 +1635,12 @@ function resolveGraceTurns(input) {
 }
 
 // src/hook-runner.ts
+init_worktree();
 import {
   spawn as childProcessSpawn
 } from "node:child_process";
-import { mkdirSync as mkdirSync2, createWriteStream } from "node:fs";
-import { dirname as dirname3 } from "node:path";
+import { mkdirSync as mkdirSync3, createWriteStream } from "node:fs";
+import { dirname as dirname4 } from "node:path";
 var DEFAULT_HOOK_MAX_LOG_BYTES = 10 * 1024 * 1024;
 var SIGKILL_GRACE_MS = 2e3;
 var TAIL_MAX_LINES = 50;
@@ -1655,7 +1668,7 @@ function runHook(opts) {
   const startedAt = now();
   const logPath = `${opts.runDir}/hook.log`;
   try {
-    mkdirSync2(dirname3(logPath), { recursive: true });
+    mkdirSync3(dirname4(logPath), { recursive: true });
   } catch {
   }
   const { CONDUCTOR_WORKTREE_PATH: _inherited, ...inheritedEnv } = process.env;
@@ -1673,7 +1686,7 @@ function runHook(opts) {
   const spawnOpts = {
     shell: true,
     detached: true,
-    cwd: opts.worktreePath ?? opts.parentCwd,
+    cwd: opts.worktreePath ? worktreeCwd({ gitRoot: dirname4(dirname4(dirname4(opts.worktreePath))), worktreePath: opts.worktreePath }, opts.parentCwd) : opts.parentCwd,
     env,
     stdio: ["ignore", "pipe", "pipe"]
   };
@@ -1705,7 +1718,7 @@ function runHook(opts) {
     } catch {
     }
   }
-  return new Promise((resolve4) => {
+  return new Promise((resolve5) => {
     let resolved = false;
     let killReason;
     let timeoutHandle;
@@ -1769,7 +1782,7 @@ function runHook(opts) {
           } catch {
           }
         }
-        resolve4(hookResult);
+        resolve5(hookResult);
       });
     };
     const escalateToSigkill = () => {
@@ -1812,7 +1825,7 @@ function runHook(opts) {
         logStream.end();
       } catch {
       }
-      resolve4({
+      resolve5({
         passed: false,
         command: opts.resolved.command,
         exitCode: null,
@@ -2007,9 +2020,9 @@ ${diag}
 }
 
 // src/memory.ts
-import { existsSync as existsSync3, mkdirSync as mkdirSync3, readFileSync as readFileSync2, appendFileSync } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync3, appendFileSync as appendFileSync2 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { join as join3, dirname as dirname4 } from "node:path";
+import { join as join4, dirname as dirname5 } from "node:path";
 import { createHash } from "node:crypto";
 var STOPWORDS = /* @__PURE__ */ new Set([
   "the",
@@ -2078,20 +2091,20 @@ function scoreOutcomes(records, shape, now) {
 function memoryPath() {
   const override = process.env.CONDUCTOR_MEMORY_PATH;
   if (override && override.trim()) return override;
-  return join3(homedir3(), ".pi", "agent", "conductor", "memory", "outcomes.jsonl");
+  return join4(homedir3(), ".pi", "agent", "conductor", "memory", "outcomes.jsonl");
 }
 function appendOutcome(rec, path = memoryPath()) {
   try {
-    mkdirSync3(dirname4(path), { recursive: true });
-    appendFileSync(path, JSON.stringify(rec) + "\n", "utf-8");
+    mkdirSync4(dirname5(path), { recursive: true });
+    appendFileSync2(path, JSON.stringify(rec) + "\n", "utf-8");
   } catch {
   }
 }
 function loadOutcomes(path = memoryPath()) {
-  if (!existsSync3(path)) return [];
+  if (!existsSync4(path)) return [];
   let raw;
   try {
-    raw = readFileSync2(path, "utf-8");
+    raw = readFileSync3(path, "utf-8");
   } catch {
     return [];
   }
@@ -2432,7 +2445,7 @@ async function checkSessionResumability(record, result) {
 // src/workspace-doctrine.ts
 import { existsSync as existsSync5, readFileSync as readFileSync5, statSync } from "node:fs";
 import { homedir as homedir4, tmpdir } from "node:os";
-import { dirname as dirname6, join as join6, relative, resolve as resolve2, sep } from "node:path";
+import { dirname as dirname6, join as join6, relative as relative2, resolve as resolve2, sep as sep2 } from "node:path";
 var MAX_WALK_DEPTH = 6;
 var MAX_DOCTRINE_CHARS = 24e3;
 var DOCTRINE_HEADING = "## Workspace doctrine";
@@ -2472,11 +2485,11 @@ function childNativeAgentsDirs(workdir) {
   const start = resolve2(workdir);
   const root = gitRoot(start);
   if (!root || root === start) return [start];
-  const rel = relative(root, start);
-  if (rel.startsWith("..") || rel.split(sep).includes("..")) return [start];
+  const rel = relative2(root, start);
+  if (rel.startsWith("..") || rel.split(sep2).includes("..")) return [start];
   const dirs = [root];
   let current = root;
-  for (const part of rel.split(sep).filter(Boolean)) {
+  for (const part of rel.split(sep2).filter(Boolean)) {
     current = join6(current, part);
     dirs.push(current);
   }
@@ -2636,11 +2649,25 @@ function assemblePersonaSystemPrompt(persona, cwd) {
   }
   return blocks.join("\n\n");
 }
-function buildSubAgentPrompt(persona, task) {
+function resolveDefaultReads(reads, childCwd, requestedCwd) {
+  return reads.map((f) => {
+    const own = resolve3(childCwd, f);
+    return existsSync6(own) ? own : resolve3(requestedCwd, f);
+  });
+}
+function buildSubAgentPrompt(persona, task, place) {
   const parts = [SUBAGENT_NESTING_GUARD, ""];
+  if (place?.worktree) {
+    const wt = place.worktree;
+    parts.push(
+      `You are working in the git worktree ${wt.path} (branch ${wt.branch}). Edit and commit only there; do not modify the main checkout at ${wt.gitRoot}.`,
+      ""
+    );
+  }
   if (persona.defaultReads.length > 0) {
     parts.push("Read these files first if they exist (they are part of your context):");
-    for (const f of persona.defaultReads) parts.push(`  - ${f}`);
+    const reads = place ? resolveDefaultReads(persona.defaultReads, place.cwd, place.requestedCwd) : persona.defaultReads;
+    for (const f of reads) parts.push(`  - ${f}`);
     parts.push("");
   }
   parts.push("## Task");
@@ -3028,6 +3055,7 @@ function spawnRun(opts) {
     description: run.task
   });
   let effectiveCwd = opts.cwd;
+  let worktreeFence;
   if (opts.worktree) {
     const spec = resolveWorktreeSpec(opts.cwd, run.id);
     if (spec === null) {
@@ -3042,7 +3070,8 @@ function spawnRun(opts) {
         run.worktreePath = spec.worktreePath;
         run.worktreeBranch = spec.branch;
         if (baseBranch) run.worktreeBaseBranch = baseBranch;
-        effectiveCwd = spec.worktreePath;
+        effectiveCwd = worktreeCwd(spec, opts.cwd);
+        worktreeFence = { path: spec.worktreePath, branch: spec.branch, gitRoot: spec.gitRoot };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         process.stderr.write(`[conductor] worktree creation failed for ${run.id}: ${msg}
@@ -3051,7 +3080,11 @@ function spawnRun(opts) {
     }
   }
   void writeRecord(run);
-  const prompt = buildSubAgentPrompt(opts.persona, opts.task);
+  const prompt = buildSubAgentPrompt(opts.persona, opts.task, {
+    cwd: effectiveCwd,
+    requestedCwd: opts.cwd,
+    worktree: worktreeFence
+  });
   const sessionDir = join7(dir, "session");
   mkdirSync5(sessionDir, { recursive: true });
   const plan = planSpawnPiArgs({
@@ -3095,7 +3128,7 @@ function spawnRun(opts) {
   const done = runPiSubprocess(run, plan.piArgs, {
     registry: opts.registry,
     cwd: effectiveCwd,
-    // v0.13: worktree path when worktree was created, else opts.cwd
+    // v0.13: opts.cwd's counterpart in the worktree when one was created
     timeoutMs: opts.timeoutMs,
     onUpdate: opts.onUpdate,
     onComplete: opts.onComplete,
@@ -3216,8 +3249,8 @@ function runPiSubprocess(run, piArgs, opts) {
   let stderr = "";
   let finalized = false;
   let donePromiseResolve;
-  const done = new Promise((resolve4) => {
-    donePromiseResolve = resolve4;
+  const done = new Promise((resolve5) => {
+    donePromiseResolve = resolve5;
   });
   const finalize2 = async (terminal, exitCode) => {
     if (finalized) return;
@@ -3465,7 +3498,7 @@ function enqueueRpcSendWithAck(run, type, message) {
   rpcSendCounter += 1;
   const id = `send-${run.id}-${rpcSendCounter}`;
   const ackPromise = new Promise(
-    (resolve4, reject) => {
+    (resolve5, reject) => {
       const timer = setTimeout(() => {
         run.pendingAcks?.delete(id);
         reject(
@@ -3475,7 +3508,7 @@ function enqueueRpcSendWithAck(run, type, message) {
         );
       }, RPC_ACK_TIMEOUT_MS);
       run.pendingAcks.set(id, {
-        resolve: (delivered) => resolve4({ delivered, deliveredAt: Date.now() }),
+        resolve: (delivered) => resolve5({ delivered, deliveredAt: Date.now() }),
         reject,
         timer
       });
@@ -3511,22 +3544,26 @@ function restoreResumeWorktree(run, readSession) {
     return void 0;
   }
   if (!path || existsSync6(path)) return void 0;
-  const gitRoot2 = dirname7(dirname7(dirname7(path)));
-  if (path !== join7(gitRoot2, ".worktrees", "conductor-wt", run.id)) return void 0;
+  const layout = `${sep3}${join7(".worktrees", "conductor-wt", run.id)}`;
+  const at = `${path}${sep3}`.lastIndexOf(`${layout}${sep3}`);
+  if (at < 0) return void 0;
+  const gitRoot2 = path.slice(0, at);
+  const root = path.slice(0, at + layout.length);
+  if (existsSync6(root)) return void 0;
   const spawnFresh = `spawn a fresh ${run.persona} instead`;
   const kept = run.worktreeBranch && refExists(gitRoot2, `refs/heads/${run.worktreeBranch}`) ? run.worktreeBranch : void 0;
   const base = run.worktreeBaseBranch ?? "master";
   if (!kept && !refExists(gitRoot2, base)) {
     const gone = existsSync6(gitRoot2) ? `its base branch ${base}` : `its repo ${gitRoot2}`;
-    return `cannot resume ${run.id}: its worktree ${path} was removed, and ${gone} is gone; ${spawnFresh}.`;
+    return `cannot resume ${run.id}: its worktree ${root} was removed, and ${gone} is gone; ${spawnFresh}.`;
   }
   const branch = kept ?? `conductor-wt/${run.id}-r${(run.resumeCount ?? 0) + 1}`;
   try {
-    restoreWorktree({ gitRoot: gitRoot2, worktreePath: path, branch }, kept ? void 0 : base);
+    restoreWorktree({ gitRoot: gitRoot2, worktreePath: root, branch }, kept ? void 0 : base);
   } catch (e) {
     return `cannot resume ${run.id}: re-creating its worktree failed: ${e.message}; ${spawnFresh}.`;
   }
-  run.worktreePath = path;
+  run.worktreePath = root;
   run.worktreeBranch = branch;
   return void 0;
 }
@@ -3555,11 +3592,11 @@ function sendToRun(run, message, opts) {
     if (result.kind === "epipe") {
       return { kind: "rejected", reason: result.reason };
     }
-    const done2 = new Promise((resolve4) => {
+    const done2 = new Promise((resolve5) => {
       const unsub = opts.registry.onChange((r) => {
         if (r.id === run.id && isTerminal(r.status)) {
           unsub();
-          resolve4(r);
+          resolve5(r);
         }
       });
     });
@@ -5295,13 +5332,13 @@ init_types();
 // src/conductor-cwd.ts
 import { statSync as statSync4 } from "node:fs";
 import { homedir as homedir7 } from "node:os";
-import { join as join14, resolve as resolve3 } from "node:path";
+import { join as join14, resolve as resolve4 } from "node:path";
 var CWD_ENTRY_TYPE = "conductor-cwd";
 function resolveCwdArg(input, base) {
   const raw = input.trim();
   if (!raw) return { ok: false, error: "cwd must be a non-empty path" };
   const expanded = raw === "~" ? homedir7() : raw.startsWith("~/") ? join14(homedir7(), raw.slice(2)) : raw;
-  const cwd = resolve3(base, expanded);
+  const cwd = resolve4(base, expanded);
   let isDir;
   try {
     isDir = statSync4(cwd).isDirectory();
@@ -6483,7 +6520,7 @@ function renderHeader(run, width) {
   const glyph = STATUS_GLYPH[run.status] ?? "\xB7";
   const baseLeft = `${glyph} ${run.persona} (${run.id}) \u2014 ${run.status} ${elapsed}`;
   const right = usage ? `[${usage}]` : "";
-  const sep2 = "\u2500".repeat(Math.max(0, width));
+  const sep4 = "\u2500".repeat(Math.max(0, width));
   const activity = deriveActivity(run, Date.now());
   let left = baseLeft;
   if (activity !== void 0) {
@@ -6498,7 +6535,7 @@ function renderHeader(run, width) {
     }
   }
   const headerLine3 = padOrTruncate(left, right, width);
-  return [sep2, headerLine3];
+  return [sep4, headerLine3];
 }
 var IDLE_THRESHOLD_MS = 5e3;
 function deriveActivity(run, nowMs) {
@@ -7144,8 +7181,8 @@ function awaitTerminal(registry, runId) {
     unsub?.();
     resolveFn(run);
   };
-  const promise = new Promise((resolve4) => {
-    resolveFn = resolve4;
+  const promise = new Promise((resolve5) => {
+    resolveFn = resolve5;
   });
   unsub = registry.onChange((r) => {
     if (r.id === runId && isTerminal(r.status)) settle(r);
@@ -9762,17 +9799,17 @@ var FOOTER_BINDINGS = [
   }
 ];
 function renderFooterHintLine(bindings, width, theme) {
-  const sep2 = "  ";
+  const sep4 = "  ";
   let plain = "";
   let styled = "";
   for (const b of bindings) {
     const piece = `${b.keyDisplay} ${b.label}`;
-    const next = plain ? plain + sep2 + piece : piece;
+    const next = plain ? plain + sep4 + piece : piece;
     if (visibleWidth3(next) > width) break;
     plain = next;
     if (theme) {
       const stylePiece = `${theme.fg("accent", b.keyDisplay)} ${b.label}`;
-      styled = styled ? styled + sep2 + stylePiece : stylePiece;
+      styled = styled ? styled + sep4 + stylePiece : stylePiece;
     }
   }
   return theme ? styled : plain;

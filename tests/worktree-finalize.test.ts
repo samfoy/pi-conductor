@@ -8,7 +8,9 @@
  * on_complete_hook gate runs in the worktree, not the main checkout (B4).
  * A leftover uncommitted change is never force-removed, and a run settled
  * by forceTerminate (kill, stall, timeout) keeps its partial work. A resume
- * that doesn't complete never releases a worktree it didn't merge.
+ * that doesn't complete never releases a worktree it didn't merge. A child
+ * spawned from a repo subdirectory works in that subdirectory of its
+ * worktree, gets absolute default_reads, and is fenced into the worktree.
  *
  * Real git in temp repos, every call through gitTestEnv(). The spawnRun
  * smoke forks a PI_BIN stub, not pi.
@@ -979,6 +981,188 @@ test("spawnRun: a seeded worktree child's prompt doesn't repeat an untracked mai
       const prompt = argv[argv.indexOf("--append-system-prompt") + 1] ?? "";
       assert.match(prompt, /You are builder\./, "the persona body is there");
       assert.doesNotMatch(prompt, /LOCAL RULES/, "pi loads it natively; no doctrine copy");
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ── Where a worktree child works (Q2) ─────────────────────────────────
+
+/** A repo with a tracked `pkg/sub` directory and an untracked `scratch` one. */
+function initRepoWithSubdirs(): { root: string; repo: string } {
+  const made = initRepo();
+  mkdirSync(join(made.repo, "pkg", "sub"), { recursive: true });
+  writeFileSync(join(made.repo, "pkg", "sub", "index.ts"), "x\n");
+  git(made.repo, "add pkg");
+  git(made.repo, "commit -m pkg");
+  mkdirSync(join(made.repo, "scratch"));
+  return made;
+}
+
+/** A stub that records its process cwd and argv, then commits `work.ts` in its cwd. */
+function recordingStub(root: string): { stub: string; cwdFile: string; argvFile: string } {
+  const cwdFile = join(root, "child-cwd.txt");
+  const argvFile = join(root, "argv.json");
+  const record = `writeFileSync(${JSON.stringify(cwdFile)}, process.cwd());\nwriteFileSync(${JSON.stringify(argvFile)}, JSON.stringify(args));\ncommit("work.ts", "done\\n", "work");`;
+  return { stub: writePiStub(root, { onSpawn: record, onResume: record }), cwdFile, argvFile };
+}
+
+for (const seeded of [false, true]) {
+  test(`spawnRun: a ${seeded ? "seeded " : ""}worktree spawn from a repo subdirectory works in that subdirectory of its worktree`, { timeout: 20_000 }, async () => {
+    const { root, repo } = initRepoWithSubdirs();
+    const { stub, cwdFile } = recordingStub(root);
+    try {
+      await withPiStub(root, stub, async () => {
+        const { run, done } = spawnRun({
+          registry: new RunRegistry(),
+          persona: { ...builderPersona(), inheritContext: seeded ? "filtered_compact" : "none" },
+          parentMessages: seeded ? seedFrom : undefined,
+          task: "probe", mode: "background", cwd: join(repo, "pkg", "sub"), timeoutMs: 15_000, worktree: true, mergeStrategy: "squash",
+        });
+        const mapped = join(run.worktreePath!, "pkg", "sub");
+        if (seeded) assert.equal(sessionHeaderCwd(readFileSync(run.sessionPath!, "utf8")), mapped, "the seeded header names the subdirectory");
+        await done;
+        assert.equal(readFileSync(cwdFile, "utf8"), mapped, "the child ran in the worktree's pkg/sub");
+        assert.equal(run.status, "completed", run.errorMessage);
+        assert.match(git(repo, "show --stat --oneline mainline"), /pkg\/sub\/work\.ts/, "its work merged back into pkg/sub");
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("spawnRun: a seeded worktree spawn from an untracked subdirectory falls back to the worktree root", { timeout: 20_000 }, async () => {
+  const { root, repo } = initRepoWithSubdirs();
+  const { stub, cwdFile } = recordingStub(root);
+  try {
+    await withPiStub(root, stub, async () => {
+      const { run, done } = spawnRun({
+        registry: new RunRegistry(),
+        persona: { ...builderPersona(), inheritContext: "filtered_compact" },
+        parentMessages: seedFrom,
+        task: "probe", mode: "background", cwd: join(repo, "scratch"), timeoutMs: 15_000, worktree: true, mergeStrategy: "squash",
+      });
+      const wtPath = run.worktreePath!;
+      assert.equal(existsSync(join(wtPath, "scratch")), false, "precondition: the worktree has no scratch/");
+      assert.equal(sessionHeaderCwd(readFileSync(run.sessionPath!, "utf8")), wtPath);
+      await done;
+      assert.equal(readFileSync(cwdFile, "utf8"), wtPath);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("spawnRun: a subdirectory spawn's on_complete_hook runs in the same subdirectory of the worktree", { timeout: 20_000 }, async () => {
+  const { root, repo } = initRepoWithSubdirs();
+  const { stub } = recordingStub(root);
+  try {
+    await withPiStub(root, stub, async () => {
+      const { run, done } = spawnRun({
+        registry: new RunRegistry(), persona: builderPersona(),
+        task: "probe", mode: "background", cwd: join(repo, "pkg"), timeoutMs: 15_000, worktree: true, mergeStrategy: "squash",
+        onCompleteHook: `pwd -P > "$CONDUCTOR_RUN_DIR/hook-cwd.txt"; echo "$CONDUCTOR_WORKTREE_PATH" > "$CONDUCTOR_RUN_DIR/hook-env.txt"; test -f work.ts`,
+      });
+      const wtPath = run.worktreePath!;
+      await done;
+      const runDir = join(root, "home", ".pi", "agent", "conductor", "runs", run.id);
+      assert.equal(readFileSync(join(runDir, "hook-cwd.txt"), "utf8").trim(), join(wtPath, "pkg"));
+      assert.equal(readFileSync(join(runDir, "hook-env.txt"), "utf8").trim(), wtPath, "CONDUCTOR_WORKTREE_PATH stays the worktree root");
+      assert.equal(run.status, "completed", run.errorMessage ?? run.hookResult?.tailText);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("sendToRun: a merged subdirectory builder's resume re-creates its worktree and resumes in the subdirectory", { timeout: 30_000 }, async () => {
+  const { root, repo } = initRepoWithSubdirs();
+  const resumeCwd = join(root, "resume-cwd.txt");
+  const stub = writePiStub(root, {
+    onSpawn: `commit("work.ts", "v1\\n", "work");`,
+    onResume: `writeFileSync(${JSON.stringify(resumeCwd)}, process.cwd());\ncommit("fix.ts", "fix\\n", "fix");`,
+  });
+  try {
+    await withPiStub(root, stub, async () => {
+      const registry = new RunRegistry();
+      const { run, done } = spawnRun({
+        registry, persona: builderPersona(), task: "probe", mode: "background", cwd: join(repo, "pkg"),
+        timeoutMs: 15_000, worktree: true, mergeStrategy: "squash",
+      });
+      const wtPath = run.worktreePath!;
+      await done;
+      assert.equal(run.status, "completed", run.errorMessage);
+      assert.equal(existsSync(wtPath), false, "precondition: the merge removed the worktree");
+
+      const sent = sendToRun(run, "one more fix", { registry, timeoutMs: 10_000 });
+      assert.equal(sent.kind, "started", sent.kind === "rejected" ? sent.reason : "");
+      assert.equal(run.worktreePath, wtPath, "the worktree root is back at its old path");
+      await sent.done;
+      assert.equal(readFileSync(resumeCwd, "utf8"), join(wtPath, "pkg"), "the resume ran in pkg/ of the worktree");
+      assert.equal(run.status, "completed", run.errorMessage);
+      assert.match(git(repo, "show --stat --oneline mainline"), /pkg\/fix\.ts/);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("spawnRun: a worktree child gets absolute default_reads, the worktree copy first, else the main checkout's", { timeout: 20_000 }, async () => {
+  const { root, repo } = initRepo();
+  writeFileSync(join(repo, "plan.md"), "tracked plan\n");
+  git(repo, "add plan.md");
+  git(repo, "commit -m plan");
+  writeFileSync(join(repo, "context.md"), "untracked context\n");
+  const { stub, argvFile } = recordingStub(root);
+  try {
+    await withPiStub(root, stub, async () => {
+      const { run, done } = spawnRun({
+        registry: new RunRegistry(),
+        persona: { ...builderPersona(), defaultReads: ["context.md", "plan.md", "nowhere.md", "/abs/elsewhere.md"] },
+        task: "probe", mode: "background", cwd: repo, timeoutMs: 15_000, worktree: true, mergeStrategy: "squash",
+      });
+      const wtPath = run.worktreePath!;
+      await done;
+      const argv: string[] = JSON.parse(readFileSync(argvFile, "utf8"));
+      const reads = argv.at(-1)!.split("\n").filter((l) => l.startsWith("  - ")).map((l) => l.slice(4));
+      assert.deepEqual(reads, [
+        join(repo, "context.md"), // untracked: only the main checkout has it
+        join(wtPath, "plan.md"), // tracked: the copy the child's branch edits
+        join(repo, "nowhere.md"), // neither: resolved against the requested cwd
+        "/abs/elsewhere.md",
+      ]);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("spawnRun: a worktree child's prompt fences it into its worktree, once; a shared-cwd child's has no fence", { timeout: 20_000 }, async () => {
+  const { root, repo } = initRepo();
+  const { stub, argvFile } = recordingStub(root);
+  try {
+    await withPiStub(root, stub, async () => {
+      const { run, done } = spawnRun({
+        registry: new RunRegistry(), persona: builderPersona(),
+        task: "probe", mode: "background", cwd: repo, timeoutMs: 15_000, worktree: true, mergeStrategy: "squash",
+      });
+      const fence =
+        `You are working in the git worktree ${run.worktreePath} (branch ${run.worktreeBranch}). ` +
+        `Edit and commit only there; do not modify the main checkout at ${repo}.`;
+      await done;
+      const prompt = (JSON.parse(readFileSync(argvFile, "utf8")) as string[]).at(-1)!;
+      assert.equal(prompt.split(fence).length - 1, 1, `the fence, exactly once:\n${prompt}`);
+      assert.doesNotMatch(run.systemPrompt ?? "", /git worktree/, "not duplicated into the system prompt");
+
+      const shared = spawnRun({
+        registry: new RunRegistry(), persona: builderPersona(),
+        task: "probe", mode: "background", cwd: repo, timeoutMs: 15_000,
+      });
+      await shared.done;
+      const sharedPrompt = (JSON.parse(readFileSync(argvFile, "utf8")) as string[]).at(-1)!;
+      assert.doesNotMatch(sharedPrompt, /You are working in the git worktree/);
     });
   } finally {
     rmSync(root, { recursive: true, force: true });

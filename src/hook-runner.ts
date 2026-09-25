@@ -45,6 +45,7 @@ import {
 import { mkdirSync, createWriteStream } from "node:fs";
 import { dirname } from "node:path";
 import type { HookResult, ResolvedHook } from "./types.ts";
+import { worktreeCwd } from "./worktree.ts";
 
 /** Default per-stream byte cap (10 MB). Mirrors the design §4.4 invariant. */
 export const DEFAULT_HOOK_MAX_LOG_BYTES = 10 * 1024 * 1024;
@@ -77,9 +78,9 @@ export interface RunHookOptions {
   /** Parent process cwd at spawn time. Surfaced as `CONDUCTOR_PARENT_CWD`. */
   parentCwd: string;
   /**
-   * The run's worktree, when it has one: the hook runs there (the tree
-   * the sub-agent changed) instead of `parentCwd`, and gets it as
-   * `CONDUCTOR_WORKTREE_PATH`.
+   * The run's worktree, when it has one: the hook runs in `parentCwd`'s
+   * counterpart there (the tree the sub-agent changed, see worktreeCwd)
+   * instead of `parentCwd`, and gets the root as `CONDUCTOR_WORKTREE_PATH`.
    */
   worktreePath?: string;
   /**
@@ -195,7 +196,9 @@ export function runHook(opts: RunHookOptions): Promise<HookResult> {
   const spawnOpts: SpawnOptions = {
     shell: true,
     detached: true,
-    cwd: opts.worktreePath ?? opts.parentCwd,
+    cwd: opts.worktreePath
+      ? worktreeCwd({ gitRoot: dirname(dirname(dirname(opts.worktreePath))), worktreePath: opts.worktreePath }, opts.parentCwd)
+      : opts.parentCwd,
     env,
     stdio: ["ignore", "pipe", "pipe"],
   };
