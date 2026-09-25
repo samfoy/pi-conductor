@@ -229,11 +229,14 @@ test("extension: ensemble_cwd and /conductor cwd share one override that persist
       assert.ok(widgets.at(-1)?.includes(`cwd: ${b}`), `panel shows the override; got ${JSON.stringify(widgets.at(-1))}`);
 
       // ctx.cwd reassignments on turn_start / session_start keep the override.
-      // (session_start re-arms timers, so pair it with a shutdown as pi does.)
+      // Check right after turn_start: the next session_start restores the
+      // override from the entries, which would hide a turn_start clobber.
       await first.fire("turn_start", {}, ctx);
+      assert.deepEqual((await cwdTool.execute("t2a", {})).details, { cwd: b, source: "override" }, "after turn_start");
+      // (session_start re-arms timers, so pair it with a shutdown as pi does.)
       await first.fire("session_shutdown", { reason: "reload" }, ctx);
       await first.fire("session_start", {}, ctx);
-      assert.deepEqual((await cwdTool.execute("t2", {})).details, { cwd: b, source: "override" });
+      assert.deepEqual((await cwdTool.execute("t2", {})).details, { cwd: b, source: "override" }, "after session_start");
       await first.command().handler("cwd", ctx);
       assert.equal(notes.at(-1), `cwd: ${b} (override)`);
 
@@ -264,6 +267,29 @@ test("extension: ensemble_cwd and /conductor cwd share one override that persist
     } finally {
       for (const i of instances) await i.fire("session_shutdown", { reason: "reload" }, ctx);
       // Let session_start's setImmediate reconcile / GC passes settle before the sandbox goes.
+      await new Promise((r) => setTimeout(r, 20));
+      if (prevSub === undefined) delete process.env.CONDUCTOR_SUBAGENT;
+      else process.env.CONDUCTOR_SUBAGENT = prevSub;
+    }
+  }));
+
+test("/conductor cwd keeps repeated whitespace inside a path", () =>
+  withTmp(async (root) => {
+    sandboxConfig(root);
+    const spaced = join(root, "two  spaces");
+    mkdirSync(spaced);
+    mkdirSync(join(root, "two spaces")); // what the collapsed argument would name
+    const prevSub = process.env.CONDUCTOR_SUBAGENT;
+    delete process.env.CONDUCTOR_SUBAGENT;
+    const entries: Entry[] = [];
+    const pi = stubPi(entries);
+    const { ctx, notes } = stubCtx(root, entries);
+    try {
+      await pi.fire("session_start", {}, ctx);
+      await pi.command().handler("cwd  two  spaces", ctx);
+      assert.equal(notes.at(-1), `cwd: ${spaced} (override)`);
+    } finally {
+      await pi.fire("session_shutdown", { reason: "reload" }, ctx);
       await new Promise((r) => setTimeout(r, 20));
       if (prevSub === undefined) delete process.env.CONDUCTOR_SUBAGENT;
       else process.env.CONDUCTOR_SUBAGENT = prevSub;

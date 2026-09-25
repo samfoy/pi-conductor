@@ -5537,7 +5537,7 @@ function registerCommands(pi, opts) {
           await runWorktreeCmd(opts, ctx, subRest);
           return;
         case "cwd":
-          runCwd(opts, ctx, subRest);
+          runCwd(opts, ctx, args.slice(sub.length).trimStart());
           return;
         default:
           ctx.ui.notify(

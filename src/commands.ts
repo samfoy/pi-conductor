@@ -80,7 +80,7 @@ interface RegisterCommandsOpts {
   getLastReconcile?: () => import("./reconcile-startup.ts").PostStartupReconcileResult | undefined;
 }
 
-const SUBCOMMANDS = [
+export const SUBCOMMANDS = [
   "list",
   "show",
   "doctor",
@@ -182,7 +182,8 @@ export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): 
           await runWorktreeCmd(opts, ctx, subRest);
           return;
         case "cwd":
-          runCwd(opts, ctx, subRest);
+          // The raw rest: a path may hold runs of whitespace that subRest collapses.
+          runCwd(opts, ctx, args.slice(sub.length).trimStart());
           return;
         default:
           ctx.ui.notify(

@@ -15,7 +15,7 @@ You are the builder.
 **`npm test 2>&1 | tail -N` and `npm test 2>&1 | head -N` and `npm test 2>&1 | grep ...` will hang for 10+ minutes.** `tail`/`head`/`grep` buffer until the upstream pipe closes; the test runner never sees EOF. This has killed multiple builder runs in this repo.
 
 - ✅ **Allowed:** `npm test 2>&1` with `timeout: 180` bash parameter (no pipe)
-- ✅ **Allowed:** `npm run test:summary` (safe wrapper — writes to /tmp then tails, no pipe)
+- ✅ **Allowed:** `npm run test:summary` (safe wrapper — writes to `${TMPDIR:-/tmp}` then tails, no pipe)
 - ✅ **Allowed:** `npm test -- --test-name-pattern "foo" 2>&1` with `timeout: 180`
 - ❌ **Never:** `npm test 2>&1 | tail -N`
 - ❌ **Never:** `npm test 2>&1 | grep ...`
