@@ -31,6 +31,11 @@ import { FocusedStreamModel } from "../src/focused-stream-model.ts";
 import { ConductorEventEmitter } from "../src/conductor-events.ts";
 import { DEFAULT_CONFIG, emptyUsage, type Persona, type Run } from "../src/types.ts";
 import { gitTestEnv } from "./helpers/git-env.ts";
+import { sandboxPi } from "./helpers/tmp.ts";
+
+// SpawnQueue.enqueueOrSpawn pre-creates runDir(id) under $HOME, so without
+// this the drift test leaves an empty builder-* dir in the real runs dir.
+sandboxPi();
 
 function git(cwd: string, cmd: string): string {
   return execSync(`git ${cmd}`, { cwd, env: gitTestEnv(), stdio: "pipe" }).toString();
