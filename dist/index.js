@@ -3772,9 +3772,8 @@ async function applyMergeToTerminal(run, gitRoot2, terminal) {
   );
   run.mergeResult = result;
   if (result.success) return terminal;
-  const conflictList = result.conflicts?.join(", ") ?? "(unknown)";
-  const hint = `resolve manually: cd ${gitRoot2} && git merge ${run.worktreeBranch}`;
-  run.errorMessage = result.conflicts ? `merge conflict in: ${conflictList}; worktree preserved at ${run.worktreePath}; ${hint}` : result.errorMessage ?? "merge failed";
+  run.errorMessage = result.conflicts ? `merge conflict in: ${result.conflicts.join(", ")}` : result.errorMessage ?? "merge failed";
+  run.worktreeKept = `worktree kept for the merge conflict: ${run.worktreePath} (branch ${run.worktreeBranch}); resolve manually: cd ${gitRoot2} && git merge ${run.worktreeBranch}, or fix it in the worktree and run /conductor worktree merge ${run.id}`;
   return "merge_conflict";
 }
 async function settleWorktree(run, terminal) {

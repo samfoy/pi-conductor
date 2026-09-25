@@ -180,7 +180,8 @@ test("settleWorktree: merge_conflict keeps the worktree, its branch, and the run
     assert.equal(branchExists(repo, wt.branch), true, "worktree branch kept");
     assert.equal(run.worktreePath, wt.path);
     assert.equal(run.worktreeBranch, wt.branch);
-    assert.ok(run.errorMessage?.includes(`git merge ${wt.branch}`), run.errorMessage);
+    assert.equal(run.errorMessage, "merge conflict in: README.md", "the conflict list, for classification");
+    assert.ok(run.worktreeKept?.includes(`git merge ${wt.branch}`), run.worktreeKept);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -832,6 +833,34 @@ test("settleWorktree: a foreground hook_failed run's summary shows the kept-bran
     const summary = renderForegroundSummary(run);
     assert.ok(summary.includes(`  ⚠ branch ${wt.branch} kept`), summary);
     assert.match(summary, /on_complete_hook failed/, "the error stays");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// A foreground summary caps the error excerpt at 120 characters, which a real
+// repo root fills before the branch and the git merge hint (critic-el2j).
+test("settleWorktree: a merge_conflict's recovery hint survives the foreground summary and reaches the card", { timeout: 15_000 }, async () => {
+  const { root, repo } = initRepo();
+  try {
+    const wt = worktreeWithCommit(repo, "builder-fm01", "README.md", "from branch\n");
+    writeFileSync(join(repo, "README.md"), "from base\n");
+    git(repo, "commit -am base");
+    const run = makeRun("builder-fm01", { mode: "foreground", worktreePath: wt.path, worktreeBranch: wt.branch });
+
+    run.status = await settleWorktree(run, "completed");
+    assert.equal(run.status, "merge_conflict");
+
+    const summary = renderForegroundSummary(run);
+    assert.match(summary, /→ merge conflict in: README\.md/, "the error line keeps the conflict list");
+    const hint = summary.split("\n").find((l) => l.startsWith("  ⚠ "));
+    assert.ok(hint, summary);
+    for (const part of [wt.path, `(branch ${wt.branch})`, `cd ${repo} && git merge ${wt.branch}`, "/conductor worktree merge builder-fm01"]) {
+      assert.ok(hint.includes(part), `${part} missing from:\n${summary}`);
+    }
+    const card = formatCompletionNotification(run);
+    assert.ok(card.includes(`<worktree-kept path="${wt.path}" branch="${wt.branch}">`), card);
+    assert.ok(card.includes(`cd ${repo} &amp;&amp; git merge ${wt.branch}`), card);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
