@@ -155,3 +155,16 @@ test("promptAndSendToRun: pushCompletionNotification wired through onComplete", 
   assert.equal(cap.pushCompletions.length, 1);
   assert.equal(cap.pushCompletions[0]!.id, "oracle-1");
 });
+
+test("promptAndSendToRun: re-reads actual session identity after asynchronous input/resolution", async () => {
+  const { deps, run } = makeDeps();
+  let session = "before";
+  const seen: (string | undefined)[] = [];
+  await executePromptAndSend({ ...deps,
+    getSessionId: () => session,
+    validateSendable: (_run, _behavior, id) => { seen.push(id); return { ok: true }; },
+    resolvePersonas: async args => { session = "after"; return deps.resolvePersonas(args); },
+    sendToRun: (_run, _message, opts) => { seen.push(opts.sessionId); return { kind: "rejected", reason: "owner changed" }; },
+  }, run.id, "A");
+  assert.deepEqual(seen, ["before", "after"]);
+});

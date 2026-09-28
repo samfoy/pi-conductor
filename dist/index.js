@@ -4151,7 +4151,17 @@ var RUN_ACTIONS = ["send", "steer", "follow_up", "pause", "resume", "kill", "foc
 function supportsFocus(ctx) {
   return ctx?.mode === "tui";
 }
-function observeRunActions(run, canFocus = false) {
+function observeRunActions(run, canFocus = false, sessionId) {
+  let effortOwnershipError;
+  if (run.effort) {
+    try {
+      const effort = readEffort(run.effort.gitRoot, run.effort.name);
+      if (!effort) throw new Error("effort record missing; ownership unresolved");
+      assertEffortOwner(effort, effortOwner(sessionId));
+    } catch (e) {
+      effortOwnershipError = `cannot send to effort ${run.effort.name}: ${e.message}`;
+    }
+  }
   const sessionPath = findRunSessionFile(run);
   let sessionMissing = false;
   if (run.sessionPath) {
@@ -4162,6 +4172,7 @@ function observeRunActions(run, canFocus = false) {
     }
   }
   return {
+    effortOwnershipError,
     capabilities: capabilitiesFor(run),
     canFocus,
     owned: run.parentPid === void 0 || run.parentPid === process.pid,
@@ -4175,6 +4186,7 @@ function observeRunActions(run, canFocus = false) {
 function runActionError(run, action, observed) {
   if (action === "focus") return observed.canFocus ? void 0 : "Focused stream requires terminal UI (TUI mode).";
   if (action === "send" || action === "steer" || action === "follow_up") {
+    if (observed.effortOwnershipError) return observed.effortOwnershipError;
     if ((run.pendingAsk || run.askExecution) && run.status !== "blocked") return `sub-agent ${run.id} is settling an owner question; wait for sub-agent-asked before answering.`;
     if (observed.retirementNotice) return `sub-agent ${run.id}: ${observed.retirementNotice}`;
   }
@@ -4198,15 +4210,15 @@ function runActionError(run, action, observed) {
 function computeAvailableActions(run, observed) {
   return RUN_ACTIONS.filter((action) => runActionError(run, action, observed) === void 0);
 }
-function availableActions(run, canFocus = false) {
-  return computeAvailableActions(run, observeRunActions(run, canFocus));
+function availableActions(run, canFocus = false, sessionId) {
+  return computeAvailableActions(run, observeRunActions(run, canFocus, sessionId));
 }
-function validateRunAction(run, action, canFocus = false) {
-  return runActionError(run, action, observeRunActions(run, canFocus));
+function validateRunAction(run, action, canFocus = false, sessionId) {
+  return runActionError(run, action, observeRunActions(run, canFocus, sessionId));
 }
-function validateSendable(run, behavior = "auto") {
+function validateSendable(run, behavior = "auto", sessionId) {
   const action = behavior === "auto" ? run.status === "running" ? "follow_up" : "send" : behavior === "resume" ? "send" : behavior;
-  const reason = validateRunAction(run, action);
+  const reason = validateRunAction(run, action, false, sessionId);
   return reason === void 0 ? { ok: true } : { ok: false, reason };
 }
 function resolveSendStrategy(run, behavior = "auto") {
@@ -4318,7 +4330,7 @@ function sendToRun(run, message, opts) {
     };
   }
   const behavior = opts.streamingBehavior ?? "auto";
-  const check = validateSendable(run, behavior);
+  const check = validateSendable(run, behavior, opts.sessionId);
   if (!check.ok) return { kind: "rejected", reason: check.reason };
   if (opts.files !== void 0) {
     if (!opts.callerCwd) return { kind: "rejected", reason: "files require an explicit callerCwd" };
@@ -6617,7 +6629,7 @@ async function runSendCmd(opts, ctx, arg) {
     );
     return;
   }
-  const check = validateSendable(run);
+  const check = validateSendable(run, "auto", opts.getSessionId?.());
   if (!check.ok && behavior === "auto") {
     ctx.ui.notify(check.reason, "warning");
     return;
@@ -6633,6 +6645,7 @@ async function runSendCmd(opts, ctx, arg) {
   const timeoutMs = resolveTimeoutMs(persona, baseOv, cfg);
   const answering = run.pendingAsk;
   const result = sendToRun(run, message, {
+    sessionId: opts.getSessionId?.(),
     registry,
     timeoutMs,
     streamingBehavior: behavior,
@@ -8089,7 +8102,7 @@ function registerStatusTool(pi, opts) {
       const all = registry.list();
       const filtered = params?.agent_id ? all.filter((r) => r.id === params.agent_id) : all;
       const groups = groupByStatus(filtered);
-      const summaries = new Map(filtered.map((r) => [r.id, toStatusSummary(r, supportsFocus(ctx))]));
+      const summaries = new Map(filtered.map((r) => [r.id, toStatusSummary(r, supportsFocus(ctx), opts.getSessionId?.())]));
       const summary = (r) => summaries.get(r.id);
       const queueList = queue.list().map((p) => ({
         id: p.id,
@@ -8591,7 +8604,7 @@ persona=${p.persona} queue_position=${result.queuePosition}
               return renderForegroundDetachedResult(result.run);
             }
             throttle.flush();
-            return foregroundFinalResult(outcome.value, supportsFocus(ctx));
+            return foregroundFinalResult(outcome.value, supportsFocus(ctx), void 0, opts.getSessionId?.());
           } finally {
             detach.unregister();
           }
@@ -8710,6 +8723,7 @@ function registerSendTool(pi, opts) {
       const timeoutMs = resolveTimeoutMs(persona, ov, cfg);
       const answering = run.pendingAsk;
       const result = sendToRun(run, params.message, {
+        sessionId: opts.getSessionId?.(),
         files: params.files,
         callerCwd: opts.getCwd(),
         registry,
@@ -8809,7 +8823,7 @@ The sub-agent acknowledged the message at ${new Date(ackResult.deliveredAt).toIS
               return renderForegroundDetachedResult(result.run);
             }
             throttle.flush();
-            return foregroundFinalResult(outcome.value, supportsFocus(ctx), answering);
+            return foregroundFinalResult(outcome.value, supportsFocus(ctx), answering, opts.getSessionId?.());
           } finally {
             detach.unregister();
           }
@@ -9103,10 +9117,10 @@ function groupByStatus(runs) {
   for (const r of runs) g[r.status].push(r);
   return g;
 }
-function toStatusSummary(r, canFocus) {
+function toStatusSummary(r, canFocus, sessionId) {
   return {
     id: r.id,
-    available_actions: availableActions(r, canFocus),
+    available_actions: availableActions(r, canFocus, sessionId),
     persona: r.persona,
     status: r.status,
     pending_ask: r.pendingAsk,
@@ -9157,8 +9171,8 @@ function formatStatusForLLM(g, queueSize, summaries) {
   }
   return lines.join("\n");
 }
-function foregroundFinalResult(r, canFocus, answering) {
-  const actions = availableActions(r, canFocus);
+function foregroundFinalResult(r, canFocus, answering, sessionId) {
+  const actions = availableActions(r, canFocus, sessionId);
   const ref = resultRef(r);
   const answerNotice = answering ? `${r.status === "blocked" && r.errorMessage ? "Answer delivery failed for" : "Answered"} question ${answering.askId}: ${answering.question}
 ` : "";
@@ -9233,6 +9247,7 @@ function buildOnChainCallback(args) {
   const step = resolveChain(args.personaName, args.cfg.chains);
   if (!step) return void 0;
   return async (parentRun) => {
+    if (parentRun.effort) return;
     const chainCwd = parentRun.cwd;
     const chainCfg = loadConfig(chainCwd);
     let targetPersonaName = step.then;
@@ -9329,6 +9344,7 @@ function keptParentRefusal(parent, successor) {
 }
 function buildOnRetryCallback(args) {
   const self = (failedRun) => {
+    if (failedRun.effort) return;
     const failedAttempt = failedRun.retryAttempt ?? 0;
     const maxAttempts = failedRun.retryPolicy?.maxAttempts ?? 1;
     const ov = args.cfg.personaOverrides[args.persona.name] ?? {};
@@ -9940,8 +9956,8 @@ function buildCompletionSendMessageOptions(run) {
   }
   return { triggerTurn: true, deliverAs: "followUp" };
 }
-function buildCompletionMessage(run, canFocus = false) {
-  const actions = availableActions(run, canFocus);
+function buildCompletionMessage(run, canFocus = false, sessionId) {
+  const actions = availableActions(run, canFocus, sessionId);
   const perSend = perSendNumbers(run);
   const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
   const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
@@ -10002,8 +10018,8 @@ Answer via ensemble_send; the original assignment remains unresolved.` : getFina
     }
   };
 }
-function buildStallMessage(run, args, canFocus = false) {
-  const actions = args.availableActions ?? availableActions(run, canFocus);
+function buildStallMessage(run, args, canFocus = false, sessionId) {
+  const actions = args.availableActions ?? availableActions(run, canFocus, sessionId);
   const evidence = args.evidenceReference ? void 0 : args.evidence ?? recentStallEvidence(run);
   return {
     customType: "ensemble-notification",
@@ -11594,7 +11610,7 @@ async function executePromptAndSend(deps, agentId, presuppliedText) {
     ctx.ui.notify(`agent_id "${agentId}" not found.`, "warning");
     return;
   }
-  const check = deps.validateSendable(run);
+  const check = deps.validateSendable(run, "auto", deps.getSessionId?.());
   if (!check.ok) {
     try {
       ctx.ui.notify(check.reason, "warning");
@@ -11637,6 +11653,7 @@ async function executePromptAndSend(deps, agentId, presuppliedText) {
   const persona = resolved.personas.get(run.persona);
   const timeoutMs = deps.resolveTimeoutMs(persona, ov, cfg);
   const result = deps.sendToRun(run, message, {
+    sessionId: deps.getSessionId?.(),
     registry: deps.registry,
     timeoutMs,
     onComplete: (r) => deps.pushCompletionNotification(r),
@@ -11736,6 +11753,7 @@ function index_default(pi) {
     await executePromptAndSend(
       {
         getCtx: () => ctxRef,
+        getSessionId: () => opts.getSessionId(),
         registry,
         cwd: cwd(),
         validateSendable,
@@ -11863,7 +11881,7 @@ function index_default(pi) {
       return { detachSignal, unregister };
     },
     pushCompletionNotification: (run) => {
-      pi.sendMessage(buildCompletionMessage(run, supportsFocus(ctxRef)), buildCompletionSendMessageOptions(run));
+      pi.sendMessage(buildCompletionMessage(run, supportsFocus(ctxRef), opts.getSessionId()), buildCompletionSendMessageOptions(run));
       if (run.status === "blocked") completionWakeTracker.drop(run.id);
       else completionWakeTracker.track(run.id, Date.now());
     }
@@ -11975,7 +11993,7 @@ function index_default(pi) {
             if (run && meta?.severity && typeof meta.silentSeconds === "number") {
               try {
                 pi.sendMessage(
-                  buildStallMessage(run, meta, supportsFocus(ctxRef)),
+                  buildStallMessage(run, meta, supportsFocus(ctxRef), opts.getSessionId()),
                   { triggerTurn: false, deliverAs: "followUp" }
                 );
               } catch (err) {
@@ -12006,7 +12024,7 @@ function index_default(pi) {
           cfg.watchdog.defaultKillOnStall,
           isWriteCapable(run.persona)
         ),
-        observeActions: (run) => availableActions(run, supportsFocus(ctxRef)),
+        observeActions: (run) => availableActions(run, supportsFocus(ctxRef), opts.getSessionId()),
         isEnabled: () => cfg.watchdog.enabled
       });
       watchdogDispose = wd.start();
@@ -12020,7 +12038,7 @@ function index_default(pi) {
           completionWakeTracker.drop(runId);
           continue;
         }
-        pi.sendMessage(buildCompletionMessage(run, supportsFocus(ctxRef)), buildCompletionSendMessageOptions(run));
+        pi.sendMessage(buildCompletionMessage(run, supportsFocus(ctxRef), opts.getSessionId()), buildCompletionSendMessageOptions(run));
       }
       for (const runId of result.expired) {
         ctxRef?.ui.notify(

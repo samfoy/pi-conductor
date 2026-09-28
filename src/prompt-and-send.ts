@@ -26,7 +26,7 @@
  *   - sendToRun rejected → notify the reason.
  */
 
-import type { Persona, Run } from "./types.ts";
+import type { Persona, Run, StreamingBehavior } from "./types.ts";
 import { modelRegistryPredicate, sendCwd, type ModelRegisteredPredicate, type RunRegistry } from "./runs.ts";
 
 export interface PromptAndSendCtx {
@@ -41,11 +41,12 @@ export interface PromptAndSendCtx {
 }
 
 export interface PromptAndSendDeps {
+  getSessionId?: () => string | undefined;
   getCtx: () => PromptAndSendCtx | null | undefined;
   registry: RunRegistry;
   /** The conductor's cwd: only the fallback for a run without one ({@link sendCwd}). */
   cwd: string;
-  validateSendable: (run: Run) => { ok: true } | { ok: false; reason: string };
+  validateSendable: (run: Run, behavior?: StreamingBehavior, sessionId?: string) => { ok: true } | { ok: false; reason: string };
   loadConfig: (cwd: string) => { personaOverrides: Record<string, unknown> };
   resolvePersonas: (args: {
     cwd: string;
@@ -60,6 +61,7 @@ export interface PromptAndSendDeps {
     run: Run,
     message: string,
     opts: {
+      sessionId?: string;
       registry: RunRegistry;
       timeoutMs: number;
       onComplete: (r: Run) => void;
@@ -87,7 +89,7 @@ export async function executePromptAndSend(
   // doesn't waste typing a message that will be rejected anyway. Same
   // pre-check applies to the presuppliedText branch — design §9 keeps
   // the check unconditional.
-  const check = deps.validateSendable(run);
+  const check = deps.validateSendable(run, "auto", deps.getSessionId?.());
   if (!check.ok) {
     try {
       ctx.ui.notify(check.reason, "warning");
@@ -137,6 +139,7 @@ export async function executePromptAndSend(
   const persona = resolved.personas.get(run.persona);
   const timeoutMs = deps.resolveTimeoutMs(persona, ov, cfg);
   const result = deps.sendToRun(run, message, {
+    sessionId: deps.getSessionId?.(),
     registry: deps.registry,
     timeoutMs,
     onComplete: (r) => deps.pushCompletionNotification(r),

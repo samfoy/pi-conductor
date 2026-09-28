@@ -326,7 +326,7 @@ function registerStatusTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       const filtered = params?.agent_id ? all.filter((r) => r.id === params.agent_id) : all;
 
       const groups = groupByStatus(filtered);
-      const summaries = new Map(filtered.map(r => [r.id, toStatusSummary(r, supportsFocus(ctx))]));
+      const summaries = new Map(filtered.map(r => [r.id, toStatusSummary(r, supportsFocus(ctx), opts.getSessionId?.())]));
       const summary = (r: Run) => summaries.get(r.id)!;
       const queueList = queue.list().map((p) => ({
         id: p.id,
@@ -949,7 +949,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
             // payload through so the last visible streamed frame matches
             // reality before the tool-call card collapses to the summary.
             throttle.flush();
-            return foregroundFinalResult(outcome.value, supportsFocus(ctx));
+            return foregroundFinalResult(outcome.value, supportsFocus(ctx), undefined, opts.getSessionId?.());
           } finally {
             detach.unregister();
           }
@@ -1098,6 +1098,7 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 
       const answering = run.pendingAsk;
       const result = sendToRun(run, params.message, {
+        sessionId: opts.getSessionId?.(),
         files: params.files,
         callerCwd: opts.getCwd(),
         registry,
@@ -1219,7 +1220,7 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
             // Force any pending payload so the last visible streamed frame
             // matches reality before the tool-call card collapses.
             throttle.flush();
-            return foregroundFinalResult(outcome.value, supportsFocus(ctx), answering);
+            return foregroundFinalResult(outcome.value, supportsFocus(ctx), answering, opts.getSessionId?.());
           } finally {
             detach.unregister();
           }
@@ -1591,10 +1592,10 @@ function groupByStatus(runs: Run[]): StatusGroups {
   return g;
 }
 
-function toStatusSummary(r: Run, canFocus: boolean) {
+function toStatusSummary(r: Run, canFocus: boolean, sessionId?: string) {
   return {
     id: r.id,
-    available_actions: availableActions(r, canFocus),
+    available_actions: availableActions(r, canFocus, sessionId),
     persona: r.persona,
     status: r.status,
     pending_ask: r.pendingAsk,
@@ -1653,8 +1654,8 @@ function formatStatusForLLM(g: StatusGroups, queueSize: number, summaries: Map<s
   return lines.join("\n");
 }
 
-function foregroundFinalResult(r: Run, canFocus: boolean, answering?: { askId: string; question: string }) {
-  const actions = availableActions(r, canFocus);
+function foregroundFinalResult(r: Run, canFocus: boolean, answering?: { askId: string; question: string }, sessionId?: string) {
+  const actions = availableActions(r, canFocus, sessionId);
   const ref = resultRef(r);
   const answerNotice = answering ? `${r.status === "blocked" && r.errorMessage ? "Answer delivery failed for" : "Answered"} question ${answering.askId}: ${answering.question}\n` : "";
   const summary = answerNotice + renderForegroundSummary(r, actions) + (ref ? `\n  result-ref: ${ref} — pass files: ['${ref}'] for the full evidence.` : "");
@@ -1780,6 +1781,7 @@ export function buildOnChainCallback(
   if (!step) return undefined;
 
   return async (parentRun: Run) => {
+    if (parentRun.effort) return;
     const chainCwd = parentRun.cwd;
     const chainCfg = loadConfig(chainCwd);
 
@@ -1932,6 +1934,7 @@ export function buildOnRetryCallback(
   args: OnRetryCallbackOpts,
 ): (run: Run) => void {
   const self = (failedRun: Run): void => {
+    if (failedRun.effort) return;
     const failedAttempt = failedRun.retryAttempt ?? 0;
     const maxAttempts = failedRun.retryPolicy?.maxAttempts ?? 1;
     const ov = args.cfg.personaOverrides[args.persona.name] ?? {};

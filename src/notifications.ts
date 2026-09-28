@@ -409,8 +409,8 @@ export function buildCompletionSendMessageOptions(run: Run): {
  * be forgotten on one of them — which is exactly how the raw-XML
  * regression shipped.
  */
-export function buildCompletionMessage(run: Run, canFocus = false): NotificationMessage {
-  const actions = availableActions(run, canFocus);
+export function buildCompletionMessage(run: Run, canFocus = false, sessionId?: string): NotificationMessage {
+  const actions = availableActions(run, canFocus, sessionId);
   const perSend = perSendNumbers(run);
   const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
   const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
@@ -480,8 +480,9 @@ export function buildStallMessage(
   run: Run,
   args: StallNoticeArgs,
   canFocus = false,
+  sessionId?: string,
 ): NotificationMessage {
-  const actions = args.availableActions ?? availableActions(run, canFocus);
+  const actions = args.availableActions ?? availableActions(run, canFocus, sessionId);
   const evidence = args.evidenceReference ? undefined : args.evidence ?? recentStallEvidence(run);
   return {
     customType: "ensemble-notification",

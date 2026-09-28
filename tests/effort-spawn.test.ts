@@ -124,7 +124,7 @@ test("M1 linked-caller subdirectory and A6 answer retain same assignment/worktre
   const restored = new RunRegistry();
   await reconcileOrphansAtStartup({ registry: restored, runsRoot: dirname(dirname(run.recordPath)), now: Date.now(), isAlive: () => false, isParentAlive: () => false });
   assert.deepEqual(restored.get(run.id)?.effort, run.effort);
-  const resumed = sendToRun(run, "Use A", { registry, timeoutMs: 5000 });
+  const resumed = sendToRun(run, "Use A", { registry, timeoutMs: 5000, sessionId: "owner" });
   assert.equal(resumed.kind, "started"); if (resumed.kind !== "started") return;
   assert.equal(launches[1].cwd, join(path, "pkg"));
   assert.equal(run.task, "original"); assert.equal(run.worktreeBranch, branch);
@@ -238,7 +238,7 @@ test("M1 blocked effort never replaces a lost assignment branch with a fresh bas
   assert.equal(run.status, "blocked");
   const path = run.worktreePath!; const branch = run.worktreeBranch!;
   git(cwd, "worktree", "remove", path); git(cwd, "branch", "-D", branch);
-  const sent = sendToRun(run, "Continue", { registry, timeoutMs: 5000 });
+  const sent = sendToRun(run, "Continue", { registry, timeoutMs: 5000, sessionId: "owner" });
   assert.equal(sent.kind, "rejected");
   assert.equal(run.status, "blocked"); assert.equal(run.pendingAsk?.askId, "lost"); assert.equal(procs.length, 1);
   assert.equal(existsSync(path), false); assert.equal(run.worktreeBranch, branch);

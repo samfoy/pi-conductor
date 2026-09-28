@@ -65,6 +65,7 @@ import { isTerminal } from "./types.ts";
 import { formatCwdInfo, type CwdController } from "./conductor-cwd.ts";
 
 interface RegisterCommandsOpts {
+  getSessionId?: () => string | undefined;
   getCwd: () => string;
   /** Backs `/conductor cwd`; shared with the `ensemble_cwd` tool. */
   cwdControl?: CwdController;
@@ -547,7 +548,7 @@ async function runSendCmd(
   // strategy resolver will reject the combination in sendToRun if
   // (e.g.) the user passed --resume on a running run; that rejection
   // arrives via the result.kind="rejected" branch below.
-  const check = validateSendable(run);
+  const check = validateSendable(run, "auto", opts.getSessionId?.());
   if (!check.ok && behavior === "auto") {
     ctx.ui.notify(check.reason, "warning");
     return;
@@ -565,6 +566,7 @@ async function runSendCmd(
 
   const answering = run.pendingAsk;
   const result = sendToRun(run, message, {
+    sessionId: opts.getSessionId?.(),
     registry,
     timeoutMs,
     streamingBehavior: behavior,

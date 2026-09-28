@@ -20,8 +20,8 @@
 import type { ChildProcess } from "node:child_process";
 import { createRunPipeline } from "./run-pipeline.ts";
 import { capabilitiesFor, subprocessRuntime } from "./subprocess-runtime.ts";
-import { ownedEffort, effortRepository, effortTip } from "./effort/open.ts";
-import { addEffortMember, type EffortRecord } from "./effort/store.ts";
+import { ownedEffort, effortOwner, effortRepository, effortTip } from "./effort/open.ts";
+import { addEffortMember, assertEffortOwner, readEffort, type EffortRecord } from "./effort/store.ts";
 import { EFFORT_NOTICE, validateTouches } from "./effort/policy.ts";
 import type { Signaler } from "./runtime.ts";
 export type { Signaler } from "./runtime.ts";
@@ -1655,6 +1655,8 @@ function mapFromRegistry(r: RunRegistry): Map<string, Run> {
 // ── ensemble_send ───────────────────────────────────────────────────────
 
 export interface SendToRunOptions {
+  /** Actual current conductor session, never inferred from the run's reconciled parent fields. */
+  sessionId?: string;
   files?: readonly string[];
   /** Required with files: the caller's effective cwd, never the target session directory. */
   callerCwd?: string;
@@ -1769,7 +1771,15 @@ export function supportsFocus(ctx?: { mode?: string; hasUI?: boolean } | null): 
 }
 
 /** Read-only I/O boundary. A snapshot is advisory, never authorization. */
-export function observeRunActions(run: Run, canFocus = false) {
+export function observeRunActions(run: Run, canFocus = false, sessionId?: string) {
+  let effortOwnershipError: string | undefined;
+  if (run.effort) {
+    try {
+      const effort = readEffort(run.effort.gitRoot, run.effort.name);
+      if (!effort) throw new Error("effort record missing; ownership unresolved");
+      assertEffortOwner(effort, effortOwner(sessionId));
+    } catch (e) { effortOwnershipError = `cannot send to effort ${run.effort.name}: ${(e as Error).message}`; }
+  }
   const sessionPath = findRunSessionFile(run);
   let sessionMissing = false;
   if (run.sessionPath) {
@@ -1777,6 +1787,7 @@ export function observeRunActions(run: Run, canFocus = false) {
     catch { sessionMissing = true; }
   }
   return {
+    effortOwnershipError,
     capabilities: capabilitiesFor(run),
     canFocus,
     owned: run.parentPid === undefined || run.parentPid === process.pid,
@@ -1794,6 +1805,7 @@ type ActionObservations = ReturnType<typeof observeRunActions>;
 export function runActionError(run: Run, action: RunAction, observed: ActionObservations): string | undefined {
   if (action === "focus") return observed.canFocus ? undefined : "Focused stream requires terminal UI (TUI mode).";
   if (action === "send" || action === "steer" || action === "follow_up") {
+    if (observed.effortOwnershipError) return observed.effortOwnershipError;
     if ((run.pendingAsk || run.askExecution) && run.status !== "blocked") return `sub-agent ${run.id} is settling an owner question; wait for sub-agent-asked before answering.`;
     if (observed.retirementNotice) return `sub-agent ${run.id}: ${observed.retirementNotice}`;
   }
@@ -1821,23 +1833,24 @@ export function computeAvailableActions(run: Run, observed: ActionObservations):
 }
 
 /** Observes config/session files once; does not discover by mutating the run. */
-export function availableActions(run: Run, canFocus = false): RunAction[] {
-  return computeAvailableActions(run, observeRunActions(run, canFocus));
+export function availableActions(run: Run, canFocus = false, sessionId?: string): RunAction[] {
+  return computeAvailableActions(run, observeRunActions(run, canFocus, sessionId));
 }
 
 /** Re-observe immediately before an action; status snapshots are not permissions. */
-export function validateRunAction(run: Run, action: RunAction, canFocus = false): string | undefined {
-  return runActionError(run, action, observeRunActions(run, canFocus));
+export function validateRunAction(run: Run, action: RunAction, canFocus = false, sessionId?: string): string | undefined {
+  return runActionError(run, action, observeRunActions(run, canFocus, sessionId));
 }
 
 /** Read-only preflight for UI prompts and the send effect boundary; reads disk. */
 export function validateSendable(
   run: Run,
   behavior: StreamingBehavior = "auto",
+  sessionId?: string,
 ): { ok: true } | { ok: false; reason: string } {
   const action = behavior === "auto" ? (run.status === "running" ? "follow_up" : "send")
     : behavior === "resume" ? "send" : behavior;
-  const reason = validateRunAction(run, action);
+  const reason = validateRunAction(run, action, false, sessionId);
   return reason === undefined ? { ok: true } : { ok: false, reason };
 }
 
@@ -2052,7 +2065,7 @@ export function sendToRun(
     };
   }
   const behavior: StreamingBehavior = opts.streamingBehavior ?? "auto";
-  const check = validateSendable(run, behavior);
+  const check = validateSendable(run, behavior, opts.sessionId);
   if (!check.ok) return { kind: "rejected", reason: check.reason };
   if (opts.files !== undefined) {
     if (!opts.callerCwd) return { kind: "rejected", reason: "files require an explicit callerCwd" };
