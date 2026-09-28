@@ -194,3 +194,80 @@ for (const hookExit of [0, 1]) {
     assert.equal(JSON.parse(readFileSync(run.recordPath, "utf8")).contextRetired, true);
   });
 }
+
+for (const seeded of [false, true]) for (const scenario of ["retired", "foreign-marker", "disabled", "another-run"]) {
+  test(`A2 live RPC ${seeded ? "seeded" : "fresh"}: ${scenario} continuation before settlement`, { timeout: 5000 }, async (t) => {
+    const procs = fakeSpawn(t);
+    const registry = new RunRegistry();
+    const cwd = tmpDir("a2-live-retirement-");
+    if (scenario === "disabled") {
+      mkdirSync(join(cwd, ".pi"));
+      writeFileSync(join(cwd, ".pi/conductor.json"), '{"contextRetirement":false}');
+    }
+    const result = await spawnRun({ registry, persona, cwd, task: "test", mode: "background", timeoutMs: 4000, steerable: true,
+      parentMessages: seeded ? [{ role: "user", content: "history", timestamp: 1 }] : [],
+    });
+    const run = result.run;
+    const proc = procs[0];
+    const writes: string[] = [];
+    proc.stdin.on("data", data => writes.push(data.toString()));
+    try {
+      let entry;
+      if (scenario === "another-run") {
+        const other = { type: "session", version: 3, id: "other-child", cwd };
+        entry = marker(other.id);
+        // Neither a sibling run nor a nested directory is this run's session.
+        for (const path of [
+          join(dirname(dirname(run.recordPath)), "other-run", "session", "other.jsonl"),
+          join(dirname(run.recordPath), "session", "nested", "other.jsonl"),
+        ]) {
+          mkdirSync(dirname(path), { recursive: true });
+          writeFileSync(path, [other, entry].map(x => JSON.stringify(x)).join("\n") + "\n");
+        }
+      } else {
+        const path = saveSession(run, scenario !== "foreign-marker", seeded);
+        const lines = readFileSync(path, "utf8").trim().split("\n");
+        entry = JSON.parse(lines.at(-1)!);
+      }
+      emit(proc, { type: "entry_appended", entry });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(run.status, "running");
+      assert.equal(Boolean(run.sessionPath), seeded, "fresh session path is not yet stamped by finalization");
+      const before = [...writes];
+      const beforeUsage = run.thisInvocationUsageBaseline;
+      const check = validateSendable(run);
+      const sent = sendToRun(run, "NEW objective", { registry, timeoutMs: 4000, streamingBehavior: "follow_up" });
+      if (sent.kind === "started") void sent.ack?.catch(() => {});
+      await new Promise<void>(resolve => setImmediate(resolve));
+      if (scenario === "retired") {
+        assert.deepEqual(writes, before, "retired live RPC child must receive no new stdin bytes");
+        assert.equal(sent.kind, "rejected");
+        assert.equal(check.ok, false, "shared gate also protects slash and overlay entry points");
+        assert.match(sent.kind === "rejected" ? sent.reason : "", /session retired/i);
+        assert.equal(run.thisInvocationUsageBaseline, beforeUsage, "no invocation mutation");
+      } else {
+        assert.equal(sent.kind, "started");
+        assert.equal(check.ok, true);
+        assert.ok(writes.slice(before.length).some(line => {
+          const command = JSON.parse(line);
+          return command.type === "follow_up" && command.message === "NEW objective";
+        }), "foreign marker, config-off, and other-run controls permit native live sends");
+      }
+      assert.equal(procs.length, 1, "a live send never spawns another process");
+      assert.equal(run.status, "running", "send does not settle the child");
+    } finally {
+      for (const id of run.pendingAcks?.keys() ?? []) emit(proc, { type: "response", id, command: "follow_up", success: true });
+      emit(proc, { type: "message_end", message: handoff });
+      emit(proc, { type: "agent_settled" });
+      await result.done;
+    }
+  });
+}
+
+test("A2 host compatibility declares the verified settlement API floor in manifest, lock, and README", () => {
+  const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta.url), "utf8"));
+  assert.equal(manifest.peerDependencies["@earendil-works/pi-coding-agent"], ">=0.87.1");
+  assert.equal(lock.packages[""].peerDependencies["@earendil-works/pi-coding-agent"], ">=0.87.1");
+  assert.match(readFileSync(new URL("../README.md", import.meta.url), "utf8"), /Pi 0\.87\.1 or newer/);
+});

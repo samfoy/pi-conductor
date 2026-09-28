@@ -2189,7 +2189,7 @@ export function validateSendable(
   run: Run,
   behavior: StreamingBehavior = "auto",
 ): { ok: true } | { ok: false; reason: string } {
-  const notice = contextRetirementNotice({ cwd: run.cwd, contextRetired: run.contextRetired || savedSessionRetired(run.sessionPath) });
+  const notice = contextRetirementNotice({ cwd: run.cwd, contextRetired: run.contextRetired || savedSessionRetired(findRunSessionFile(run)) });
   if (notice) return { ok: false, reason: `sub-agent ${run.id}: ${notice}` };
   const r = resolveSendStrategy(run, behavior);
   if (r.strategy.kind === "rejected") {
@@ -3389,8 +3389,12 @@ export async function reconcileRecord(
   await writeRecord(run);
 }
 
-function discoverContextRetirement(run: Run, sessionDir = join(dirname(run.recordPath), "session")): void {
-  const sessionPath = run.sessionPath ?? findSessionFile(sessionDir);
+function findRunSessionFile(run: Run, sessionDir = join(dirname(run.recordPath), "session")): string | undefined {
+  return run.sessionPath ?? findSessionFile(sessionDir);
+}
+
+function discoverContextRetirement(run: Run, sessionDir?: string): void {
+  const sessionPath = findRunSessionFile(run, sessionDir);
   if (savedSessionRetired(sessionPath)) {
     run.sessionPath = sessionPath;
     run.contextRetired = true;

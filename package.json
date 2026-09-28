@@ -49,7 +49,7 @@
   "peerDependencies": {
     "@sinclair/typebox": "^0.34.49",
     "@earendil-works/pi-agent-core": "*",
-    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-coding-agent": ">=0.87.1",
     "@earendil-works/pi-tui": "*"
   },
   "dependencies": {},

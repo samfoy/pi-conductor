@@ -169,7 +169,8 @@ native compaction and resume again; historical metadata is retained. Children in
 worktrees read this setting from the spawning project's config location. Quality
 hooks and worktree safety still apply. Settlement uses Pi's `agent_settled` event
 (JSON and RPC), not `agent_end`, which can precede overflow recovery; process exit
-is the fallback. RPC therefore requires a Pi version that emits `agent_settled`.
+is the fallback. Supported host: **Pi 0.87.1 or newer** (`@earendil-works/pi-coding-agent >=0.87.1`);
+0.87.1 is the verified floor for the required `agent_settled` API.
 This is Phase A **A2 only**, not A3–A6 or the herdr runtime.
 
 `~/.pi/agent/extensions/conductor/config.json` (user) or `<project>/.pi/conductor.json` (project, overrides user):
