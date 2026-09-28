@@ -90,23 +90,10 @@ export function applyEvent(run: Run, event: unknown): EventEffect {
     return handleExtensionUiRequest(run, e as RpcExtensionUIRequest);
   }
 
-  if (e.type === "agent_end") {
-    return { kind: "finalize", status: "completed", exitCode: 0 };
-  }
-
-  if (e.type === "turn_end") {
-    if (!e.message) return NONE;
-    const msg = e.message as AgentMessage;
-    const content = (msg as any).content;
-    const hasToolCall = Array.isArray(content)
-      ? content.some((p: any) => p?.type === "toolCall")
-      : false;
-    const stopReason = (msg as any).stopReason;
-    const errored = stopReason === "error" || stopReason === "aborted";
-    if (!hasToolCall && !errored) {
-      return { kind: "finalize", status: "completed", exitCode: 0 };
-    }
-    return NONE;
+  // turn_end and agent_end precede overflow recovery and queued work.
+  if (e.type === "agent_settled") {
+    const failed = run.stopReason === "error" || run.stopReason === "aborted";
+    return { kind: "finalize", status: failed ? "failed" : "completed", exitCode: failed ? 1 : 0 };
   }
 
   if (e.type === "message_end") {

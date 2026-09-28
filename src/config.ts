@@ -103,6 +103,7 @@ function mergeConfig(base: ConductorConfig, raw: unknown): ConductorConfig {
   if (r.defaultMode === "on" || r.defaultMode === "off") {
     out.defaultMode = r.defaultMode;
   }
+  if (typeof r.contextRetirement === "boolean") out.contextRetirement = r.contextRetirement;
   if (typeof r.defaultSteerable === "boolean") {
     // v0.12 steering: project/user-config layer for the steerable
     // cascade. Mirrors `defaultKillOnStall` placement intent

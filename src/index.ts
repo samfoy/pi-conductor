@@ -38,6 +38,7 @@ import {
 import { buildConductorSystemPrompt } from "./conductor-prompt.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
+import { installContextRetirement } from "./context-retirement.ts";
 import { FocusedStreamModel } from "./focused-stream-model.ts";
 import { createFocusedOverlayComponent } from "./focused-overlay-factory.ts";
 import { installFocusedOverlayShortcut } from "./focused-overlay-shortcut.ts";
@@ -62,6 +63,7 @@ import { executePromptAndSend } from "./prompt-and-send.ts";
 import { CWD_ENTRY_TYPE, createCwdController } from "./conductor-cwd.ts";
 
 export default function (pi: ExtensionAPI): void {
+  installContextRetirement(pi);
   // ── Mutable session-scoped state ─────────────────────────────────────
   let ctxRef: ExtensionContext | null = null;
   let widget: EnsembleWidget | null = null;

@@ -59,7 +59,7 @@ pi-conductor closes that gap. The parent pi session is the conductor, sub-agents
 ### Persistence + reliability (v0.9 / v0.9.x / v0.10)
 
 - Every spawn writes its session JSONL into `<runDir>/session/`; `Run.sessionPath` is populated up-front when seeded or on finalize for fresh spawns.
-- `ensemble_send` resumes any finished sub-agent's session via `pi --session <path>`. Reuse a sub-agent's loaded context instead of re-spawning when you want a follow-up.
+- `ensemble_send` resumes a finished sub-agent's session via `pi --session <path>`, unless it has retired under context pressure. For a retired session, start a fresh child with its handoff.
 - **Run-record GC (v0.9).** Two-tier reclaim — cold-archive (`unlink transcript.jsonl`, keep `record.json` / `final.md` / `session/`) preserves `ensemble_send` resumability for the configured TTL (default 30 days); full-delete frees `runs/<id>/` once the run is already archived AND past the second TTL AND unpinned. Triggers: auto on `session_start` (debounced 6h), manual `/conductor gc [--dry-run] [--force] [--persona=<name>] [--verbose]`. User-pinning sidecar (`.pinned` via `/conductor pin`/`unpin`) opts a run out of both tiers. Doctor surface lists disk usage; `/conductor history` annotates with `pinned` / `archived`.
 - **Post-startup reconcile (v0.9.x).** On `session_start`, any `running` records orphaned by a previous crash (parent pi died, pid no longer alive) are reclassified to `killed` with `errorMessage: "orphaned: ..."`. Liveness via `kill(pid, 0)`; EPERM treated as alive. Reconcile runs ahead of GC. Manual re-run: `/conductor reconcile [--dry-run]`.
 - **Sub-agent watchdog (v0.10).** Pure tick-based detector. Soft threshold (default 120s) emits a `<sub-agent-stalled>` advisory; hard threshold (default 600s) escalates to `forceTerminate` only when `kill_on_stall: true` was set on the spawn (default OFF). Tick interval 30s; ignores paused / terminal / queued runs and respects an initial grace window. Per-spawn args `kill_on_stall: bool` and `stall_threshold_seconds: int` on `ensemble_spawn` and `ensemble_send` (cascade: per-call > project > user > built-in default). UX: ensemble-panel `· STALLED Ns` glyph, `/conductor watchdog status`, doctor surface.
@@ -153,6 +153,25 @@ This is **partial enforcement**, not a sandbox: `bash` stays available unless a 
 
 ## Configuration
 
+`contextRetirement` defaults to `true` and applies only to managed conductor children
+(`CONDUCTOR_SUBAGENT=1`), never to the parent's compaction. Automatic threshold
+compaction records a session-scoped retirement marker and is cancelled; overflow
+recovery still compacts and retries. Manual compaction is unchanged. Each subsequent
+request receives hidden, request-local guidance to stop safely, preserve essential
+validation, and return a self-contained handoff, not a claim of completion.
+
+The parent reads the exact session's marker before settlement notifications and
+retains `contextRetired` in `record.json`, including through reconcile and resumes.
+Foreground and background output identify retirement. `ensemble_send`, `/conductor send`,
+and overlay sends reject retired sessions before spawning or restoring worktrees.
+Set `contextRetirement: false` to bypass retirement, including old markers, and allow
+native compaction and resume again; historical metadata is retained. Children in
+worktrees read this setting from the spawning project's config location. Quality
+hooks and worktree safety still apply. Settlement uses Pi's `agent_settled` event
+(JSON and RPC), not `agent_end`, which can precede overflow recovery; process exit
+is the fallback. RPC therefore requires a Pi version that emits `agent_settled`.
+This is Phase A **A2 only**, not A3–A6 or the herdr runtime.
+
 `~/.pi/agent/extensions/conductor/config.json` (user) or `<project>/.pi/conductor.json` (project, overrides user):
 
 ```jsonc
@@ -160,6 +179,7 @@ This is **partial enforcement**, not a sandbox: `bash` stays available unless a 
   "defaultMode": "off",                  // v0.8: "on" | "off". Pinned
                                          // conductor-mode default at
                                          // extension load. Beats env var.
+  "contextRetirement": true,             // A2: retire managed children on automatic context pressure
   "defaultTimeoutMinutes": 60,
   "maxConcurrent": 4,
   "queueOnConcurrencyCap": true,

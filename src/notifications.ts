@@ -14,6 +14,7 @@
  */
 
 import { compactEnvelopeBlock } from "./compaction-hook.ts";
+import { contextRetirementNotice } from "./context-retirement.ts";
 import { elapsedStr, formatUsage, getFinalText, sendsSinceSpawn } from "./runs.ts";
 import type { Run, RunStatus } from "./types.ts";
 
@@ -147,6 +148,8 @@ export function formatCompletionNotification(run: Run): string {
     if (run.steerCount) lines.push(`    <steers>${run.steerCount}</steers>`);
     lines.push("  </lifetime>");
   }
+  const retirement = contextRetirementNotice(run);
+  if (retirement) lines.push(`  <context-retired>${escapeXml(retirement)}</context-retired>`);
   if (run.errorMessage) {
     lines.push(`  <error>${escapeXml(run.errorMessage)}</error>`);
   }
@@ -392,6 +395,11 @@ export function buildCompletionMessage(run: Run): NotificationMessage {
   }
 
   const notes: NotificationNote[] = [];
+  const retirement = contextRetirementNotice(run);
+  if (retirement) {
+    stats.push("session retired; use a fresh child with the handoff");
+    notes.push({ slot: "warning", text: retirement });
+  }
   if (run.errorMessage) notes.push({ slot: "error", text: run.errorMessage });
   if (run.worktreeKept) notes.push({ slot: "warning", text: run.worktreeKept });
   if (run.nonSubstantiveFinal) {

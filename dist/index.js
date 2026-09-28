@@ -39,6 +39,7 @@ function toRunRecord(r) {
     transcriptPath: r.transcriptPath,
     finalPath: r.finalPath,
     sessionPath: r.sessionPath,
+    contextRetired: r.contextRetired,
     systemPrompt: r.systemPrompt,
     tools: r.tools,
     excludeTools: r.excludeTools,
@@ -96,6 +97,7 @@ var init_types = __esm({
     CONDUCTOR_LLM_TOOL_NAMES = Object.values(CONDUCTOR_LLM_TOOLS);
     FOREIGN_SPAWN_TOOLS = ["subagent", "agent"];
     DEFAULT_CONFIG = {
+      contextRetirement: true,
       defaultTimeoutMinutes: 60,
       maxConcurrent: 4,
       worktreeMode: "conductor",
@@ -181,7 +183,7 @@ __export(worktree_exports, {
   worktreeSpecFromRun: () => worktreeSpecFromRun
 });
 import { execSync } from "node:child_process";
-import { existsSync as existsSync3, appendFileSync, readFileSync as readFileSync2, realpathSync as realpathSync2 } from "node:fs";
+import { existsSync as existsSync3, appendFileSync, readFileSync as readFileSync3, realpathSync as realpathSync2 } from "node:fs";
 import { mkdirSync as mkdirSync2 } from "node:fs";
 import { join as join3, dirname as dirname3, isAbsolute, relative, sep } from "node:path";
 function gitEnv() {
@@ -296,7 +298,7 @@ function ensureWorktreeGitignore(gitRoot2) {
   const ignorePath = join3(gitRoot2, ".gitignore");
   const pattern = ".worktrees/";
   if (existsSync3(ignorePath)) {
-    const content = readFileSync2(ignorePath, "utf-8");
+    const content = readFileSync3(ignorePath, "utf-8");
     if (content.split("\n").some((line) => line.trim() === pattern.trim())) {
       return;
     }
@@ -457,7 +459,7 @@ import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
 
 // src/commands.ts
 init_types();
-import { existsSync as existsSync11, readdirSync as readdirSync2, readFileSync as readFileSync7, statSync as statSync5 } from "node:fs";
+import { existsSync as existsSync11, readdirSync as readdirSync2, readFileSync as readFileSync8, statSync as statSync5 } from "node:fs";
 import { join as join15, dirname as dirname9 } from "node:path";
 
 // src/status-glyph.ts
@@ -843,6 +845,7 @@ function mergeConfig(base, raw) {
   if (r.defaultMode === "on" || r.defaultMode === "off") {
     out.defaultMode = r.defaultMode;
   }
+  if (typeof r.contextRetirement === "boolean") out.contextRetirement = r.contextRetirement;
   if (typeof r.defaultSteerable === "boolean") {
     out.defaultSteerable = r.defaultSteerable;
   }
@@ -954,7 +957,7 @@ function loadConfig(cwd) {
 
 // src/runs.ts
 import { spawn } from "node:child_process";
-import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync6, readdirSync, statSync as statSync2 } from "node:fs";
+import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync7, readdirSync, statSync as statSync2 } from "node:fs";
 import { mkdir, writeFile as writeFile2, appendFile } from "node:fs/promises";
 import { homedir as homedir5 } from "node:os";
 import { StringDecoder } from "node:string_decoder";
@@ -1173,20 +1176,9 @@ function applyEvent(run, event) {
   if (e.type === "extension_ui_request") {
     return handleExtensionUiRequest(run, e);
   }
-  if (e.type === "agent_end") {
-    return { kind: "finalize", status: "completed", exitCode: 0 };
-  }
-  if (e.type === "turn_end") {
-    if (!e.message) return NONE;
-    const msg = e.message;
-    const content = msg.content;
-    const hasToolCall = Array.isArray(content) ? content.some((p) => p?.type === "toolCall") : false;
-    const stopReason = msg.stopReason;
-    const errored = stopReason === "error" || stopReason === "aborted";
-    if (!hasToolCall && !errored) {
-      return { kind: "finalize", status: "completed", exitCode: 0 };
-    }
-    return NONE;
+  if (e.type === "agent_settled") {
+    const failed = run.stopReason === "error" || run.stopReason === "aborted";
+    return { kind: "finalize", status: failed ? "failed" : "completed", exitCode: failed ? 1 : 0 };
   }
   if (e.type === "message_end") {
     if (!e.message) return NONE;
@@ -1527,6 +1519,59 @@ function sessionHeaderCwd(text) {
   } catch {
     return void 0;
   }
+}
+
+// src/context-retirement.ts
+import { readFileSync as readFileSync2 } from "node:fs";
+var RETIRED_ENTRY = "conductor-context-retired";
+var FINALIZE_INSTRUCTION = "This session is retiring because of context pressure. Start no new objectives. Bring the current coherent operation to a safe stopping point, preserving essential validation. Return a self-contained handoff describing completed work, current state, relevant files, checks performed and their results, unresolved issues, and exact next steps for a fresh child. Retirement is not evidence that the task is complete; distinguish verified work from unfinished work.";
+function hasRetirement(entries, sessionId) {
+  return entries.some((entry) => {
+    if (!entry || typeof entry !== "object") return false;
+    const e = entry;
+    return e.type === "custom" && e.customType === RETIRED_ENTRY && e.data?.sessionId === sessionId;
+  });
+}
+function installContextRetirement(pi) {
+  if (process.env.CONDUCTOR_SUBAGENT !== "1") return;
+  pi.on("session_before_compact", (event, ctx) => {
+    if (!loadConfig(process.env.CONDUCTOR_CONFIG_CWD || ctx.cwd).contextRetirement || event.reason === "manual") return;
+    const sessionId = ctx.sessionManager.getSessionId();
+    if (!hasRetirement(ctx.sessionManager.getEntries(), sessionId)) {
+      pi.appendEntry(RETIRED_ENTRY, { sessionId });
+    }
+    if (event.reason === "threshold") return { cancel: true };
+  });
+  pi.on("context", (event, ctx) => {
+    if (!loadConfig(process.env.CONDUCTOR_CONFIG_CWD || ctx.cwd).contextRetirement) return;
+    if (!hasRetirement(ctx.sessionManager.getEntries(), ctx.sessionManager.getSessionId())) return;
+    return {
+      messages: [
+        ...event.messages.filter((m) => !(m.role === "custom" && m.customType === RETIRED_ENTRY)),
+        { role: "custom", customType: RETIRED_ENTRY, content: FINALIZE_INSTRUCTION, display: false, timestamp: Date.now() }
+      ]
+    };
+  });
+}
+function savedSessionRetired(sessionPath) {
+  if (!sessionPath) return false;
+  try {
+    const entries = readFileSync2(sessionPath, "utf8").split("\n").map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return void 0;
+      }
+    });
+    const header = entries[0];
+    return header?.type === "session" && typeof header.id === "string" && header.id.length > 0 && hasRetirement(entries.slice(1), header.id);
+  } catch {
+    return false;
+  }
+}
+function contextRetirementNotice(run) {
+  if (!run.contextRetired || !loadConfig(run.cwd).contextRetirement) return void 0;
+  return "Session retired due to context pressure. Use a fresh child with the handoff for follow-up; retirement does not mean the task is complete.";
 }
 
 // src/substance-check.ts
@@ -2020,7 +2065,7 @@ ${diag}
 }
 
 // src/memory.ts
-import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync3, appendFileSync as appendFileSync2 } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync4, readFileSync as readFileSync4, appendFileSync as appendFileSync2 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { join as join4, dirname as dirname5 } from "node:path";
 import { createHash } from "node:crypto";
@@ -2104,7 +2149,7 @@ function loadOutcomes(path = memoryPath()) {
   if (!existsSync4(path)) return [];
   let raw;
   try {
-    raw = readFileSync3(path, "utf-8");
+    raw = readFileSync4(path, "utf-8");
   } catch {
     return [];
   }
@@ -2144,7 +2189,7 @@ init_worktree();
 // src/reconcile-startup.ts
 init_types();
 import { readFile as readFile2, readdir as readdir2, stat as stat2, writeFile } from "node:fs/promises";
-import { readFileSync as readFileSync4 } from "node:fs";
+import { readFileSync as readFileSync5 } from "node:fs";
 import { join as join5 } from "node:path";
 function classifyRecord(record, isAlive, _now, selfPid = process.pid, isParentAlive = (pid, startTime) => defaultParentLivenessProbe(pid, startTime), selfSessionId = void 0) {
   const status = record.status;
@@ -2188,7 +2233,7 @@ function defaultLivenessProbe(pid) {
 function readProcessStartTime(pid) {
   if (process.platform !== "linux") return void 0;
   try {
-    const raw = readFileSync4(`/proc/${pid}/stat`, "utf-8");
+    const raw = readFileSync5(`/proc/${pid}/stat`, "utf-8");
     const closeParen = raw.lastIndexOf(")");
     if (closeParen < 0) return void 0;
     const fields = raw.slice(closeParen + 2).split(" ");
@@ -2392,6 +2437,7 @@ function buildOrphanRun(record, status) {
     transcriptPath: record.transcriptPath,
     finalPath: record.finalPath,
     sessionPath: record.sessionPath,
+    contextRetired: record.contextRetired,
     systemPrompt: record.systemPrompt,
     // Tool policy must survive re-adoption, or a resumed read-only persona
     // loses its exclusions (buildResumePiArgs reads these).
@@ -2443,7 +2489,7 @@ async function checkSessionResumability(record, result) {
 }
 
 // src/workspace-doctrine.ts
-import { existsSync as existsSync5, readFileSync as readFileSync5, statSync } from "node:fs";
+import { existsSync as existsSync5, readFileSync as readFileSync6, statSync } from "node:fs";
 import { homedir as homedir4, tmpdir } from "node:os";
 import { dirname as dirname6, join as join6, relative as relative2, resolve as resolve2, sep as sep2 } from "node:path";
 var MAX_WALK_DEPTH = 6;
@@ -2509,7 +2555,7 @@ function loadWorkspaceDoctrine(workdir) {
     const start = resolve2(workdir);
     const path = findAgentsMd(start);
     if (!path || childNativeAgentsDirs(start).includes(dirname6(path))) return "";
-    let text = readFileSync5(path, "utf8").trim();
+    let text = readFileSync6(path, "utf8").trim();
     if (!text) return "";
     if (text.length > MAX_DOCTRINE_CHARS) text = truncateDoctrine(text, path);
     return `${DOCTRINE_HEADING}
@@ -2639,7 +2685,7 @@ var READ_ONLY_PERSONA_ENFORCER = [
 function assemblePersonaSystemPrompt(persona, cwd) {
   const blocks = persona.readOnly === true ? [READ_ONLY_PERSONA_ENFORCER, persona.systemPrompt] : [persona.systemPrompt];
   try {
-    const preamble = readFileSync6(join7(builtinPersonasDir(), "_preamble.md"), "utf8").trim();
+    const preamble = readFileSync7(join7(builtinPersonasDir(), "_preamble.md"), "utf8").trim();
     if (preamble) blocks.push(preamble);
   } catch {
   }
@@ -3245,7 +3291,8 @@ function runPiSubprocess(run, piArgs, opts) {
       cwd: opts.cwd,
       shell: false,
       stdio: [stdinKind, "pipe", "pipe"],
-      env: buildSubagentEnv()
+      // Worktrees may not contain the spawning project's untracked config.
+      env: { ...buildSubagentEnv(), CONDUCTOR_CONFIG_CWD: run.cwd }
     });
   } catch (e) {
     run.status = "failed";
@@ -3295,6 +3342,7 @@ function runPiSubprocess(run, piArgs, opts) {
     }
     const rest = stdoutLines.end();
     if (rest.trim()) processLine(rest);
+    discoverContextRetirement(run, opts.sessionDir);
     if (terminal === "completed" && exitCode === 0 && opts.resolvedHook && !isTerminal(run.status)) {
       try {
         terminal = await applyHookToTerminal(
@@ -3320,6 +3368,7 @@ function runPiSubprocess(run, piArgs, opts) {
     }
     if (!applyCloseHandlerTerminal(run, terminal, exitCode)) {
       discoverSessionPathIfMissing(run, opts.sessionDir);
+      await writeRecord(run);
       run.proc = void 0;
       try {
         proc.kill();
@@ -3441,8 +3490,10 @@ function mapFromRegistry(r) {
 function sendCwd(run, conductorCwd) {
   return run.cwd || conductorCwd;
 }
-function validateSendable(run) {
-  const r = resolveSendStrategy(run, "auto");
+function validateSendable(run, behavior = "auto") {
+  const notice = contextRetirementNotice({ cwd: run.cwd, contextRetired: run.contextRetired || savedSessionRetired(run.sessionPath) });
+  if (notice) return { ok: false, reason: `sub-agent ${run.id}: ${notice}` };
+  const r = resolveSendStrategy(run, behavior);
   if (r.strategy.kind === "rejected") {
     return { ok: false, reason: r.strategy.reason };
   }
@@ -3610,6 +3661,8 @@ function sendToRun(run, message, opts) {
     };
   }
   const behavior = opts.streamingBehavior ?? "auto";
+  const check = validateSendable(run, behavior);
+  if (!check.ok) return { kind: "rejected", reason: check.reason };
   const decision = resolveSendStrategy(run, behavior);
   if (decision.strategy.kind === "rejected") {
     return { kind: "rejected", reason: decision.strategy.reason };
@@ -3637,14 +3690,8 @@ function sendToRun(run, message, opts) {
     opts.events?.emitSteered({ id: run.id, message: trimmed });
     return { kind: "started", run, done: done2, ack: result.ack };
   }
-  if (run.sessionPath && !existsSync6(run.sessionPath)) {
-    return {
-      kind: "rejected",
-      reason: `sub-agent ${run.id} session file is missing on disk: ${run.sessionPath}`
-    };
-  }
   const sessionPath = run.sessionPath;
-  const worktreeBlocker = restoreResumeWorktree(run, () => readFileSync6(sessionPath, "utf8"));
+  const worktreeBlocker = restoreResumeWorktree(run, () => readFileSync7(sessionPath, "utf8"));
   if (worktreeBlocker) return { kind: "rejected", reason: worktreeBlocker };
   run.status = "running";
   run.finishedAt = void 0;
@@ -3664,7 +3711,7 @@ function sendToRun(run, message, opts) {
   opts.registry.notify(run);
   run.model = resumeModel(
     run.model,
-    () => readFileSync6(sessionPath, "utf8"),
+    () => readFileSync7(sessionPath, "utf8"),
     opts.isRegisteredModel,
     opts.currentModelProvider
   );
@@ -3983,6 +4030,7 @@ function forceTerminate(run, reason, registry, onComplete, killGroup = defaultKi
     }, 2e3).unref();
     run.hookProc = void 0;
   }
+  discoverContextRetirement(run);
   run.status = reason === "timeout" ? "timeout" : reason === "stalled" ? "killed" : reason === "aborted" ? "aborted" : (
     // v0.17: turn-limit termination
     "killed"
@@ -4041,10 +4089,18 @@ function resumeRun(run, registry, signaler = defaultSignaler2) {
   return true;
 }
 async function reconcileRecord(run, status, errorMessage, finishedAt) {
+  discoverContextRetirement(run);
   run.status = status;
   run.finishedAt = finishedAt;
   run.errorMessage = errorMessage;
   await writeRecord(run);
+}
+function discoverContextRetirement(run, sessionDir = join7(dirname7(run.recordPath), "session")) {
+  const sessionPath = run.sessionPath ?? findSessionFile(sessionDir);
+  if (savedSessionRetired(sessionPath)) {
+    run.sessionPath = sessionPath;
+    run.contextRetired = true;
+  }
 }
 async function writeRecord(run) {
   try {
@@ -5879,7 +5935,7 @@ function runHistory(_opts, ctx, arg) {
       readRecord: (id) => {
         const p = join15(runDir(id), "record.json");
         try {
-          return JSON.parse(readFileSync7(p, "utf8"));
+          return JSON.parse(readFileSync8(p, "utf8"));
         } catch {
           return void 0;
         }
@@ -5887,7 +5943,7 @@ function runHistory(_opts, ctx, arg) {
       readFinalText: (id) => {
         const p = join15(runDir(id), "final.md");
         try {
-          return readFileSync7(p, "utf8");
+          return readFileSync8(p, "utf8");
         } catch {
           return void 0;
         }
@@ -6346,11 +6402,11 @@ Resolve manually in the worktree and run /conductor worktree merge ${runId} agai
 // src/tools.ts
 init_types();
 import { Type } from "@sinclair/typebox";
-import { readFileSync as readFileSync9, existsSync as existsSync13 } from "node:fs";
+import { readFileSync as readFileSync10, existsSync as existsSync13 } from "node:fs";
 import { dirname as dirname10 } from "node:path";
 
 // src/chain.ts
-import { readFileSync as readFileSync8, existsSync as existsSync12 } from "node:fs";
+import { readFileSync as readFileSync9, existsSync as existsSync12 } from "node:fs";
 var DEFAULT_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nOriginal task:\n{task}\n\n---\nFinal output:\n{final}";
 var WORKTREE_CHAIN_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nThe work is on branch `{worktreeBranch}` (not yet merged to `{baseBranch}`).\nRun the following to inspect the changes:\n\n```bash\ngit diff {baseBranch}...{worktreeBranch}\n```\n\nOriginal task:\n{task}";
 var FINAL_PLACEHOLDER = "(no final output)";
@@ -6372,7 +6428,7 @@ function buildChainTask(taskTemplate, context) {
   let finalContent = FINAL_PLACEHOLDER;
   if (existsSync12(context.finalPath)) {
     try {
-      finalContent = readFileSync8(context.finalPath, "utf-8");
+      finalContent = readFileSync9(context.finalPath, "utf-8");
     } catch {
     }
   }
@@ -6923,6 +6979,8 @@ function renderForegroundSummary(run) {
     headline += ` \xB7 lifetime ${lifetimeElapsed}${lifetimeCost}`;
   }
   lines.push(headline);
+  const retirement = contextRetirementNotice(run);
+  if (retirement) lines.push(`  ${retirement}`);
   if (run.status === "completed") {
     const final = getFinalText(run.messages);
     if (final) {
@@ -8259,7 +8317,7 @@ function buildOnChainCallback(args) {
       let parentFinal = "";
       if (existsSync13(parentRun.finalPath)) {
         try {
-          parentFinal = readFileSync9(parentRun.finalPath, "utf-8");
+          parentFinal = readFileSync10(parentRun.finalPath, "utf-8");
         } catch {
         }
       }
@@ -8791,6 +8849,8 @@ function formatCompletionNotification(run) {
     if (run.steerCount) lines.push(`    <steers>${run.steerCount}</steers>`);
     lines.push("  </lifetime>");
   }
+  const retirement = contextRetirementNotice(run);
+  if (retirement) lines.push(`  <context-retired>${escapeXml(retirement)}</context-retired>`);
   if (run.errorMessage) {
     lines.push(`  <error>${escapeXml(run.errorMessage)}</error>`);
   }
@@ -8918,6 +8978,11 @@ function buildCompletionMessage(run) {
     stats.push(`lifetime ${elapsedStr(run.startTime, run.finishedAt)}${cost} (${sends})`);
   }
   const notes = [];
+  const retirement = contextRetirementNotice(run);
+  if (retirement) {
+    stats.push("session retired; use a fresh child with the handoff");
+    notes.push({ slot: "warning", text: retirement });
+  }
   if (run.errorMessage) notes.push({ slot: "error", text: run.errorMessage });
   if (run.worktreeKept) notes.push({ slot: "warning", text: run.worktreeKept });
   if (run.nonSubstantiveFinal) {
@@ -10567,6 +10632,7 @@ async function executePromptAndSend(deps, agentId, presuppliedText) {
 
 // src/index.ts
 function index_default(pi) {
+  installContextRetirement(pi);
   let ctxRef = null;
   let widget = null;
   const cwdControl = createCwdController({

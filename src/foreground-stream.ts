@@ -15,9 +15,10 @@
  * dump that v0.3 used as a tool result; the streamed view above
  * remains visible in the tool-call card.
  *
- * Both helpers are pure (no I/O, no TUI).
+ * Neither helper uses the TUI; the summary reads retirement config to honor opt-out.
  */
 
+import { contextRetirementNotice } from "./context-retirement.ts";
 import { elapsedStr, formatUsage, getFinalText, sendsSinceSpawn, type RunRegistry } from "./runs.ts";
 import { renderHeader, renderTranscript } from "./transcript.ts";
 import { isTerminal, type Run } from "./types.ts";
@@ -142,6 +143,8 @@ export function renderForegroundSummary(run: Run): string {
     headline += ` · lifetime ${lifetimeElapsed}${lifetimeCost}`;
   }
   lines.push(headline);
+  const retirement = contextRetirementNotice(run);
+  if (retirement) lines.push(`  ${retirement}`);
 
   if (run.status === "completed") {
     const final = getFinalText(run.messages);

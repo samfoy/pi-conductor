@@ -668,6 +668,7 @@ function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
     transcriptPath: record.transcriptPath,
     finalPath: record.finalPath,
     sessionPath: record.sessionPath,
+    contextRetired: record.contextRetired,
     systemPrompt: record.systemPrompt,
     // Tool policy must survive re-adoption, or a resumed read-only persona
     // loses its exclusions (buildResumePiArgs reads these).

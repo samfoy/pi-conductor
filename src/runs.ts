@@ -30,6 +30,7 @@ import { applyEvent, qualifyModel } from "./event-handler.ts";
 import { filterParentContext, filterParentContextCompact } from "./context-filter.ts";
 import { resolveInheritContext } from "./inherit-context.ts";
 import { seedSessionFile, sessionHeaderCwd } from "./session-seed.ts";
+import { savedSessionRetired, contextRetirementNotice } from "./context-retirement.ts";
 import { isNonSubstantiveFinalMessage } from "./substance-check.ts";
 import { resolveOnCompleteHook, type HookCascadeInput } from "./hook-cascade.ts";
 import { resolveMaxTurns, resolveGraceTurns } from "./turn-limit.ts";
@@ -1757,7 +1758,8 @@ function runPiSubprocess(
       cwd: opts.cwd,
       shell: false,
       stdio: [stdinKind, "pipe", "pipe"],
-      env: buildSubagentEnv(),
+      // Worktrees may not contain the spawning project's untracked config.
+      env: { ...buildSubagentEnv(), CONDUCTOR_CONFIG_CWD: run.cwd },
     });
   } catch (e) {
     run.status = "failed";
@@ -1833,6 +1835,7 @@ function runPiSubprocess(
     }
     const rest = stdoutLines.end();
     if (rest.trim()) processLine(rest);
+    discoverContextRetirement(run, opts.sessionDir);
     // v0.11 on_complete_hook (slice 2): fire the resolved hook between
     // stream-drain and `applyCloseHandlerTerminal`. Gates are strict:
     // only on natural exit-zero close with a resolved hook AND when
@@ -1890,6 +1893,7 @@ function runPiSubprocess(
     // `done` with the correct (forceTerminate-set) state.
     if (!applyCloseHandlerTerminal(run, terminal, exitCode)) {
       discoverSessionPathIfMissing(run, opts.sessionDir);
+      await writeRecord(run);
       run.proc = undefined;
       try {
         proc.kill();
@@ -2183,8 +2187,11 @@ export type SendToRunResult =
  */
 export function validateSendable(
   run: Run,
+  behavior: StreamingBehavior = "auto",
 ): { ok: true } | { ok: false; reason: string } {
-  const r = resolveSendStrategy(run, "auto");
+  const notice = contextRetirementNotice({ cwd: run.cwd, contextRetired: run.contextRetired || savedSessionRetired(run.sessionPath) });
+  if (notice) return { ok: false, reason: `sub-agent ${run.id}: ${notice}` };
+  const r = resolveSendStrategy(run, behavior);
   if (r.strategy.kind === "rejected") {
     return { ok: false, reason: r.strategy.reason };
   }
@@ -2509,6 +2516,8 @@ export function sendToRun(
     };
   }
   const behavior: StreamingBehavior = opts.streamingBehavior ?? "auto";
+  const check = validateSendable(run, behavior);
+  if (!check.ok) return { kind: "rejected", reason: check.reason };
   const decision = resolveSendStrategy(run, behavior);
   if (decision.strategy.kind === "rejected") {
     return { kind: "rejected", reason: decision.strategy.reason };
@@ -2562,14 +2571,6 @@ export function sendToRun(
   }
 
   // spawn-resume: legacy fresh-subprocess path on a terminal run.
-  // Validate the session file exists on disk (validateSendable's
-  // post-strategy check, preserved verbatim from pre-slice-4).
-  if (run.sessionPath && !existsSync(run.sessionPath)) {
-    return {
-      kind: "rejected",
-      reason: `sub-agent ${run.id} session file is missing on disk: ${run.sessionPath}`,
-    };
-  }
   // resolveSendStrategy guarantees sessionPath is set on spawn-resume,
   // but TS can't see through a free-function call — capture it.
   const sessionPath = run.sessionPath as string;
@@ -3269,6 +3270,7 @@ export function forceTerminate(
     // `applyHookToTerminal` is a no-op and W5's assertion holds.
     run.hookProc = undefined;
   }
+  discoverContextRetirement(run);
   run.status =
     reason === "timeout" ? "timeout" :
     reason === "stalled" ? "killed" :
@@ -3380,10 +3382,19 @@ export async function reconcileRecord(
   errorMessage: string,
   finishedAt: number,
 ): Promise<void> {
+  discoverContextRetirement(run);
   run.status = status;
   run.finishedAt = finishedAt;
   run.errorMessage = errorMessage;
   await writeRecord(run);
+}
+
+function discoverContextRetirement(run: Run, sessionDir = join(dirname(run.recordPath), "session")): void {
+  const sessionPath = run.sessionPath ?? findSessionFile(sessionDir);
+  if (savedSessionRetired(sessionPath)) {
+    run.sessionPath = sessionPath;
+    run.contextRetired = true;
+  }
 }
 
 async function writeRecord(run: Run): Promise<void> {

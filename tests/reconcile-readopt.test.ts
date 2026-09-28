@@ -60,6 +60,7 @@ function fullRun(dir: string, over: Partial<Run> = {}): Run {
     transcriptPath: join(dir, "transcript.jsonl"),
     finalPath: join(dir, "final.md"),
     sessionPath: join(dir, "session.jsonl"),
+    contextRetired: false,
     systemPrompt: "You are builder.",
     tools: ["read", "bash"],
     excludeTools: ["edit"],
@@ -108,7 +109,7 @@ for (const [label, status, alive, expected] of [
       const dir = join(runsRoot, "builder-full");
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "session.jsonl"), "{}\n");
-      const record = toRunRecord(fullRun(dir, { status }));
+      const record = toRunRecord(fullRun(dir, { status, contextRetired: true }));
       const unset = Object.entries(record).filter(([, v]) => v === undefined).map(([k]) => k);
       assert.deepEqual(unset, [], "fixture sets every persisted field");
       writeFileSync(record.recordPath, JSON.stringify(record));

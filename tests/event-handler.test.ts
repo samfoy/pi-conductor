@@ -56,13 +56,13 @@ test("applyEvent: malformed event (no type field) returns kind=none", () => {
   assert.deepEqual(r, { kind: "none" });
 });
 
-test("applyEvent: agent_end finalizes with completed/0", () => {
+test("applyEvent: agent_end waits for settlement (overflow may follow)", () => {
   const run = makeRun();
   const r = applyEvent(run, { type: "agent_end" });
-  assert.deepEqual(r, { kind: "finalize", status: "completed", exitCode: 0 });
+  assert.deepEqual(r, { kind: "none" });
 });
 
-test("applyEvent: turn_end with no tool calls and stopReason=stop finalizes", () => {
+test("applyEvent: turn_end with no tool calls waits for settlement", () => {
   const run = makeRun();
   const event = {
     type: "turn_end",
@@ -73,7 +73,7 @@ test("applyEvent: turn_end with no tool calls and stopReason=stop finalizes", ()
     },
   };
   const r = applyEvent(run, event);
-  assert.deepEqual(r, { kind: "finalize", status: "completed", exitCode: 0 });
+  assert.deepEqual(r, { kind: "none" });
 });
 
 test("applyEvent: turn_end with tool calls does NOT finalize", () => {
@@ -639,3 +639,13 @@ test("applyEvent: message_end with role=assistant is NOT compacted", () => {
   assert.notDeepEqual(effect, { kind: "compacted" });
   assert.equal(effect.kind, "updated");
 });
+
+for (const stopReason of ["stop", "error", "aborted"]) {
+  test(`applyEvent: agent_settled finalizes from the last stop reason (${stopReason})`, () => {
+    const run = makeRun();
+    run.stopReason = stopReason;
+    assert.deepEqual(applyEvent(run, { type: "agent_settled" }), {
+      kind: "finalize", status: stopReason === "stop" ? "completed" : "failed", exitCode: stopReason === "stop" ? 0 : 1,
+    });
+  });
+}

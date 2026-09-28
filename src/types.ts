@@ -186,6 +186,8 @@ export interface ChainStep {
 }
 
 export interface ConductorConfig {
+  /** Retire managed child sessions on automatic context pressure. */
+  contextRetirement: boolean;
   defaultTimeoutMinutes: number;
   maxConcurrent: number;
   /**
@@ -357,6 +359,7 @@ export interface PersonaOverride {
 }
 
 export const DEFAULT_CONFIG: ConductorConfig = {
+  contextRetirement: true,
   defaultTimeoutMinutes: 60,
   maxConcurrent: 4,
   worktreeMode: "conductor",
@@ -801,6 +804,8 @@ export interface Run {
    * predating v0.5.
    */
   sessionPath?: string;
+  /** The saved child session retired under context pressure; preserved on resume. */
+  contextRetired?: boolean;
   /**
    * Persona system-prompt body captured at spawn time. Pi sessions do NOT
    * persist system prompts to disk, so any resume (`pi --session <path>`)
@@ -961,6 +966,8 @@ export interface RunRecord {
   transcriptPath: string;
   finalPath: string;
   sessionPath?: string;
+  /** The saved child session retired under context pressure; preserved on resume. */
+  contextRetired?: boolean;
   systemPrompt?: string;
   /** See `Run.tools`. */
   tools?: string[];
@@ -1078,6 +1085,7 @@ export function toRunRecord(r: Run): RunRecord {
     transcriptPath: r.transcriptPath,
     finalPath: r.finalPath,
     sessionPath: r.sessionPath,
+    contextRetired: r.contextRetired,
     systemPrompt: r.systemPrompt,
     tools: r.tools,
     excludeTools: r.excludeTools,
