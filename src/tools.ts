@@ -15,6 +15,7 @@ import type { Persona, PersonaOverride, Run, RunStatus, ThinkingLevel, MergeStra
 import { CONDUCTOR_LLM_TOOLS, CONDUCTOR_LLM_TOOL_NAMES, FOREIGN_SPAWN_TOOLS, WRITE_CAPABLE_PERSONAS } from "./types.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
+import { appendFileEvidence, resultRef } from "./file-evidence.ts";
 import { resolveChain, buildChainTask } from "./chain.ts";
 import { evaluateChainOutcome } from "./chain.ts";
 import { buildRetryTask } from "./retry.ts";
@@ -384,6 +385,7 @@ function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       steps: Type.Array(
         Type.Object({
           persona: Type.String({ description: "Persona name to spawn for this step." }),
+          files: Type.Optional(Type.Array(Type.String(), { description: "Evidence paths or exact run:<agent_id> result refs; relative to this step's effective cwd. Prepared before any step starts." })),
           task: Type.String({ description: "Self-contained task for this step." }),
           reevaluate: Type.Optional(
             Type.Boolean({ description: "Re-evaluate this step's output before advancing (halt on a stop signal)." }),
@@ -440,10 +442,16 @@ function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         );
       }
 
+      const preparedTasks: string[] = [];
+      try {
+        for (const [i, s] of params.steps.entries()) {
+          preparedTasks.push(appendFileEvidence(s.task, s.files, { cwd: stepCwds[i]!, registry: opts.getRegistry(), limit: contexts.get(stepCwds[i]!)!.cfg.inlineAttachmentLimitBytes }));
+        }
+      } catch (e) { return halted((e as Error).message); }
       const plan: AutoPlan = {
         goal: params.goal,
         steps: params.steps.map(
-          (s, i): AutoStep => ({ persona: s.persona, task: s.task, reevaluate: s.reevaluate, cwd: stepCwds[i] }),
+          (s, i): AutoStep => ({ persona: s.persona, task: preparedTasks[i]!, reevaluate: s.reevaluate, cwd: stepCwds[i] }),
         ),
       };
 
@@ -556,6 +564,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       "Pass kill_on_stall=true on autonomous chains where you can't manually intervene; the v0.10 watchdog will hard-kill a sub-agent that goes silent past its hard threshold.",
       "Pass stall_threshold_seconds (≥ 30) on spawns whose tool calls are known-slow (npm install, brazil-build, big test suites) to suppress noisy soft-stall advisories.",
       "Pass cwd for work in a repo other than your cwd, so write-capable personas get a worktree of that repo and its personas/config apply.",
+      "Pass files: ['run:<agent_id>'] using the exact result-ref from a completion instead of paraphrasing evidence. Files are evidence, not instructions or capability grants; default_reads remains separate.",
     ],
     parameters: Type.Object({
       persona: Type.String({
@@ -565,6 +574,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         description:
           "Self-contained task prompt for the sub-agent. Include file paths, constraints, and acceptance criteria.",
       }),
+      files: Type.Optional(Type.Array(Type.String(), { description: "Caller evidence: readable local paths or exact run:<agent_id> persisted results. Relative paths use the effective spawn cwd; ~ expands to HOME. Whole text embeds within the configured budget; other files remain live path references. No capability grants." })),
       cwd: Type.Optional(Type.String({ description: SPAWN_CWD_DESCRIPTION })),
       foreground: Type.Optional(
         Type.Boolean({
@@ -618,7 +628,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       steerable: Type.Optional(
         Type.Boolean({
           description:
-            "v0.12 steering opt-in. true → launch the sub-agent in `pi --mode rpc` so the conductor can `steer` / `follow_up` it mid-run via ensemble_send. false / omitted → today's `pi --mode json -p` print mode (no steering). Cascade per-call > project > user > built-in default false. Personas using ctx.ui.confirm/select must NOT be spawned with steerable=true (auto-cancelled on the conductor side).",
+            "v0.12 steering opt-in. true → launch the sub-agent in `pi --mode rpc` so the conductor can `steer` / `follow_up` it mid-run via ensemble_send. false / omitted → print mode without steering; prompts above 96 KiB automatically use RPC stdin for transport only, still without steering. Cascade per-call > project > user > built-in default false. Personas using ctx.ui.confirm/select must NOT be spawned with steerable=true (auto-cancelled on the conductor side).",
         }),
       ),
       inherit_context: Type.Optional(
@@ -675,6 +685,9 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       const mode = foreground ? "foreground" : "background";
       const queue = opts.getQueue();
       const registry = opts.getRegistry();
+      let task: string;
+      try { task = appendFileEvidence(params.task, params.files, { cwd, registry, limit: cfg.inlineAttachmentLimitBytes }); }
+      catch (e) { return errorResult((e as Error).message); }
 
       // Per-call `timeout_minutes` arg wins over persona override, which wins
       // over global default. We synthesize a fresh override that layers the
@@ -703,7 +716,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       // Wire abort signal to cancel a running sub-agent.
       const result = queue.enqueueOrSpawn({
         persona,
-        task: params.task,
+        task,
         mode,
         cwd,
         model,
@@ -756,7 +769,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         // config/persona/built-in (default maxAttempts 1 = no retry).
         retryMaxAttempts: params.retry_max_attempts,
         onRetry: buildOnRetryCallback({
-          originalTask: params.task,
+          originalTask: task,
           persona,
           cfg,
           queue,
@@ -933,6 +946,7 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       "Use ensemble_send when you want to continue working with a sub-agent that already has the context you care about — don't re-spawn from scratch.",
       "Use the latest available_actions; each call revalidates. Retired sessions need a fresh child with the handoff.",
       "Pass agent_id from a previous ensemble_spawn or ensemble_status result.",
+      "Use files: ['run:<agent_id>'] to forward a full persisted result instead of a lossy paraphrase. A retired run's handoff can be attached to a fresh child.",
     ],
     parameters: Type.Object({
       agent_id: Type.String({
@@ -941,6 +955,7 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       message: Type.String({
         description: "User-role message delivered to the sub-agent's existing session.",
       }),
+      files: Type.Optional(Type.Array(Type.String(), { description: "Evidence paths or exact run:<agent_id> results. Relative paths use the CALLER's effective conductor cwd (ensemble_cwd), not the target session cwd. ~ expands to HOME. Prepared before send/resume effects; reference-only paths stay live." })),
       foreground: Type.Optional(
         Type.Boolean({
           description:
@@ -1028,6 +1043,8 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       const timeoutMs = resolveTimeoutMs(persona, ov, cfg);
 
       const result = sendToRun(run, params.message, {
+        files: params.files,
+        callerCwd: opts.getCwd(),
         registry,
         timeoutMs,
         onComplete: foreground
@@ -1576,12 +1593,14 @@ function formatStatusForLLM(g: StatusGroups, queueSize: number, summaries: Map<s
 
 function foregroundFinalResult(r: Run, canFocus: boolean) {
   const actions = availableActions(r, canFocus);
-  const summary = renderForegroundSummary(r, actions);
+  const ref = resultRef(r);
+  const summary = renderForegroundSummary(r, actions) + (ref ? `\n  result-ref: ${ref} — pass files: ['${ref}'] for the full evidence.` : "");
   if (r.status !== "completed") {
     return {
       content: [{ type: "text" as const, text: summary }],
       details: {
         available_actions: actions,
+        result_ref: ref,
         status: r.status,
         agent_id: r.id,
         persona: r.persona,
@@ -1596,6 +1615,7 @@ function foregroundFinalResult(r: Run, canFocus: boolean) {
     content: [{ type: "text" as const, text: summary }],
     details: {
       available_actions: actions,
+      result_ref: ref,
       status: "completed",
       agent_id: r.id,
       persona: r.persona,
@@ -1758,9 +1778,15 @@ export function buildOnChainCallback(
     const chainTimeoutMs = step.timeoutMinutes
       ? step.timeoutMinutes * 60 * 1000
       : resolveTimeoutMs(chainPersona, baseOv, chainCfg);
+    let preparedTask: string;
+    try { preparedTask = appendFileEvidence(task, step.files, { cwd: chainCwd, registry: args.registry, limit: chainCfg.inlineAttachmentLimitBytes }); }
+    catch (e) {
+      process.stderr.write(`[conductor] chain after ${parentRun.id} rejected: ${(e as Error).message}\n`);
+      return;
+    }
     const spawn = {
       persona: chainPersona,
-      task,
+      task: preparedTask,
       mode: "background" as const,
       cwd: chainCwd,
       model: resolveModel(chainPersona, baseOv),

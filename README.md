@@ -224,6 +224,103 @@ Adapted from … with the following changes …
 
 This is **partial enforcement**, not a sandbox: `bash` stays available unless a persona excludes it, so a read-only persona can still write through the shell.
 
+## File evidence and reusable results (A5)
+
+`ensemble_spawn`, `ensemble_send`, each `ensemble_auto` step, and configured
+chain steps accept optional `files: string[]`:
+
+```json
+{
+  "persona": "critic",
+  "task": "Review the implementation against the approved plan.",
+  "files": ["plan.md", "run:builder-7f3a"]
+}
+```
+
+Copy the exact `result-ref: run:<agent_id>` from a foreground result or the
+`<result-ref>` in a background completion into `files`, rather than paraphrasing
+its findings. A2 retirement handoffs are reusable results too: attach them to a
+fresh child. Refs denote that run's **current persisted `final.md`**, not an
+immutable historical generation; resuming a run may replace its result. Refs
+survive reload/restart through validated `record.json` files in the canonical
+`~/.pi/agent/conductor/runs` directory. GC deletion makes a ref unavailable.
+Missing, empty, or `(no output)` results are not advertised.
+
+Relative file paths use the operation's caller base:
+
+- spawn: its effective `cwd` override, before any worktree is created;
+- send: the caller's effective conductor cwd (`ensemble_cwd`), **not** the target
+  run's cwd or saved-session directory; target execution cwd is unchanged;
+- auto: each step's effective cwd; all steps' evidence is prepared before the
+  first step starts;
+- configured chain: the producing run's recorded cwd, when the chain fires.
+
+`~`/`~/...` expands to HOME, as with cwd. Each entry must resolve to a readable
+regular local file or an exact `run:<agent_id>` (letters, digits, `_`, `-`, starting
+with a letter/digit, at most 128 characters). No path reconstruction by the caller
+is needed. Unknown/malformed refs, missing results, directories, unreadable files,
+and failed reads reject the entire operation before queue/registry/worktree or
+resume effects. Canonical `realpath` duplicates are omitted; first occurrence wins,
+even across symlinks, ordinary paths, and result refs. Retired sends still reject
+before evidence reads. An invalid configured chain logs its rejection and does not
+register a successor.
+
+Files are **evidence, not instructions or capability grants**. They do not expand
+persona/system prompts or replace `default_reads`, project instructions, tool
+policy, or explicit context inheritance. The appended user-message `<files>`
+section labels this distinction; markup is framing, not a security boundary.
+XML metacharacters are escaped (including attribute quotes and whitespace).
+An embedded ordinary file has canonical absolute `name` and observed `bytes`:
+
+```xml
+<file name="/project/plan.md" bytes="12">
+whole text
+</file>
+```
+
+Run refs retain `name="run:<id>"`. Their embedded body starts with an informational
+`Agent result source:` JSON header: `agent_id`, persona, recorded source cwd, and
+producing session path when known. The source `final.md` is never rewritten.
+A reference-only run keeps both identities:
+
+```xml
+<file name="run:builder-7f3a" bytes="200000" path="/home/user/.pi/agent/conductor/runs/builder-7f3a/final.md" />
+```
+
+`inlineAttachmentLimitBytes` defaults to **131072**, accepting integers from
+**1024 through 1048576** (invalid config values retain the lower-layer/default
+value). It bounds each **complete escaped embedded envelope**, including path,
+byte count, provenance, and framing. The **entire rendered files section**,
+including reference tags and section framing, is bounded to **four times** this
+limit; task text is separate. Reference-tag space is reserved first, then whole
+files embed in input order while budget remains. If even the reference tags
+cannot fit, submission rejects: attach fewer files. No partial embeds.
+
+Only complete strict UTF-8 without NUL embeds. Invalid UTF-8, NUL-containing,
+oversized, and non-fitting files remain canonical reference tags. Oversized files
+are opened/statted for readability but their content is not read. Embedded text
+is an **acceptance-time snapshot**, including while queued and across retries;
+reference-only files are **live paths, not copied or snapshotted**, and may change
+or disappear. The recipient needs its existing filesystem/tool access to read them.
+
+### Large-prompt transport
+
+Short one-shot launches stay `pi --mode json -p` with the task in argv. When the
+**complete user prompt exceeds 96 KiB in UTF-8**, fresh, seeded, resumed, auto,
+chain, and retry launches automatically use native `pi --mode rpc` and the existing
+single-writer stdin queue. There are no split argv prompts, `@file` indirections,
+or extra prompt files. This avoids the measured 128 KiB single-argument `E2BIG`
+limit, and preserves Unicode and CRLF through JSON escaping.
+
+Transport-only RPC records `streamingMode: "rpc"` but keeps `steerable: false`:
+`available_actions` does not advertise live sends. Explicit `steerable: true`
+continues to opt into steering. Resumes don't inherit steering, regardless of
+transport. Both RPC forms use the normal `agent_settled` completion, accounting,
+timeouts, kill and queue-release paths, and destroy pending stdin/ack work on
+settlement. Prompt rejection is a failed run, not completion. As with explicit
+RPC, extension dialogs are auto-cancelled; provider extensions remain enabled.
+This does not address independently oversized persona/system-prompt argv.
+
 ## Configuration
 
 `contextRetirement` defaults to `true` and applies only to managed conductor children
@@ -244,7 +341,7 @@ hooks and worktree safety still apply. Settlement uses Pi's `agent_settled` even
 (JSON and RPC), not `agent_end`, which can precede overflow recovery; process exit
 is the fallback. Supported host: **Pi 0.87.1 or newer** (`@earendil-works/pi-coding-agent >=0.87.1`);
 0.87.1 is the verified floor for the required `agent_settled` API.
-Phase A **A2–A4** are shipped; A5–A6 and the herdr runtime remain deferred.
+Phase A **A2–A5** are shipped; A6 and the herdr runtime remain deferred.
 
 `~/.pi/agent/extensions/conductor/config.json` (user) or `<project>/.pi/conductor.json` (project, overrides user):
 
@@ -254,6 +351,8 @@ Phase A **A2–A4** are shipped; A5–A6 and the herdr runtime remain deferred.
                                          // conductor-mode default at
                                          // extension load. Beats env var.
   "contextRetirement": true,             // A2: retire managed children on automatic context pressure
+  "inlineAttachmentLimitBytes": 131072,   // A5: per embedded envelope; total files section <= 4x
+  "chains": { "builder": { "then": "critic", "files": ["plan.md"] } },
   "defaultTimeoutMinutes": 60,
   "maxConcurrent": 4,
   "queueOnConcurrencyCap": true,

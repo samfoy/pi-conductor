@@ -13,6 +13,7 @@ import {
   forceTerminate,
   RunRegistry,
   spawnRun,
+  prepareSpawnEvidence,
   type SpawnOptions,
 } from "./runs.ts";
 import type { Run, SpawnMode } from "./types.ts";
@@ -89,6 +90,7 @@ export class SpawnQueue {
   enqueueOrSpawn(
     opts: QueuedSpawnOptions & { registry?: RunRegistry },
   ): SpawnOrQueueResult {
+    opts = prepareSpawnEvidence(opts, opts.registry ?? this.registry);
     const { registry: callerRegistry, ...spawn } = opts;
     const registry = callerRegistry ?? this.registry;
     const slotsFree = this.maxConcurrent - registry.countActive();

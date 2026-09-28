@@ -165,6 +165,8 @@ export interface PersonaLoadError {
  * successfully, the conductor auto-spawns `then` as a background run.
  */
 export interface ChainStep {
+  /** Evidence paths, resolved against the producing run's cwd when the chain fires. */
+  files?: string[];
   /** Persona name to spawn after the source persona completes. */
   then: string;
   /**
@@ -188,6 +190,8 @@ export interface ChainStep {
 export interface ConductorConfig {
   /** Retire managed child sessions on automatic context pressure. */
   contextRetirement: boolean;
+  /** Complete rendered file limit; total evidence is bounded to four times this. */
+  inlineAttachmentLimitBytes: number;
   defaultTimeoutMinutes: number;
   maxConcurrent: number;
   /**
@@ -360,6 +364,7 @@ export interface PersonaOverride {
 
 export const DEFAULT_CONFIG: ConductorConfig = {
   contextRetirement: true,
+  inlineAttachmentLimitBytes: 131072,
   defaultTimeoutMinutes: 60,
   maxConcurrent: 4,
   worktreeMode: "conductor",
@@ -690,14 +695,7 @@ export interface Run {
    */
   steerable?: boolean;
 
-  /**
-   * v0.12: derived from `steerable`. Either `"print"` (today's
-   * default) or `"rpc"`. Stored separately from `steerable` because
-   * it captures *what mode the subprocess is actually running in*
-   * — useful for diagnostics, doctor surface, and the tiny chance
-   * that future cascade layers invalidate `steerable` post-spawn.
-   * No production path produces `"rpc"` until slice 2.
-   */
+  /** Actual wire transport. A5 may select RPC for a large prompt while steerable stays false. */
   streamingMode?: "print" | "rpc";
 
   /**

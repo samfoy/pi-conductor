@@ -237,12 +237,7 @@ test("RpcStdinQueue: destroy(reason) rejects all pending writes with the supplie
 test(
   "RpcStdinQueue: multi-line strings in payload values are escaped by JSON.stringify and accepted (slice 6 fix)",
   async () => {
-    // Slice 2 originally rejected raw `\n` in any string field. That
-    // broke slice 3's initial-prompt injection because
-    // `buildSubAgentPrompt` always produces multi-line text. The
-    // slice 6 live integration tests caught the bug. Removed
-    // 2026-05-28 as part of slice 6 closure. CR rejection survives
-    // as a defense against accidental CRLF tooling.
+    // Payload newlines are JSON escapes, not protocol record separators.
     const w = makeFakeWritable();
     const q = new RpcStdinQueue(asWritable(w));
 
@@ -273,40 +268,18 @@ test(
     // inside the message is JSON-escaped to backslash-n).
     assert.equal(objPortion.includes("\n"), false, "object portion is single-line wire-safe");
 
-    // CR rejection still fires as a tripwire.
-    let errCR: Error | undefined;
-    try {
-      await q.enqueue({ id: "B", type: "prompt", message: "hello\rworld" });
-      assert.fail("expected rejection on embedded CR");
-    } catch (e) {
-      errCR = e as Error;
+    // JSON.stringify escapes CR too; evidence must preserve CRLF unchanged.
+    for (const cmd of [
+      { id: "B", type: "prompt", message: "hello\r\nworld" },
+      { id: "C", type: "prompt", message: "ok", nested: [{ text: "data\rbreak" }] },
+    ]) {
+      await q.enqueue(cmd);
+      const wire = w.chunks.at(-1)!;
+      assert.equal(wire.includes("\r"), false);
+      assert.deepEqual(JSON.parse(wire), cmd);
     }
-    assert.ok(errCR);
-    assert.match(errCR!.message, /carriage return|raw CR|CR/i);
-    assert.equal(w.chunks.length, 1, "rejected CR payload must not reach the stream");
-
-    // Nested CR in array values still trips the recursive scan.
-    let errNested: Error | undefined;
-    try {
-      await q.enqueue({
-        id: "C",
-        type: "prompt",
-        message: "ok",
-        images: [{ content: "data\rbreak" } as unknown as never],
-      });
-      assert.fail("expected rejection on nested embedded CR");
-    } catch (e) {
-      errNested = e as Error;
-    }
-    assert.ok(errNested);
-    assert.match(errNested!.message, /CR|carriage/i);
-    assert.equal(w.chunks.length, 1, "nested CR rejected");
-
-    // After all the rejections, a clean payload still goes through:
-    // the queue is not poisoned by prior validation failures.
     await q.enqueue({ id: "D", type: "prompt", message: "clean" });
-    assert.equal(w.chunks.length, 2);
-    assert.match(w.chunks[1], /"id":"D"/);
+    assert.equal(w.chunks.length, 4);
 
     q.destroy("end of test");
   },

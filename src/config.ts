@@ -104,6 +104,10 @@ function mergeConfig(base: ConductorConfig, raw: unknown): ConductorConfig {
     out.defaultMode = r.defaultMode;
   }
   if (typeof r.contextRetirement === "boolean") out.contextRetirement = r.contextRetirement;
+  if (typeof r.inlineAttachmentLimitBytes === "number" && Number.isInteger(r.inlineAttachmentLimitBytes) &&
+      r.inlineAttachmentLimitBytes >= 1024 && r.inlineAttachmentLimitBytes <= 1048576) {
+    out.inlineAttachmentLimitBytes = r.inlineAttachmentLimitBytes;
+  }
   if (typeof r.defaultSteerable === "boolean") {
     // v0.12 steering: project/user-config layer for the steerable
     // cascade. Mirrors `defaultKillOnStall` placement intent

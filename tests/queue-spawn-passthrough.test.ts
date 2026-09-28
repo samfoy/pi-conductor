@@ -262,6 +262,7 @@ function everyOption(): Required<QueuedOptions> {
   return {
     persona: builderPersona(),
     task: "drift",
+    files: [],
     mode: "foreground",
     cwd: "/drift/cwd",
     model: "prov/drift-model",
@@ -310,7 +311,9 @@ test("SpawnQueue: every SpawnOptions key survives the queue round-trip to the sp
   assert.equal(spawned.length, 1, "the drain spawned the queued builder");
   const got = spawned[0]!;
   const keys = Object.keys(opts) as Array<keyof QueuedOptions>;
-  const lost = keys.filter((k) => k !== "mode" && got[k] !== opts[k]);
+  // Evidence is consumed at acceptance, not forwarded for a second read at drain.
+  assert.equal(got.files, undefined);
+  const lost = keys.filter((k) => k !== "mode" && k !== "files" && got[k] !== opts[k]);
   assert.deepEqual(lost, [], "every option reaches the spawner by identity");
   assert.equal(got.mode, "background", "a queued spawn starts in the background");
   assert.equal(got.preAllocatedId, r.kind === "queued" ? r.pending.id : "", "the pre-allocated id is used");

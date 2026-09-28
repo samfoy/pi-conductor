@@ -12,12 +12,17 @@ export const CWD_ENTRY_TYPE = "conductor-cwd";
 
 export type CwdResolution = { ok: true; cwd: string } | { ok: false; error: string };
 
+/** Shared local-path expansion for cwd and evidence; preserve path whitespace. */
+export function resolveLocalPath(raw: string, base: string): string {
+  const expanded = raw === "~" ? homedir() : raw.startsWith("~/") ? join(homedir(), raw.slice(2)) : raw;
+  return resolve(base, expanded);
+}
+
 /** Expand `~`, resolve relative paths against `base`, and require an existing directory. */
 export function resolveCwdArg(input: string, base: string): CwdResolution {
   const raw = input.trim();
   if (!raw) return { ok: false, error: "cwd must be a non-empty path" };
-  const expanded = raw === "~" ? homedir() : raw.startsWith("~/") ? join(homedir(), raw.slice(2)) : raw;
-  const cwd = resolve(base, expanded);
+  const cwd = resolveLocalPath(raw, base);
   let isDir: boolean;
   try {
     isDir = statSync(cwd).isDirectory();

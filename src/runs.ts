@@ -22,6 +22,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node
 import { mkdir, writeFile, appendFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { StringDecoder } from "node:string_decoder";
+import { appendFileEvidence } from "./file-evidence.ts";
 import { RpcStdinQueue } from "./rpc-stdin.ts";
 import { dirname, join, resolve, sep } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -422,8 +423,8 @@ export function buildSubAgentPrompt(persona: Persona, task: string, place?: SubA
  *   - `kind: "resume"` — continues an existing session at `sessionPath`.
  *     System prompt is NOT re-injected (the existing session already has it).
  *
- * In both modes the prompt becomes the trailing positional argument and is
- * delivered to the sub-agent as a user-role message.
+ * Short one-shot prompts use the trailing positional argument; explicit RPC
+ * or prompts above 96 KiB use stdin. Both deliver a whole user-role message.
  *
  * Both modes take the tool policy: `tools` → `--tools <csv>` (omitted when
  * undefined) and `excludeTools` → `--exclude-tools <csv>`, always unioned
@@ -493,14 +494,10 @@ export type PiArgsOptions = PiToolPolicyArgs &
     });
 
 export function buildPiArgs(opts: PiArgsOptions): string[] {
-  // v0.12 steering: argv shape is mode-bifurcated. Print mode
-  // (`steerable: false`, today's only path) emits `--mode json -p`
-  // and the trailing prompt positional. RPC mode (`steerable: true`)
-  // emits `--mode rpc`, omits `-p`, AND omits the prompt positional
-  // — the prompt is delivered as the first `RpcCommand` line on
-  // stdin (slice 3 wires this; slice 2 only emits the argv).
-  // See `docs/v0.12-steering-design.md` §4.2.
-  const args: string[] = opts.steerable
+  // Keep short one-shot prompts in argv. Larger UTF-8 prompts use native RPC stdin
+  // below the host's 128 KiB single-argument limit, without granting live steering.
+  const rpc = opts.steerable || Buffer.byteLength(opts.prompt, "utf8") > 96 * 1024;
+  const args: string[] = rpc
     ? ["--mode", "rpc"]
     : ["--mode", "json", "-p"];
   if (opts.kind === "fresh") {
@@ -532,7 +529,7 @@ export function buildPiArgs(opts: PiArgsOptions): string[] {
   }
   // Trailing prompt positional. RPC mode injects the prompt over
   // stdin (slice 3); print mode passes it as the final argv slot.
-  if (!opts.steerable) {
+  if (!rpc) {
     args.push(opts.prompt);
   }
   return args;
@@ -1015,6 +1012,7 @@ export class RunRegistry {
 // ── Spawn ────────────────────────────────────────────────────────────
 
 export interface SpawnOptions {
+  files?: readonly string[];
   registry: RunRegistry;
   persona: Persona;
   task: string;
@@ -1262,14 +1260,16 @@ export async function attachSpawnedProc(
   await writeRecord(run);
 }
 
-/**
- * Spawn a sub-agent. Returns the Run immediately (status="running").
- * Resolves the returned promise when the run reaches a terminal status.
- *
- * Foreground/background semantics are the caller's choice — both run the
- * same subprocess; the difference is only how the caller awaits.
- */
+/** Prepare once before queue/registry/worktree effects; drain and retry use the resulting task. */
+export function prepareSpawnEvidence<T extends { task: string; files?: readonly string[]; cwd: string }>(opts: T, registry: RunRegistry): T {
+  if (opts.files === undefined) return opts;
+  const task = appendFileEvidence(opts.task, opts.files, { cwd: opts.cwd, registry, limit: loadConfigWithErrors(opts.cwd).config.inlineAttachmentLimitBytes });
+  return { ...opts, task, files: undefined };
+}
+
+/** Spawn immediately; foreground/background callers await the same terminal promise. */
 export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
+  opts = prepareSpawnEvidence(opts, opts.registry);
   const id = opts.preAllocatedId ?? allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
   const dir = runDir(id);
   mkdirSync(dir, { recursive: true });
@@ -1526,11 +1526,8 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // the argv shape produced above. Slice 3 hard-coded `false`; the
     // dead value was a known TODO.
     steerable: opts.steerable === true,
-    // v0.12 slice 4 — when steerable, the prompt is delivered as the
-    // first `prompt` RPC command on stdin (not as the trailing argv
-    // positional, which RPC mode ignores). `runPiSubprocess` enqueues
-    // it via `RpcStdinQueue` once the subprocess is up.
-    initialPrompt: opts.steerable === true ? prompt : undefined,
+    // The transport selector may choose RPC even when steering was not requested.
+    initialPrompt: prompt,
     // v0.11 on_complete_hook (slice 2): resolve at spawn time from the
     // current config layers + persona frontmatter. Per-call args land
     // in slice 3; for slice 2 the per-call layer is always undefined.
@@ -1604,28 +1601,9 @@ interface RunPiSubprocessOpts {
   onComplete?: (run: Run) => void;
   /** When provided, finalize() will populate run.sessionPath from this dir. */
   sessionDir?: string;
-  /**
-   * v0.12 slice 3 — declare the spawn's mode explicitly. Required
-   * (not optional) so the argv shape and stdio shape can never
-   * diverge: every caller declares its mode and `runPiSubprocess`
-   * threads it into both the subprocess `stdio[0]` branch and the
-   * post-spawn `Run.streamingMode` stamp.
-   *
-   * `steerable: false` is today's print-mode default (`--mode json -p`,
-   * stdin = "ignore", trailing positional prompt). `steerable: true`
-   * is the new RPC path (`--mode rpc`, stdin = "pipe", queue attached,
-   * initial prompt injected over stdin).
-   *
-   * No production caller passes `true` until slice 4's per-call
-   * cascade lands on `ensemble_spawn`; slice 3 wires the plumbing.
-   */
+  /** Explicit control opt-in. Transport is independently selected by buildPiArgs. */
   steerable: boolean;
-  /**
-   * v0.12 slice 3 — prompt body to inject as the first RPC `prompt`
-   * command on stdin. Required when `steerable: true`; ignored when
-   * `steerable: false` (print mode passes the prompt as the trailing
-   * argv positional inside `piArgs`).
-   */
+  /** Complete user prompt; injected through the FIFO if argv selects RPC. */
   initialPrompt?: string;
   /**
    * v0.11 on_complete_hook (slice 2): pre-resolved hook to invoke after
@@ -1744,12 +1722,9 @@ function runPiSubprocess(
 ): Promise<Run> {
   const invocation = getPiInvocation(piArgs);
 
-  // v0.12 slice 3 — stdio[0] branches on steerable. Print mode keeps
-  // the pre-v0.12 "ignore" shape; RPC mode opens a writable pipe so
-  // the conductor can send commands (initial prompt, steers,
-  // follow-ups, ext-ui-cancel envelopes) over stdin via the
-  // `RpcStdinQueue`. See `docs/v0.12-steering-design.md` §4.2.
-  const stdinKind: "ignore" | "pipe" = opts.steerable ? "pipe" : "ignore";
+  // The argv builder owns transport selection; steering remains an independent opt-in.
+  const rpc = piArgs[1] === "rpc";
+  const stdinKind: "ignore" | "pipe" = rpc ? "pipe" : "ignore";
   run.onComplete = opts.onComplete;
 
   let proc: ChildProcess;
@@ -1780,20 +1755,14 @@ function runPiSubprocess(
   }
   void attachSpawnedProc(run, proc);
 
-  // v0.12 slice 3 — stamp streamingMode + steerable on the Run
-  // immediately so the resolver and watchdog see a stable post-spawn
-  // shape. Slice 4's per-call cascade will set Run.steerable upstream
-  // before this point too; stamping again is idempotent.
   stampSpawnStreamingMode(run, opts.steerable === true);
+  run.streamingMode = rpc ? "rpc" : "print";
 
-  // v0.12 slice 3 — attach the single-writer stdin queue and inject
-  // the initial `prompt` command per design §4.2 "Initial prompt
-  // injection" + plan §5 Q1 resolution (immediate write; trust the
-  // kernel pipe buffer; v0.5 `sendToRun` precedent at runs.ts:1210).
-  // Fire-and-forget enqueue: the response arrives later as a
-  // `response` line (slice 4 wires the ack).
-  if (opts.steerable === true && proc.stdin) {
+  // All stdin writes share the existing FIFO, including the initial large prompt.
+  if (rpc && proc.stdin) {
     const queue = new RpcStdinQueue(proc.stdin);
+    // Writable emits error even when the write callback observes it (early-exit EPIPE).
+    proc.stdin.on("error", (e: Error) => queue.destroy(e.message));
     run.rpcStdinQueue = queue;
     if (typeof opts.initialPrompt === "string" && opts.initialPrompt.length > 0) {
       void queue
@@ -1802,11 +1771,10 @@ function runPiSubprocess(
           type: "prompt",
           message: opts.initialPrompt,
         })
-        .catch(() => {
-          // EPIPE / ECANCELED here means the subprocess exited
-          // before we delivered the initial prompt. Nothing to
-          // recover — the close handler will finalize the run as
-          // failed when the subprocess emits its exit code.
+        .catch((e: Error) => {
+          if (finalized) return;
+          run.errorMessage = `initial prompt delivery failed: ${e.message}`;
+          void finalize("failed", 1);
         });
     }
   }
@@ -1829,6 +1797,12 @@ function runPiSubprocess(
   const finalize = async (terminal: RunStatus, exitCode?: number) => {
     if (finalized) return;
     finalized = true;
+    run.rpcStdinQueue?.destroy("settled");
+    for (const ack of run.pendingAcks?.values() ?? []) {
+      clearTimeout(ack.timer);
+      ack.reject(new Error("sub-agent settled before acknowledgement"));
+    }
+    run.pendingAcks?.clear();
     if (run.timeoutTimer) {
       clearTimeout(run.timeoutTimer);
       run.timeoutTimer = undefined;
@@ -1986,6 +1960,12 @@ function runPiSubprocess(
       return;
     }
 
+    if (event.type === "response" && event.id === `init-${run.id}` && event.success === false) {
+      run.errorMessage = `initial prompt rejected: ${event.error ?? "unknown error"}`;
+      void finalize("failed", 1);
+      return;
+    }
+
     // Pure state-machine logic lives in applyEvent (see src/event-handler.ts).
     // This wrapper handles I/O (transcript append) and listener notification.
     const effect = applyEvent(run, event);
@@ -2068,6 +2048,9 @@ function mapFromRegistry(r: RunRegistry): Map<string, Run> {
 // ── ensemble_send ───────────────────────────────────────────────────────
 
 export interface SendToRunOptions {
+  files?: readonly string[];
+  /** Required with files: the caller's effective cwd, never the target session directory. */
+  callerCwd?: string;
   registry: RunRegistry;
   timeoutMs: number;
   onUpdate?: (run: Run) => void;
@@ -2179,7 +2162,7 @@ export function capabilitiesFor(run: Run) {
   const exited = run.proc?.exitCode != null || run.proc?.signalCode != null;
   return {
     pause: !!run.proc?.pid && !exited,
-    liveSend: run.streamingMode === "rpc" && !!run.rpcStdinQueue?.writable && !exited,
+    liveSend: run.streamingMode === "rpc" && run.steerable !== false && !!run.rpcStdinQueue?.writable && !exited,
   };
 }
 
@@ -2310,7 +2293,7 @@ export function resolveSendStrategy(
 ): ResolvedSendStrategy {
   // running
   if (run.status === "running") {
-    const isRpc = run.streamingMode === "rpc";
+    const isRpc = run.streamingMode === "rpc" && run.steerable !== false;
     if (!isRpc) {
       return {
         strategy: {
@@ -2559,7 +2542,7 @@ export function sendToRun(
   message: string,
   opts: SendToRunOptions,
 ): SendToRunResult {
-  const trimmed = message.trim();
+  let trimmed = message.trim();
   if (!trimmed) {
     return {
       kind: "rejected",
@@ -2569,6 +2552,12 @@ export function sendToRun(
   const behavior: StreamingBehavior = opts.streamingBehavior ?? "auto";
   const check = validateSendable(run, behavior);
   if (!check.ok) return { kind: "rejected", reason: check.reason };
+  if (opts.files !== undefined) {
+    if (!opts.callerCwd) return { kind: "rejected", reason: "files require an explicit callerCwd" };
+    try {
+      trimmed = appendFileEvidence(trimmed, opts.files, { cwd: opts.callerCwd, registry: opts.registry, limit: loadConfigWithErrors(opts.callerCwd).config.inlineAttachmentLimitBytes });
+    } catch (e) { return { kind: "rejected", reason: (e as Error).message }; }
+  }
   const decision = resolveSendStrategy(run, behavior);
   if (decision.strategy.kind === "rejected") {
     return { kind: "rejected", reason: decision.strategy.reason };
@@ -2674,16 +2663,9 @@ export function sendToRun(
     // Re-discover sessionPath on finalize — the file path is stable but the
     // mtime updates, which lets future sends still find it.
     sessionDir: dirname(sessionPath),
-    // v0.12 steering: spawn-resume on a terminal run is always
-    // print-mode by design (§4.4 archived-run compat / Q10 lock).
-    // The live RPC paths (`rpc-steer` / `rpc-follow-up`) ride the
-    // existing subprocess via `Run.rpcStdinQueue` and never hit this
-    // branch — see the early-return in `sendToRun` above. This
-    // argument is hard-coded `false` because `pi --session` resume
-    // does not promise to re-enter RPC mode (the original subprocess
-    // is gone; no stickiness across the boundary).
+    // Resume does not inherit live steering; large messages still select RPC transport.
     steerable: false,
-    initialPrompt: undefined,
+    initialPrompt: trimmed,
     // v0.11 on_complete_hook (slice 2): re-resolve at every terminal
     // transition so config changes between spawn and re-fire are
     // honored (§4.6: each terminal is a fresh gate). Per-call layer

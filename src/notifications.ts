@@ -13,6 +13,7 @@
  * what left raw XML in the transcript until 2026-06.
  */
 
+import { resultRef } from "./file-evidence.ts";
 import { compactEnvelopeBlock } from "./compaction-hook.ts";
 import { contextRetirementNotice } from "./context-retirement.ts";
 import { availableActions, type RunAction, elapsedStr, formatUsage, getFinalText, sendsSinceSpawn } from "./runs.ts";
@@ -133,6 +134,8 @@ export function formatCompletionNotification(run: Run, actions: RunAction[] = av
   const lines: string[] = [];
   lines.push("```xml");
   lines.push("<sub-agent-completed>");
+  const ref = resultRef(run);
+  if (ref) lines.push(`  <result-ref>${ref}</result-ref>`);
   lines.push(`  <agent-id>${run.id}</agent-id>`);
   lines.push(`  <persona>${run.persona}</persona>`);
   lines.push(`  <status>${run.status}</status>`);
@@ -419,6 +422,8 @@ export function buildCompletionMessage(run: Run, canFocus = false): Notification
   }
 
   const notes: NotificationNote[] = [];
+  const ref = resultRef(run);
+  if (ref) notes.push({ slot: "muted", text: `result-ref: ${ref} — pass files: ['${ref}'] for the full evidence.` });
   const retirement = contextRetirementNotice(run);
   if (retirement) {
     stats.push("session retired; use a fresh child with the handoff");

@@ -24,43 +24,6 @@
 
 import type { Writable } from "node:stream";
 
-/**
- * Recursively scan a value for any string field containing a raw
- * CR. Returns `"\r"` on first hit, or null. Bounded by `MAX_DEPTH`
- * to defeat cycle bombs; cycles otherwise are caught by
- * `JSON.stringify` later.
- *
- * Why CR-only (was LF + CR pre-v0.12-slice-6): `JSON.stringify`
- * always escapes a string-value `\n` to the JSON two-char escape
- * `\\n`, so the wire byte-stream never carries a raw LF inside a
- * payload string — pi's `attachJsonlLineReader` framing is safe.
- * Slice 2 was over-defensive: it rejected raw `\n` in input strings
- * AND broke slice 3's initial-prompt-injection path, because
- * `buildSubAgentPrompt` always produces multi-line text. The slice 6
- * live integration tests caught it (no `response` line ever arrived
- * because every steerable spawn's initial prompt was silently
- * rejected by the queue's pre-check).
- *
- * CR (`\r`) is still rejected because pi's reader strips a trailing
- * `\r` before parsing; a CR inside a payload string is unusual and
- * not produced by any production caller, so we keep that defense as
- * a tripwire for accidental CRLF tooling. Drop if a real use case
- * appears.
- */
-function findRawCr(value: unknown, depth = 0): boolean {
-  if (depth > 16) return false;
-  if (typeof value === "string") return value.includes("\r");
-  if (value === null || typeof value !== "object") return false;
-  if (Array.isArray(value)) {
-    for (const item of value) if (findRawCr(item, depth + 1)) return true;
-    return false;
-  }
-  for (const key of Object.keys(value as Record<string, unknown>)) {
-    if (findRawCr((value as Record<string, unknown>)[key], depth + 1)) return true;
-  }
-  return false;
-}
-
 /** A single FIFO entry — one enqueued command. */
 interface QueueEntry {
   /** Pre-stringified JSON line (without the trailing newline). */
@@ -94,8 +57,8 @@ export class RpcStdinQueue {
    * (with `cause` set to the underlying `Error`) or if the queue has
    * been destroyed.
    *
-   * Embedded LF / CR characters in the stringified payload are
-   * rejected synchronously (LF-only framing invariant).
+   * Payload CR/LF are JSON-escaped, preserving whole evidence without
+   * introducing protocol record boundaries.
    */
   enqueue(cmd: object): Promise<void> {
     return new Promise<void>((resolve, reject) => {
@@ -104,29 +67,7 @@ export class RpcStdinQueue {
         return;
       }
 
-      // CR-only framing tripwire. `JSON.stringify` escapes a
-      // string-value `\n` to `\\n` (the JSON two-char escape) so the
-      // wire byte-stream never carries a raw LF inside a payload —
-      // pi's `attachJsonlLineReader` framing is safe regardless. We
-      // keep CR rejection as a defense against accidental CRLF
-      // tooling (pi's reader strips trailing `\r` before parsing,
-      // but mid-payload CR is still suspicious).
-      //
-      // Slice 2 originally rejected raw `\n` too; that broke slice 3's
-      // initial-prompt injection because `buildSubAgentPrompt` always
-      // produces multi-line text. The slice 6 live integration tests
-      // caught it (no `response` line ever arrived because every
-      // steerable spawn's initial prompt was rejected here). Removed
-      // 2026-05-28 as part of slice 6 closure.
-      if (findRawCr(cmd)) {
-        reject(
-          new Error(
-            "embedded carriage return in command payload string field; LF-only framing forbids raw CR",
-          ),
-        );
-        return;
-      }
-
+      // JSON.stringify escapes CR and LF in payloads; only the appended LF frames a record.
       let json: string;
       try {
         json = JSON.stringify(cmd);
