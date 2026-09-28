@@ -61,6 +61,7 @@ function fullRun(dir: string, over: Partial<Run> = {}): Run {
     finalPath: join(dir, "final.md"),
     sessionPath: join(dir, "session.jsonl"),
     contextRetired: false,
+    pendingAsk: { askId: "ask-test", question: "Continue?", evidence: "" },
     systemPrompt: "You are builder.",
     tools: ["read", "bash"],
     excludeTools: ["edit"],
@@ -94,7 +95,7 @@ function fullRun(dir: string, over: Partial<Run> = {}): Run {
 }
 
 // Fields reconcile deliberately rewrites when it reclassifies a record.
-const REWRITTEN_ON_RECLASSIFY = new Set(["status", "finishedAt", "errorMessage"]);
+const REWRITTEN_ON_RECLASSIFY = new Set(["status", "finishedAt", "errorMessage", "pendingAsk"]);
 
 // ── (c) buildOrphanRun carries every persisted field ────────────────
 

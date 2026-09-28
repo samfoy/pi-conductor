@@ -40,6 +40,7 @@ function toRunRecord(r) {
     finalPath: r.finalPath,
     sessionPath: r.sessionPath,
     contextRetired: r.contextRetired,
+    pendingAsk: r.pendingAsk,
     systemPrompt: r.systemPrompt,
     tools: r.tools,
     excludeTools: r.excludeTools,
@@ -59,6 +60,9 @@ function toRunRecord(r) {
     maxTurns: r.maxTurns,
     graceTurns: r.graceTurns
   };
+}
+function isSettled(s) {
+  return s === "blocked" || isTerminal(s);
 }
 function isTerminal(s) {
   return TERMINAL_STATUSES.includes(s);
@@ -465,6 +469,7 @@ import { join as join16, dirname as dirname10 } from "node:path";
 
 // src/status-glyph.ts
 var STATUS_GLYPH = {
+  blocked: "?",
   queued: "\u25CC",
   running: "\u25CF",
   paused: "\u23F8",
@@ -649,6 +654,9 @@ function parseToolList(value, field) {
 }
 function effectiveExcludeTools(excludeTools) {
   return [.../* @__PURE__ */ new Set([...excludeTools ?? [], ...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS])];
+}
+function effectiveAllowTools(tools) {
+  return tools === void 0 ? void 0 : [.../* @__PURE__ */ new Set([...tools, "ask_owner"])];
 }
 function requireString(fm, key) {
   const v = fm[key];
@@ -1354,6 +1362,24 @@ function applyEvent(run, event) {
   }
   if (e.type === "extension_ui_request") {
     return handleExtensionUiRequest(run, e);
+  }
+  if (e.type === "tool_execution_start" && e.toolName === "ask_owner") {
+    const assistant = [...run.messages].reverse().find((m) => m.role === "assistant");
+    const calls = assistant?.role === "assistant" ? assistant.content.filter((p) => p.type === "toolCall") : [];
+    if (!run.pendingAsk && calls.length === 1 && calls[0].name === "ask_owner" && calls[0].id === e.toolCallId && typeof e.args?.question === "string" && e.args.question.trim()) {
+      run.askExecution = { askId: e.toolCallId, question: e.args.question.trim() };
+    }
+    return NONE;
+  }
+  if (e.type === "tool_execution_end" && e.toolName === "ask_owner") {
+    const execution = run.askExecution;
+    run.askExecution = void 0;
+    const details = e.result?.details;
+    if (execution && e.isError === false && execution.askId === e.toolCallId && details?.askId === e.toolCallId && details.question === execution.question && typeof details.evidence === "string" && !run.pendingAsk) {
+      run.pendingAsk = { ...execution, evidence: details.evidence };
+      return UPDATED;
+    }
+    return NONE;
   }
   if (e.type === "agent_settled") {
     const failed = run.stopReason === "error" || run.stopReason === "aborted";
@@ -2165,6 +2191,7 @@ var PROBES = [
   }
 ];
 function classifyFailure(sig) {
+  if (sig.terminal === "blocked") return void 0;
   switch (sig.terminationReason) {
     case "timeout":
       return "timeout";
@@ -2381,6 +2408,7 @@ function classifyRecord(record, isAlive, _now, selfPid = process.pid, isParentAl
   if (parentAlive && !isOurs) {
     return "skip-foreign";
   }
+  if (status === "blocked") return "restore-blocked";
   if (status === "queued") {
     return "reclassify-failed-queued";
   }
@@ -2490,6 +2518,10 @@ async function reconcileOrphansAtStartup(deps) {
       );
       const dryRun = deps.dryRun === true;
       switch (verdict) {
+        case "restore-blocked":
+          if (!dryRun) deps.registry.register(buildOrphanRun(record, "blocked"));
+          await checkSessionResumability(record, result);
+          break;
         case "skip-terminal":
           break;
         case "skip-foreign":
@@ -2598,7 +2630,7 @@ function buildOrphanRun(record, status) {
     // Restore ownership identity so downstream ownership checks
     // (e.g. forceTerminate's foreign-run refusal) see the original
     // spawning host/slot rather than treating the orphan as unowned.
-    parentPid: record.parentPid,
+    parentPid: status === "blocked" ? process.pid : record.parentPid,
     parentSessionId: record.parentSessionId,
     parentStartTime: record.parentStartTime,
     exitCode: record.exitCode,
@@ -2617,6 +2649,7 @@ function buildOrphanRun(record, status) {
     finalPath: record.finalPath,
     sessionPath: record.sessionPath,
     contextRetired: record.contextRetired,
+    pendingAsk: status === "running" || status === "blocked" ? record.pendingAsk : void 0,
     systemPrompt: record.systemPrompt,
     // Tool policy must survive re-adoption, or a resumed read-only persona
     // loses its exclusions (buildResumePiArgs reads these).
@@ -2651,6 +2684,7 @@ async function reclassifyOnDisk(opts) {
   const updated = {
     ...opts.record,
     status: opts.nextStatus,
+    pendingAsk: void 0,
     finishedAt: opts.now,
     errorMessage: opts.errorMessage
   };
@@ -2910,7 +2944,8 @@ function buildPiArgs(opts) {
   }
   if (opts.model) args.push("--model", opts.model);
   if (opts.thinking) args.push("--thinking", opts.thinking);
-  if (opts.tools && opts.tools.length > 0) args.push("--tools", opts.tools.join(","));
+  const tools = effectiveAllowTools(opts.tools);
+  if (tools && tools.length > 0) args.push("--tools", tools.join(","));
   args.push("--exclude-tools", effectiveExcludeTools(opts.excludeTools).join(","));
   if (opts.kind === "fresh") {
     args.push("--append-system-prompt", opts.systemPrompt);
@@ -3098,7 +3133,7 @@ var RunRegistry = class {
   countActive() {
     let n = 0;
     for (const r of this.runs.values()) {
-      if (!isTerminal(r.status) && r.status !== "queued") n++;
+      if (!isSettled(r.status) && r.status !== "queued") n++;
     }
     return n;
   }
@@ -3109,7 +3144,7 @@ var RunRegistry = class {
   countActiveBy(personaNames) {
     let n = 0;
     for (const r of this.runs.values()) {
-      if (!isTerminal(r.status) && r.status !== "queued" && personaNames.has(r.persona)) {
+      if (!isSettled(r.status) && r.status !== "queued" && personaNames.has(r.persona)) {
         n++;
       }
     }
@@ -3476,7 +3511,7 @@ function runPiSubprocess(run, piArgs, opts) {
       shell: false,
       stdio: [stdinKind, "pipe", "pipe"],
       // Worktrees may not contain the spawning project's untracked config.
-      env: { ...buildSubagentEnv(), CONDUCTOR_CONFIG_CWD: run.cwd }
+      env: { ...buildSubagentEnv(), CONDUCTOR_CONFIG_CWD: run.cwd, CONDUCTOR_RUN_ID: run.id }
     });
   } catch (e) {
     run.status = "failed";
@@ -3493,6 +3528,7 @@ function runPiSubprocess(run, piArgs, opts) {
     return Promise.resolve(run);
   }
   void attachSpawnedProc(run, proc);
+  const processClosed = new Promise((resolve5) => proc.once("close", () => resolve5()));
   stampSpawnStreamingMode(run, opts.steerable === true);
   run.streamingMode = rpc ? "rpc" : "print";
   if (rpc && proc.stdin) {
@@ -3537,7 +3573,45 @@ function runPiSubprocess(run, piArgs, opts) {
     }
     const rest = stdoutLines.end();
     if (rest.trim()) processLine(rest);
+    discoverSessionPathIfMissing(run, opts.sessionDir);
     discoverContextRetirement(run, opts.sessionDir);
+    if (run.pendingAsk && !isTerminal(run.status)) {
+      if (terminal === "completed" && run.sessionPath && !contextRetirementNotice(run)) {
+        try {
+          proc.kill();
+        } catch {
+        }
+        const killFallback = setTimeout(() => {
+          try {
+            proc.kill("SIGKILL");
+          } catch {
+          }
+        }, 2e3);
+        await processClosed;
+        clearTimeout(killFallback);
+        if (isTerminal(run.status)) {
+          donePromiseResolve(run);
+          return;
+        }
+        run.status = "blocked";
+        run.finishedAt = Date.now();
+        run.exitCode = exitCode;
+        run.proc = void 0;
+        run.pid = void 0;
+        run.failureClass = void 0;
+        await writeRecord(run);
+        opts.registry.notify(run);
+        try {
+          opts.onComplete?.(run);
+        } catch {
+        }
+        donePromiseResolve(run);
+        return;
+      }
+      run.pendingAsk = void 0;
+      terminal = "failed";
+      run.errorMessage = "Owner question cannot be resumed: session missing, retired, or subprocess failed. Use a fresh child with the transcript.";
+    }
     if (terminal === "completed" && exitCode === 0 && opts.resolvedHook && !isTerminal(run.status)) {
       try {
         terminal = await applyHookToTerminal(
@@ -3725,6 +3799,7 @@ function observeRunActions(run, canFocus = false) {
 function runActionError(run, action, observed) {
   if (action === "focus") return observed.canFocus ? void 0 : "Focused stream requires terminal UI (TUI mode).";
   if (action === "send" || action === "steer" || action === "follow_up") {
+    if (run.pendingAsk && run.status !== "blocked") return `sub-agent ${run.id} is settling an owner question; wait for sub-agent-asked before answering.`;
     if (observed.retirementNotice) return `sub-agent ${run.id}: ${observed.retirementNotice}`;
   }
   if (action !== "send" && !observed.owned) {
@@ -3795,6 +3870,10 @@ function resolveSendStrategy(run, behavior = "auto") {
         reason: `sub-agent ${run.id} is queued and has not started yet; wait for it to start before sending.`
       }
     };
+  }
+  if (run.status === "blocked") {
+    if (!run.pendingAsk) return { strategy: { kind: "rejected", reason: `sub-agent ${run.id} has no valid pending owner question; inspect the transcript before abandoning this assignment.` } };
+    if (behavior === "steer" || behavior === "follow_up") return { strategy: { kind: "rejected", reason: `sub-agent ${run.id} is blocked on an owner question. Answer with auto or resume to continue its saved session.` } };
   }
   if (behavior === "steer") {
     return {
@@ -3942,7 +4021,7 @@ function sendToRun(run, message, opts) {
     }
     const done2 = new Promise((resolve5) => {
       const unsub = opts.registry.onChange((r) => {
-        if (r.id === run.id && isTerminal(r.status)) {
+        if (r.id === run.id && isSettled(r.status)) {
           unsub();
           resolve5(r);
         }
@@ -3954,6 +4033,16 @@ function sendToRun(run, message, opts) {
   const sessionPath = run.sessionPath;
   const worktreeBlocker = restoreResumeWorktree(run, () => readFileSync8(sessionPath, "utf8"));
   if (worktreeBlocker) return { kind: "rejected", reason: worktreeBlocker };
+  const pendingAsk = run.pendingAsk;
+  if (pendingAsk) trimmed = `<owner-answer ask-id=${JSON.stringify(pendingAsk.askId)}>
+Question: ${pendingAsk.question}
+Answer: ${trimmed}
+Continue the original assignment, not a new task.
+</owner-answer>`;
+  run.pendingAsk = void 0;
+  run.askExecution = void 0;
+  run.failureClass = void 0;
+  run.nonSubstantiveFinal = void 0;
   run.status = "running";
   run.finishedAt = void 0;
   run.exitCode = void 0;
@@ -4283,6 +4372,8 @@ function forceTerminate(run, reason, registry, onComplete, killGroup = defaultKi
     }, 2e3).unref();
     run.hookProc = void 0;
   }
+  run.pendingAsk = void 0;
+  run.askExecution = void 0;
   discoverContextRetirement(run);
   run.status = reason === "timeout" ? "timeout" : reason === "stalled" ? "killed" : reason === "aborted" ? "aborted" : (
     // v0.17: turn-limit termination
@@ -4658,6 +4749,7 @@ function decideForEntry(entry, config, now, orphanThresholdMs) {
       reason: "running but fresh; awaiting orphan TTL"
     };
   }
+  if (entry.status === "blocked") return { kind: "keep", id: entry.id, reason: "unresolved owner question" };
   if (entry.malformed) {
     return {
       kind: "keep",
@@ -5062,7 +5154,9 @@ function buildHistoryReport(deps, opts) {
     if (archived) {
       lines.push("      (archived; resume creates new transcript)");
     }
-    if (r.status === "aborted") {
+    if (r.status === "blocked") {
+      lines.push(`      ? ${r.pendingAsk?.askId}: ${r.pendingAsk?.question} \u2014 answer via ensemble_send`);
+    } else if (r.status === "aborted") {
       const limitNote = r.maxTurns ? ` (limit: ${r.maxTurns} turns)` : "";
       lines.push(`      \u2192 turn limit reached${limitNote}`);
     } else if (r.status === "completed") {
@@ -6207,6 +6301,7 @@ async function runSendCmd(opts, ctx, arg) {
   });
   const persona = resolved.personas.get(run.persona);
   const timeoutMs = resolveTimeoutMs(persona, baseOv, cfg);
+  const answering = run.pendingAsk;
   const result = sendToRun(run, message, {
     registry,
     timeoutMs,
@@ -6247,7 +6342,7 @@ async function runSendCmd(opts, ctx, arg) {
     return;
   }
   ctx.ui.notify(
-    `${agentId} resuming via fresh subprocess (streaming_behavior=${behavior})`,
+    answering ? `${agentId} answering ${answering.askId}: ${answering.question}` : `${agentId} resuming via fresh subprocess (streaming_behavior=${behavior})`,
     "info"
   );
 }
@@ -6587,7 +6682,7 @@ function runWatchdogStatus(opts, ctx) {
 function buildWatchdogStatusReport(args) {
   const { registry, watchdogConfig, defaultKillOnStall, enabled, now } = args;
   const active = registry.list().filter(
-    (r) => r.status !== "completed" && r.status !== "failed" && r.status !== "killed" && r.status !== "timeout" && r.status !== "hook_failed" && r.status !== "paused" && r.status !== "queued"
+    (r) => r.status !== "blocked" && r.status !== "completed" && r.status !== "failed" && r.status !== "killed" && r.status !== "timeout" && r.status !== "hook_failed" && r.status !== "paused" && r.status !== "queued"
   );
   const lines = [];
   lines.push("## Watchdog");
@@ -6747,7 +6842,7 @@ Resolve manually in the worktree and run /conductor worktree merge ${runId} agai
 
 // src/tools.ts
 init_types();
-import { Type } from "@sinclair/typebox";
+import { Type as Type2 } from "@sinclair/typebox";
 import { readFileSync as readFileSync11, existsSync as existsSync13 } from "node:fs";
 import { dirname as dirname11 } from "node:path";
 
@@ -6825,6 +6920,7 @@ function nextAutoAction(state, cfg) {
   return { kind: "spawn", step: state.plan.steps[state.cursor], index: state.cursor };
 }
 function classifyStepOutcome(outcome, originalTask, attempt, policy) {
+  if (outcome.status === "blocked") return { kind: "escalate", reason: "step blocked on an owner question; answer via ensemble_send" };
   if (outcome.status === "completed") return { kind: "success" };
   const cls = outcome.failureClass ?? "unknown";
   if (shouldRetry(cls, attempt, policy)) {
@@ -6935,6 +7031,33 @@ function finalize(state) {
 // src/steerable.ts
 function collapseSteerableCascade(inputs) {
   return inputs.perCall ?? inputs.project ?? inputs.user ?? inputs.defaultValue;
+}
+
+// src/ask-owner.ts
+import { Type } from "@sinclair/typebox";
+function registerAskOwner(pi, getRegistry, env) {
+  let outstanding = false;
+  pi.registerTool({
+    name: "ask_owner",
+    label: "Ask owner",
+    description: "Ask one blocking question required to continue your current assignment. Call alone as the only tool in this assistant turn. Ends your turn; the owner answers via ensemble_send in your saved session. Not a progress or generic messaging channel.",
+    parameters: Type.Object({ question: Type.String(), files: Type.Optional(Type.Array(Type.String())) }),
+    async execute(id, params, signal, _update, ctx) {
+      if (!env.CONDUCTOR_RUN_ID || ctx.isIdle() || signal?.aborted || !ctx.sessionManager.getSessionFile()) throw new Error("ask_owner requires an active managed child context with a saved session");
+      if (outstanding) throw new Error("An owner question is already outstanding");
+      if (typeof params.question !== "string" || !params.question.trim()) throw new Error("question must contain non-whitespace text");
+      if (ctx.hasPendingMessages()) throw new Error("Cannot ask with queued messages; process the owner messages first");
+      const last = [...ctx.sessionManager.getBranch()].reverse().find((e) => e.type === "message" && e.message.role === "assistant");
+      const calls = last?.type === "message" && last.message.role === "assistant" ? last.message.content.filter((p) => p.type === "toolCall") : [];
+      if (calls.length !== 1 || calls[0].name !== "ask_owner" || calls[0].id !== id) throw new Error("Call ask_owner alone as the only tool call in the assistant turn");
+      const config = loadConfig(env.CONDUCTOR_CONFIG_CWD || ctx.cwd);
+      if (config.contextRetirement && hasRetirement(ctx.sessionManager.getEntries(), ctx.sessionManager.getSessionId())) throw new Error("Session retired; return a handoff for a fresh child instead of asking for an impossible continuation");
+      const question = params.question.trim();
+      const evidence = appendFileEvidence("", params.files, { cwd: ctx.cwd, registry: getRegistry(), limit: config.inlineAttachmentLimitBytes });
+      outstanding = true;
+      return { content: [{ type: "text", text: "Assignment blocked. Your owner will answer this question via ensemble_send; stop and wait." }], details: { askId: id, question, evidence }, terminate: true };
+    }
+  });
 }
 
 // src/tools.ts
@@ -7174,7 +7297,7 @@ function padOrTruncate(left, right, width) {
 init_types();
 
 // src/transcript-classify.ts
-var HEADER_GLYPHS = /* @__PURE__ */ new Set(["\u25CC", "\u25CF", "\u23F8", "\u2713", "\u2717", "\u25A0", "\u23F1", "\u2297", "\u2298", "\u23F9"]);
+var HEADER_GLYPHS = /* @__PURE__ */ new Set(["?", "\u25CC", "\u25CF", "\u23F8", "\u2713", "\u2717", "\u25A0", "\u23F1", "\u2297", "\u2298", "\u23F9"]);
 function classifyLine(line) {
   if (line.length > 0 && /^─+$/.test(line)) {
     return { kind: "ruler" };
@@ -7226,6 +7349,7 @@ function statusColorSlot(status) {
     case "merge_conflict":
     case "aborted":
       return "error";
+    case "blocked":
     case "paused":
       return "warning";
     case "queued":
@@ -7445,12 +7569,12 @@ function installPostDetachCompletionListener(run, registry, pushNotification) {
   const unsub = registry.onChange((r) => {
     if (!active) return;
     if (r.id !== run.id) return;
-    if (!isTerminal(r.status)) return;
+    if (!isSettled(r.status)) return;
     active = false;
     unsub();
     pushNotification(r);
   });
-  if (active && isTerminal(run.status)) {
+  if (active && isSettled(run.status)) {
     active = false;
     unsub();
     pushNotification(run);
@@ -7464,8 +7588,11 @@ function installPostDetachCompletionListener(run, registry, pushNotification) {
 
 // src/tools.ts
 var FOREGROUND_STREAM_INTERVAL_MS = 50;
-function registerTools(pi, opts) {
-  if (process.env.CONDUCTOR_SUBAGENT === "1") return;
+function registerTools(pi, opts, env = process.env) {
+  if (env.CONDUCTOR_SUBAGENT === "1") {
+    if (env.CONDUCTOR_DEPTH !== "2") registerAskOwner(pi, opts.getRegistry, env);
+    return;
+  }
   registerListTool(pi, opts);
   registerStatusTool(pi, opts);
   registerSpawnTool(pi, opts);
@@ -7491,9 +7618,9 @@ function registerCwdTool(pi, opts) {
     promptGuidelines: [
       "Prefer a per-call `cwd` on ensemble_spawn for one-off repo work; use ensemble_cwd when a whole stretch of work targets another repo."
     ],
-    parameters: Type.Object({
-      path: Type.Optional(Type.String({ description: "New default cwd. Must be an existing directory." })),
-      reset: Type.Optional(Type.Boolean({ description: "true clears the override and returns to the session's start cwd." }))
+    parameters: Type2.Object({
+      path: Type2.Optional(Type2.String({ description: "New default cwd. Must be an existing directory." })),
+      reset: Type2.Optional(Type2.Boolean({ description: "true clears the override and returns to the session's start cwd." }))
     }),
     async execute(_id, params) {
       const r = opts.cwdControl?.change({ path: params.path, reset: params.reset }) ?? {
@@ -7518,7 +7645,7 @@ function registerListTool(pi, opts) {
       "Call ensemble_list when you need to know which personas are installed before spawning one.",
       "The returned descriptions are short \u2014 read the persona body via /conductor show <name> if you need the full system prompt."
     ],
-    parameters: Type.Object({}),
+    parameters: Type2.Object({}),
     async execute(_id, _params) {
       const cwd = opts.getCwd();
       const cfg = loadConfig(cwd);
@@ -7547,8 +7674,8 @@ function registerRecommendTool(pi, opts) {
       "Call ensemble_recommend before spawning when you're unsure which persona historically succeeds on this kind of task.",
       "The score is a HINT, not a mandate \u2014 a persona with no history simply won't appear. Prefer the canonical chain shapes when memory is empty."
     ],
-    parameters: Type.Object({
-      task: Type.String({ description: "The task description to score personas for." })
+    parameters: Type2.Object({
+      task: Type2.String({ description: "The task description to score personas for." })
     }),
     async execute(_id, params) {
       const scores = scoreForShape(params.task);
@@ -7573,9 +7700,9 @@ function registerStatusTool(pi, opts) {
       "Use ensemble_status when you need to know which sub-agents are alive (e.g. before deciding whether to spawn another).",
       "Background sub-agents push completion notifications automatically; you don't need to poll."
     ],
-    parameters: Type.Object({
-      agent_id: Type.Optional(
-        Type.String({ description: "Filter to a specific agent_id; omit for all." })
+    parameters: Type2.Object({
+      agent_id: Type2.Optional(
+        Type2.String({ description: "Filter to a specific agent_id; omit for all." })
       )
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -7600,6 +7727,7 @@ function registerStatusTool(pi, opts) {
           }
         ],
         details: {
+          blocked: groups.blocked.map(summary),
           running: groups.running.map(summary),
           queued: groups.queued.map(summary),
           paused: groups.paused.map(summary),
@@ -7632,10 +7760,10 @@ function awaitTerminal(registry, runId) {
     resolveFn = resolve5;
   });
   unsub = registry.onChange((r) => {
-    if (r.id === runId && isTerminal(r.status)) settle(r);
+    if (r.id === runId && isSettled(r.status)) settle(r);
   });
   const cur = registry.list().find((r) => r.id === runId);
-  if (cur && isTerminal(cur.status)) settle(cur);
+  if (cur && isSettled(cur.status)) settle(cur);
   return { promise, settle };
 }
 function registerAutoTool(pi, opts) {
@@ -7649,29 +7777,29 @@ function registerAutoTool(pi, opts) {
       "Always set max_steps; add budget_usd for cost-sensitive runs. The executor stops at the first non-retryable failure or stop verdict and reports what completed.",
       "Set reevaluate:true on a step whose successor should only run if the step's output doesn't signal a blocker."
     ],
-    parameters: Type.Object({
-      goal: Type.String({ description: "One-line description of the overall goal (for the run summary)." }),
-      steps: Type.Array(
-        Type.Object({
-          persona: Type.String({ description: "Persona name to spawn for this step." }),
-          files: Type.Optional(Type.Array(Type.String(), { description: "Evidence paths or exact run:<agent_id> result refs; relative to this step's effective cwd. Prepared before any step starts." })),
-          task: Type.String({ description: "Self-contained task for this step." }),
-          reevaluate: Type.Optional(
-            Type.Boolean({ description: "Re-evaluate this step's output before advancing (halt on a stop signal)." })
+    parameters: Type2.Object({
+      goal: Type2.String({ description: "One-line description of the overall goal (for the run summary)." }),
+      steps: Type2.Array(
+        Type2.Object({
+          persona: Type2.String({ description: "Persona name to spawn for this step." }),
+          files: Type2.Optional(Type2.Array(Type2.String(), { description: "Evidence paths or exact run:<agent_id> result refs; relative to this step's effective cwd. Prepared before any step starts." })),
+          task: Type2.String({ description: "Self-contained task for this step." }),
+          reevaluate: Type2.Optional(
+            Type2.Boolean({ description: "Re-evaluate this step's output before advancing (halt on a stop signal)." })
           ),
-          cwd: Type.Optional(Type.String({ description: SPAWN_CWD_DESCRIPTION }))
+          cwd: Type2.Optional(Type2.String({ description: SPAWN_CWD_DESCRIPTION }))
         }),
         { minItems: 1, description: "Ordered plan steps." }
       ),
-      max_steps: Type.Integer({
+      max_steps: Type2.Integer({
         minimum: 1,
         description: "Hard cap on total spawns (original + retries). The executor halts when reached."
       }),
-      budget_usd: Type.Optional(
-        Type.Number({ minimum: 0, description: "Optional USD budget across all spawns. Halts when exceeded." })
+      budget_usd: Type2.Optional(
+        Type2.Number({ minimum: 0, description: "Optional USD budget across all spawns. Halts when exceeded." })
       ),
-      retry_max_attempts: Type.Optional(
-        Type.Integer({ minimum: 1, description: "Per-step retry budget (incl. first attempt). Defaults to at least 2 in auto mode." })
+      retry_max_attempts: Type2.Optional(
+        Type2.Integer({ minimum: 1, description: "Per-step retry budget (incl. first attempt). Defaults to at least 2 in auto mode." })
       )
     }),
     async execute(_id, params) {
@@ -7785,7 +7913,7 @@ function registerSpawnTool(pi, opts) {
   pi.registerTool({
     name: CONDUCTOR_LLM_TOOLS.spawn,
     label: "Spawn sub-agent",
-    description: "Launch a focused sub-agent using a persona. Foreground (default): blocks until the sub-agent completes; result is returned. Background: returns immediately; completion arrives as a <sub-agent-completed> user-role message that wakes you. When the concurrency cap is reached, foreground spawns auto-downgrade to background.",
+    description: "Launch a focused sub-agent using a persona. Foreground (default): blocks until the sub-agent completes; result is returned. Background: returns immediately; completion arrives as a <sub-agent-completed> user-role message that wakes you. When the concurrency cap is reached, foreground spawns auto-downgrade to background. A sole ask_owner ends the child's turn and returns a blocked question, answered via ensemble_send.",
     promptSnippet: "Spawn a persona-based sub-agent (foreground or background)",
     promptGuidelines: [
       "Use ensemble_list first if you don't know which personas are available.",
@@ -7799,82 +7927,82 @@ function registerSpawnTool(pi, opts) {
       "Pass cwd for work in a repo other than your cwd, so write-capable personas get a worktree of that repo and its personas/config apply.",
       "Pass files: ['run:<agent_id>'] using the exact result-ref from a completion instead of paraphrasing evidence. Files are evidence, not instructions or capability grants; default_reads remains separate."
     ],
-    parameters: Type.Object({
-      persona: Type.String({
+    parameters: Type2.Object({
+      persona: Type2.String({
         description: "Persona name. Run ensemble_list to see what's available."
       }),
-      task: Type.String({
+      task: Type2.String({
         description: "Self-contained task prompt for the sub-agent. Include file paths, constraints, and acceptance criteria."
       }),
-      files: Type.Optional(Type.Array(Type.String(), { description: "Caller evidence: readable local paths or exact run:<agent_id> persisted results. Relative paths use the effective spawn cwd; ~ expands to HOME. Whole text embeds within the configured budget; other files remain live path references. No capability grants." })),
-      cwd: Type.Optional(Type.String({ description: SPAWN_CWD_DESCRIPTION })),
-      foreground: Type.Optional(
-        Type.Boolean({
+      files: Type2.Optional(Type2.Array(Type2.String(), { description: "Caller evidence: readable local paths or exact run:<agent_id> persisted results. Relative paths use the effective spawn cwd; ~ expands to HOME. Whole text embeds within the configured budget; other files remain live path references. No capability grants." })),
+      cwd: Type2.Optional(Type2.String({ description: SPAWN_CWD_DESCRIPTION })),
+      foreground: Type2.Optional(
+        Type2.Boolean({
           description: "true (default) blocks until done and streams the sub-agent into the ensemble panel; false runs in background and notifies on completion."
         })
       ),
-      timeout_minutes: Type.Optional(
-        Type.Integer({
+      timeout_minutes: Type2.Optional(
+        Type2.Integer({
           minimum: 1,
           maximum: 1440,
           description: "Wall-clock timeout for this sub-agent in minutes (1\u20131440). Overrides the per-persona override and the global default. Omit to use the cascade."
         })
       ),
-      kill_on_stall: Type.Optional(
-        Type.Boolean({
+      kill_on_stall: Type2.Optional(
+        Type2.Boolean({
           description: "v0.10 watchdog opt-in. true \u2192 the sub-agent is auto-killed if it goes silent past the hard-stall threshold (default 600s). false / omitted \u2192 advisory-only; the wall-clock timeout still applies. Recommend true on autonomous chains; default off for interactive sessions."
         })
       ),
-      stall_threshold_seconds: Type.Optional(
-        Type.Integer({
+      stall_threshold_seconds: Type2.Optional(
+        Type2.Integer({
           minimum: 30,
           description: "v0.10 watchdog soft-stall threshold for this spawn, in seconds (\u2265 30). Hard threshold scales with the same ratio as conductor defaults (typically 5\xD7). Override when the persona's expected tool calls are legitimately slow (npm install, brazil-build, large test suites). Default: 120s."
         })
       ),
-      on_complete_hook: Type.Optional(
-        Type.String({
+      on_complete_hook: Type2.Optional(
+        Type2.String({
           description: 'v0.11 quality-gate hook. Shell command run after the sub-agent reaches a terminal status; non-zero exit flips the run to `hook_failed`. Empty string (`""`) is the explicit-disable sentinel \u2014 short-circuits the cascade so this spawn runs no hook even if project / user config or persona frontmatter declares one. Cascade: per-call > project > user > persona-frontmatter.'
         })
       ),
-      on_complete_hook_timeout_seconds: Type.Optional(
-        Type.Integer({
+      on_complete_hook_timeout_seconds: Type2.Optional(
+        Type2.Integer({
           minimum: 1,
           description: "v0.11 quality-gate hook timeout (seconds). Read paired with `on_complete_hook`; a runaway hook past this budget is killed and the run flips to `hook_failed`. Default 300 when omitted."
         })
       ),
-      merge_strategy: Type.Optional(
-        Type.Union(
-          [Type.Literal("squash"), Type.Literal("merge"), Type.Literal("none")],
+      merge_strategy: Type2.Optional(
+        Type2.Union(
+          [Type2.Literal("squash"), Type2.Literal("merge"), Type2.Literal("none")],
           {
             description: 'v0.14 worktree auto-merge strategy. When set (and the persona has a worktree), the worktree branch is merged back to the base branch on `completed`. `"squash"` squashes all commits into one; `"merge"` creates a merge commit; `"none"` skips merge-back. Cascade: per-call > project > user > persona-frontmatter > built-in default (`"squash"` for builder/simplifier, `"none"` for others). Omit to use the cascade.'
           }
         )
       ),
-      steerable: Type.Optional(
-        Type.Boolean({
+      steerable: Type2.Optional(
+        Type2.Boolean({
           description: "v0.12 steering opt-in. true \u2192 launch the sub-agent in `pi --mode rpc` so the conductor can `steer` / `follow_up` it mid-run via ensemble_send. false / omitted \u2192 print mode without steering; prompts above 96 KiB automatically use RPC stdin for transport only, still without steering. Cascade per-call > project > user > built-in default false. Personas using ctx.ui.confirm/select must NOT be spawned with steerable=true (auto-cancelled on the conductor side)."
         })
       ),
-      inherit_context: Type.Optional(
-        Type.Union(
+      inherit_context: Type2.Optional(
+        Type2.Union(
           [
-            Type.Literal("none"),
-            Type.Literal("filtered"),
-            Type.Literal("filtered_compact"),
-            Type.Literal("full")
+            Type2.Literal("none"),
+            Type2.Literal("filtered"),
+            Type2.Literal("filtered_compact"),
+            Type2.Literal("full")
           ],
           {
             description: "Item 12 candidate #3 \u2014 per-call override for the persona's inherit_context frontmatter. Useful when the parent conductor's narration is contaminating the sub-agent's identity (see docs/backlog.md item 12 for the witnessed builder-4gsl bleed). Cascade: per-call > project config persona override > user config persona override > persona frontmatter. Default: persona frontmatter."
           }
         )
       ),
-      chain: Type.Optional(
-        Type.Boolean({
+      chain: Type2.Optional(
+        Type2.Boolean({
           description: "v0.15 chains: set to false to skip automatic chain spawns for this run even if a chain is configured in conductor.json for the persona. Default: true (chains apply when configured)."
         })
       ),
-      retry_max_attempts: Type.Optional(
-        Type.Integer({
+      retry_max_attempts: Type2.Optional(
+        Type2.Integer({
           minimum: 1,
           description: "v0.18 classified retry: total attempts (including the first) for this spawn. 1 = no retry (default). When >1, a non-completed terminal whose failure classifies as retryable (environment/stall/timeout/test by default) auto-respawns the same persona with a diagnostic-augmented task, up to this budget. Deterministic-cause failures (syntax/logic) and permission failures are never retried. Cascade: per-call > project > user > persona-frontmatter > built-in."
         })
@@ -7996,7 +8124,7 @@ function registerSpawnTool(pi, opts) {
         const downgradedNote = result.downgraded ? "Foreground spawn auto-downgraded to background because the concurrency cap is full. The sub-agent is queued; completion will arrive as a <sub-agent-completed> notification." : "Spawn queued; completion will arrive as a <sub-agent-completed> notification.";
         if (result.downgraded) {
           const unsub = registry.onChange((run) => {
-            if (run.id === p.id && isTerminalStatus(run.status)) {
+            if (run.id === p.id && isSettled(run.status)) {
               unsub();
               opts.pushCompletionNotification(run);
             }
@@ -8103,7 +8231,7 @@ function registerSendTool(pi, opts) {
   pi.registerTool({
     name: CONDUCTOR_LLM_TOOLS.send,
     label: "Send to sub-agent",
-    description: "Continue an existing sub-agent's session with a new user-role message. send continues a saved session in a new process; steer/follow_up deliver over live RPC. Live RPC sends await acknowledgement only. Use the latest available_actions; each call revalidates. Foreground (default): blocks until the sub-agent's reply arrives. Background: returns immediately; reply arrives as a <sub-agent-completed> notification.",
+    description: "Continue an existing sub-agent's session with a new user-role message, or answer its outstanding ask_owner question. send continues a saved session in a new process; steer/follow_up deliver over live RPC. Live RPC sends await acknowledgement only. Use the latest available_actions; each call revalidates. Foreground (default): blocks until the sub-agent's reply arrives. Background: returns immediately; completion or a blocking owner question arrives automatically.",
     promptSnippet: "Send a follow-up message to an existing sub-agent",
     promptGuidelines: [
       "Use ensemble_send when you want to continue working with a sub-agent that already has the context you care about \u2014 don't re-spawn from scratch.",
@@ -8111,55 +8239,55 @@ function registerSendTool(pi, opts) {
       "Pass agent_id from a previous ensemble_spawn or ensemble_status result.",
       "Use files: ['run:<agent_id>'] to forward a full persisted result instead of a lossy paraphrase. A retired run's handoff can be attached to a fresh child."
     ],
-    parameters: Type.Object({
-      agent_id: Type.String({
+    parameters: Type2.Object({
+      agent_id: Type2.String({
         description: "agent_id of the sub-agent to send to. Get it from ensemble_spawn or ensemble_status."
       }),
-      message: Type.String({
+      message: Type2.String({
         description: "User-role message delivered to the sub-agent's existing session."
       }),
-      files: Type.Optional(Type.Array(Type.String(), { description: "Evidence paths or exact run:<agent_id> results. Relative paths use the CALLER's effective conductor cwd (ensemble_cwd), not the target session cwd. ~ expands to HOME. Prepared before send/resume effects; reference-only paths stay live." })),
-      foreground: Type.Optional(
-        Type.Boolean({
+      files: Type2.Optional(Type2.Array(Type2.String(), { description: "Evidence paths or exact run:<agent_id> results. Relative paths use the CALLER's effective conductor cwd (ensemble_cwd), not the target session cwd. ~ expands to HOME. Prepared before send/resume effects; reference-only paths stay live." })),
+      foreground: Type2.Optional(
+        Type2.Boolean({
           description: "true (default) blocks until the sub-agent finishes its reply; false runs in background and notifies on completion."
         })
       ),
-      timeout_minutes: Type.Optional(
-        Type.Integer({
+      timeout_minutes: Type2.Optional(
+        Type2.Integer({
           minimum: 1,
           maximum: 1440,
           description: "Wall-clock timeout for this resumed turn in minutes (1\u20131440). Overrides per-persona and global defaults. Send arms a fresh budget per call."
         })
       ),
-      kill_on_stall: Type.Optional(
-        Type.Boolean({
+      kill_on_stall: Type2.Optional(
+        Type2.Boolean({
           description: "v0.10 watchdog opt-in for the resumed turn. true \u2192 auto-kill on hard-stall. Replaces the original spawn's value and persists for subsequent sends. Omit to keep the existing setting."
         })
       ),
-      stall_threshold_seconds: Type.Optional(
-        Type.Integer({
+      stall_threshold_seconds: Type2.Optional(
+        Type2.Integer({
           minimum: 30,
           description: "v0.10 watchdog soft-stall threshold for the resumed turn, in seconds (\u2265 30). Hard threshold scales with the same ratio as conductor defaults. Replaces the original spawn's value."
         })
       ),
-      on_complete_hook: Type.Optional(
-        Type.String({
+      on_complete_hook: Type2.Optional(
+        Type2.String({
           description: "v0.11 quality-gate hook for the resumed turn. Replaces the original spawn's per-call hook (and persists for subsequent sends until next override). Empty string disables for this resume only."
         })
       ),
-      on_complete_hook_timeout_seconds: Type.Optional(
-        Type.Integer({
+      on_complete_hook_timeout_seconds: Type2.Optional(
+        Type2.Integer({
           minimum: 1,
           description: "v0.11 quality-gate hook timeout (seconds) for the resumed turn. Replaces the original spawn's per-call timeout."
         })
       ),
-      streaming_behavior: Type.Optional(
-        Type.Union(
+      streaming_behavior: Type2.Optional(
+        Type2.Union(
           [
-            Type.Literal("auto"),
-            Type.Literal("steer"),
-            Type.Literal("follow_up"),
-            Type.Literal("resume")
+            Type2.Literal("auto"),
+            Type2.Literal("steer"),
+            Type2.Literal("follow_up"),
+            Type2.Literal("resume")
           ],
           {
             description: "auto selects live follow_up or saved-session send. steer delivers a course correction before the next model call; follow_up queues until the agent finishes. resume means the available_actions token send (new process via pi --session), NOT ensemble_resume (SIGCONT). Use the latest available_actions; each call revalidates."
@@ -8187,6 +8315,7 @@ function registerSendTool(pi, opts) {
       const baseOv = cfg.personaOverrides[run.persona] ?? {};
       const ov = params.timeout_minutes !== void 0 ? { ...baseOv, timeoutMinutes: params.timeout_minutes } : baseOv;
       const timeoutMs = resolveTimeoutMs(persona, ov, cfg);
+      const answering = run.pendingAsk;
       const result = sendToRun(run, params.message, {
         files: params.files,
         callerCwd: opts.getCwd(),
@@ -8287,7 +8416,7 @@ The sub-agent acknowledged the message at ${new Date(ackResult.deliveredAt).toIS
               return renderForegroundDetachedResult(result.run);
             }
             throttle.flush();
-            return foregroundFinalResult(outcome.value, supportsFocus(ctx));
+            return foregroundFinalResult(outcome.value, supportsFocus(ctx), answering);
           } finally {
             detach.unregister();
           }
@@ -8303,7 +8432,8 @@ The sub-agent acknowledged the message at ${new Date(ackResult.deliveredAt).toIS
             text: `running: ${result.run.id}
 persona=${result.run.persona} mode=background (resumed)
 
-Send dispatched in background. Continue with other work; completion will arrive as a <sub-agent-completed> notification.`
+` + (answering ? `Answer dispatched for question ${answering.askId}: ${answering.question}
+` : "") + `Send dispatched in background. Continue with other work; completion or another owner question will arrive automatically.`
           }
         ],
         details: {
@@ -8326,8 +8456,8 @@ function registerPauseTool(pi, opts) {
       "Use ensemble_pause to halt token consumption on a long-running sub-agent without killing it.",
       "Use the latest available_actions; each call revalidates."
     ],
-    parameters: Type.Object({
-      agent_id: Type.String({ description: "agent_id of the sub-agent to pause." })
+    parameters: Type2.Object({
+      agent_id: Type2.String({ description: "agent_id of the sub-agent to pause." })
     }),
     async execute(_id, params) {
       const registry = opts.getRegistry();
@@ -8367,8 +8497,8 @@ function registerResumeTool(pi, opts) {
       "Use ensemble_resume to continue a sub-agent previously paused via ensemble_pause.",
       "Use the latest available_actions; each call revalidates."
     ],
-    parameters: Type.Object({
-      agent_id: Type.String({ description: "agent_id of the sub-agent to resume." })
+    parameters: Type2.Object({
+      agent_id: Type2.String({ description: "agent_id of the sub-agent to resume." })
     }),
     async execute(_id, params) {
       const registry = opts.getRegistry();
@@ -8409,8 +8539,8 @@ function registerKillTool(pi, opts) {
       "Use the latest available_actions; each call revalidates. Already-terminal sub-agents remain no-op success.",
       "Run records (transcript, final.md) are preserved for post-mortem inspection."
     ],
-    parameters: Type.Object({
-      agent_id: Type.String({
+    parameters: Type2.Object({
+      agent_id: Type2.String({
         description: "agent_id of the sub-agent to terminate."
       })
     }),
@@ -8457,9 +8587,9 @@ function registerFocusTool(pi, opts) {
       "Use ensemble_focus when you want to draw the user's attention to a particular sub-agent's live transcript.",
       "Pass agent_id when you have a specific sub-agent in mind; omit it to open the overlay on the most recently active one."
     ],
-    parameters: Type.Object({
-      agent_id: Type.Optional(
-        Type.String({ description: "agent_id of the sub-agent to focus on (omit for most-recent)." })
+    parameters: Type2.Object({
+      agent_id: Type2.Optional(
+        Type2.String({ description: "agent_id of the sub-agent to focus on (omit for most-recent)." })
       )
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -8565,6 +8695,7 @@ function formatPersonaListForLLM(personas) {
 }
 function groupByStatus(runs) {
   const g = {
+    blocked: [],
     running: [],
     queued: [],
     paused: [],
@@ -8585,6 +8716,7 @@ function toStatusSummary(r, canFocus) {
     available_actions: availableActions(r, canFocus),
     persona: r.persona,
     status: r.status,
+    pending_ask: r.pendingAsk,
     elapsed: elapsedStr(r.startTime, r.finishedAt),
     usage: formatUsage(r.usage),
     lastToolCall: r.lastToolCall,
@@ -8594,6 +8726,7 @@ function toStatusSummary(r, canFocus) {
 function formatStatusForLLM(g, queueSize, summaries) {
   const lines = [];
   const counts = [];
+  if (g.blocked.length) counts.push(`${g.blocked.length} blocked`);
   if (g.running.length) counts.push(`${g.running.length} running`);
   if (g.paused.length) counts.push(`${g.paused.length} paused`);
   if (g.queued.length || queueSize) counts.push(`${g.queued.length} queued`);
@@ -8601,6 +8734,7 @@ function formatStatusForLLM(g, queueSize, summaries) {
   if (finished) counts.push(`${finished} finished`);
   lines.push(counts.length === 0 ? "No sub-agents." : `Sub-agents: ${counts.join(", ")}.`);
   const groupOrder = [
+    ["Blocked (awaiting owner)", g.blocked],
     ["Running", g.running],
     ["Paused", g.paused],
     ["Queued", g.queued],
@@ -8629,11 +8763,19 @@ function formatStatusForLLM(g, queueSize, summaries) {
   }
   return lines.join("\n");
 }
-function foregroundFinalResult(r, canFocus) {
+function foregroundFinalResult(r, canFocus, answering) {
   const actions = availableActions(r, canFocus);
   const ref = resultRef(r);
-  const summary = renderForegroundSummary(r, actions) + (ref ? `
+  const answerNotice = answering ? `Answered question ${answering.askId}: ${answering.question}
+` : "";
+  const summary = answerNotice + renderForegroundSummary(r, actions) + (ref ? `
   result-ref: ${ref} \u2014 pass files: ['${ref}'] for the full evidence.` : "");
+  if (r.status === "blocked") return {
+    content: [{ type: "text", text: `${summary}
+Question ${r.pendingAsk?.askId}: ${r.pendingAsk?.question}${r.pendingAsk?.evidence ?? ""}
+Answer via ensemble_send; the original assignment is unresolved.` }],
+    details: { status: r.status, agent_id: r.id, pending_ask: r.pendingAsk, available_actions: actions }
+  };
   if (r.status !== "completed") {
     return {
       content: [{ type: "text", text: summary }],
@@ -8691,9 +8833,6 @@ function validateHookTimeoutSeconds(s) {
     return `on_complete_hook_timeout_seconds must be a positive integer; got ${s}`;
   }
   return void 0;
-}
-function isTerminalStatus(s) {
-  return s === "completed" || s === "failed" || s === "killed" || s === "timeout" || s === "hook_failed" || s === "merge_conflict" || s === "aborted";
 }
 function buildOnChainCallback(args) {
   if (!args.chainEnabled) return void 0;
@@ -9041,7 +9180,7 @@ function formatRow(r, theme, nowMs, wdCfg) {
   const glyph = statusGlyph(r.status, theme);
   const name = theme.fg("accent", r.persona) + theme.fg("dim", `:${r.id.split("-").pop() ?? r.id}`);
   const elapsed = theme.fg("dim", elapsedStr(r.startTime, r.finishedAt));
-  const activity = r.status === "queued" ? theme.fg("dim", " (queued)") : r.status === "paused" ? theme.fg("warning", " (paused)") : r.hookExecuting ? theme.fg("warning", " \xB7 hook") : r.gracePeriodActive ? theme.fg("warning", " \xB7 \u26A0 wrapping up") : r.lastToolCall ? theme.fg("dim", ` \u2192 ${r.lastToolCall}`) : r.status === "running" ? theme.fg("dim", " starting\u2026") : "";
+  const activity = r.status === "queued" ? theme.fg("dim", " (queued)") : r.status === "blocked" ? theme.fg("warning", " (blocked: awaiting owner)") : r.status === "paused" ? theme.fg("warning", " (paused)") : r.hookExecuting ? theme.fg("warning", " \xB7 hook") : r.gracePeriodActive ? theme.fg("warning", " \xB7 \u26A0 wrapping up") : r.lastToolCall ? theme.fg("dim", ` \u2192 ${r.lastToolCall}`) : r.status === "running" ? theme.fg("dim", " starting\u2026") : "";
   const turnPart = r.usage.turns > 0 ? r.maxTurns !== void 0 ? `\u27F3${r.usage.turns}/${r.maxTurns}` : `\u27F3${r.usage.turns}` : "";
   const tokenPart = formatUsage({ turns: 0, input: r.usage.input, output: r.usage.output, cost: r.usage.cost });
   const usageStr = [turnPart, tokenPart].filter(Boolean).join(" ");
@@ -9069,6 +9208,7 @@ function statusColorSlot2(s) {
       return "dim";
     case "running":
       return "accent";
+    case "blocked":
     case "paused":
       return "warning";
     case "completed":
@@ -9215,6 +9355,19 @@ function perSendNumbers(run) {
   };
 }
 function formatCompletionNotification(run, actions = availableActions(run)) {
+  if (run.status === "blocked") {
+    const ask = run.pendingAsk;
+    return `<sub-agent-asked>
+  <agent-id>${escapeXml(run.id)}</agent-id>
+  <status>blocked</status>
+  <ask-id>${escapeXml(ask?.askId ?? "")}</ask-id>
+  <question>${escapeXml(ask?.question ?? "Question unavailable; inspect transcript")}</question>
+${ask?.evidence ?? ""}
+  <available-actions>${actions.join(", ")}</available-actions>
+  <guidance>Answer via ensemble_send on this agent id. Assignment unresolved; do independent work while deciding.</guidance>
+  <transcript>${escapeXml(run.transcriptPath)}</transcript>
+</sub-agent-asked>`;
+  }
   const finalText = getFinalText(run.messages);
   const perSend = perSendNumbers(run);
   const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
@@ -9298,6 +9451,8 @@ function formatCompletionNotification(run, actions = availableActions(run)) {
 }
 function statusVerb(status) {
   switch (status) {
+    case "blocked":
+      return "awaiting owner";
     case "completed":
       return "completed";
     case "killed":
@@ -9314,7 +9469,7 @@ function statusVerb(status) {
   }
 }
 function headerLine(run, elapsed, usageStr, resumed) {
-  const glyph = run.status === "completed" ? "\u2713" : run.status === "killed" ? "\u25A0" : run.status === "timeout" ? "\u23F1" : run.status === "hook_failed" ? "\u2297" : run.status === "aborted" ? "\u23F9" : "\u2717";
+  const glyph = run.status === "blocked" ? "?" : run.status === "completed" ? "\u2713" : run.status === "killed" ? "\u25A0" : run.status === "timeout" ? "\u23F1" : run.status === "hook_failed" ? "\u2297" : run.status === "aborted" ? "\u23F9" : "\u2717";
   const verb = statusVerb(run.status);
   const usagePart = usageStr ? `, ${usageStr}` : "";
   let line = `## ${glyph} \`${run.persona}\` ${verb} (${elapsed}${usagePart}) \u2014 id \`${run.id}\``;
@@ -9402,7 +9557,7 @@ function buildCompletionMessage(run, canFocus = false) {
       text: `${run.nonSubstantiveFinal.reason}: ${run.nonSubstantiveFinal.message}`
     });
   }
-  if (run.hookResult) {
+  if (run.hookResult && run.status !== "blocked") {
     const h = run.hookResult;
     const exit = h.exitCode ?? "signal";
     notes.push({
@@ -9415,13 +9570,15 @@ function buildCompletionMessage(run, canFocus = false) {
     content: formatCompletionNotification(run, actions),
     display: true,
     details: {
-      kind: "completed",
+      kind: run.status === "blocked" ? "asked" : "completed",
       available_actions: actions,
       id: run.id,
       persona: run.persona,
       status: run.status,
       stats,
-      body: getFinalText(run.messages),
+      body: run.status === "blocked" ? `Question ${run.pendingAsk?.askId}: ${run.pendingAsk?.question}
+${run.pendingAsk?.evidence ?? ""}
+Answer via ensemble_send; the original assignment remains unresolved.` : getFinalText(run.messages),
       transcriptPath: run.transcriptPath,
       notes
     }
@@ -9716,6 +9873,12 @@ Background completions arrive as user-role messages containing this XML:
 \`\`\`
 
 Distinguish these from real user messages by the \`<sub-agent-completed>\` opening tag. **Never thank the sub-agent and never address it directly** \u2014 the user is your conversation partner, not the persona. Synthesize the findings for the user.
+
+## 5.1 Owner questions
+
+A managed child can call \`ask_owner\` alone to ask one genuine blocking question. Its turn ends; after native settlement its process exits and the assignment becomes \`blocked\`, not completed or failed. A foreground spawn returns the question; background delivery is one \`<sub-agent-asked>\` card with an ask id, prepared file evidence and available_actions. No polling: do independent work or ask the user for the decision.
+
+Answer with \`ensemble_send(agent_id, message)\` (auto or resume). This correlates your answer to the outstanding question and resumes the original assignment in its saved session/worktree. Preflight rejection preserves the question. If send is unavailable because the session retired, use a fresh child with the transcript/handoff instead. Kill abandons the question but preserves work for the existing TTL policy. Blocked work holds no concurrency slot, is not GC'd, and does not run success hooks, merge, retry, advance auto plans or auto-chain. Depth-two leaves have no ask_owner; their questions belong in final text.
 
 ## 6. Writing good persona prompts
 
@@ -11032,7 +11195,7 @@ async function executePromptAndSend(deps, agentId, presuppliedText) {
   } else {
     try {
       message = await ctx.ui.input(
-        `Send to ${agentId}`,
+        run.pendingAsk ? `Answer ${run.pendingAsk.askId}: ${run.pendingAsk.question}` : `Send to ${agentId}`,
         "Type a follow-up message; Esc to cancel."
       );
     } catch {
@@ -11278,7 +11441,8 @@ function index_default(pi) {
     },
     pushCompletionNotification: (run) => {
       pi.sendMessage(buildCompletionMessage(run, supportsFocus(ctxRef)), buildCompletionSendMessageOptions(run));
-      completionWakeTracker.track(run.id, Date.now());
+      if (run.status === "blocked") completionWakeTracker.drop(run.id);
+      else completionWakeTracker.track(run.id, Date.now());
     }
   };
   pi.on("session_start", async (_event, ctx) => {

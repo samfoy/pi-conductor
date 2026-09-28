@@ -391,7 +391,8 @@ export default function (pi: ExtensionAPI): void {
       // Item 11 dead-man-switch: track this wake. clearOnTurnStart()
       // drops it when the conductor's next turn fires (the wake
       // worked). The 15s tick re-fires if no turn fires within 30s.
-      completionWakeTracker.track(run.id, Date.now());
+      if (run.status === "blocked") completionWakeTracker.drop(run.id);
+      else completionWakeTracker.track(run.id, Date.now());
     },
   };
 

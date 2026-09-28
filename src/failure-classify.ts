@@ -143,7 +143,8 @@ export const PROBES: readonly Probe[] = [
  * `completed` returns "unknown" (callers should not classify successes;
  * guarding here keeps the function total).
  */
-export function classifyFailure(sig: FailureSignal): FailureClass {
+export function classifyFailure(sig: FailureSignal): FailureClass | undefined {
+  if (sig.terminal === "blocked") return undefined;
   // 1. Termination reason is the most authoritative signal.
   switch (sig.terminationReason) {
     case "timeout":

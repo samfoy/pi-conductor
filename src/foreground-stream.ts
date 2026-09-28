@@ -21,7 +21,7 @@
 import { contextRetirementNotice } from "./context-retirement.ts";
 import { availableActions, type RunAction, elapsedStr, formatUsage, getFinalText, sendsSinceSpawn, type RunRegistry } from "./runs.ts";
 import { renderHeader, renderTranscript } from "./transcript.ts";
-import { isTerminal, type Run } from "./types.ts";
+import { isSettled, type Run } from "./types.ts";
 import { STATUS_GLYPH } from "./status-glyph.ts";
 import { classifyLine } from "./transcript-classify.ts";
 import { applyThemeToLines, type ThemeFg } from "./transcript-style.ts";
@@ -370,7 +370,7 @@ export function installPostDetachCompletionListener(
   const unsub = registry.onChange((r) => {
     if (!active) return;
     if (r.id !== run.id) return;
-    if (!isTerminal(r.status)) return;
+    if (!isSettled(r.status)) return;
     active = false;
     unsub();
     pushNotification(r);
@@ -379,7 +379,7 @@ export function installPostDetachCompletionListener(
   // already reached terminal in the microtask window between the
   // detach race resolving and this function running, notify() has
   // already fired with no listener attached — fire it now.
-  if (active && isTerminal(run.status)) {
+  if (active && isSettled(run.status)) {
     active = false;
     unsub();
     pushNotification(run);

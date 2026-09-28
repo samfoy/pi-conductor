@@ -43,9 +43,10 @@ import { loadConfigWithErrors } from "./config.ts";
 import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage, currentBranch, worktreeHasUncommittedChanges, branchHasUnmergedCommits, restoreWorktree, refExists, worktreeCwd } from "./worktree.ts";
 import { readProcessStartTime } from "./reconcile-startup.ts";
 import { ConductorEventEmitter } from "./conductor-events.ts";
-import { builtinPersonasDir, effectiveExcludeTools } from "./personas.ts";
+import { builtinPersonasDir, effectiveAllowTools, effectiveExcludeTools } from "./personas.ts";
 import { loadWorkspaceDoctrine } from "./workspace-doctrine.ts";
 import {  emptyUsage,
+  isSettled,
   isTerminal,
   toRunRecord,
   type ConductorConfig,
@@ -507,7 +508,8 @@ export function buildPiArgs(opts: PiArgsOptions): string[] {
   }
   if (opts.model) args.push("--model", opts.model);
   if (opts.thinking) args.push("--thinking", opts.thinking);
-  if (opts.tools && opts.tools.length > 0) args.push("--tools", opts.tools.join(","));
+  const tools = effectiveAllowTools(opts.tools);
+  if (tools && tools.length > 0) args.push("--tools", tools.join(","));
   args.push("--exclude-tools", effectiveExcludeTools(opts.excludeTools).join(","));
   if (opts.kind === "fresh") {
     // Pi exposes --append-system-prompt for system prompt addenda; we use that
@@ -965,7 +967,7 @@ export class RunRegistry {
   countActive(): number {
     let n = 0;
     for (const r of this.runs.values()) {
-      if (!isTerminal(r.status) && r.status !== "queued") n++;
+      if (!isSettled(r.status) && r.status !== "queued") n++;
     }
     return n;
   }
@@ -977,7 +979,7 @@ export class RunRegistry {
   countActiveBy(personaNames: ReadonlySet<string>): number {
     let n = 0;
     for (const r of this.runs.values()) {
-      if (!isTerminal(r.status) && r.status !== "queued" && personaNames.has(r.persona)) {
+      if (!isSettled(r.status) && r.status !== "queued" && personaNames.has(r.persona)) {
         n++;
       }
     }
@@ -1734,7 +1736,7 @@ function runPiSubprocess(
       shell: false,
       stdio: [stdinKind, "pipe", "pipe"],
       // Worktrees may not contain the spawning project's untracked config.
-      env: { ...buildSubagentEnv(), CONDUCTOR_CONFIG_CWD: run.cwd },
+      env: { ...buildSubagentEnv(), CONDUCTOR_CONFIG_CWD: run.cwd, CONDUCTOR_RUN_ID: run.id },
     });
   } catch (e) {
     run.status = "failed";
@@ -1754,6 +1756,7 @@ function runPiSubprocess(
     return Promise.resolve(run);
   }
   void attachSpawnedProc(run, proc);
+  const processClosed = new Promise<void>(resolve => proc.once("close", () => resolve()));
 
   stampSpawnStreamingMode(run, opts.steerable === true);
   run.streamingMode = rpc ? "rpc" : "print";
@@ -1809,7 +1812,32 @@ function runPiSubprocess(
     }
     const rest = stdoutLines.end();
     if (rest.trim()) processLine(rest);
+    discoverSessionPathIfMissing(run, opts.sessionDir);
     discoverContextRetirement(run, opts.sessionDir);
+    if (run.pendingAsk && !isTerminal(run.status)) {
+      if (terminal === "completed" && run.sessionPath && !contextRetirementNotice(run)) {
+        try { proc.kill(); } catch { /* already exited */ }
+        const killFallback = setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* already exited */ } }, 2000);
+        await processClosed;
+        clearTimeout(killFallback);
+        // A user kill during teardown abandons the ask and owns its notification.
+        if (isTerminal(run.status)) { donePromiseResolve(run); return; }
+        run.status = "blocked";
+        run.finishedAt = Date.now();
+        run.exitCode = exitCode;
+        run.proc = undefined;
+        run.pid = undefined;
+        run.failureClass = undefined;
+        await writeRecord(run);
+        opts.registry.notify(run);
+        try { opts.onComplete?.(run); } catch { /* listener errors cannot wedge settlement */ }
+        donePromiseResolve(run);
+        return;
+      }
+      run.pendingAsk = undefined;
+      terminal = "failed";
+      run.errorMessage = "Owner question cannot be resumed: session missing, retired, or subprocess failed. Use a fresh child with the transcript.";
+    }
     // v0.11 on_complete_hook (slice 2): fire the resolved hook between
     // stream-drain and `applyCloseHandlerTerminal`. Gates are strict:
     // only on natural exit-zero close with a resolved hook AND when
@@ -2196,6 +2224,7 @@ type ActionObservations = ReturnType<typeof observeRunActions>;
 export function runActionError(run: Run, action: RunAction, observed: ActionObservations): string | undefined {
   if (action === "focus") return observed.canFocus ? undefined : "Focused stream requires terminal UI (TUI mode).";
   if (action === "send" || action === "steer" || action === "follow_up") {
+    if (run.pendingAsk && run.status !== "blocked") return `sub-agent ${run.id} is settling an owner question; wait for sub-agent-asked before answering.`;
     if (observed.retirementNotice) return `sub-agent ${run.id}: ${observed.retirementNotice}`;
   }
   if (action !== "send" && !observed.owned) {
@@ -2334,6 +2363,11 @@ export function resolveSendStrategy(
         reason: `sub-agent ${run.id} is queued and has not started yet; wait for it to start before sending.`,
       },
     };
+  }
+
+  if (run.status === "blocked") {
+    if (!run.pendingAsk) return { strategy: { kind: "rejected", reason: `sub-agent ${run.id} has no valid pending owner question; inspect the transcript before abandoning this assignment.` } };
+    if (behavior === "steer" || behavior === "follow_up") return { strategy: { kind: "rejected", reason: `sub-agent ${run.id} is blocked on an owner question. Answer with auto or resume to continue its saved session.` } };
   }
 
   // terminal — explicit steer/follow_up never makes sense.
@@ -2598,7 +2632,7 @@ export function sendToRun(
     // change listener does the work.
     const done = new Promise<Run>((resolve) => {
       const unsub = opts.registry.onChange((r) => {
-        if (r.id === run.id && isTerminal(r.status)) {
+        if (r.id === run.id && isSettled(r.status)) {
           unsub();
           resolve(r);
         }
@@ -2617,7 +2651,14 @@ export function sendToRun(
   const worktreeBlocker = restoreResumeWorktree(run, () => readFileSync(sessionPath, "utf8"));
   if (worktreeBlocker) return { kind: "rejected", reason: worktreeBlocker };
 
+  const pendingAsk = run.pendingAsk;
+  if (pendingAsk) trimmed = `<owner-answer ask-id=${JSON.stringify(pendingAsk.askId)}>\nQuestion: ${pendingAsk.question}\nAnswer: ${trimmed}\nContinue the original assignment, not a new task.\n</owner-answer>`;
+
   // Reset terminal state so listeners and the panel see this as a fresh run.
+  run.pendingAsk = undefined;
+  run.askExecution = undefined;
+  run.failureClass = undefined;
+  run.nonSubstantiveFinal = undefined;
   run.status = "running";
   run.finishedAt = undefined;
   run.exitCode = undefined;
@@ -3293,6 +3334,8 @@ export function forceTerminate(
     // `applyHookToTerminal` is a no-op and W5's assertion holds.
     run.hookProc = undefined;
   }
+  run.pendingAsk = undefined;
+  run.askExecution = undefined;
   discoverContextRetirement(run);
   run.status =
     reason === "timeout" ? "timeout" :

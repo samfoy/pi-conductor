@@ -54,6 +54,7 @@ test("STATUS_GLYPH: covers every RunStatus key (no holes)", () => {
   const keys = Object.keys(STATUS_GLYPH).sort();
   assert.deepEqual(keys, [
     "aborted",
+    "blocked",
     "completed",
     "failed",
     "hook_failed",

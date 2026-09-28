@@ -117,7 +117,7 @@ export async function executePromptAndSend(
   } else {
     try {
       message = await ctx.ui.input(
-        `Send to ${agentId}`,
+        run.pendingAsk ? `Answer ${run.pendingAsk.askId}: ${run.pendingAsk.question}` : `Send to ${agentId}`,
         "Type a follow-up message; Esc to cancel.",
       );
     } catch {

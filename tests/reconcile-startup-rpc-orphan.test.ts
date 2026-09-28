@@ -272,6 +272,7 @@ test(
       "timeout",
       "hook_failed",
       "merge_conflict", // v0.14: worktree auto-merge conflict terminal status
+      "blocked",        // A6: unresolved owner question, not an RPC orphan
       "aborted",        // v0.17: turn-limit termination
     ];
     for (const s of allowed) {

@@ -90,6 +90,25 @@ export function applyEvent(run: Run, event: unknown): EventEffect {
     return handleExtensionUiRequest(run, e as RpcExtensionUIRequest);
   }
 
+  if (e.type === "tool_execution_start" && e.toolName === "ask_owner") {
+    const assistant = [...run.messages].reverse().find(m => m.role === "assistant");
+    const calls = assistant?.role === "assistant" ? assistant.content.filter(p => p.type === "toolCall") : [];
+    if (!run.pendingAsk && calls.length === 1 && calls[0].name === "ask_owner" && calls[0].id === e.toolCallId && typeof e.args?.question === "string" && e.args.question.trim()) {
+      run.askExecution = { askId: e.toolCallId, question: e.args.question.trim() };
+    }
+    return NONE;
+  }
+  if (e.type === "tool_execution_end" && e.toolName === "ask_owner") {
+    const execution = run.askExecution;
+    run.askExecution = undefined;
+    const details = e.result?.details;
+    if (execution && e.isError === false && execution.askId === e.toolCallId && details?.askId === e.toolCallId && details.question === execution.question && typeof details.evidence === "string" && !run.pendingAsk) {
+      run.pendingAsk = { ...execution, evidence: details.evidence };
+      return UPDATED;
+    }
+    return NONE;
+  }
+
   // turn_end and agent_end precede overflow recovery and queued work.
   if (e.type === "agent_settled") {
     const failed = run.stopReason === "error" || run.stopReason === "aborted";

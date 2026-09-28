@@ -11,6 +11,7 @@
 import type { RunStatus } from "./types.ts";
 
 export const STATUS_GLYPH: Record<RunStatus, string> = {
+  blocked: "?",
   queued: "◌",
   running: "●",
   paused: "⏸",

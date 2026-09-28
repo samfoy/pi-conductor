@@ -57,7 +57,7 @@ test("spawnRun: stamps tools/excludeTools on the Run and record, and passes them
 
     await done;
     const argv: string[] = JSON.parse(readFileSync(argvOut, "utf8"));
-    assert.equal(argv[argv.indexOf("--tools") + 1], "read,bash");
+    assert.equal(argv[argv.indexOf("--tools") + 1], "read,bash,ask_owner");
     assert.equal(argv[argv.indexOf("--exclude-tools") + 1], expectedExclude.join(","));
 
     const record = JSON.parse(readFileSync(run.recordPath, "utf8"));

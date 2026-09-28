@@ -142,6 +142,8 @@ export function formatRow(
   const activity =
     r.status === "queued"
       ? theme.fg("dim", " (queued)")
+      : r.status === "blocked"
+        ? theme.fg("warning", " (blocked: awaiting owner)")
       : r.status === "paused"
         ? theme.fg("warning", " (paused)")
         : r.hookExecuting
@@ -207,6 +209,7 @@ function statusColorSlot(s: RunStatus): string {
       return "dim";
     case "running":
       return "accent";
+    case "blocked":
     case "paused":
       return "warning";
     case "completed":

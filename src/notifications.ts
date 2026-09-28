@@ -45,7 +45,7 @@ export interface NotificationNote {
  * never drift from the numbers in the envelope.
  */
 export interface EnsembleNotificationDetails {
-  kind: "completed" | "stalled";
+  kind: "completed" | "stalled" | "asked";
   /** Absent only on historical persisted cards. */
   available_actions?: RunAction[];
   id: string;
@@ -116,6 +116,10 @@ function perSendNumbers(run: Run): PerSendNumbers {
 }
 
 export function formatCompletionNotification(run: Run, actions: RunAction[] = availableActions(run)): string {
+  if (run.status === "blocked") {
+    const ask = run.pendingAsk;
+    return `<sub-agent-asked>\n  <agent-id>${escapeXml(run.id)}</agent-id>\n  <status>blocked</status>\n  <ask-id>${escapeXml(ask?.askId ?? "")}</ask-id>\n  <question>${escapeXml(ask?.question ?? "Question unavailable; inspect transcript")}</question>\n${ask?.evidence ?? ""}\n  <available-actions>${actions.join(", ")}</available-actions>\n  <guidance>Answer via ensemble_send on this agent id. Assignment unresolved; do independent work while deciding.</guidance>\n  <transcript>${escapeXml(run.transcriptPath)}</transcript>\n</sub-agent-asked>`;
+  }
   const finalText = getFinalText(run.messages);
   const perSend = perSendNumbers(run);
   // Per-send <duration>: render via elapsedStr against a synthetic
@@ -215,6 +219,7 @@ export function formatCompletionNotification(run: Run, actions: RunAction[] = av
  */
 export function statusVerb(status: RunStatus): string {
   switch (status) {
+    case "blocked": return "awaiting owner";
     case "completed": return "completed";
     case "killed": return "killed";
     case "timeout": return "timed out";
@@ -231,6 +236,7 @@ function headerLine(
   resumed: boolean,
 ): string {
   const glyph =
+    run.status === "blocked"   ? "?" :
     run.status === "completed" ? "✓" :
     run.status === "killed"    ? "■" :
     run.status === "timeout"   ? "⏱" :
@@ -437,7 +443,7 @@ export function buildCompletionMessage(run: Run, canFocus = false): Notification
       text: `${run.nonSubstantiveFinal.reason}: ${run.nonSubstantiveFinal.message}`,
     });
   }
-  if (run.hookResult) {
+  if (run.hookResult && run.status !== "blocked") {
     const h = run.hookResult;
     const exit = h.exitCode ?? "signal";
     notes.push({
@@ -453,13 +459,13 @@ export function buildCompletionMessage(run: Run, canFocus = false): Notification
     content: formatCompletionNotification(run, actions),
     display: true,
     details: {
-      kind: "completed",
+      kind: run.status === "blocked" ? "asked" : "completed",
       available_actions: actions,
       id: run.id,
       persona: run.persona,
       status: run.status,
       stats,
-      body: getFinalText(run.messages),
+      body: run.status === "blocked" ? `Question ${run.pendingAsk?.askId}: ${run.pendingAsk?.question}\n${run.pendingAsk?.evidence ?? ""}\nAnswer via ensemble_send; the original assignment remains unresolved.` : getFinalText(run.messages),
       transcriptPath: run.transcriptPath,
       notes,
     },

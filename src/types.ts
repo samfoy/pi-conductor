@@ -434,7 +434,14 @@ export interface MergeResult {
 /** v0.14: personas that write code and should default to `"squash"` merge strategy. */
 export const WRITE_CAPABLE_PERSONAS: ReadonlySet<string> = new Set(["builder", "simplifier"]);
 
+export interface PendingAsk {
+  askId: string;
+  question: string;
+  evidence: string;
+}
+
 export type RunStatus =
+  | "blocked"
   | "queued"
   | "running"
   | "paused"
@@ -803,6 +810,9 @@ export interface Run {
    */
   sessionPath?: string;
   /** The saved child session retired under context pressure; preserved on resume. */
+  pendingAsk?: PendingAsk;
+  /** Unaccepted execution correlation; never persisted. */
+  askExecution?: { askId: string; question: string };
   contextRetired?: boolean;
   /**
    * Persona system-prompt body captured at spawn time. Pi sessions do NOT
@@ -965,6 +975,7 @@ export interface RunRecord {
   finalPath: string;
   sessionPath?: string;
   /** The saved child session retired under context pressure; preserved on resume. */
+  pendingAsk?: PendingAsk;
   contextRetired?: boolean;
   systemPrompt?: string;
   /** See `Run.tools`. */
@@ -1084,6 +1095,7 @@ export function toRunRecord(r: Run): RunRecord {
     finalPath: r.finalPath,
     sessionPath: r.sessionPath,
     contextRetired: r.contextRetired,
+    pendingAsk: r.pendingAsk,
     systemPrompt: r.systemPrompt,
     tools: r.tools,
     excludeTools: r.excludeTools,
@@ -1168,6 +1180,10 @@ export const TERMINAL_STATUSES: RunStatus[] = [
   "merge_conflict",
   "aborted", // v0.17: turn-limit termination
 ];
+export function isSettled(s: RunStatus): boolean {
+  return s === "blocked" || isTerminal(s);
+}
+
 export function isTerminal(s: RunStatus): boolean {
   return TERMINAL_STATUSES.includes(s);
 }

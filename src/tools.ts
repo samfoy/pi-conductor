@@ -30,7 +30,8 @@ import {
 import { resolveRetryPolicy } from "./retry.ts";
 import { collapseSteerableCascade } from "./steerable.ts";
 import { availableActions, supportsFocus, validateRunAction, elapsedStr, failBeforeSpawn, forceTerminate, formatUsage, getFinalText, keptBranchHint, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendCwd, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
-import { isTerminal } from "./types.ts";
+import { registerAskOwner } from "./ask-owner.ts";
+import { isSettled, isTerminal } from "./types.ts";
 import { SpawnQueue } from "./queue.ts";
 import { resolveMergeStrategy, resolveWorktreeSpec } from "./worktree.ts";
 import { formatCwdInfo, resolveCwdArg, type CwdController, type CwdResolution } from "./conductor-cwd.ts";
@@ -114,7 +115,7 @@ interface RegisterToolsOpts {
   getEvents?: () => ConductorEventEmitter;
 }
 
-export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
+export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts, env: NodeJS.ProcessEnv = process.env): void {
   // Item 14 (`docs/backlog.md`) — env-var gate. When this pi process
   // is itself a conductor sub-agent (`CONDUCTOR_SUBAGENT=1`, set by
   // `buildSubagentEnv` at spawn time), skip-register every
@@ -130,7 +131,10 @@ export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
   // Witnessed: `builder-k6dc → builder-55a4` chain, 2026-05-28. The
   // outer builder fanned out instead of executing its brief; this
   // gate closes that channel.
-  if (process.env.CONDUCTOR_SUBAGENT === "1") return;
+  if (env.CONDUCTOR_SUBAGENT === "1") {
+    if (env.CONDUCTOR_DEPTH !== "2") registerAskOwner(pi, opts.getRegistry, env);
+    return;
+  }
 
   registerListTool(pi, opts);
   registerStatusTool(pi, opts);
@@ -304,6 +308,7 @@ function registerStatusTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           },
         ],
         details: {
+          blocked: groups.blocked.map(summary),
           running: groups.running.map(summary),
           queued: groups.queued.map(summary),
           paused: groups.paused.map(summary),
@@ -355,10 +360,10 @@ export function awaitTerminal(
     resolveFn = resolve;
   });
   unsub = registry.onChange((r) => {
-    if (r.id === runId && isTerminal(r.status)) settle(r);
+    if (r.id === runId && isSettled(r.status)) settle(r);
   });
   const cur = registry.list().find((r) => r.id === runId);
-  if (cur && isTerminal(cur.status)) settle(cur);
+  if (cur && isSettled(cur.status)) settle(cur);
   return { promise, settle };
 }
 
@@ -552,7 +557,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       "Launch a focused sub-agent using a persona. " +
       "Foreground (default): blocks until the sub-agent completes; result is returned. " +
       "Background: returns immediately; completion arrives as a <sub-agent-completed> user-role message that wakes you. " +
-      "When the concurrency cap is reached, foreground spawns auto-downgrade to background.",
+      "When the concurrency cap is reached, foreground spawns auto-downgrade to background. A sole ask_owner ends the child's turn and returns a blocked question, answered via ensemble_send.",
     promptSnippet: "Spawn a persona-based sub-agent (foreground or background)",
     promptGuidelines: [
       "Use ensemble_list first if you don't know which personas are available.",
@@ -798,7 +803,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         // ensemble_send (own onComplete) doesn't re-fire it.
         if (result.downgraded) {
           const unsub = registry.onChange((run) => {
-            if (run.id === p.id && isTerminalStatus(run.status)) {
+            if (run.id === p.id && isSettled(run.status)) {
               unsub();
               opts.pushCompletionNotification(run);
             }
@@ -935,12 +940,12 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
     name: CONDUCTOR_LLM_TOOLS.send,
     label: "Send to sub-agent",
     description:
-      "Continue an existing sub-agent's session with a new user-role message. " +
+      "Continue an existing sub-agent's session with a new user-role message, or answer its outstanding ask_owner question. " +
       "send continues a saved session in a new process; steer/follow_up deliver over live RPC. " +
       "Live RPC sends await acknowledgement only. " +
       "Use the latest available_actions; each call revalidates. " +
       "Foreground (default): blocks until the sub-agent's reply arrives. " +
-      "Background: returns immediately; reply arrives as a <sub-agent-completed> notification.",
+      "Background: returns immediately; completion or a blocking owner question arrives automatically.",
     promptSnippet: "Send a follow-up message to an existing sub-agent",
     promptGuidelines: [
       "Use ensemble_send when you want to continue working with a sub-agent that already has the context you care about — don't re-spawn from scratch.",
@@ -1042,6 +1047,7 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           : baseOv;
       const timeoutMs = resolveTimeoutMs(persona, ov, cfg);
 
+      const answering = run.pendingAsk;
       const result = sendToRun(run, params.message, {
         files: params.files,
         callerCwd: opts.getCwd(),
@@ -1164,7 +1170,7 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
             // Force any pending payload so the last visible streamed frame
             // matches reality before the tool-call card collapses.
             throttle.flush();
-            return foregroundFinalResult(outcome.value, supportsFocus(ctx));
+            return foregroundFinalResult(outcome.value, supportsFocus(ctx), answering);
           } finally {
             detach.unregister();
           }
@@ -1182,7 +1188,8 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
             text:
               `running: ${result.run.id}\n` +
               `persona=${result.run.persona} mode=background (resumed)\n\n` +
-              `Send dispatched in background. Continue with other work; completion will arrive as a <sub-agent-completed> notification.`,
+              (answering ? `Answer dispatched for question ${answering.askId}: ${answering.question}\n` : "") +
+              `Send dispatched in background. Continue with other work; completion or another owner question will arrive automatically.`,
           },
         ],
         details: {
@@ -1504,6 +1511,7 @@ export function formatPersonaListForLLM(personas: Persona[]): string {
 }
 
 interface StatusGroups {
+  blocked: Run[];
   running: Run[];
   queued: Run[];
   paused: Run[];
@@ -1518,6 +1526,7 @@ interface StatusGroups {
 
 function groupByStatus(runs: Run[]): StatusGroups {
   const g: StatusGroups = {
+    blocked: [],
     running: [],
     queued: [],
     paused: [],
@@ -1539,6 +1548,7 @@ function toStatusSummary(r: Run, canFocus: boolean) {
     available_actions: availableActions(r, canFocus),
     persona: r.persona,
     status: r.status,
+    pending_ask: r.pendingAsk,
     elapsed: elapsedStr(r.startTime, r.finishedAt),
     usage: formatUsage(r.usage),
     lastToolCall: r.lastToolCall,
@@ -1549,6 +1559,7 @@ function toStatusSummary(r: Run, canFocus: boolean) {
 function formatStatusForLLM(g: StatusGroups, queueSize: number, summaries: Map<string, ReturnType<typeof toStatusSummary>>): string {
   const lines: string[] = [];
   const counts: string[] = [];
+  if (g.blocked.length) counts.push(`${g.blocked.length} blocked`);
   if (g.running.length) counts.push(`${g.running.length} running`);
   if (g.paused.length) counts.push(`${g.paused.length} paused`);
   if (g.queued.length || queueSize) counts.push(`${g.queued.length} queued`);
@@ -1557,6 +1568,7 @@ function formatStatusForLLM(g: StatusGroups, queueSize: number, summaries: Map<s
   lines.push(counts.length === 0 ? "No sub-agents." : `Sub-agents: ${counts.join(", ")}.`);
 
   const groupOrder: Array<[string, Run[]]> = [
+    ["Blocked (awaiting owner)", g.blocked],
     ["Running", g.running],
     ["Paused", g.paused],
     ["Queued", g.queued],
@@ -1591,10 +1603,15 @@ function formatStatusForLLM(g: StatusGroups, queueSize: number, summaries: Map<s
   return lines.join("\n");
 }
 
-function foregroundFinalResult(r: Run, canFocus: boolean) {
+function foregroundFinalResult(r: Run, canFocus: boolean, answering?: { askId: string; question: string }) {
   const actions = availableActions(r, canFocus);
   const ref = resultRef(r);
-  const summary = renderForegroundSummary(r, actions) + (ref ? `\n  result-ref: ${ref} — pass files: ['${ref}'] for the full evidence.` : "");
+  const answerNotice = answering ? `Answered question ${answering.askId}: ${answering.question}\n` : "";
+  const summary = answerNotice + renderForegroundSummary(r, actions) + (ref ? `\n  result-ref: ${ref} — pass files: ['${ref}'] for the full evidence.` : "");
+  if (r.status === "blocked") return {
+    content: [{ type: "text" as const, text: `${summary}\nQuestion ${r.pendingAsk?.askId}: ${r.pendingAsk?.question}${r.pendingAsk?.evidence ?? ""}\nAnswer via ensemble_send; the original assignment is unresolved.` }],
+    details: { status: r.status, agent_id: r.id, pending_ask: r.pendingAsk, available_actions: actions },
+  };
   if (r.status !== "completed") {
     return {
       content: [{ type: "text" as const, text: summary }],
@@ -1676,9 +1693,6 @@ function validateHookTimeoutSeconds(s: number | undefined): string | undefined {
   return undefined;
 }
 
-function isTerminalStatus(s: RunStatus): boolean {
-  return s === "completed" || s === "failed" || s === "killed" || s === "timeout" || s === "hook_failed" || s === "merge_conflict" || s === "aborted";
-}
 
 // ── v0.15 chains ─────────────────────────────────────────────────────────
 

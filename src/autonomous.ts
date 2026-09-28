@@ -155,6 +155,7 @@ export function classifyStepOutcome(
   attempt: number,
   policy: RetryPolicy,
 ): StepDecision {
+  if (outcome.status === "blocked") return { kind: "escalate", reason: "step blocked on an owner question; answer via ensemble_send" };
   if (outcome.status === "completed") return { kind: "success" };
   const cls: FailureClass = outcome.failureClass ?? "unknown";
   if (shouldRetry(cls, attempt, policy)) {

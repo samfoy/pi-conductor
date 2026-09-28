@@ -192,6 +192,8 @@ function decideForEntry(
     };
   }
 
+  if (entry.status === "blocked") return { kind: "keep", id: entry.id, reason: "unresolved owner question" };
+
   // Rule 4: malformed records — surface, don't reclaim.
   if (entry.malformed) {
     return {

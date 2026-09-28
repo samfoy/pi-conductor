@@ -321,6 +321,46 @@ settlement. Prompt rejection is a failed run, not completion. As with explicit
 RPC, extension dialogs are auto-cancelled; provider extensions remain enabled.
 This does not address independently oversized persona/system-prompt argv.
 
+## Owner questions (A6)
+
+Managed children have `ask_owner({ question, files? })` for **one decision needed
+to continue the current assignment**, not progress messages. Call it alone: Pi's
+actual assistant tool batch must contain only this call. Blank questions, invalid
+file evidence, queued messages, duplicate asks, inactive contexts and retired
+sessions reject without ending the turn. Depth-two leaves have no `ask_owner`;
+put their questions in final text. Explicit tool allowlists retain `ask_owner`;
+a persona's explicit `exclude_tools` still wins. Parent tools do not change.
+
+Accepted questions end the child's turn. After native `agent_settled` and process
+exit, the run is **`blocked` (`?`)**, not successful or failed. Foreground calls
+return the question; background calls deliver one `<sub-agent-asked>` card with
+the question, tool-call ask id, prepared file evidence and `available_actions`.
+Files use A5's validation and budgets, resolved from the **child's cwd** (including
+its worktree). Embedded evidence is prepared once in the accepted tool execution.
+No `final.md` or result-ref is manufactured for a question.
+
+Answer through the existing send surface:
+
+```json
+{"agent_id":"builder-7f3a","message":"Use option B.","streaming_behavior":"resume"}
+```
+
+`auto` also works. The answer is framed with the outstanding ask id and question,
+and resumes the saved Pi session and **original assignment/worktree**, not a new
+task. Preflight failures preserve the question. `/conductor send` and the overlay's
+`s` control do the same; `ensemble_resume` is SIGCONT, not an answer tool.
+
+Blocked runs consume no concurrency slot, have no running process (print and both
+RPC transports), and are ignored by the watchdog. They retain their session,
+question, worktree and branch across restart; GC does not reclaim unresolved work.
+No success hook, merge, normal completion card, retry or auto-chain/auto-plan
+advancement occurs while blocked. A later successful answer turn runs normal
+completion gates. Auto plans halt and require owner intervention rather than
+silently restarting the plan. Kill abandons the ask and preserves work under the
+existing killed-run TTL policy. Retirement prevents continuation consistently;
+if the saved session is retired, use a fresh child with the transcript/handoff.
+The parent can do independent work; **do not poll** for questions or answers.
+
 ## Configuration
 
 `contextRetirement` defaults to `true` and applies only to managed conductor children

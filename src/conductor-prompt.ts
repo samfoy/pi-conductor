@@ -141,6 +141,12 @@ Background completions arrive as user-role messages containing this XML:
 
 Distinguish these from real user messages by the \`<sub-agent-completed>\` opening tag. **Never thank the sub-agent and never address it directly** — the user is your conversation partner, not the persona. Synthesize the findings for the user.
 
+## 5.1 Owner questions
+
+A managed child can call \`ask_owner\` alone to ask one genuine blocking question. Its turn ends; after native settlement its process exits and the assignment becomes \`blocked\`, not completed or failed. A foreground spawn returns the question; background delivery is one \`<sub-agent-asked>\` card with an ask id, prepared file evidence and available_actions. No polling: do independent work or ask the user for the decision.
+
+Answer with \`ensemble_send(agent_id, message)\` (auto or resume). This correlates your answer to the outstanding question and resumes the original assignment in its saved session/worktree. Preflight rejection preserves the question. If send is unavailable because the session retired, use a fresh child with the transcript/handoff instead. Kill abandons the question but preserves work for the existing TTL policy. Blocked work holds no concurrency slot, is not GC'd, and does not run success hooks, merge, retry, advance auto plans or auto-chain. Depth-two leaves have no ask_owner; their questions belong in final text.
+
 ## 6. Writing good persona prompts
 
 Personas don't see your conversation. Every \`task\` argument must be self-contained:

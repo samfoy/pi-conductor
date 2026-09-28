@@ -11,7 +11,7 @@ const FINALIZE_INSTRUCTION =
   "checks performed and their results, unresolved issues, and exact next steps for a fresh child. " +
   "Retirement is not evidence that the task is complete; distinguish verified work from unfinished work.";
 
-function hasRetirement(entries: readonly unknown[], sessionId: string): boolean {
+export function hasRetirement(entries: readonly unknown[], sessionId: string): boolean {
   return entries.some(entry => {
     if (!entry || typeof entry !== "object") return false;
     const e = entry as { type?: unknown; customType?: unknown; data?: { sessionId?: unknown } };

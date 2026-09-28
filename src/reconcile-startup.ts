@@ -77,6 +77,7 @@ export type ClassifyResult =
   | "reclassify-killed"
   | "reclassify-failed-queued"
   | "reclassify-pre-schema"
+  | "restore-blocked"
   | "skip-terminal"
   | "skip-foreign";
 
@@ -162,6 +163,8 @@ export function classifyRecord(
   if (parentAlive && !isOurs) {
     return "skip-foreign";
   }
+
+  if (status === "blocked") return "restore-blocked";
 
   // A queued run never spawned. Status → failed regardless of any
   // (defensive) pid the record might carry.
@@ -502,6 +505,10 @@ export async function reconcileOrphansAtStartup(
       const dryRun = deps.dryRun === true;
 
       switch (verdict) {
+        case "restore-blocked":
+          if (!dryRun) deps.registry.register(buildOrphanRun(record, "blocked"));
+          await checkSessionResumability(record, result);
+          break;
         case "skip-terminal":
           // GC owns these; reconcile is a no-op.
           break;
@@ -650,7 +657,7 @@ function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
     // Restore ownership identity so downstream ownership checks
     // (e.g. forceTerminate's foreign-run refusal) see the original
     // spawning host/slot rather than treating the orphan as unowned.
-    parentPid: record.parentPid,
+    parentPid: status === "blocked" ? process.pid : record.parentPid,
     parentSessionId: record.parentSessionId,
     parentStartTime: record.parentStartTime,
     exitCode: record.exitCode,
@@ -669,6 +676,7 @@ function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
     finalPath: record.finalPath,
     sessionPath: record.sessionPath,
     contextRetired: record.contextRetired,
+    pendingAsk: status === "running" || status === "blocked" ? record.pendingAsk : undefined,
     systemPrompt: record.systemPrompt,
     // Tool policy must survive re-adoption, or a resumed read-only persona
     // loses its exclusions (buildResumePiArgs reads these).
@@ -714,6 +722,7 @@ async function reclassifyOnDisk(opts: {
   const updated: RunRecord = {
     ...opts.record,
     status: opts.nextStatus,
+    pendingAsk: undefined,
     finishedAt: opts.now,
     errorMessage: opts.errorMessage,
   };

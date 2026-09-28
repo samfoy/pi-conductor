@@ -556,6 +556,7 @@ async function runSendCmd(
   const persona = resolved.personas.get(run.persona);
   const timeoutMs = resolveTimeoutMs(persona, baseOv, cfg);
 
+  const answering = run.pendingAsk;
   const result = sendToRun(run, message, {
     registry,
     timeoutMs,
@@ -608,7 +609,7 @@ async function runSendCmd(
   // Mirror the LLM tool's spawn-resume notify; we don't await `done`
   // because that blocks the slash command until the sub-agent finishes.
   ctx.ui.notify(
-    `${agentId} resuming via fresh subprocess (streaming_behavior=${behavior})`,
+    answering ? `${agentId} answering ${answering.askId}: ${answering.question}` : `${agentId} resuming via fresh subprocess (streaming_behavior=${behavior})`,
     "info",
   );
 }
@@ -1191,6 +1192,7 @@ export function buildWatchdogStatusReport(args: {
     .list()
     .filter(
       (r) =>
+        r.status !== "blocked" &&
         r.status !== "completed" &&
         r.status !== "failed" &&
         r.status !== "killed" &&

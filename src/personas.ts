@@ -303,6 +303,11 @@ export function effectiveExcludeTools(excludeTools?: readonly string[]): string[
   return [...new Set([...(excludeTools ?? []), ...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS])];
 }
 
+/** Keep owner questions available to explicitly allowlisted managed children. */
+export function effectiveAllowTools(tools: readonly string[] | undefined): string[] | undefined {
+  return tools === undefined ? undefined : [...new Set([...tools, "ask_owner"])];
+}
+
 function requireString(fm: Record<string, unknown>, key: string): string {
   const v = fm[key];
   if (typeof v !== "string" || v.trim() === "") {

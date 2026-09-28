@@ -128,7 +128,7 @@ function makePersona(overrides: Partial<Persona> = {}): Persona {
 
 test("CONDUCTOR_LLM_TOOL_NAMES is exactly the set of tools registerTools registers", () => {
   const registered = captureRegisteredToolNames();
-  assert.equal(registered.length, 11, "sanity: registerTools registers the ensemble_* surface");
+  assert.equal(registered.length, CONDUCTOR_LLM_TOOL_NAMES.length, "sanity: registerTools registers the ensemble_* surface");
   assert.deepEqual([...CONDUCTOR_LLM_TOOL_NAMES].sort(), [...registered].sort());
 });
 
@@ -166,7 +166,7 @@ for (const kind of ["fresh", "resume"] as const) {
 
   test(`buildPiArgs(${kind}): allowlist → --tools csv; persona exclusions prepended to the conductor tools`, () => {
     const args = buildPiArgs({ ...base, tools: ["read", "grep"], excludeTools: ["edit", "write"] });
-    assert.equal(flagValue(args, "--tools"), "read,grep");
+    assert.equal(flagValue(args, "--tools"), "read,grep,ask_owner");
     assert.equal(
       flagValue(args, "--exclude-tools"),
       ["edit", "write", ...ALWAYS_EXCLUDED].join(","),
@@ -192,7 +192,7 @@ test("buildPiArgs(steerable): tool flags are emitted in RPC mode too", () => {
     steerable: true,
     tools: ["read"],
   });
-  assert.equal(flagValue(args, "--tools"), "read");
+  assert.equal(flagValue(args, "--tools"), "read,ask_owner");
   assert.ok(flagValue(args, "--exclude-tools"));
 });
 
@@ -223,7 +223,7 @@ test("buildResumePiArgs: re-applies the run's persisted tool policy", () => {
     makeRun({ tools: ["read", "bash"], excludeTools: effectiveExcludeTools(["edit"]) }),
     "follow up",
   );
-  assert.equal(flagValue(args, "--tools"), "read,bash");
+  assert.equal(flagValue(args, "--tools"), "read,bash,ask_owner");
   assert.equal(flagValue(args, "--exclude-tools"), ["edit", ...ALWAYS_EXCLUDED].join(","));
 });
 
@@ -280,7 +280,7 @@ for (const [label, onDisk, alive, status] of [
       const registered = runs.get(id);
       assert.equal(registered?.status, status);
       const args = buildResumePiArgs(registered!, "x");
-      assert.equal(flagValue(args, "--tools"), "read,bash");
+      assert.equal(flagValue(args, "--tools"), "read,bash,ask_owner");
       const excluded = (flagValue(args, "--exclude-tools") ?? "").split(",");
       for (const name of [...READ_ONLY_EXCLUSIONS, ...CONDUCTOR_LLM_TOOL_NAMES, "subagent", "agent"]) {
         assert.ok(excluded.includes(name), `--exclude-tools must contain ${name}; got ${excluded.join(",")}`);
@@ -313,7 +313,7 @@ test("planSpawnPiArgs: threads the persona's tool policy into fresh AND seeded-r
         cwd: sessionDir,
       });
       assert.equal(plan.mode, inheritContext === "full" ? "resume" : "fresh");
-      assert.equal(flagValue(plan.piArgs, "--tools"), "read");
+      assert.equal(flagValue(plan.piArgs, "--tools"), "read,ask_owner");
       assert.equal(
         flagValue(plan.piArgs, "--exclude-tools"),
         ["edit", ...ALWAYS_EXCLUDED].join(","),

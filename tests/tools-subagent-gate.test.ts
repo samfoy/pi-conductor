@@ -108,11 +108,7 @@ test("registerTools: sub-agent context (CONDUCTOR_SUBAGENT=1) suppresses all ens
       0,
       `expected zero ensemble_* tools when CONDUCTOR_SUBAGENT=1, got: ${ensembleTools.map((t) => t.name).join(", ")}`,
     );
-    // Defensive: assert no tools at all — there's nothing else
-    // `registerTools` ships today, and a future addition of a
-    // non-ensemble tool to `registerTools` should force this test
-    // to be reconsidered (gate scope).
-    assert.equal(tools.length, 0, `unexpected non-ensemble tool registered: ${tools.map((t) => t.name).join(", ")}`);
+    assert.deepEqual(tools.map(t => t.name), ["ask_owner"], "only owner-question infrastructure is added");
   } finally {
     if (prev === undefined) delete process.env.CONDUCTOR_SUBAGENT;
     else process.env.CONDUCTOR_SUBAGENT = prev;
