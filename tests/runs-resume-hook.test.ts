@@ -208,9 +208,8 @@ test(
     assert.equal(original.onCompleteHookTimeoutSeconds, 30);
 
     // ── (b) per-send override replaces Run.onCompleteHook in place ─
-    // RPC path: needs steerable + streamingMode "rpc" + a fake stdin
-    // queue so the override merge runs before enqueueRpcSendWithAck
-    // returns epipe.
+    // RPC overrides require a writable queue. Acknowledge immediately
+    // below so the fixture leaves no pending ack timer.
     const reg2 = new RunRegistry();
     const liveRun = makeRun("inspector-resume2", {
       status: "running",
@@ -221,6 +220,15 @@ test(
       steerable: true,
       streamingMode: "rpc",
     });
+    liveRun.rpcStdinQueue = {
+      writable: true,
+      enqueue: async (cmd: { id: string }) => {
+        const ack = liveRun.pendingAcks!.get(cmd.id)!;
+        clearTimeout(ack.timer);
+        ack.resolve(true);
+        liveRun.pendingAcks!.delete(cmd.id);
+      },
+    } as any;
     reg2.register(liveRun);
     sendToRun(liveRun, "steer the agent", {
       registry: reg2,

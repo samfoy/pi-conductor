@@ -83,6 +83,11 @@ export class RpcStdinQueue {
     this.stream = stream;
   }
 
+  /** Observes the same queue/stream state used by the write path. */
+  get writable(): boolean {
+    return !this.destroyed && !!this.stream && !this.stream.writableEnded && !this.stream.destroyed && this.stream.writable;
+  }
+
   /**
    * Enqueue a command for sequenced JSON-line write. Resolves when
    * the kernel acknowledges the write; rejects on EPIPE / ECANCELED
@@ -192,7 +197,7 @@ export class RpcStdinQueue {
     // Defensive null-guard. If the stream is undefined (consumer
     // bug) or already destroyed, fail this entry and the queue
     // explicitly.
-    if (!this.stream || this.stream.writableEnded || this.stream.destroyed) {
+    if (!this.writable) {
       this.inFlightEntry = null;
       const err = new Error("RpcStdinQueue: underlying stream is not writable") as Error & {
         cause?: unknown;

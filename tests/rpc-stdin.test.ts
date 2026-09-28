@@ -48,6 +48,7 @@ interface FakeWritable {
   mode: "ok" | "back-pressure" | "epipe-on-next";
   pending: Array<() => void>;
   writableEnded: boolean;
+  writable: boolean;
   destroyed: boolean;
   write(
     chunk: Buffer | string,
@@ -64,6 +65,7 @@ function makeFakeWritable(): FakeWritable {
     mode: "ok",
     pending: [],
     writableEnded: false,
+    writable: true,
     destroyed: false,
     write(chunk, encodingOrCb, maybeCb): boolean {
       const cb =

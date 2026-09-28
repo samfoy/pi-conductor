@@ -40,6 +40,8 @@ import {
   sendToRun,
   type RunRegistry,
   validateSendable,
+  supportsFocus,
+  validateRunAction,
 } from "./runs.ts";
 import type { StreamingBehavior } from "./types.ts";
 import { resolveTimeoutMs } from "./runs.ts";
@@ -346,6 +348,7 @@ function runStop(
   }
   let n = 0;
   for (const r of targets) {
+    if (validateRunAction(r, "kill")) continue;
     if (r.status === "queued") {
       opts.getQueue().removeQueued(r.id);
       n++;
@@ -427,6 +430,10 @@ function runFocus(
       );
       return;
     }
+  }
+  if (!supportsFocus(ctx)) {
+    ctx.ui.notify("Focused stream requires terminal UI (TUI mode).", "warning");
+    return;
   }
   opts.openFocusedOverlay(id);
 }

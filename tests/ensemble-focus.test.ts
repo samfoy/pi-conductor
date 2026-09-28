@@ -86,14 +86,14 @@ test("ensemble_focus tool is registered", () => {
 test("ensemble_focus updates the model's focused id when agent_id matches", async () => {
   const { model, focusTool } = setup();
   assert.ok(focusTool);
-  await focusTool.execute("call-1", { agent_id: "b-2" });
+  await focusTool.execute("call-1", { agent_id: "b-2" }, undefined, undefined, { mode: "tui", hasUI: true });
   assert.equal(model.focused()?.id, "b-2");
 });
 
 test("ensemble_focus calls openFocusedOverlay with the matched agent_id", async () => {
   const { opens, focusTool } = setup();
   assert.ok(focusTool);
-  await focusTool.execute("call-1", { agent_id: "a-1" });
+  await focusTool.execute("call-1", { agent_id: "a-1" }, undefined, undefined, { mode: "tui", hasUI: true });
   assert.deepEqual(opens, ["a-1"]);
 });
 
@@ -115,6 +115,6 @@ test("ensemble_focus with no agent_id opens the overlay on the current focus (mo
   // Capture what model.focused() resolves to BEFORE the call so we can
   // compare against what the tool requested to open.
   const expected = model.focused()?.id;
-  await focusTool.execute("call-1", {});
+  await focusTool.execute("call-1", {}, undefined, undefined, { mode: "tui", hasUI: true });
   assert.deepEqual(opens, [expected]);
 });

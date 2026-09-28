@@ -22,7 +22,7 @@ import { matchesKey } from "@earendil-works/pi-tui";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { registerCommands } from "./commands.ts";
 import { registerTools } from "./tools.ts";
-import { RunRegistry } from "./runs.ts";
+import { RunRegistry, supportsFocus } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
 import { mountEnsembleWidget, type EnsembleWidget } from "./widget.ts";
 import {
@@ -148,7 +148,7 @@ export default function (pi: ExtensionAPI): void {
   // so pi's reserved bindings don't also fire.
 
   function openFocusedOverlay(agentId?: string): void {
-    if (!ctxRef) return;
+    if (!ctxRef || !supportsFocus(ctxRef)) return;
     if (overlayOpen) {
       // Already open — just shift focus to the requested agent.
       if (agentId) focusModel.focus(agentId);
@@ -386,7 +386,7 @@ export default function (pi: ExtensionAPI): void {
       return { detachSignal, unregister };
     },
     pushCompletionNotification: (run: Run) => {
-      pi.sendMessage(buildCompletionMessage(run), buildCompletionSendMessageOptions(run));
+      pi.sendMessage(buildCompletionMessage(run, supportsFocus(ctxRef)), buildCompletionSendMessageOptions(run));
       // Item 11 dead-man-switch: track this wake. clearOnTurnStart()
       // drops it when the conductor's next turn fires (the wake
       // worked). The 15s tick re-fires if no turn fires within 30s.
@@ -549,7 +549,7 @@ export default function (pi: ExtensionAPI): void {
                     severity: meta.severity,
                     silentSeconds: meta.silentSeconds,
                     thresholdSeconds,
-                  }),
+                  }, supportsFocus(ctxRef)),
                   { triggerTurn: false, deliverAs: "followUp" },
                 );
               } catch (err) {
@@ -612,7 +612,7 @@ export default function (pi: ExtensionAPI): void {
         // PRD line 257 contract is binary — fire a turn or don't —
         // so a second attempt is appropriate even if the first was a
         // host-side downgrade rather than a missed event.
-        pi.sendMessage(buildCompletionMessage(run), buildCompletionSendMessageOptions(run));
+        pi.sendMessage(buildCompletionMessage(run, supportsFocus(ctxRef)), buildCompletionSendMessageOptions(run));
       }
       for (const runId of result.expired) {
         // Cap hit — surface a warning so a human notices. The conductor

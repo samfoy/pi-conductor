@@ -15,7 +15,7 @@
 
 import { compactEnvelopeBlock } from "./compaction-hook.ts";
 import { contextRetirementNotice } from "./context-retirement.ts";
-import { elapsedStr, formatUsage, getFinalText, sendsSinceSpawn } from "./runs.ts";
+import { availableActions, type RunAction, elapsedStr, formatUsage, getFinalText, sendsSinceSpawn } from "./runs.ts";
 import type { Run, RunStatus } from "./types.ts";
 
 /** Theme slot for an annotation row under a notification card. */
@@ -44,6 +44,8 @@ export interface NotificationNote {
  */
 export interface EnsembleNotificationDetails {
   kind: "completed" | "stalled";
+  /** Absent only on historical persisted cards. */
+  available_actions?: RunAction[];
   id: string;
   persona: string;
   status: RunStatus;
@@ -108,7 +110,7 @@ function perSendNumbers(run: Run): PerSendNumbers {
   };
 }
 
-export function formatCompletionNotification(run: Run): string {
+export function formatCompletionNotification(run: Run, actions: RunAction[] = availableActions(run)): string {
   const finalText = getFinalText(run.messages);
   const perSend = perSendNumbers(run);
   // Per-send <duration>: render via elapsedStr against a synthetic
@@ -130,6 +132,7 @@ export function formatCompletionNotification(run: Run): string {
   lines.push(`  <agent-id>${run.id}</agent-id>`);
   lines.push(`  <persona>${run.persona}</persona>`);
   lines.push(`  <status>${run.status}</status>`);
+  lines.push(`  <available-actions>${actions.join(",")}</available-actions>`);
   lines.push(`  <duration>${elapsed}</duration>`);
   lines.push(
     `  <usage><turns>${perSend.turns}</turns><input>${perSend.input}</input>` +
@@ -297,6 +300,7 @@ function escapeXmlAttr(s: string): string {
 export function formatStallNotification(
   run: Run,
   args: { severity: "soft" | "hard"; silentSeconds: number; thresholdSeconds: number },
+  actions: RunAction[] = availableActions(run),
 ): string {
   const elapsed = elapsedStr(run.startTime);
 
@@ -306,6 +310,7 @@ export function formatStallNotification(
   lines.push(`  <agent-id>${run.id}</agent-id>`);
   lines.push(`  <persona>${run.persona}</persona>`);
   lines.push(`  <status>${run.status}</status>`);
+  lines.push(`  <available-actions>${actions.join(",")}</available-actions>`);
   lines.push(`  <duration>${elapsed}</duration>`);
   lines.push(
     `  <stall><severity>${args.severity}</severity>` +
@@ -375,7 +380,8 @@ export function buildCompletionSendMessageOptions(run: Run): {
  * be forgotten on one of them — which is exactly how the raw-XML
  * regression shipped.
  */
-export function buildCompletionMessage(run: Run): NotificationMessage {
+export function buildCompletionMessage(run: Run, canFocus = false): NotificationMessage {
+  const actions = availableActions(run, canFocus);
   const perSend = perSendNumbers(run);
   const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
   const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
@@ -421,10 +427,11 @@ export function buildCompletionMessage(run: Run): NotificationMessage {
 
   return {
     customType: "ensemble-notification",
-    content: formatCompletionNotification(run),
+    content: formatCompletionNotification(run, actions),
     display: true,
     details: {
       kind: "completed",
+      available_actions: actions,
       id: run.id,
       persona: run.persona,
       status: run.status,
@@ -440,13 +447,16 @@ export function buildCompletionMessage(run: Run): NotificationMessage {
 export function buildStallMessage(
   run: Run,
   args: { severity: "soft" | "hard"; silentSeconds: number; thresholdSeconds: number },
+  canFocus = false,
 ): NotificationMessage {
+  const actions = availableActions(run, canFocus);
   return {
     customType: "ensemble-notification",
-    content: formatStallNotification(run, args),
+    content: formatStallNotification(run, args, actions),
     display: true,
     details: {
       kind: "stalled",
+      available_actions: actions,
       id: run.id,
       persona: run.persona,
       status: run.status,

@@ -1,5 +1,5 @@
 /**
- * Pure renderers for the v0.4 inline-streamed foreground spawn.
+ * Renderers for the v0.4 inline-streamed foreground spawn.
  *
  * `renderForegroundStream(run, width)` returns the multi-line text that
  * pi displays in the parent's tool-call card while a foreground sub-agent
@@ -19,7 +19,7 @@
  */
 
 import { contextRetirementNotice } from "./context-retirement.ts";
-import { elapsedStr, formatUsage, getFinalText, sendsSinceSpawn, type RunRegistry } from "./runs.ts";
+import { availableActions, type RunAction, elapsedStr, formatUsage, getFinalText, sendsSinceSpawn, type RunRegistry } from "./runs.ts";
 import { renderHeader, renderTranscript } from "./transcript.ts";
 import { isTerminal, type Run } from "./types.ts";
 import { STATUS_GLYPH } from "./status-glyph.ts";
@@ -109,7 +109,7 @@ export function renderForegroundStream(
  * excerpt and use the appropriate status glyph. A kept worktree or branch
  * adds a `  ⚠ <hint>` line on any status (v0.20 W4).
  */
-export function renderForegroundSummary(run: Run): string {
+export function renderForegroundSummary(run: Run, actions: readonly RunAction[] = availableActions(run)): string {
   const glyph = STATUS_GLYPH[run.status] ?? "·";
   const verb =
     run.status === "completed" ? "completed" :
@@ -143,6 +143,7 @@ export function renderForegroundSummary(run: Run): string {
     headline += ` · lifetime ${lifetimeElapsed}${lifetimeCost}`;
   }
   lines.push(headline);
+  lines.push(`  available_actions=${actions.join(",") || "(none)"}`);
   const retirement = contextRetirementNotice(run);
   if (retirement) lines.push(`  ${retirement}`);
 

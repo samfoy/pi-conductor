@@ -125,6 +125,8 @@ test("S6 W3 negative: widget formatRow uses simple turn count when no maxTurns",
 test("S6 W4: notification for aborted status contains 'aborted' and 'turn limit'", () => {
   const run = makeRun({
     status: "aborted",
+    cwd: "/tmp",
+    recordPath: "/tmp/ux-surfaces/record.json",
     finishedAt: Date.now(),
     thisInvocationStartedAt: Date.now() - 5000,
     maxTurns: 20,

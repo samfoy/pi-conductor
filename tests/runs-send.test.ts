@@ -463,7 +463,7 @@ for (const behavior of ["steer", "follow_up"] as const) {
       status: "running",
       streamingMode: "rpc",
       steerable: true,
-      rpcStdinQueue: { enqueue: async (cmd: unknown) => void enqueued.push(cmd), destroy: () => {} } as any,
+      rpcStdinQueue: { writable: true, enqueue: async (cmd: unknown) => void enqueued.push(cmd), destroy: () => {} } as any,
       usage: { ...emptyUsage(), turns: 3, input: 10, output: 20, cost: 0.5 },
       thisInvocationStartedAt: 1,
       resumeCount: 0,

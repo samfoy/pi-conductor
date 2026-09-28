@@ -530,7 +530,7 @@ test("settleWorktree: a steered run that was never resumed fails like any other:
       status: "running",
       streamingMode: "rpc",
       steerable: true,
-      rpcStdinQueue: { enqueue: async () => {}, destroy: () => {} } as any,
+      rpcStdinQueue: { writable: true, enqueue: async () => {}, destroy: () => {} } as any,
       worktreePath: wt.path,
       worktreeBranch: wt.branch,
     });

@@ -82,6 +82,7 @@ function captureTools() {
  * the resolution shape (success / EPIPE).
  */
 class FakeRpcStdinQueue {
+  readonly writable = true;
   public readonly calls: Array<Record<string, unknown>> = [];
   /** When set, every enqueue rejects with this error (EPIPE simulation). */
   public rejectWith?: Error;

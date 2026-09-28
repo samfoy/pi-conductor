@@ -106,6 +106,8 @@ May also be worth pinning these into `personas/builder.md` if the failure recurs
 
 May also be worth pinning into `personas/builder.md`.
 
+**A3 follow-up (open):** `tests/ensemble-send-steerable.test.ts`'s `waitForFirstEnqueue` uses `Date.now()` while the ack-timeout test mocks Date. If validation rejects before enqueue, its deadline never advances; A3's first full run hit the 360s outer timeout. The queue fixture now supplies the new `writable` observation, but the latent unbounded wait remains. Separately bound the wait with a real clock or a runner timeout; deferred from action eligibility.
+
 ### 6. Pre-commit grep for residual `MUTATION` / `MUTATE` markers (`builder-ew9e` finding) — CLOSED 2026-05-21 (`9db4916`)
 
 **Witnessed:** `builder-ccl8` performed WDD verification by mutating production code with `// MUTATION:` comments on each modified line, then was killed mid-verification before reverting. The dirty tree stashed contained one residual mutation in `src/hook-runner.ts:343-346` (the W1 close handler) that the salvage builder had to grep-and-fix before tests would pass.

@@ -42,6 +42,38 @@ pi-conductor closes that gap. The parent pi session is the conductor, sub-agents
 - **Per-spawn `cwd`** on `ensemble_spawn` and on each `ensemble_auto` step sets where the sub-agent runs and where personas, config, and the git root for `worktree: true` isolation resolve. `~` and relative paths resolve against the conductor's default cwd; a missing directory is rejected before any run starts. `ensemble_send` resumes and chain successors keep the original run's cwd. A chain successor gets the same worktree decision as `ensemble_spawn`, branching from the current HEAD; a write-capable successor after a parent whose branch was kept unmerged fails instead of starting without that work.
 - **Conductor default cwd.** pi can't change a session's cwd, so the conductor keeps its own: `/conductor cwd [<path>|--reset]` or the `ensemble_cwd` tool (`{ path?, reset? }`) sets or clears an override for later spawns. With no argument, both report the effective cwd and its source. The override is saved as a `conductor-cwd` session entry, so it survives `/reload` and resume.
 
+### Available actions (Phase A A3)
+
+`ensemble_status` reports `available_actions` for every run, including queued,
+paused, and all terminal statuses. Completion and stall envelopes include
+`<available-actions>` (comma-separated tokens); foreground completion text/details
+and expanded notification cards carry the same snapshot.
+
+| Token | Operation |
+|---|---|
+| `send` | `ensemble_send` with `streaming_behavior: "resume"`: new process continuing the saved session |
+| `steer` | `ensemble_send` with `streaming_behavior: "steer"`: live RPC course correction before the next model call |
+| `follow_up` | `ensemble_send` with `streaming_behavior: "follow_up"`: live RPC message queued until the agent finishes |
+| `pause` | `ensemble_pause`: SIGSTOP |
+| `resume` | `ensemble_resume`: SIGCONT, **not** saved-session send |
+| `kill` | `ensemble_kill`: terminate the run or cancel its queue entry |
+| `focus` | `ensemble_focus`: open the transcript overlay in TUI mode |
+
+`ensemble_send`'s default `auto` selects live `follow_up` or saved-session `send`.
+**Use the latest available_actions; each call revalidates.** Snapshots are advisory:
+the session file, retirement marker, stdin, process ownership, or UI capability may
+change before execution. Reporting only reads; it never starts a process, restores
+a worktree, changes branches, or writes a run record. Runtime errors (for example,
+a rejected signal or worktree restoration failure) can still prevent an action.
+
+Retirement removes `send`, `steer`, and `follow_up`, including fresh RPC sessions
+whose marker arrives before finalization. `contextRetirement: false` bypasses that
+restriction. Process controls require local ownership; saved terminal sessions can
+still be continued after startup reconciliation. `focus` is unavailable in RPC,
+JSON, and print modes even when an RPC client supports other UI interactions.
+Terminal `ensemble_kill` remains an idempotent no-op success although `kill` is not
+advertised there. No runtime backend or ownership redesign is included in A3.
+
 ### Context inheritance
 
 - **`inherit_context: filtered`** — sub-agent boots with a seeded session of the conductor's filtered transcript: keeps user/assistant prose + read/write/bash tool calls + branch / compaction summaries; drops `ensemble_*` and `subagent` orchestration noise, `<sub-agent-completed>` cards, and `!!`-prefix bash entries.
@@ -171,7 +203,7 @@ hooks and worktree safety still apply. Settlement uses Pi's `agent_settled` even
 (JSON and RPC), not `agent_end`, which can precede overflow recovery; process exit
 is the fallback. Supported host: **Pi 0.87.1 or newer** (`@earendil-works/pi-coding-agent >=0.87.1`);
 0.87.1 is the verified floor for the required `agent_settled` API.
-This is Phase A **A2 only**, not A3–A6 or the herdr runtime.
+Phase A **A2 and A3** are shipped; A4–A6 and the herdr runtime remain deferred.
 
 `~/.pi/agent/extensions/conductor/config.json` (user) or `<project>/.pi/conductor.json` (project, overrides user):
 

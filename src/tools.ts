@@ -28,7 +28,7 @@ import {
 } from "./autonomous.ts";
 import { resolveRetryPolicy } from "./retry.ts";
 import { collapseSteerableCascade } from "./steerable.ts";
-import { elapsedStr, failBeforeSpawn, forceTerminate, formatUsage, getFinalText, keptBranchHint, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendCwd, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
+import { availableActions, supportsFocus, validateRunAction, elapsedStr, failBeforeSpawn, forceTerminate, formatUsage, getFinalText, keptBranchHint, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendCwd, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
 import { isTerminal } from "./types.ts";
 import { SpawnQueue } from "./queue.ts";
 import { resolveMergeStrategy, resolveWorktreeSpec } from "./worktree.ts";
@@ -268,7 +268,7 @@ function registerStatusTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
     name: CONDUCTOR_LLM_TOOLS.status,
     label: "Sub-agent status",
     description:
-      "Report status of currently-running, queued, paused, and recently-finished sub-agents in this session.",
+      "Report status and available_actions for each sub-agent in this session. Use the latest available_actions; each call revalidates.",
     promptSnippet: "Check status of conductor sub-agents",
     promptGuidelines: [
       "Use ensemble_status when you need to know which sub-agents are alive (e.g. before deciding whether to spawn another).",
@@ -279,13 +279,15 @@ function registerStatusTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         Type.String({ description: "Filter to a specific agent_id; omit for all." }),
       ),
     }),
-    async execute(_id, params) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
       const registry = opts.getRegistry();
       const queue = opts.getQueue();
       const all = registry.list();
       const filtered = params?.agent_id ? all.filter((r) => r.id === params.agent_id) : all;
 
       const groups = groupByStatus(filtered);
+      const summaries = new Map(filtered.map(r => [r.id, toStatusSummary(r, supportsFocus(ctx))]));
+      const summary = (r: Run) => summaries.get(r.id)!;
       const queueList = queue.list().map((p) => ({
         id: p.id,
         persona: p.spawn.persona.name,
@@ -297,19 +299,22 @@ function registerStatusTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         content: [
           {
             type: "text" as const,
-            text: formatStatusForLLM(groups, queueList.length),
+            text: formatStatusForLLM(groups, queueList.length, summaries),
           },
         ],
         details: {
-          running: groups.running.map(toStatusSummary),
-          queued: groups.queued.map(toStatusSummary),
-          paused: groups.paused.map(toStatusSummary),
+          running: groups.running.map(summary),
+          queued: groups.queued.map(summary),
+          paused: groups.paused.map(summary),
           finished: [
             ...groups.completed,
             ...groups.failed,
             ...groups.killed,
             ...groups.timeout,
-          ].map(toStatusSummary),
+            ...groups.hook_failed,
+            ...groups.merge_conflict,
+            ...groups.aborted,
+          ].map(summary),
           queueDetail: queueList,
         },
       };
@@ -644,7 +649,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         }),
       ),
     }),
-    async execute(_id, params, signal, onUpdate) {
+    async execute(_id, params, signal, onUpdate, ctx) {
       const tmRange = validateTimeoutMinutes(params.timeout_minutes);
       if (tmRange) return errorResult(tmRange);
       const stallRange = validateStallThresholdSeconds(params.stall_threshold_seconds);
@@ -878,7 +883,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
             // payload through so the last visible streamed frame matches
             // reality before the tool-call card collapses to the summary.
             throttle.flush();
-            return foregroundFinalResult(outcome.value);
+            return foregroundFinalResult(outcome.value, supportsFocus(ctx));
           } finally {
             detach.unregister();
           }
@@ -918,13 +923,15 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
     label: "Send to sub-agent",
     description:
       "Continue an existing sub-agent's session with a new user-role message. " +
-      "Works on finished sub-agents too (resumes via pi --session). " +
+      "send continues a saved session in a new process; steer/follow_up deliver over live RPC. " +
+      "Live RPC sends await acknowledgement only. " +
+      "Use the latest available_actions; each call revalidates. " +
       "Foreground (default): blocks until the sub-agent's reply arrives. " +
       "Background: returns immediately; reply arrives as a <sub-agent-completed> notification.",
     promptSnippet: "Send a follow-up message to an existing sub-agent",
     promptGuidelines: [
       "Use ensemble_send when you want to continue working with a sub-agent that already has the context you care about — don't re-spawn from scratch.",
-      "The sub-agent must be in a terminal state (completed/failed/killed/timeout). Running, paused, and queued sub-agents are rejected.",
+      "Use the latest available_actions; each call revalidates. Retired sessions need a fresh child with the handoff.",
       "Pass agent_id from a previous ensemble_spawn or ensemble_status result.",
     ],
     parameters: Type.Object({
@@ -984,7 +991,7 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           ],
           {
             description:
-              "v0.12 steering. Default 'auto' → follow_up for live RPC sub-agents, spawn-resume for terminal ones. 'steer' interrupts the running turn; 'follow_up' queues for the next turn boundary; 'resume' forces a fresh subprocess via pi --session (terminal runs only). Sub-agent must have been spawned with steerable: true for steer/follow_up to work.",
+              "auto selects live follow_up or saved-session send. steer delivers a course correction before the next model call; follow_up queues until the agent finishes. resume means the available_actions token send (new process via pi --session), NOT ensemble_resume (SIGCONT). Use the latest available_actions; each call revalidates.",
           },
         ),
       ),
@@ -1140,7 +1147,7 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
             // Force any pending payload so the last visible streamed frame
             // matches reality before the tool-call card collapses.
             throttle.flush();
-            return foregroundFinalResult(outcome.value);
+            return foregroundFinalResult(outcome.value, supportsFocus(ctx));
           } finally {
             detach.unregister();
           }
@@ -1184,7 +1191,7 @@ function registerPauseTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
     promptSnippet: "Pause a running sub-agent",
     promptGuidelines: [
       "Use ensemble_pause to halt token consumption on a long-running sub-agent without killing it.",
-      "The sub-agent must be in 'running' status; paused/queued/terminal sub-agents are rejected.",
+      "Use the latest available_actions; each call revalidates.",
     ],
     parameters: Type.Object({
       agent_id: Type.String({ description: "agent_id of the sub-agent to pause." }),
@@ -1199,10 +1206,9 @@ function registerPauseTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         );
         return r as { content: typeof r.content; details: PauseDetails };
       }
-      if (run.status !== "running") {
-        const r = errorResult(
-          `cannot pause sub-agent ${run.id}: status is ${run.status} (must be 'running').`,
-        );
+      const blocker = validateRunAction(run, "pause");
+      if (blocker) {
+        const r = errorResult(blocker);
         return r as { content: typeof r.content; details: PauseDetails };
       }
       const ok = pauseRun(run, registry);
@@ -1225,11 +1231,11 @@ function registerResumeTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
     name: CONDUCTOR_LLM_TOOLS.resume,
     label: "Resume sub-agent",
     description:
-      "SIGCONT a paused sub-agent. The sub-agent must have been paused via ensemble_pause first.",
+      "SIGCONT a paused sub-agent (available_actions token resume), not a new saved-session process. Use the latest available_actions; each call revalidates.",
     promptSnippet: "Resume a paused sub-agent",
     promptGuidelines: [
       "Use ensemble_resume to continue a sub-agent previously paused via ensemble_pause.",
-      "The sub-agent must be in 'paused' status; running/queued/terminal sub-agents are rejected.",
+      "Use the latest available_actions; each call revalidates.",
     ],
     parameters: Type.Object({
       agent_id: Type.String({ description: "agent_id of the sub-agent to resume." }),
@@ -1244,10 +1250,9 @@ function registerResumeTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         );
         return r as { content: typeof r.content; details: ResumeDetails };
       }
-      if (run.status !== "paused") {
-        const r = errorResult(
-          `cannot resume sub-agent ${run.id}: status is ${run.status} (must be 'paused').`,
-        );
+      const blocker = validateRunAction(run, "resume");
+      if (blocker) {
+        const r = errorResult(blocker);
         return r as { content: typeof r.content; details: ResumeDetails };
       }
       const ok = resumeRun(run, registry);
@@ -1282,7 +1287,7 @@ function registerKillTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
     promptSnippet: "Force-terminate a sub-agent",
     promptGuidelines: [
       "Use ensemble_kill to abort a sub-agent that is misbehaving, off-track, or no longer needed.",
-      "Killable states: running, paused, queued. Already-terminal sub-agents are no-op success.",
+      "Use the latest available_actions; each call revalidates. Already-terminal sub-agents remain no-op success.",
       "Run records (transcript, final.md) are preserved for post-mortem inspection.",
     ],
     parameters: Type.Object({
@@ -1303,11 +1308,16 @@ function registerKillTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       }
       // Idempotent: if already-terminal, return current status as success.
       // Matches the brief's "calling on an already-terminated sub-agent is a no-op success".
-      if (run.status === "completed" || run.status === "failed" || run.status === "killed" || run.status === "timeout" || run.status === "hook_failed" || run.status === "merge_conflict" || run.status === "aborted") {
+      if (isTerminal(run.status)) {
         return {
           content: [{ type: "text" as const, text: `already ${run.status}: ${run.id} (no-op)` }],
           details: { status: run.status, agent_id: run.id, persona: run.persona } as KillDetails,
         };
+      }
+      const blocker = validateRunAction(run, "kill");
+      if (blocker) {
+        const r = errorResult(blocker);
+        return r as { content: typeof r.content; details: KillDetails };
       }
       // Queued runs need to be removed from the pending list AND have their
       // placeholder Run flipped to terminal. SpawnQueue.removeQueued does both
@@ -1337,6 +1347,7 @@ function registerFocusTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
     label: "Focus a sub-agent",
     description:
       "Request the focused-stream overlay open on a specific sub-agent. " +
+      "Use the latest available_actions; each call revalidates. " +
       "When agent_id is omitted, opens the overlay on the currently-focused " +
       "(most recently active) sub-agent. The user controls the overlay with " +
       "Esc (close), Tab/Shift+Tab (cycle), arrows (scroll), c (collapse tool " +
@@ -1351,7 +1362,7 @@ function registerFocusTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         Type.String({ description: "agent_id of the sub-agent to focus on (omit for most-recent)." }),
       ),
     }),
-    async execute(_id, params) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
       const model = opts.getModel();
       const id = params?.agent_id;
       type FocusDetails = {
@@ -1360,6 +1371,11 @@ function registerFocusTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         error?: string;
       };
 
+      const target = id ? opts.getRegistry().get(id) : model.focused();
+      if (target) {
+        const blocker = validateRunAction(target, "focus", supportsFocus(ctx));
+        if (blocker) return { content: [{ type: "text" as const, text: blocker }], details: { opened: false, agent_id: target.id, error: blocker } as FocusDetails };
+      }
       if (id) {
         const ok = model.focus(id);
         if (!ok) {
@@ -1500,9 +1516,10 @@ function groupByStatus(runs: Run[]): StatusGroups {
   return g;
 }
 
-function toStatusSummary(r: Run) {
+function toStatusSummary(r: Run, canFocus: boolean) {
   return {
     id: r.id,
+    available_actions: availableActions(r, canFocus),
     persona: r.persona,
     status: r.status,
     elapsed: elapsedStr(r.startTime, r.finishedAt),
@@ -1512,13 +1529,13 @@ function toStatusSummary(r: Run) {
   };
 }
 
-function formatStatusForLLM(g: StatusGroups, queueSize: number): string {
+function formatStatusForLLM(g: StatusGroups, queueSize: number, summaries: Map<string, ReturnType<typeof toStatusSummary>>): string {
   const lines: string[] = [];
   const counts: string[] = [];
   if (g.running.length) counts.push(`${g.running.length} running`);
   if (g.paused.length) counts.push(`${g.paused.length} paused`);
   if (g.queued.length || queueSize) counts.push(`${g.queued.length} queued`);
-  const finished = g.completed.length + g.failed.length + g.killed.length + g.timeout.length + g.hook_failed.length;
+  const finished = g.completed.length + g.failed.length + g.killed.length + g.timeout.length + g.hook_failed.length + g.merge_conflict.length + g.aborted.length;
   if (finished) counts.push(`${finished} finished`);
   lines.push(counts.length === 0 ? "No sub-agents." : `Sub-agents: ${counts.join(", ")}.`);
 
@@ -1531,6 +1548,8 @@ function formatStatusForLLM(g: StatusGroups, queueSize: number): string {
     ["Killed", g.killed],
     ["Timeout", g.timeout],
     ["Hook failed", g.hook_failed],
+    ["Merge conflict", g.merge_conflict],
+    ["Aborted", g.aborted],
   ];
   for (const [label, list] of groupOrder) {
     if (list.length === 0) continue;
@@ -1548,19 +1567,21 @@ function formatStatusForLLM(g: StatusGroups, queueSize: number): string {
       const usagePart = usageStr ? `[${usageStr}]` : "";
       const hint = r.lastToolCall ? ` → ${r.lastToolCall}` : "";
       lines.push(
-        `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint}`,
+        `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} available_actions=${summaries.get(r.id)!.available_actions.join(",") || "(none)"}`,
       );
     }
   }
   return lines.join("\n");
 }
 
-function foregroundFinalResult(r: Run) {
-  const summary = renderForegroundSummary(r);
+function foregroundFinalResult(r: Run, canFocus: boolean) {
+  const actions = availableActions(r, canFocus);
+  const summary = renderForegroundSummary(r, actions);
   if (r.status !== "completed") {
     return {
       content: [{ type: "text" as const, text: summary }],
       details: {
+        available_actions: actions,
         status: r.status,
         agent_id: r.id,
         persona: r.persona,
@@ -1574,6 +1595,7 @@ function foregroundFinalResult(r: Run) {
   return {
     content: [{ type: "text" as const, text: summary }],
     details: {
+      available_actions: actions,
       status: "completed",
       agent_id: r.id,
       persona: r.persona,

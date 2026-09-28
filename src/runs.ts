@@ -2170,42 +2170,93 @@ export type SendToRunResult =
     }
   | { kind: "rejected"; reason: string };
 
-/**
- * Pure pre-check for whether a run can be sent to right now. Returns
- * the same set of rejection reasons {@link sendToRun} would, but
- * without any side effects — callers can use this to short-circuit UI
- * flows (e.g. the overlay's 's' keybinding) before opening an input
- * prompt.
- *
- * v0.12 slice 1: thin shim around {@link resolveSendStrategy} (called
- * with `"auto"`) plus a post-strategy I/O check that the session file
- * is actually present on disk. The pure resolver checks string
- * presence (`run.sessionPath` set/unset); this layer adds the disk
- * check via {@link existsSync}. Callers stay shape-stable; only the
- * underlying decision logic moved into the resolver so the v0.12
- * `streaming_behavior` arg can route through the same matrix.
- */
+/** Canonical tokens: send starts a saved session; resume sends SIGCONT. */
+export const RUN_ACTIONS = ["send", "steer", "follow_up", "pause", "resume", "kill", "focus"] as const;
+export type RunAction = typeof RUN_ACTIONS[number];
+
+/** Current subprocess capabilities; a future backend can supply its own values. */
+export function capabilitiesFor(run: Run) {
+  const exited = run.proc?.exitCode != null || run.proc?.signalCode != null;
+  return {
+    pause: !!run.proc?.pid && !exited,
+    liveSend: run.streamingMode === "rpc" && !!run.rpcStdinQueue?.writable && !exited,
+  };
+}
+
+export function supportsFocus(ctx?: { mode?: string; hasUI?: boolean } | null): boolean {
+  return ctx?.mode === "tui";
+}
+
+/** Read-only I/O boundary. A snapshot is advisory, never authorization. */
+export function observeRunActions(run: Run, canFocus = false) {
+  const sessionPath = findRunSessionFile(run);
+  let sessionMissing = false;
+  if (run.sessionPath) {
+    try { sessionMissing = !statSync(run.sessionPath).isFile(); }
+    catch { sessionMissing = true; }
+  }
+  return {
+    capabilities: capabilitiesFor(run),
+    canFocus,
+    owned: run.parentPid === undefined || run.parentPid === process.pid,
+    retirementNotice: contextRetirementNotice({
+      cwd: run.cwd,
+      contextRetired: run.contextRetired || savedSessionRetired(sessionPath),
+    }),
+    sessionMissing,
+  };
+}
+
+type ActionObservations = ReturnType<typeof observeRunActions>;
+
+/** Pure eligibility, shared by reports and execution gates. Undefined means eligible. */
+export function runActionError(run: Run, action: RunAction, observed: ActionObservations): string | undefined {
+  if (action === "focus") return observed.canFocus ? undefined : "Focused stream requires terminal UI (TUI mode).";
+  if (action === "send" || action === "steer" || action === "follow_up") {
+    if (observed.retirementNotice) return `sub-agent ${run.id}: ${observed.retirementNotice}`;
+  }
+  if (action !== "send" && !observed.owned) {
+    return `sub-agent ${run.id} is owned by another conductor (foreign run).`;
+  }
+  if (action === "kill") return isTerminal(run.status) ? `sub-agent ${run.id} is already ${run.status}.` : undefined;
+  if (action === "pause" || action === "resume") {
+    const required = action === "pause" ? "running" : "paused";
+    if (run.status !== required) return `cannot ${action} sub-agent ${run.id}: status is ${run.status} (must be '${required}').`;
+    return observed.capabilities.pause ? undefined : `${action} failed for ${run.id}: process handle missing or signal rejected.`;
+  }
+  const decision = resolveSendStrategy(run, action === "send" ? "resume" : action);
+  if (decision.strategy.kind === "rejected") return decision.strategy.reason;
+  if (observed.sessionMissing) return `sub-agent ${run.id} session file is missing on disk: ${run.sessionPath}`;
+  if (action !== "send" && !observed.capabilities.liveSend) {
+    return `sub-agent ${run.id} finished before steer was delivered (${run.rpcStdinQueue ? "stdin is not writable" : "stdin queue gone"}).`;
+  }
+  return undefined;
+}
+
+/** Pure computation over one set of filesystem/runtime observations. */
+export function computeAvailableActions(run: Run, observed: ActionObservations): RunAction[] {
+  return RUN_ACTIONS.filter(action => runActionError(run, action, observed) === undefined);
+}
+
+/** Observes config/session files once; does not discover by mutating the run. */
+export function availableActions(run: Run, canFocus = false): RunAction[] {
+  return computeAvailableActions(run, observeRunActions(run, canFocus));
+}
+
+/** Re-observe immediately before an action; status snapshots are not permissions. */
+export function validateRunAction(run: Run, action: RunAction, canFocus = false): string | undefined {
+  return runActionError(run, action, observeRunActions(run, canFocus));
+}
+
+/** Read-only preflight for UI prompts and the send effect boundary; reads disk. */
 export function validateSendable(
   run: Run,
   behavior: StreamingBehavior = "auto",
 ): { ok: true } | { ok: false; reason: string } {
-  const notice = contextRetirementNotice({ cwd: run.cwd, contextRetired: run.contextRetired || savedSessionRetired(findRunSessionFile(run)) });
-  if (notice) return { ok: false, reason: `sub-agent ${run.id}: ${notice}` };
-  const r = resolveSendStrategy(run, behavior);
-  if (r.strategy.kind === "rejected") {
-    return { ok: false, reason: r.strategy.reason };
-  }
-  // I/O check after the pure resolver. The disk-existence check stays
-  // here because resolveSendStrategy is pure (no fs). Slice 4 may
-  // narrow this for true RPC steer/follow_up paths once the live
-  // subprocess is the source of truth, not the on-disk session file.
-  if (run.sessionPath && !existsSync(run.sessionPath)) {
-    return {
-      ok: false,
-      reason: `sub-agent ${run.id} session file is missing on disk: ${run.sessionPath}`,
-    };
-  }
-  return { ok: true };
+  const action = behavior === "auto" ? (run.status === "running" ? "follow_up" : "send")
+    : behavior === "resume" ? "send" : behavior;
+  const reason = validateRunAction(run, action);
+  return reason === undefined ? { ok: true } : { ok: false, reason };
 }
 
 /**
@@ -3171,19 +3222,9 @@ export function forceTerminate(
   killGroup: (pid: number, signal: NodeJS.Signals) => void = defaultKillGroup,
 ): void {
   if (isTerminal(run.status)) return;
-  // Defense-in-depth against the post-startup-reconcile foreign-adoption
-  // bug: if this run is owned by a different live conductor host
-  // (parentPid !== process.pid), refuse the entire operation. We have
-  // no proc handle for it anyway (foreign children are spawned in the
-  // sibling session), so SIGTERM/SIGKILL would no-op; the real harm
-  // would be the writeRecord/registry.notify side effects corrupting
-  // the owner's state. Records with `parentPid === undefined` are
-  // legacy/unscoped — fall through to the existing path.
-  if (run.parentPid !== undefined && run.parentPid !== process.pid) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      `forceTerminate: refusing to mutate foreign run id=${run.id} ownerPid=${run.parentPid} selfPid=${process.pid}`,
-    );
+  const blocker = validateRunAction(run, "kill");
+  if (blocker) {
+    console.warn(`forceTerminate: refusing to mutate foreign run id=${run.id}: ${blocker}`);
     return;
   }
   if (run.timeoutTimer) {
@@ -3329,10 +3370,9 @@ export function pauseRun(
   registry: RunRegistry,
   signaler: Signaler = defaultSignaler,
 ): boolean {
-  if (run.status !== "running") return false;
-  if (!run.proc?.pid) return false;
+  if (validateRunAction(run, "pause")) return false;
   try {
-    signaler(run.proc.pid, "SIGSTOP");
+    signaler(run.proc!.pid!, "SIGSTOP");
   } catch {
     return false;
   }
@@ -3348,10 +3388,9 @@ export function resumeRun(
   registry: RunRegistry,
   signaler: Signaler = defaultSignaler,
 ): boolean {
-  if (run.status !== "paused") return false;
-  if (!run.proc?.pid) return false;
+  if (validateRunAction(run, "resume")) return false;
   try {
-    signaler(run.proc.pid, "SIGCONT");
+    signaler(run.proc!.pid!, "SIGCONT");
   } catch {
     return false;
   }

@@ -986,6 +986,10 @@ var RpcStdinQueue = class {
   constructor(stream) {
     this.stream = stream;
   }
+  /** Observes the same queue/stream state used by the write path. */
+  get writable() {
+    return !this.destroyed && !!this.stream && !this.stream.writableEnded && !this.stream.destroyed && this.stream.writable;
+  }
   /**
    * Enqueue a command for sequenced JSON-line write. Resolves when
    * the kernel acknowledges the write; rejects on EPIPE / ECANCELED
@@ -1066,7 +1070,7 @@ var RpcStdinQueue = class {
     if (!entry) return;
     this.inFlightEntry = entry;
     const line = entry.json + "\n";
-    if (!this.stream || this.stream.writableEnded || this.stream.destroyed) {
+    if (!this.writable) {
       this.inFlightEntry = null;
       const err = new Error("RpcStdinQueue: underlying stream is not writable");
       entry.reject(err);
@@ -3490,20 +3494,73 @@ function mapFromRegistry(r) {
 function sendCwd(run, conductorCwd) {
   return run.cwd || conductorCwd;
 }
+var RUN_ACTIONS = ["send", "steer", "follow_up", "pause", "resume", "kill", "focus"];
+function capabilitiesFor(run) {
+  const exited = run.proc?.exitCode != null || run.proc?.signalCode != null;
+  return {
+    pause: !!run.proc?.pid && !exited,
+    liveSend: run.streamingMode === "rpc" && !!run.rpcStdinQueue?.writable && !exited
+  };
+}
+function supportsFocus(ctx) {
+  return ctx?.mode === "tui";
+}
+function observeRunActions(run, canFocus = false) {
+  const sessionPath = findRunSessionFile(run);
+  let sessionMissing = false;
+  if (run.sessionPath) {
+    try {
+      sessionMissing = !statSync2(run.sessionPath).isFile();
+    } catch {
+      sessionMissing = true;
+    }
+  }
+  return {
+    capabilities: capabilitiesFor(run),
+    canFocus,
+    owned: run.parentPid === void 0 || run.parentPid === process.pid,
+    retirementNotice: contextRetirementNotice({
+      cwd: run.cwd,
+      contextRetired: run.contextRetired || savedSessionRetired(sessionPath)
+    }),
+    sessionMissing
+  };
+}
+function runActionError(run, action, observed) {
+  if (action === "focus") return observed.canFocus ? void 0 : "Focused stream requires terminal UI (TUI mode).";
+  if (action === "send" || action === "steer" || action === "follow_up") {
+    if (observed.retirementNotice) return `sub-agent ${run.id}: ${observed.retirementNotice}`;
+  }
+  if (action !== "send" && !observed.owned) {
+    return `sub-agent ${run.id} is owned by another conductor (foreign run).`;
+  }
+  if (action === "kill") return isTerminal(run.status) ? `sub-agent ${run.id} is already ${run.status}.` : void 0;
+  if (action === "pause" || action === "resume") {
+    const required = action === "pause" ? "running" : "paused";
+    if (run.status !== required) return `cannot ${action} sub-agent ${run.id}: status is ${run.status} (must be '${required}').`;
+    return observed.capabilities.pause ? void 0 : `${action} failed for ${run.id}: process handle missing or signal rejected.`;
+  }
+  const decision = resolveSendStrategy(run, action === "send" ? "resume" : action);
+  if (decision.strategy.kind === "rejected") return decision.strategy.reason;
+  if (observed.sessionMissing) return `sub-agent ${run.id} session file is missing on disk: ${run.sessionPath}`;
+  if (action !== "send" && !observed.capabilities.liveSend) {
+    return `sub-agent ${run.id} finished before steer was delivered (${run.rpcStdinQueue ? "stdin is not writable" : "stdin queue gone"}).`;
+  }
+  return void 0;
+}
+function computeAvailableActions(run, observed) {
+  return RUN_ACTIONS.filter((action) => runActionError(run, action, observed) === void 0);
+}
+function availableActions(run, canFocus = false) {
+  return computeAvailableActions(run, observeRunActions(run, canFocus));
+}
+function validateRunAction(run, action, canFocus = false) {
+  return runActionError(run, action, observeRunActions(run, canFocus));
+}
 function validateSendable(run, behavior = "auto") {
-  const notice = contextRetirementNotice({ cwd: run.cwd, contextRetired: run.contextRetired || savedSessionRetired(findRunSessionFile(run)) });
-  if (notice) return { ok: false, reason: `sub-agent ${run.id}: ${notice}` };
-  const r = resolveSendStrategy(run, behavior);
-  if (r.strategy.kind === "rejected") {
-    return { ok: false, reason: r.strategy.reason };
-  }
-  if (run.sessionPath && !existsSync6(run.sessionPath)) {
-    return {
-      ok: false,
-      reason: `sub-agent ${run.id} session file is missing on disk: ${run.sessionPath}`
-    };
-  }
-  return { ok: true };
+  const action = behavior === "auto" ? run.status === "running" ? "follow_up" : "send" : behavior === "resume" ? "send" : behavior;
+  const reason = validateRunAction(run, action);
+  return reason === void 0 ? { ok: true } : { ok: false, reason };
 }
 function resolveSendStrategy(run, behavior = "auto") {
   if (run.status === "running") {
@@ -3975,10 +4032,9 @@ function checkTurnLimit(run, registry, terminateFn, enqueueGraceMsg = defaultGra
 }
 function forceTerminate(run, reason, registry, onComplete, killGroup = defaultKillGroup) {
   if (isTerminal(run.status)) return;
-  if (run.parentPid !== void 0 && run.parentPid !== process.pid) {
-    console.warn(
-      `forceTerminate: refusing to mutate foreign run id=${run.id} ownerPid=${run.parentPid} selfPid=${process.pid}`
-    );
+  const blocker = validateRunAction(run, "kill");
+  if (blocker) {
+    console.warn(`forceTerminate: refusing to mutate foreign run id=${run.id}: ${blocker}`);
     return;
   }
   if (run.timeoutTimer) {
@@ -4061,8 +4117,7 @@ var defaultSignaler2 = (pid, signal) => {
   process.kill(pid, signal);
 };
 function pauseRun(run, registry, signaler = defaultSignaler2) {
-  if (run.status !== "running") return false;
-  if (!run.proc?.pid) return false;
+  if (validateRunAction(run, "pause")) return false;
   try {
     signaler(run.proc.pid, "SIGSTOP");
   } catch {
@@ -4075,8 +4130,7 @@ function pauseRun(run, registry, signaler = defaultSignaler2) {
   return true;
 }
 function resumeRun(run, registry, signaler = defaultSignaler2) {
-  if (run.status !== "paused") return false;
-  if (!run.proc?.pid) return false;
+  if (validateRunAction(run, "resume")) return false;
   try {
     signaler(run.proc.pid, "SIGCONT");
   } catch {
@@ -5733,6 +5787,7 @@ function runStop(opts, ctx, arg) {
   }
   let n = 0;
   for (const r of targets) {
+    if (validateRunAction(r, "kill")) continue;
     if (r.status === "queued") {
       opts.getQueue().removeQueued(r.id);
       n++;
@@ -5795,6 +5850,10 @@ function runFocus(opts, ctx, arg) {
       );
       return;
     }
+  }
+  if (!supportsFocus(ctx)) {
+    ctx.ui.notify("Focused stream requires terminal UI (TUI mode).", "warning");
+    return;
   }
   opts.openFocusedOverlay(id);
 }
@@ -6955,7 +7014,7 @@ function renderForegroundStream(run, width, theme) {
   return `\u2026 (transcript truncated to last ~${STREAM_MAX_CHARS} chars) \u2026
 ${tail}`;
 }
-function renderForegroundSummary(run) {
+function renderForegroundSummary(run, actions = availableActions(run)) {
   const glyph = STATUS_GLYPH[run.status] ?? "\xB7";
   const verb = run.status === "completed" ? "completed" : run.status === "killed" ? "killed" : run.status === "timeout" ? "timed out" : run.status;
   const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
@@ -6982,6 +7041,7 @@ function renderForegroundSummary(run) {
     headline += ` \xB7 lifetime ${lifetimeElapsed}${lifetimeCost}`;
   }
   lines.push(headline);
+  lines.push(`  available_actions=${actions.join(",") || "(none)"}`);
   const retirement = contextRetirementNotice(run);
   if (retirement) lines.push(`  ${retirement}`);
   if (run.status === "completed") {
@@ -7223,7 +7283,7 @@ function registerStatusTool(pi, opts) {
   pi.registerTool({
     name: CONDUCTOR_LLM_TOOLS.status,
     label: "Sub-agent status",
-    description: "Report status of currently-running, queued, paused, and recently-finished sub-agents in this session.",
+    description: "Report status and available_actions for each sub-agent in this session. Use the latest available_actions; each call revalidates.",
     promptSnippet: "Check status of conductor sub-agents",
     promptGuidelines: [
       "Use ensemble_status when you need to know which sub-agents are alive (e.g. before deciding whether to spawn another).",
@@ -7234,12 +7294,14 @@ function registerStatusTool(pi, opts) {
         Type.String({ description: "Filter to a specific agent_id; omit for all." })
       )
     }),
-    async execute(_id, params) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
       const registry = opts.getRegistry();
       const queue = opts.getQueue();
       const all = registry.list();
       const filtered = params?.agent_id ? all.filter((r) => r.id === params.agent_id) : all;
       const groups = groupByStatus(filtered);
+      const summaries = new Map(filtered.map((r) => [r.id, toStatusSummary(r, supportsFocus(ctx))]));
+      const summary = (r) => summaries.get(r.id);
       const queueList = queue.list().map((p) => ({
         id: p.id,
         persona: p.spawn.persona.name,
@@ -7250,19 +7312,22 @@ function registerStatusTool(pi, opts) {
         content: [
           {
             type: "text",
-            text: formatStatusForLLM(groups, queueList.length)
+            text: formatStatusForLLM(groups, queueList.length, summaries)
           }
         ],
         details: {
-          running: groups.running.map(toStatusSummary),
-          queued: groups.queued.map(toStatusSummary),
-          paused: groups.paused.map(toStatusSummary),
+          running: groups.running.map(summary),
+          queued: groups.queued.map(summary),
+          paused: groups.paused.map(summary),
           finished: [
             ...groups.completed,
             ...groups.failed,
             ...groups.killed,
-            ...groups.timeout
-          ].map(toStatusSummary),
+            ...groups.timeout,
+            ...groups.hook_failed,
+            ...groups.merge_conflict,
+            ...groups.aborted
+          ].map(summary),
           queueDetail: queueList
         }
       };
@@ -7520,7 +7585,7 @@ function registerSpawnTool(pi, opts) {
         })
       )
     }),
-    async execute(_id, params, signal, onUpdate) {
+    async execute(_id, params, signal, onUpdate, ctx) {
       const tmRange = validateTimeoutMinutes(params.timeout_minutes);
       if (tmRange) return errorResult(tmRange);
       const stallRange = validateStallThresholdSeconds(params.stall_threshold_seconds);
@@ -7704,7 +7769,7 @@ persona=${p.persona} queue_position=${result.queuePosition}
               return renderForegroundDetachedResult(result.run);
             }
             throttle.flush();
-            return foregroundFinalResult(outcome.value);
+            return foregroundFinalResult(outcome.value, supportsFocus(ctx));
           } finally {
             detach.unregister();
           }
@@ -7737,11 +7802,11 @@ function registerSendTool(pi, opts) {
   pi.registerTool({
     name: CONDUCTOR_LLM_TOOLS.send,
     label: "Send to sub-agent",
-    description: "Continue an existing sub-agent's session with a new user-role message. Works on finished sub-agents too (resumes via pi --session). Foreground (default): blocks until the sub-agent's reply arrives. Background: returns immediately; reply arrives as a <sub-agent-completed> notification.",
+    description: "Continue an existing sub-agent's session with a new user-role message. send continues a saved session in a new process; steer/follow_up deliver over live RPC. Live RPC sends await acknowledgement only. Use the latest available_actions; each call revalidates. Foreground (default): blocks until the sub-agent's reply arrives. Background: returns immediately; reply arrives as a <sub-agent-completed> notification.",
     promptSnippet: "Send a follow-up message to an existing sub-agent",
     promptGuidelines: [
       "Use ensemble_send when you want to continue working with a sub-agent that already has the context you care about \u2014 don't re-spawn from scratch.",
-      "The sub-agent must be in a terminal state (completed/failed/killed/timeout). Running, paused, and queued sub-agents are rejected.",
+      "Use the latest available_actions; each call revalidates. Retired sessions need a fresh child with the handoff.",
       "Pass agent_id from a previous ensemble_spawn or ensemble_status result."
     ],
     parameters: Type.Object({
@@ -7794,7 +7859,7 @@ function registerSendTool(pi, opts) {
             Type.Literal("resume")
           ],
           {
-            description: "v0.12 steering. Default 'auto' \u2192 follow_up for live RPC sub-agents, spawn-resume for terminal ones. 'steer' interrupts the running turn; 'follow_up' queues for the next turn boundary; 'resume' forces a fresh subprocess via pi --session (terminal runs only). Sub-agent must have been spawned with steerable: true for steer/follow_up to work."
+            description: "auto selects live follow_up or saved-session send. steer delivers a course correction before the next model call; follow_up queues until the agent finishes. resume means the available_actions token send (new process via pi --session), NOT ensemble_resume (SIGCONT). Use the latest available_actions; each call revalidates."
           }
         )
       )
@@ -7917,7 +7982,7 @@ The sub-agent acknowledged the message at ${new Date(ackResult.deliveredAt).toIS
               return renderForegroundDetachedResult(result.run);
             }
             throttle.flush();
-            return foregroundFinalResult(outcome.value);
+            return foregroundFinalResult(outcome.value, supportsFocus(ctx));
           } finally {
             detach.unregister();
           }
@@ -7954,7 +8019,7 @@ function registerPauseTool(pi, opts) {
     promptSnippet: "Pause a running sub-agent",
     promptGuidelines: [
       "Use ensemble_pause to halt token consumption on a long-running sub-agent without killing it.",
-      "The sub-agent must be in 'running' status; paused/queued/terminal sub-agents are rejected."
+      "Use the latest available_actions; each call revalidates."
     ],
     parameters: Type.Object({
       agent_id: Type.String({ description: "agent_id of the sub-agent to pause." })
@@ -7968,10 +8033,9 @@ function registerPauseTool(pi, opts) {
         );
         return r;
       }
-      if (run.status !== "running") {
-        const r = errorResult(
-          `cannot pause sub-agent ${run.id}: status is ${run.status} (must be 'running').`
-        );
+      const blocker = validateRunAction(run, "pause");
+      if (blocker) {
+        const r = errorResult(blocker);
         return r;
       }
       const ok = pauseRun(run, registry);
@@ -7992,11 +8056,11 @@ function registerResumeTool(pi, opts) {
   pi.registerTool({
     name: CONDUCTOR_LLM_TOOLS.resume,
     label: "Resume sub-agent",
-    description: "SIGCONT a paused sub-agent. The sub-agent must have been paused via ensemble_pause first.",
+    description: "SIGCONT a paused sub-agent (available_actions token resume), not a new saved-session process. Use the latest available_actions; each call revalidates.",
     promptSnippet: "Resume a paused sub-agent",
     promptGuidelines: [
       "Use ensemble_resume to continue a sub-agent previously paused via ensemble_pause.",
-      "The sub-agent must be in 'paused' status; running/queued/terminal sub-agents are rejected."
+      "Use the latest available_actions; each call revalidates."
     ],
     parameters: Type.Object({
       agent_id: Type.String({ description: "agent_id of the sub-agent to resume." })
@@ -8010,10 +8074,9 @@ function registerResumeTool(pi, opts) {
         );
         return r;
       }
-      if (run.status !== "paused") {
-        const r = errorResult(
-          `cannot resume sub-agent ${run.id}: status is ${run.status} (must be 'paused').`
-        );
+      const blocker = validateRunAction(run, "resume");
+      if (blocker) {
+        const r = errorResult(blocker);
         return r;
       }
       const ok = resumeRun(run, registry);
@@ -8038,7 +8101,7 @@ function registerKillTool(pi, opts) {
     promptSnippet: "Force-terminate a sub-agent",
     promptGuidelines: [
       "Use ensemble_kill to abort a sub-agent that is misbehaving, off-track, or no longer needed.",
-      "Killable states: running, paused, queued. Already-terminal sub-agents are no-op success.",
+      "Use the latest available_actions; each call revalidates. Already-terminal sub-agents remain no-op success.",
       "Run records (transcript, final.md) are preserved for post-mortem inspection."
     ],
     parameters: Type.Object({
@@ -8056,11 +8119,16 @@ function registerKillTool(pi, opts) {
         );
         return r;
       }
-      if (run.status === "completed" || run.status === "failed" || run.status === "killed" || run.status === "timeout" || run.status === "hook_failed" || run.status === "merge_conflict" || run.status === "aborted") {
+      if (isTerminal(run.status)) {
         return {
           content: [{ type: "text", text: `already ${run.status}: ${run.id} (no-op)` }],
           details: { status: run.status, agent_id: run.id, persona: run.persona }
         };
+      }
+      const blocker = validateRunAction(run, "kill");
+      if (blocker) {
+        const r = errorResult(blocker);
+        return r;
       }
       if (run.status === "queued") {
         queue.removeQueued(run.id);
@@ -8078,7 +8146,7 @@ function registerFocusTool(pi, opts) {
   pi.registerTool({
     name: CONDUCTOR_LLM_TOOLS.focus,
     label: "Focus a sub-agent",
-    description: "Request the focused-stream overlay open on a specific sub-agent. When agent_id is omitted, opens the overlay on the currently-focused (most recently active) sub-agent. The user controls the overlay with Esc (close), Tab/Shift+Tab (cycle), arrows (scroll), c (collapse tool calls), t (thinking visibility), k (kill).",
+    description: "Request the focused-stream overlay open on a specific sub-agent. Use the latest available_actions; each call revalidates. When agent_id is omitted, opens the overlay on the currently-focused (most recently active) sub-agent. The user controls the overlay with Esc (close), Tab/Shift+Tab (cycle), arrows (scroll), c (collapse tool calls), t (thinking visibility), k (kill).",
     promptSnippet: "Open the focused-stream overlay on a sub-agent",
     promptGuidelines: [
       "Use ensemble_focus when you want to draw the user's attention to a particular sub-agent's live transcript.",
@@ -8089,9 +8157,14 @@ function registerFocusTool(pi, opts) {
         Type.String({ description: "agent_id of the sub-agent to focus on (omit for most-recent)." })
       )
     }),
-    async execute(_id, params) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
       const model = opts.getModel();
       const id = params?.agent_id;
+      const target = id ? opts.getRegistry().get(id) : model.focused();
+      if (target) {
+        const blocker = validateRunAction(target, "focus", supportsFocus(ctx));
+        if (blocker) return { content: [{ type: "text", text: blocker }], details: { opened: false, agent_id: target.id, error: blocker } };
+      }
       if (id) {
         const ok = model.focus(id);
         if (!ok) {
@@ -8201,9 +8274,10 @@ function groupByStatus(runs) {
   for (const r of runs) g[r.status].push(r);
   return g;
 }
-function toStatusSummary(r) {
+function toStatusSummary(r, canFocus) {
   return {
     id: r.id,
+    available_actions: availableActions(r, canFocus),
     persona: r.persona,
     status: r.status,
     elapsed: elapsedStr(r.startTime, r.finishedAt),
@@ -8212,13 +8286,13 @@ function toStatusSummary(r) {
     transcriptPath: r.transcriptPath
   };
 }
-function formatStatusForLLM(g, queueSize) {
+function formatStatusForLLM(g, queueSize, summaries) {
   const lines = [];
   const counts = [];
   if (g.running.length) counts.push(`${g.running.length} running`);
   if (g.paused.length) counts.push(`${g.paused.length} paused`);
   if (g.queued.length || queueSize) counts.push(`${g.queued.length} queued`);
-  const finished = g.completed.length + g.failed.length + g.killed.length + g.timeout.length + g.hook_failed.length;
+  const finished = g.completed.length + g.failed.length + g.killed.length + g.timeout.length + g.hook_failed.length + g.merge_conflict.length + g.aborted.length;
   if (finished) counts.push(`${finished} finished`);
   lines.push(counts.length === 0 ? "No sub-agents." : `Sub-agents: ${counts.join(", ")}.`);
   const groupOrder = [
@@ -8229,7 +8303,9 @@ function formatStatusForLLM(g, queueSize) {
     ["Failed", g.failed],
     ["Killed", g.killed],
     ["Timeout", g.timeout],
-    ["Hook failed", g.hook_failed]
+    ["Hook failed", g.hook_failed],
+    ["Merge conflict", g.merge_conflict],
+    ["Aborted", g.aborted]
   ];
   for (const [label, list] of groupOrder) {
     if (list.length === 0) continue;
@@ -8242,18 +8318,20 @@ function formatStatusForLLM(g, queueSize) {
       const usagePart = usageStr ? `[${usageStr}]` : "";
       const hint = r.lastToolCall ? ` \u2192 ${r.lastToolCall}` : "";
       lines.push(
-        `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint}`
+        `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} available_actions=${summaries.get(r.id).available_actions.join(",") || "(none)"}`
       );
     }
   }
   return lines.join("\n");
 }
-function foregroundFinalResult(r) {
-  const summary = renderForegroundSummary(r);
+function foregroundFinalResult(r, canFocus) {
+  const actions = availableActions(r, canFocus);
+  const summary = renderForegroundSummary(r, actions);
   if (r.status !== "completed") {
     return {
       content: [{ type: "text", text: summary }],
       details: {
+        available_actions: actions,
         status: r.status,
         agent_id: r.id,
         persona: r.persona,
@@ -8267,6 +8345,7 @@ function foregroundFinalResult(r) {
   return {
     content: [{ type: "text", text: summary }],
     details: {
+      available_actions: actions,
       status: "completed",
       agent_id: r.id,
       persona: r.persona,
@@ -8817,7 +8896,7 @@ function perSendNumbers(run) {
     cost: Math.max(0, run.usage.cost - baseline.cost)
   };
 }
-function formatCompletionNotification(run) {
+function formatCompletionNotification(run, actions = availableActions(run)) {
   const finalText = getFinalText(run.messages);
   const perSend = perSendNumbers(run);
   const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
@@ -8836,6 +8915,7 @@ function formatCompletionNotification(run) {
   lines.push(`  <agent-id>${run.id}</agent-id>`);
   lines.push(`  <persona>${run.persona}</persona>`);
   lines.push(`  <status>${run.status}</status>`);
+  lines.push(`  <available-actions>${actions.join(",")}</available-actions>`);
   lines.push(`  <duration>${elapsed}</duration>`);
   lines.push(
     `  <usage><turns>${perSend.turns}</turns><input>${perSend.input}</input><output>${perSend.output}</output><cost>${perSend.cost.toFixed(4)}</cost></usage>`
@@ -8932,7 +9012,7 @@ function escapeXml(s) {
 function escapeXmlAttr(s) {
   return escapeXml(s).replace(/"/g, "&quot;");
 }
-function formatStallNotification(run, args) {
+function formatStallNotification(run, args, actions = availableActions(run)) {
   const elapsed = elapsedStr(run.startTime);
   const lines = [];
   lines.push("```xml");
@@ -8940,6 +9020,7 @@ function formatStallNotification(run, args) {
   lines.push(`  <agent-id>${run.id}</agent-id>`);
   lines.push(`  <persona>${run.persona}</persona>`);
   lines.push(`  <status>${run.status}</status>`);
+  lines.push(`  <available-actions>${actions.join(",")}</available-actions>`);
   lines.push(`  <duration>${elapsed}</duration>`);
   lines.push(
     `  <stall><severity>${args.severity}</severity><silent-seconds>${args.silentSeconds}</silent-seconds><threshold-seconds>${args.thresholdSeconds}</threshold-seconds></stall>`
@@ -8963,7 +9044,8 @@ function buildCompletionSendMessageOptions(run) {
   }
   return { triggerTurn: true, deliverAs: "followUp" };
 }
-function buildCompletionMessage(run) {
+function buildCompletionMessage(run, canFocus = false) {
+  const actions = availableActions(run, canFocus);
   const perSend = perSendNumbers(run);
   const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
   const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
@@ -9004,10 +9086,11 @@ function buildCompletionMessage(run) {
   }
   return {
     customType: "ensemble-notification",
-    content: formatCompletionNotification(run),
+    content: formatCompletionNotification(run, actions),
     display: true,
     details: {
       kind: "completed",
+      available_actions: actions,
       id: run.id,
       persona: run.persona,
       status: run.status,
@@ -9018,13 +9101,15 @@ function buildCompletionMessage(run) {
     }
   };
 }
-function buildStallMessage(run, args) {
+function buildStallMessage(run, args, canFocus = false) {
+  const actions = availableActions(run, canFocus);
   return {
     customType: "ensemble-notification",
-    content: formatStallNotification(run, args),
+    content: formatStallNotification(run, args, actions),
     display: true,
     details: {
       kind: "stalled",
+      available_actions: actions,
       id: run.id,
       persona: run.persona,
       status: run.status,
@@ -9066,6 +9151,9 @@ function renderNotificationCard(d, opts) {
     lines.push([{ text: INDENT + note.text, slot: note.slot }]);
   }
   if (opts.expanded) {
+    if (d.available_actions) {
+      lines.push([{ text: `${INDENT}available_actions=${d.available_actions.join(",") || "(none)"}`, slot: "muted" }]);
+    }
     lines.push([{ text: `${INDENT}transcript: ${d.transcriptPath}`, slot: "muted" }]);
   }
   return lines;
@@ -9248,6 +9336,13 @@ Each persona has its own system prompt (run \`/conductor show <name>\` to read i
 
 ## 3. Tools
 
+**Use the latest available_actions; each call revalidates.** Status and completion/stall results report an advisory snapshot, not a lasting permission. Tokens map to:
+- \`send\`: \`ensemble_send\` with \`streaming_behavior: "resume"\` (new process continuing a saved session).
+- \`steer\` / \`follow_up\`: \`ensemble_send\` with that behavior (live RPC delivery).
+- \`pause\` / \`resume\`: \`ensemble_pause\` / \`ensemble_resume\` (SIGSTOP / SIGCONT). This \`resume\` is NOT saved-session send.
+- \`kill\` / \`focus\`: \`ensemble_kill\` / \`ensemble_focus\`. Terminal kill remains an idempotent no-op even when omitted.
+If a session retired under context pressure, use a fresh child with its handoff, not another send. Retirement is not proof of task completion.
+
 - **\`ensemble_spawn\`** \u2014 start a sub-agent with a persona and a task.
   - \`foreground: true\` (default) \u2014 your tool call blocks; the sub-agent's transcript streams into the ensemble panel; the result is returned to you.
   - \`foreground: false\` \u2014 the sub-agent runs in the background; your turn ends immediately; the completion arrives later as a \`<sub-agent-completed>\` user-role message that wakes you.
@@ -9273,6 +9368,7 @@ Background completions arrive as user-role messages containing this XML:
   <agent-id>...</agent-id>
   <persona>...</persona>
   <status>completed|failed|killed|timeout</status>
+  <available-actions>send,focus</available-actions>
   <duration>...</duration>
   <usage><turns>N</turns>...<cost>D</cost></usage>
   <result>
@@ -9378,10 +9474,10 @@ For the canonical chain shapes the overseer follows by default \u2014 including 
 - **Send with a behavior.** \`ensemble_send\` takes an optional \`streaming_behavior\` arg with four values:
   - \`auto\` (default) \u2014 for a *running* steerable sub-agent, queues your message as a follow-up at the next turn boundary; for a *terminal* sub-agent, resumes its session in a fresh subprocess (today's behavior).
   - \`follow_up\` \u2014 explicit queue. Same as \`auto\` for a running steerable run.
-  - \`steer\` \u2014 *interrupt* the current turn. Use sparingly: only for course corrections ("stop, you're heading down the wrong path"). The agent receives your message immediately and aborts whatever it's doing. Reflexive \`steer\` on every send wastes loaded context.
-  - \`resume\` \u2014 force a fresh-subprocess resume (only valid on terminal runs; rejects on running ones with a named error).
+  - \`steer\` \u2014 *interrupt* the current turn. Use sparingly: only for course corrections ("stop, you're heading down the wrong path"). Pi delivers it after the current tool calls, before the next model call. Reflexive \`steer\` on every send wastes loaded context.
+  - \`resume\` \u2014 force a fresh-subprocess saved-session send, not SIGCONT.
 - **Default to \`auto\`.** It does the right thing in both states: queue for running, resume for terminal. Reach for explicit \`steer\` only when you genuinely need to interrupt mid-turn.
-- **Non-steerable runs reject \`steer\` / \`follow_up\`.** A run spawned without \`steerable: true\` cannot be interrupted; \`ensemble_send\` rejects with a named error pointing you at the spawn-time opt-in. The slash-command equivalent is \`/conductor send <agent-id> [--steer|--follow-up|--resume] <message>\`.
+- **Check the latest available_actions.** Each call revalidates; on rejection, use the error to recover rather than retrying the stale snapshot. The slash-command equivalent is \`/conductor send <agent-id> [--steer|--follow-up|--resume] <message>\`.
 - **Steering doesn't bypass the kill switch.** \`ensemble_kill\` (and the watchdog's hard threshold when \`kill_on_stall: true\`) still SIGTERMs a steerable sub-agent. Steering is for course corrections, not for keeping a doomed run alive.
 
 **At the start of every non-trivial user turn, ask yourself:** *"What persona owns this verb?"* Spawn that one. If you can't name a persona, ask the user a clarifying question \u2014 don't start working.
@@ -9432,7 +9528,7 @@ Review-only
 
 **Loop semantics.** When a producer-reviewer pair is in a loop (\`\u21C4\`):
 
-- **Iterate via \`ensemble_send\`, never re-spawn.** Revisions go to the same sub-agent: \`ensemble_send(producer_id, "<reviewer findings>; revise per these notes")\`. Re-spawning loses loaded context and pays the seeding cost again. \`ensemble_send\` bypasses the concurrency cap (\xA74), so loops never starve other sub-agents.
+- **Iterate via \`ensemble_send\` when advertised.** Otherwise use a fresh child with a self-contained handoff. Revisions normally go to the same sub-agent: \`ensemble_send(producer_id, "<reviewer findings>; revise per these notes")\`. Re-spawning loses loaded context and pays the seeding cost again. \`ensemble_send\` bypasses the concurrency cap (\xA74), so loops never starve other sub-agents.
 - **Cap each loop at 3 iterations.** If iteration 3 still has open issues, stop and escalate to the user with a concrete summary: what the reviewer keeps flagging, what the producer keeps producing, what the disagreement is about. Don't ping-pong past iteration 3 \u2014 at iteration 4, *you* are the bottleneck.
 - **Reviewer veto trumps producer push-back.** Reviewer rejects \u2192 revision required, by default. You may override the reviewer only by stating an explicit rationale in the conversation (e.g. "redteam concern is out of scope for this slice; deferred"). Silent overrides are not allowed.
 - **You do not review.** Inside a loop your job is routing findings, not substituting your own opinion. If you think the reviewer is wrong, spawn a *second* reviewer (\`redteam\` or a different \`oracle\`) for an independent check. Don't arbitrate alone \u2014 that's the slip from \xA71.5 wearing a different hat. When you spawn a second reviewer for an independent check, write its brief from the *first reviewer's findings* (which you already have in the completion envelope), not from re-reading the diff yourself. Re-reading the diff is the slip from \xA71.5 wearing a different hat.
@@ -10661,7 +10757,7 @@ function index_default(pi) {
   });
   installCompactionHook(pi);
   function openFocusedOverlay(agentId) {
-    if (!ctxRef) return;
+    if (!ctxRef || !supportsFocus(ctxRef)) return;
     if (overlayOpen) {
       if (agentId) focusModel.focus(agentId);
       return;
@@ -10844,7 +10940,7 @@ function index_default(pi) {
       return { detachSignal, unregister };
     },
     pushCompletionNotification: (run) => {
-      pi.sendMessage(buildCompletionMessage(run), buildCompletionSendMessageOptions(run));
+      pi.sendMessage(buildCompletionMessage(run, supportsFocus(ctxRef)), buildCompletionSendMessageOptions(run));
       completionWakeTracker.track(run.id, Date.now());
     }
   };
@@ -10960,7 +11056,7 @@ function index_default(pi) {
                     severity: meta.severity,
                     silentSeconds: meta.silentSeconds,
                     thresholdSeconds
-                  }),
+                  }, supportsFocus(ctxRef)),
                   { triggerTurn: false, deliverAs: "followUp" }
                 );
               } catch (err) {
@@ -11004,7 +11100,7 @@ function index_default(pi) {
           completionWakeTracker.drop(runId);
           continue;
         }
-        pi.sendMessage(buildCompletionMessage(run), buildCompletionSendMessageOptions(run));
+        pi.sendMessage(buildCompletionMessage(run, supportsFocus(ctxRef)), buildCompletionSendMessageOptions(run));
       }
       for (const runId of result.expired) {
         ctxRef?.ui.notify(

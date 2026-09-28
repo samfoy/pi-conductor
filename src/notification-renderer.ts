@@ -96,6 +96,9 @@ export function renderNotificationCard(
     lines.push([{ text: INDENT + note.text, slot: note.slot }]);
   }
   if (opts.expanded) {
+    if (d.available_actions) {
+      lines.push([{ text: `${INDENT}available_actions=${d.available_actions.join(",") || "(none)"}`, slot: "muted" }]);
+    }
     lines.push([{ text: `${INDENT}transcript: ${d.transcriptPath}`, slot: "muted" }]);
   }
   return lines;

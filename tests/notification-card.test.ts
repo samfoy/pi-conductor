@@ -216,6 +216,7 @@ test("W8: expanded card shows the whole body and the transcript path", () => {
       "✓ builder completed · 1.2m · 3t ↑12k ↓2.1k $0.080 · builder-ab12",
       "  Implemented the thing.",
       "  Second line.",
+      "  available_actions=(none)",
       "  transcript: /tmp/transcript.jsonl",
     ].join("\n"),
   );
