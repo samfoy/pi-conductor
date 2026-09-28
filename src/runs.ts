@@ -20,6 +20,9 @@
 import type { ChildProcess } from "node:child_process";
 import { createRunPipeline } from "./run-pipeline.ts";
 import { capabilitiesFor, subprocessRuntime } from "./subprocess-runtime.ts";
+import { ownedEffort, effortRepository, effortTip } from "./effort/open.ts";
+import { addEffortMember, type EffortRecord } from "./effort/store.ts";
+import { EFFORT_NOTICE, validateTouches } from "./effort/policy.ts";
 import type { Signaler } from "./runtime.ts";
 export type { Signaler } from "./runtime.ts";
 export { buildSubagentEnv, capabilitiesFor, createLineDecoder, RPC_ACK_TIMEOUT_MS } from "./subprocess-runtime.ts";
@@ -965,6 +968,8 @@ export class RunRegistry {
 // ── Spawn ────────────────────────────────────────────────────────────
 
 export interface SpawnOptions {
+  effort?: string;
+  touches?: string[];
   files?: readonly string[];
   registry: RunRegistry;
   persona: Persona;
@@ -1220,10 +1225,23 @@ export function prepareSpawnEvidence<T extends { task: string; files?: readonly 
   return { ...opts, task, files: undefined };
 }
 
+/** Validate before registry/queue/process effects, shared by immediate and queued spawns. */
+export function prepareSpawnEffort(opts: Pick<SpawnOptions, "effort" | "touches" | "persona" | "cwd" | "parentSessionId">): EffortRecord | undefined {
+  if (opts.effort === undefined) {
+    if (opts.touches !== undefined) throw new Error("touches requires an effort");
+    return undefined;
+  }
+  if (opts.persona.readOnly) throw new Error(`effort readers are unsupported. ${EFFORT_NOTICE}`);
+  if (opts.touches !== undefined) validateTouches(opts.touches);
+  return ownedEffort(opts.cwd, opts.effort, opts.parentSessionId);
+}
+
 /** Spawn immediately; foreground/background callers await the same terminal promise. */
 export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
   opts = prepareSpawnEvidence(opts, opts.registry);
+  const effort = prepareSpawnEffort(opts);
   const id = opts.preAllocatedId ?? allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
+  if (effort) addEffortMember(effort, id);
   const dir = runDir(id);
   mkdirSync(dir, { recursive: true });
 
@@ -1233,7 +1251,8 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     task: opts.task,
     model: opts.model,
     thinking: opts.thinking,
-    mode: opts.mode,
+    mode: effort ? "background" : opts.mode,
+    effort: effort ? { name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches ? [...opts.touches] : undefined } : undefined,
     status: "running",
     startTime: Date.now(),
     lastEventAt: Date.now(),
@@ -1383,9 +1402,10 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
   // cwds — fall back to shared cwd with a warning rather than failing.
   let effectiveCwd = opts.cwd;
   let worktreeFence: SubAgentPromptPlace["worktree"];
-  if (opts.worktree) {
-    const spec = resolveWorktreeSpec(opts.cwd, run.id);
+  if (opts.worktree || effort) {
+    const spec = resolveWorktreeSpec(effort?.gitRoot ?? opts.cwd, run.id);
     if (spec === null) {
+      if (effort) throw new Error("effort repository disappeared; refusing shared cwd fallback");
       process.stderr.write(
         `[conductor] worktree: true but ${opts.cwd} is not inside a git repo; ` +
           `falling back to shared cwd for run ${run.id}\n`,
@@ -1394,16 +1414,27 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
       try {
         // v0.14: capture the base branch before creating the worktree.
         // Non-fatal: undefined leaves worktreeBaseBranch unset.
-        const baseBranch = currentBranch(spec.gitRoot);
-        createWorktree(spec);
+        const baseBranch = effort?.baseBranch ?? currentBranch(spec.gitRoot);
+        const from = effort ? effortTip(effort) : undefined;
+        createWorktree(spec, { from });
+        if (run.effort) run.effort.spawnBase = from;
         run.worktreePath = spec.worktreePath;
         run.worktreeBranch = spec.branch;
         if (baseBranch) run.worktreeBaseBranch = baseBranch;
-        effectiveCwd = worktreeCwd(spec, opts.cwd);
+        effectiveCwd = worktreeCwd(effort ? { ...spec, gitRoot: effortRepository(opts.cwd).requestedRoot } : spec, opts.cwd);
+        if (run.effort) run.effort.cwd = effectiveCwd;
         worktreeFence = { path: spec.worktreePath, branch: spec.branch, gitRoot: spec.gitRoot };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         process.stderr.write(`[conductor] worktree creation failed for ${run.id}: ${msg}\n`);
+        if (effort) {
+          run.status = "failed";
+          run.errorMessage = `effort isolation failed; no child started: ${msg}. ${EFFORT_NOTICE}`;
+          run.failureClass = "environment";
+          run.finishedAt = Date.now();
+          const done = writeRecord(run).then(() => { opts.registry.notify(run); opts.onComplete?.(run); return run; });
+          return { run, done };
+        }
         // Non-fatal: fall back to shared cwd rather than killing the chain.
       }
     }
@@ -1909,6 +1940,8 @@ export function resolveSendStrategy(
     if (behavior === "steer" || behavior === "follow_up") return { strategy: { kind: "rejected", reason: `sub-agent ${run.id} is blocked on an owner question. Answer with auto or resume to continue its saved session.` } };
   }
 
+  if (run.effort && isTerminal(run.status)) return { strategy: { kind: "rejected", reason: `${EFFORT_NOTICE} Start a fresh effort writer; only blocked assignments accept owner answers.` } };
+
   // terminal — explicit steer/follow_up never makes sense.
   if (behavior === "steer") {
     return {
@@ -2084,6 +2117,9 @@ export function sendToRun(
   // but TS can't see through a free-function call — capture it.
   const sessionPath = run.sessionPath as string;
   const answer = run.pendingAsk ? { ask: run.pendingAsk, cwd: run.cwd } : undefined;
+  if (run.effort && (!run.effort.cwd || !run.worktreeBranch || !refExists(run.effort.gitRoot, `refs/heads/${run.worktreeBranch}`))) {
+    return { kind: "rejected", reason: "effort assignment branch/cwd is missing; preserve the outstanding question and inspect the effort before recovery" };
+  }
   const worktreeBlocker = restoreResumeWorktree(run, () => readFileSync(sessionPath, "utf8"));
   if (worktreeBlocker) return { kind: "rejected", reason: worktreeBlocker };
 
@@ -2134,7 +2170,7 @@ export function sendToRun(
   const done = createRunPipeline(run, piArgs, {
     answer,
     registry: opts.registry,
-    cwd: run.cwd,
+    cwd: run.effort?.cwd ?? run.cwd,
     timeoutMs: opts.timeoutMs,
     onUpdate: opts.onUpdate,
     onComplete: opts.onComplete,
@@ -2310,6 +2346,7 @@ export async function applyMergeToTerminal(
   gitRoot: string,
   terminal: RunStatus,
 ): Promise<RunStatus> {
+  if (run.effort) return terminal;
   // Guard: only merge on `completed` with a real strategy and a worktree.
   if (
     terminal !== "completed" ||
@@ -2372,6 +2409,11 @@ export async function applyMergeToTerminal(
  * 5b (v0.20 W2). Exported for tests.
  */
 export async function settleWorktree(run: Run, terminal: RunStatus): Promise<RunStatus> {
+  if (run.effort) {
+    // M1 retains the assignment intact; only later integration may release its assets.
+    run.worktreeKept = `${EFFORT_NOTICE} Worktree ${run.worktreePath ?? "unavailable"}; branch ${run.worktreeBranch ?? "unavailable"} preserved.`;
+    return terminal;
+  }
   if (!run.worktreePath || !run.worktreeBranch) return terminal;
   const gitRoot = dirname(dirname(dirname(run.worktreePath)));
   const noMergeBack = !run.mergeStrategy || run.mergeStrategy === "none";
@@ -2417,6 +2459,7 @@ function keptWorktreeHint(worktreePath: string, branch: string): string {
  * Best-effort: on failure the fields stay set so GC can find the orphan.
  */
 export function releaseWorktree(run: Run, opts: { keepBranch: boolean }): void {
+  if (run.effort) return;
   if (!run.worktreePath || !run.worktreeBranch) return;
   const wtSpec = {
     // Reconstruct gitRoot: <gitRoot>/.worktrees/conductor-wt/<run-id> → 3 levels up
@@ -2453,7 +2496,7 @@ export function applyChainIfPresent(
   terminal: RunStatus,
   onChain: ((run: Run) => void) | undefined,
 ): void {
-  if (terminal !== "completed") return;
+  if (run.effort || terminal !== "completed") return;
   if (!onChain) return;
   try {
     onChain(run);
@@ -2481,7 +2524,7 @@ export function applyRetryIfNeeded(
   run: Run,
   onRetry: ((run: Run) => void) | undefined,
 ): boolean {
-  if (!onRetry) return false;
+  if (run.effort || !onRetry) return false;
   if (run.status === "completed") return false;
   if (!run.retryPolicy || !run.failureClass) return false;
   const attempt = run.retryAttempt ?? 0;
@@ -2548,6 +2591,8 @@ export async function applyHookToTerminal(
       finalPath: run.finalPath,
       transcriptPath: run.transcriptPath,
       parentCwd: run.cwd,
+      cwd: run.effort?.cwd,
+      tmpDir: run.effort ? join(dirname(run.recordPath), "tmp") : undefined,
       worktreePath: run.worktreePath,
       onProc: (proc) => {
         run.hookProc = proc;
@@ -2761,7 +2806,7 @@ export function forceTerminate(
   // stay, since they may hold partial committed work. GC reclaims it on
   // its TTL. The hint is a card note, apart from errorMessage (v0.20 W4).
   if (run.worktreePath && run.worktreeBranch) {
-    run.worktreeKept = keptWorktreeHint(run.worktreePath, run.worktreeBranch);
+    run.worktreeKept = run.effort ? `${EFFORT_NOTICE} Worktree ${run.worktreePath}; branch ${run.worktreeBranch} preserved.` : keptWorktreeHint(run.worktreePath, run.worktreeBranch);
   }
   registry.notify(run);
   void writeRecord(run);

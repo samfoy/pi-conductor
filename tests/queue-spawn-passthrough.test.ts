@@ -258,10 +258,13 @@ type QueuedOptions = Omit<SpawnOptions, "registry" | "preAllocatedId">;
  * tsc (`npm run typecheck` covers tests/) reject this fixture the day a
  * new SpawnOptions key lands without a value here.
  */
-function everyOption(): Required<QueuedOptions> {
+// Effort values need a real owned repository; their nonempty round-trip is in effort-spawn.test.ts.
+function everyOption(): Required<Omit<QueuedOptions, "effort" | "touches">> & { effort: string | undefined; touches: string[] | undefined } {
   return {
     persona: builderPersona(),
     task: "drift",
+    effort: undefined,
+    touches: undefined,
     files: [],
     mode: "foreground",
     cwd: "/drift/cwd",

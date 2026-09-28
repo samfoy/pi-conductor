@@ -124,6 +124,10 @@ export async function executeReclaim(
       continue;
     }
 
+    if (record.effort) {
+      failed.push({ agentId, action: actionKind, error: "unresolved effort ownership; legacy GC refused" });
+      continue;
+    }
     if (!isTerminal(record.status)) {
       failed.push({
         agentId,

@@ -14,10 +14,13 @@ import {
   RunRegistry,
   spawnRun,
   prepareSpawnEvidence,
+  prepareSpawnEffort,
+  writeRecord,
   type SpawnOptions,
 } from "./runs.ts";
+import { addEffortMember } from "./effort/store.ts";
 import type { Run, SpawnMode } from "./types.ts";
-import { emptyUsage } from "./types.ts";
+import { emptyUsage, isSettled } from "./types.ts";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { runDir } from "./runs.ts";
@@ -91,12 +94,14 @@ export class SpawnQueue {
     opts: QueuedSpawnOptions & { registry?: RunRegistry },
   ): SpawnOrQueueResult {
     opts = prepareSpawnEvidence(opts, opts.registry ?? this.registry);
+    const effort = prepareSpawnEffort(opts);
+    if (opts.touches) opts = { ...opts, touches: [...opts.touches] };
     const { registry: callerRegistry, ...spawn } = opts;
     const registry = callerRegistry ?? this.registry;
     const slotsFree = this.maxConcurrent - registry.countActive();
-    const writeCapable = WRITE_CAPABLE_PERSONAS.has(opts.persona.name);
+    const writeCapable = !!effort || WRITE_CAPABLE_PERSONAS.has(opts.persona.name);
     const writeSlotsFree =
-      this.maxConcurrentWriteCapable - registry.countActiveBy(WRITE_CAPABLE_PERSONAS);
+      this.maxConcurrentWriteCapable - countWriters(registry);
     const canSpawnNow = slotsFree > 0 && (!writeCapable || writeSlotsFree > 0);
 
     if (canSpawnNow) {
@@ -108,6 +113,7 @@ export class SpawnQueue {
     const id = allocateRunId(opts.persona.name, mapFromRegistry(registry));
     // Pre-create the run dir + a queued placeholder Run so /conductor status
     // and the panel can show the queued sub-agent immediately.
+    if (effort) addEffortMember(effort, id);
     const dir = runDir(id);
     mkdirSync(dir, { recursive: true });
     const placeholder: Run = {
@@ -118,6 +124,8 @@ export class SpawnQueue {
       thinking: opts.thinking,
       mode: "background", // queued runs are always background once they start
       status: "queued",
+      ...(effort ? { parentPid: effort.owner.pid, parentStartTime: effort.owner.startTime, parentSessionId: effort.owner.sessionId } : {}),
+      effort: effort ? { name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches ? [...opts.touches] : undefined } : undefined,
       startTime: Date.now(),
       lastEventAt: Date.now(),
       messages: [],
@@ -128,6 +136,7 @@ export class SpawnQueue {
       finalPath: join(dir, "final.md"),
     };
     registry.register(placeholder);
+    if (effort) void writeRecord(placeholder);
 
     const pending: PendingSpawn = {
       id,
@@ -176,10 +185,10 @@ export class SpawnQueue {
       const next = this.pending[i]!;
       const slotsFree = this.maxConcurrent - this.registry.countActive();
       if (slotsFree <= 0) return;
-      const writeCapable = WRITE_CAPABLE_PERSONAS.has(next.spawn.persona.name);
+      const writeCapable = next.spawn.effort !== undefined || WRITE_CAPABLE_PERSONAS.has(next.spawn.persona.name);
       const writeSlotsFree =
         this.maxConcurrentWriteCapable -
-        this.registry.countActiveBy(WRITE_CAPABLE_PERSONAS);
+        countWriters(this.registry);
       if (writeCapable && writeSlotsFree <= 0) {
         // This write-capable spawn must wait; try the next pending entry.
         i++;
@@ -194,14 +203,27 @@ export class SpawnQueue {
         continue;
       }
 
-      this.spawn({
-        ...next.spawn,
-        mode: next.effectiveMode,
-        registry: this.registry,
-        preAllocatedId: next.id,
-      });
+      try {
+        this.spawn({
+          ...next.spawn,
+          mode: next.effectiveMode,
+          registry: this.registry,
+          preAllocatedId: next.id,
+        });
+      } catch (e) {
+        if (!placeholder.effort) throw e;
+        placeholder.status = "failed";
+        placeholder.finishedAt = Date.now();
+        placeholder.errorMessage = `effort launch refused: ${(e as Error).message}`;
+        void writeRecord(placeholder).then(() => { this.registry.notify(placeholder); next.spawn.onComplete?.(placeholder); });
+      }
     }
   }
+}
+
+function countWriters(registry: RunRegistry): number {
+  return registry.countActiveBy(WRITE_CAPABLE_PERSONAS) + registry.list().filter(r =>
+    r.effort && !WRITE_CAPABLE_PERSONAS.has(r.persona) && !isSettled(r.status) && r.status !== "queued").length;
 }
 
 function mapFromRegistry(r: RunRegistry): Map<string, Run> {

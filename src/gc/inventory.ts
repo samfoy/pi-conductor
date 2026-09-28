@@ -69,6 +69,7 @@ export interface InventoryEntry {
    * a run that didn't complete kept its branch after the directory went.
    */
   holdsWorktree?: boolean;
+  effort?: RunRecord["effort"];
 }
 
 interface SafeStat {
@@ -201,6 +202,7 @@ async function buildEntry(
     inMemory,
     malformed: false,
     holdsWorktree: holdsKeptWorktree(record),
+    effort: record.effort,
   };
 }
 

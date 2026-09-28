@@ -29,8 +29,8 @@ pi-conductor closes that gap. The parent pi session is the conductor, sub-agents
   - **Review / verification:** `critic`, `redteam`, `finalizer`, `verifier`
   - **Debugging:** `investigator`
   - **Other:** `profiler`, `scribe`
-- **LLM tools:** `ensemble_list`, `ensemble_status`, `ensemble_spawn`, `ensemble_send`, `ensemble_pause`, `ensemble_resume`, `ensemble_kill`, `ensemble_focus`, `ensemble_recommend` (v0.18 memory-ranked persona suggestions), `ensemble_auto` (v0.18 autonomous plan execution), `ensemble_cwd` (show or change the default cwd for spawns).
-- **Slash commands:** `/conductor list | show | doctor | on | off | status | stop | pause | resume | queue | focus | history | pin | unpin | gc | reconcile | watchdog | send | worktree | cwd`. `send <id> <message>` resumes or steers a run like `ensemble_send`; `worktree list | merge <id> | clean` inspects and settles kept worktrees.
+- **LLM tools:** `ensemble_list`, `ensemble_status`, `ensemble_spawn`, `ensemble_send`, `ensemble_pause`, `ensemble_resume`, `ensemble_kill`, `ensemble_focus`, `ensemble_recommend` (v0.18 memory-ranked persona suggestions), `ensemble_auto` (v0.18 autonomous plan execution), `ensemble_cwd` (show or change the default cwd for spawns), `ensemble_effort` (open/status of unintegrated efforts).
+- **Slash commands:** `/conductor list | show | doctor | on | off | status | stop | pause | resume | queue | focus | history | pin | unpin | gc | reconcile | watchdog | send | worktree | cwd | effort`. `send <id> <message>` resumes or steers a run like `ensemble_send`; `worktree list | merge <id> | clean` inspects and settles kept worktrees.
 
 ### Spawning + lifecycle
 
@@ -320,6 +320,60 @@ timeouts, kill and queue-release paths, and destroy pending stdin/ack work on
 settlement. Prompt rejection is a failed run, not completion. As with explicit
 RPC, extension dialogs are auto-cancelled; provider extensions remain enabled.
 This does not address independently oversized persona/system-prompt argv.
+
+## Named efforts (M1 — unintegrated writers)
+
+`ensemble_effort({action:"open", effort:"feature", verify:"npm test"})` captures
+an attached base branch and commit from the conductor's requested checkout and
+creates **`refs/heads/conductor-int/feature` without checking it out**. Status is
+available through `ensemble_effort({action:"status", effort:"feature"})` and
+`/conductor effort list` or `/conductor effort status feature`.
+
+**M1 writers are UNINTEGRATED until M2.** No baseline verification, merge queue,
+verified-tip guarantee, or automatic landing is implemented here. A completed
+run means the child and its configured completion hook passed, not that its work
+was integrated. The worktree and branch are retained on success, failure and kill;
+dirty work is never discarded. Legacy worktree merge/clean and GC skip effort assets.
+
+Spawn with `effort:"feature"` and optional `touches:["src/**"]`. The first spawn
+can open the effort using config. Every effort writer gets its own worktree,
+even with persona `worktree:false`, and foreground requests become background.
+The branch starts at the integration tip **when dequeued**, not when requested.
+Repo-subdirectory mapping, seeded sessions, hooks and owner answers use that
+isolated cwd, including when called from a linked checkout. A blocked A6 writer
+can receive its answer on the same assignment; terminal effort runs require a
+fresh effort spawn. Children cannot access `ensemble_effort`.
+
+Policy precedence is explicit open override (`verify`, `land`) > project
+`<requested cwd>/.pi/conductor.json` > user config > defaults, frozen at open:
+
+```json
+{"efforts":{"verify":"npm test","generated":{"paths":["dist/**"],"command":"npm run build"},"maxParallel":2,"merger":"auto","mergerMaxAttempts":1,"land":"branch","history":"squash"}}
+```
+
+There is **no default verify command**. Explicit `verify:""` records disabled
+verification; it does not disable repository hooks. Generated policy, maxParallel,
+merger and land are captured only; they do not activate integration or relax the
+legacy writer cap in M1. Names match `^[a-z][a-z0-9-]{0,39}$`. Scope/generated paths
+are nonempty repo-relative literal, `*` or `**` globs; traversal, absolute paths
+and other glob syntax are rejected. Omitted scope remains undeclared.
+
+Readers, effort auto plans, chains and classified retries are unavailable until
+later slices; none silently escapes into non-effort work. Non-git, detached-base,
+Brazil and external-worktree-mode opens are refused. Opening requires a session id
+and records process-start identity (Linux start ticks, otherwise Node's stable
+process time origin). No config is rewritten.
+
+Records live under `~/.pi/agent/conductor/efforts/<name>-<sha256(real gitRoot)>/`.
+The canonical repository root is the main checkout, even for linked-worktree
+callers; the captured base remains the caller's branch. An exclusive `effort.lock`
+claim and atomic `effort.json` replacements retain owner session/pid/start identity,
+frozen policy and ordered member ids. Existing refs/records/claims fail closed.
+There is no takeover or destructive effort action in M1: even stale claims remain
+for review. A failed creation/persistence retains its claim and any created ref;
+rollback never deletes a ref that another actor may have replaced. The claim is
+not evidence of successful open if `effort.json` is absent. Inspect the preserved
+files and refs before any manual recovery; automated recovery is deferred.
 
 ## Owner questions (A6)
 

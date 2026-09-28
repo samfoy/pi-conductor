@@ -690,6 +690,7 @@ function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
     // these; without them a dead run's worktree is invisible.
     worktreePath: record.worktreePath,
     worktreeBranch: record.worktreeBranch,
+    effort: record.effort,
     worktreeBaseBranch: record.worktreeBaseBranch,
     mergeStrategy: record.mergeStrategy,
     mergeResult: record.mergeResult,

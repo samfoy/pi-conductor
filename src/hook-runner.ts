@@ -77,6 +77,10 @@ export interface RunHookOptions {
   transcriptPath: string;
   /** Parent process cwd at spawn time. Surfaced as `CONDUCTOR_PARENT_CWD`. */
   parentCwd: string;
+  /** Explicit effective cwd for effort writers invoked from linked checkouts. */
+  cwd?: string;
+  /** Private run directory for effort hook temporary files. */
+  tmpDir?: string;
   /**
    * The run's worktree, when it has one: the hook runs in `parentCwd`'s
    * counterpart there (the tree the sub-agent changed, see worktreeCwd)
@@ -183,6 +187,7 @@ export function runHook(opts: RunHookOptions): Promise<HookResult> {
   const { CONDUCTOR_WORKTREE_PATH: _inherited, ...inheritedEnv } = process.env;
   const env: NodeJS.ProcessEnv = {
     ...inheritedEnv,
+    ...(opts.tmpDir ? { TMPDIR: opts.tmpDir } : {}),
     CONDUCTOR_RUN_ID: opts.runId,
     CONDUCTOR_PERSONA: opts.persona,
     CONDUCTOR_FINAL_TEXT_PATH: opts.finalPath,
@@ -196,9 +201,9 @@ export function runHook(opts: RunHookOptions): Promise<HookResult> {
   const spawnOpts: SpawnOptions = {
     shell: true,
     detached: true,
-    cwd: opts.worktreePath
+    cwd: opts.cwd ?? (opts.worktreePath
       ? worktreeCwd({ gitRoot: dirname(dirname(dirname(opts.worktreePath))), worktreePath: opts.worktreePath }, opts.parentCwd)
-      : opts.parentCwd,
+      : opts.parentCwd),
     env,
     stdio: ["ignore", "pipe", "pipe"],
   };

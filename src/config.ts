@@ -75,6 +75,12 @@ function mergeConfig(base: ConductorConfig, raw: unknown): ConductorConfig {
   if (!raw || typeof raw !== "object") return base;
   const r = raw as Record<string, unknown>;
   const out: ConductorConfig = { ...base };
+  // Effort policy is validated at open, not silently weakened on malformed values.
+  if (r.efforts !== undefined) {
+    out.efforts = r.efforts && typeof r.efforts === "object" && !Array.isArray(r.efforts)
+      ? { ...out.efforts, ...r.efforts }
+      : { verify: undefined };
+  }
 
   if (typeof r.defaultTimeoutMinutes === "number" && r.defaultTimeoutMinutes > 0) {
     out.defaultTimeoutMinutes = r.defaultTimeoutMinutes;

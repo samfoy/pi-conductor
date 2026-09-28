@@ -15,7 +15,7 @@
  * This test pins the registration-side gate:
  *   - When `process.env.CONDUCTOR_SUBAGENT === "1"`: zero
  *     `ensemble_*` tools are registered.
- *   - When unset: all 10 are registered.
+ *   - When unset: all 12 are registered.
  *
  * The spawn-side complement (`buildSubagentEnv` setting the env var
  * on every spawned subprocess) is already pinned by
@@ -69,7 +69,7 @@ function callRegisterTools(cwd: string): RegisteredTool[] {
   return cap.tools;
 }
 
-test("registerTools: parent context (CONDUCTOR_SUBAGENT unset) registers all 11 ensemble_* tools", () => {
+test("registerTools: parent context (CONDUCTOR_SUBAGENT unset) registers all 12 ensemble_* tools", () => {
   const cwd = mkdtempSync(join(tmpdir(), "conductor-tools-parent-"));
   const prev = process.env.CONDUCTOR_SUBAGENT;
   delete process.env.CONDUCTOR_SUBAGENT;
@@ -79,6 +79,7 @@ test("registerTools: parent context (CONDUCTOR_SUBAGENT unset) registers all 11 
     assert.deepEqual(names, [
       "ensemble_auto",
       "ensemble_cwd",
+      "ensemble_effort",
       "ensemble_focus",
       "ensemble_kill",
       "ensemble_list",
@@ -126,7 +127,7 @@ test("registerTools: empty CONDUCTOR_SUBAGENT='' does NOT suppress (only literal
   process.env.CONDUCTOR_SUBAGENT = "";
   try {
     const tools = callRegisterTools(cwd);
-    assert.equal(tools.length, 11, `expected 11 tools when CONDUCTOR_SUBAGENT='', got ${tools.length}`);
+    assert.equal(tools.length, 12, `expected 12 tools when CONDUCTOR_SUBAGENT='', got ${tools.length}`);
   } finally {
     if (prev === undefined) delete process.env.CONDUCTOR_SUBAGENT;
     else process.env.CONDUCTOR_SUBAGENT = prev;

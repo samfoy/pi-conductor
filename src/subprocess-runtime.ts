@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { RpcStdinQueue } from "./rpc-stdin.ts";
 import type { Run } from "./types.ts";
@@ -8,13 +9,15 @@ import type { RunRuntime, RunSink, RunTransport, Signaler, Delivery } from "./ru
 export class SubprocessRuntime implements RunRuntime {
   launch(run: Run, args: string[], cwd: string, sink: RunSink, initialPrompt?: string): RunTransport {
     const invocation = getPiInvocation(args);
+    const tmp = run.effort ? join(dirname(run.recordPath), "tmp") : undefined;
+    if (tmp) mkdirSync(tmp, { recursive: true });
     const rpc = args[1] === "rpc";
     const proc = spawn(invocation.command, invocation.args, {
       cwd,
       shell: false,
       stdio: [rpc ? "pipe" : "ignore", "pipe", "pipe"],
       // Worktrees may not contain the spawning project's untracked config.
-      env: { ...buildSubagentEnv(), CONDUCTOR_CONFIG_CWD: run.cwd, CONDUCTOR_RUN_ID: run.id },
+      env: { ...buildSubagentEnv(), CONDUCTOR_CONFIG_CWD: run.cwd, CONDUCTOR_RUN_ID: run.id, ...(tmp ? { TMPDIR: tmp } : {}) },
     });
     const closed = new Promise<void>(resolve => proc.once("close", () => resolve()));
     const stdoutLines = createLineDecoder(line => sink.line(line));

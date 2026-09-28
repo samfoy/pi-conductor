@@ -33,7 +33,7 @@ import { WRITE_CAPABLE_PERSONAS } from "./types.ts";
  * commands in temp repos launched from inside the pre-commit hook inherit
  * the parent repo's git context and behave incorrectly.
  */
-function gitEnv(): NodeJS.ProcessEnv {
+export function gitEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
     if (key.startsWith("GIT_") && key !== "GIT_EDITOR" && key !== "GIT_AUTHOR_NAME" && key !== "GIT_AUTHOR_EMAIL") {
@@ -127,13 +127,14 @@ export function worktreeCwd(spec: Pick<WorktreeSpec, "gitRoot" | "worktreePath">
  */
 export function createWorktree(
   spec: WorktreeSpec,
-  opts: { skipGitignore?: boolean } = {},
+  opts: { skipGitignore?: boolean; from?: string } = {},
 ): void {
   if (!opts.skipGitignore) {
     ensureWorktreeGitignore(spec.gitRoot);
   }
 
-  addWorktree(spec, `-b ${JSON.stringify(spec.branch)} HEAD`);
+  if (opts.from !== undefined && !/^[a-f0-9]{40,64}$/.test(opts.from)) throw new Error("worktree from must be a commit OID");
+  addWorktree(spec, `-b ${JSON.stringify(spec.branch)} ${opts.from ?? "HEAD"}`);
 }
 
 /**

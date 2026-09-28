@@ -19,6 +19,9 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { effortRepository, effortTip } from "./effort/open.ts";
+import { readEffort, listEfforts } from "./effort/store.ts";
+import { EFFORT_NOTICE } from "./effort/policy.ts";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { Persona, PersonaResolution, Run, RunRecord, RunStatus } from "./types.ts";
@@ -102,6 +105,7 @@ export const SUBCOMMANDS = [
   "watchdog",
   "send",
   "worktree",
+  "effort",
   "cwd",
 ];
 
@@ -179,6 +183,9 @@ export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): 
           return;
         case "send":
           await runSendCmd(opts, ctx, subRest);
+          return;
+        case "effort":
+          runEffortCmd(opts, ctx, subRest);
           return;
         case "worktree":
           await runWorktreeCmd(opts, ctx, subRest);
@@ -1266,6 +1273,17 @@ export function buildWatchdogStatusReport(args: {
   return lines.join("\n");
 }
 
+function runEffortCmd(opts: Pick<RegisterCommandsOpts, "getCwd">, ctx: ExtensionCommandContext, args: string): void {
+  try {
+    const [action = "list", name] = args.trim() ? args.trim().split(/\s+/) : [];
+    const { gitRoot } = effortRepository(opts.getCwd());
+    if (action !== "list" && action !== "status") throw new Error("Only effort list/status are available");
+    const records = action === "list" ? listEfforts(gitRoot) : [readEffort(gitRoot, name ?? "")];
+    if (records.some(r => !r)) throw new Error("effort not found");
+    ctx.ui.notify(`${EFFORT_NOTICE}\n${JSON.stringify(records.map(effort => ({ effort, tip: effortTip(effort!) })), null, 2)}`, "info");
+  } catch (e) { ctx.ui.notify(`${(e as Error).message}. ${EFFORT_NOTICE}`, "error"); }
+}
+
 // ── /conductor worktree ─────────────────────────────────────────────────────
 
 type WorktreeCommandDeps = Pick<RegisterCommandsOpts, "getRegistry" | "getCwd">;
@@ -1321,6 +1339,10 @@ export async function runWorktreeCmd(
           `Run "${runId}" not found. Use /conductor worktree list to see runs with worktrees.`,
           "error",
         );
+        return;
+      }
+      if (run.effort) {
+        ctx.ui.notify(`Legacy worktree merge refuses effort assets. ${EFFORT_NOTICE}`, "error");
         return;
       }
       if (run.status !== "merge_conflict") {
@@ -1387,6 +1409,7 @@ export async function runWorktreeCmd(
       const runs = opts.getRegistry().list();
       const toClean = runs.filter(
         (r: Run) =>
+          !r.effort &&
           r.worktreePath &&
           r.worktreeBranch &&
           isTerminal(r.status) &&

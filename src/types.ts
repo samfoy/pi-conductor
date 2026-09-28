@@ -44,6 +44,7 @@ export const CONDUCTOR_LLM_TOOLS = {
   recommend: "ensemble_recommend",
   auto: "ensemble_auto",
   cwd: "ensemble_cwd",
+  effort: "ensemble_effort",
 } as const;
 
 export const CONDUCTOR_LLM_TOOL_NAMES: readonly string[] = Object.values(CONDUCTOR_LLM_TOOLS);
@@ -188,6 +189,7 @@ export interface ChainStep {
 }
 
 export interface ConductorConfig {
+  efforts?: Partial<import("./effort/policy.ts").EffortPolicy>;
   /** Retire managed child sessions on automatic context pressure. */
   contextRetirement: boolean;
   /** Complete rendered file limit; total evidence is bounded to four times this. */
@@ -475,7 +477,19 @@ export function emptyUsage(): Usage {
  * Persistence to disk happens via `runs.ts` — record.json is written on every
  * status change; transcript.jsonl is appended per stream event.
  */
+export interface RunEffort {
+  name: string;
+  gitRoot: string;
+  role: "writer";
+  /** Absent while queued; resolved at actual launch, never request time. */
+  spawnBase?: string;
+  /** Actual child cwd, captured after linked-checkout subdirectory mapping. */
+  cwd?: string;
+  touches?: string[];
+}
+
 export interface Run {
+  effort?: RunEffort;
   /** Stable id, e.g. `oracle-7f3a`. Used by ensemble_send/stop/etc. */
   id: string;
   /** Persona name as resolved at spawn time. */
@@ -930,6 +944,7 @@ export interface Run {
 
 /** Persisted record.json shape (subset of Run, no proc/timer references). */
 export interface RunRecord {
+  effort?: RunEffort;
   id: string;
   persona: string;
   task: string;
@@ -1108,6 +1123,7 @@ export function toRunRecord(r: Run): RunRecord {
     hookResult: r.hookResult,
     worktreePath: r.worktreePath,
     worktreeBranch: r.worktreeBranch,
+    effort: r.effort,
     worktreeBaseBranch: r.worktreeBaseBranch,
     mergeStrategy: r.mergeStrategy,
     mergeResult: r.mergeResult,

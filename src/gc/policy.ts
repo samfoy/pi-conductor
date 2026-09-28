@@ -166,6 +166,7 @@ function decideForEntry(
   now: number,
   orphanThresholdMs: number,
 ): ReclaimAction {
+  if (entry.effort || entry.inMemory?.effort) return { kind: "keep", id: entry.id, reason: "unresolved effort ownership" };
   // Rule 1: active-in-memory gate (load-bearing per slice 1 acceptance).
   if (entry.inMemory) {
     const mem = entry.inMemory;

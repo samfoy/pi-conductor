@@ -244,7 +244,7 @@ function headerLine(
     run.status === "timeout"   ? "⏱" :
     run.status === "hook_failed" ? "⊗" :
     run.status === "aborted"   ? "⏹" : "✗"; // v0.17: aborted (turn limit)
-  const verb = statusVerb(run.status);
+  const verb = statusVerb(run.status) + (run.effort ? ` — UNINTEGRATED (${run.effort.name})` : "");
   const usagePart = usageStr ? `, ${usageStr}` : "";
   let line = `## ${glyph} \`${run.persona}\` ${verb} (${elapsed}${usagePart}) — id \`${run.id}\``;
   if (resumed) {
@@ -416,6 +416,7 @@ export function buildCompletionMessage(run: Run, canFocus = false): Notification
   const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
 
   const stats = [elapsedStr(perSendStart, perSendEnd)];
+  if (run.effort) stats.push(`UNINTEGRATED (${run.effort.name})`);
   const usageStr = formatUsage(perSend);
   if (usageStr) stats.push(usageStr);
   stats.push(run.id);
