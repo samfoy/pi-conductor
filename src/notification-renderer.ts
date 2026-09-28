@@ -92,10 +92,18 @@ export function renderNotificationCard(
     }
   }
 
+  if (d.kind === "stalled" && !opts.expanded) {
+    lines.push([{ text: `${INDENT}${EXPAND_KEY} for stall evidence and guidance`, slot: "dim" }]);
+    return lines;
+  }
   for (const note of d.notes) {
     lines.push([{ text: INDENT + note.text, slot: note.slot }]);
   }
   if (opts.expanded) {
+    if (d.evidence) {
+      for (const line of d.evidence.split("\n")) lines.push([{ text: INDENT + line, slot: "toolOutput" }]);
+    }
+    if (d.guidance) lines.push([{ text: INDENT + d.guidance, slot: "muted" }]);
     if (d.available_actions) {
       lines.push([{ text: `${INDENT}available_actions=${d.available_actions.join(",") || "(none)"}`, slot: "muted" }]);
     }

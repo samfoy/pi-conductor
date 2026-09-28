@@ -22,13 +22,14 @@ import { matchesKey } from "@earendil-works/pi-tui";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { registerCommands } from "./commands.ts";
 import { registerTools } from "./tools.ts";
-import { RunRegistry, supportsFocus } from "./runs.ts";
+import { RunRegistry, supportsFocus, availableActions } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
 import { mountEnsembleWidget, type EnsembleWidget } from "./widget.ts";
 import {
   buildCompletionMessage,
   buildCompletionSendMessageOptions,
   buildStallMessage,
+  type StallNoticeArgs,
 } from "./notifications.ts";
 import { registerNotificationRenderer } from "./notification-renderer.ts";
 import {
@@ -535,21 +536,13 @@ export default function (pi: ExtensionAPI): void {
             // followUp-style (no triggerTurn) so it doesn't yank the
             // user mid-edit; the parent LLM sees it on its next turn.
             const meta = data as
-              | { agentId?: string; severity?: "soft" | "hard"; silentSeconds?: number }
+              | (StallNoticeArgs & { agentId: string })
               | undefined;
             const run = meta?.agentId ? registry.get(meta.agentId) : undefined;
             if (run && meta?.severity && typeof meta.silentSeconds === "number") {
-              const thresholdSeconds =
-                meta.severity === "hard"
-                  ? cfg.watchdog.defaultHardSeconds
-                  : cfg.watchdog.defaultSoftSeconds;
               try {
                 pi.sendMessage(
-                  buildStallMessage(run, {
-                    severity: meta.severity,
-                    silentSeconds: meta.silentSeconds,
-                    thresholdSeconds,
-                  }, supportsFocus(ctxRef)),
+                  buildStallMessage(run, meta, supportsFocus(ctxRef)),
                   { triggerTurn: false, deliverAs: "followUp" },
                 );
               } catch (err) {
@@ -585,6 +578,7 @@ export default function (pi: ExtensionAPI): void {
             cfg.watchdog.defaultKillOnStall,
             isWriteCapable(run.persona),
           ),
+        observeActions: (run) => availableActions(run, supportsFocus(ctxRef)),
         isEnabled: () => cfg.watchdog.enabled,
       });
       watchdogDispose = wd.start();

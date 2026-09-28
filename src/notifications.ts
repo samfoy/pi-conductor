@@ -16,6 +16,7 @@
 import { compactEnvelopeBlock } from "./compaction-hook.ts";
 import { contextRetirementNotice } from "./context-retirement.ts";
 import { availableActions, type RunAction, elapsedStr, formatUsage, getFinalText, sendsSinceSpawn } from "./runs.ts";
+import { boundStallText, escapeStallEvidence, recentStallEvidence, STALL_GUIDANCE } from "./stall-evidence.ts";
 import type { Run, RunStatus } from "./types.ts";
 
 /** Theme slot for an annotation row under a notification card. */
@@ -51,6 +52,9 @@ export interface EnsembleNotificationDetails {
   status: RunStatus;
   /** Stall severity. Present only when `kind === "stalled"`. */
   severity?: "soft" | "hard";
+  /** Bounded first-episode evidence, or a reference on subsequent notices. */
+  evidence?: string;
+  guidance?: string;
   /** Summary segments, joined with " · " onto the header line. */
   stats: string[];
   /** Sub-agent final text. Empty for stall advisories. */
@@ -297,9 +301,19 @@ function escapeXmlAttr(s: string): string {
  *
  * `silentSeconds` is computed by the caller from `now() - run.lastEventAt`.
  */
+export interface StallNoticeArgs {
+  severity: "soft" | "hard";
+  silentSeconds: number;
+  thresholdSeconds: number;
+  evidence?: string;
+  /** Subsequent soft reminder or hard escalation of the same episode. */
+  evidenceReference?: string;
+  availableActions?: RunAction[];
+}
+
 export function formatStallNotification(
   run: Run,
-  args: { severity: "soft" | "hard"; silentSeconds: number; thresholdSeconds: number },
+  args: StallNoticeArgs,
   actions: RunAction[] = availableActions(run),
 ): string {
   const elapsed = elapsedStr(run.startTime);
@@ -318,8 +332,12 @@ export function formatStallNotification(
       `<threshold-seconds>${args.thresholdSeconds}</threshold-seconds></stall>`,
   );
   if (run.lastToolCall) {
-    lines.push(`  <last-tool>${escapeXml(run.lastToolCall)}</last-tool>`);
+    lines.push(`  <last-tool>${escapeStallEvidence(boundStallText(run.lastToolCall, 512))}</last-tool>`);
   }
+  lines.push(args.evidenceReference
+    ? `  <evidence-reference>${escapeStallEvidence(args.evidenceReference)}</evidence-reference>`
+    : `<recent-activity>\n${escapeStallEvidence(args.evidence ?? recentStallEvidence(run))}\n</recent-activity>`);
+  lines.push(`  <guidance>${escapeXml(STALL_GUIDANCE)}</guidance>`);
   lines.push(`  <transcript>${run.transcriptPath}</transcript>`);
   lines.push("</sub-agent-stalled>");
   lines.push("```");
@@ -327,7 +345,7 @@ export function formatStallNotification(
 
   const glyph = args.severity === "hard" ? "⚠" : "·";
   const verb = args.severity === "hard" ? "hard-stalled" : "soft-stalled";
-  const lastTool = run.lastToolCall ? `, last: ${run.lastToolCall}` : "";
+  const lastTool = run.lastToolCall ? `, last: ${escapeStallEvidence(boundStallText(run.lastToolCall, 512))}` : "";
   const header = `## ${glyph} \`${run.persona}\` ${verb} — silent ${args.silentSeconds}s${lastTool} — id \`${run.id}\``;
   return [header, "", ...lines].join("\n");
 }
@@ -446,13 +464,14 @@ export function buildCompletionMessage(run: Run, canFocus = false): Notification
 /** {@link buildCompletionMessage} for a watchdog stall advisory. */
 export function buildStallMessage(
   run: Run,
-  args: { severity: "soft" | "hard"; silentSeconds: number; thresholdSeconds: number },
+  args: StallNoticeArgs,
   canFocus = false,
 ): NotificationMessage {
-  const actions = availableActions(run, canFocus);
+  const actions = args.availableActions ?? availableActions(run, canFocus);
+  const evidence = args.evidenceReference ? undefined : args.evidence ?? recentStallEvidence(run);
   return {
     customType: "ensemble-notification",
-    content: formatStallNotification(run, args, actions),
+    content: formatStallNotification(run, { ...args, evidence }, actions),
     display: true,
     details: {
       kind: "stalled",
@@ -461,11 +480,13 @@ export function buildStallMessage(
       persona: run.persona,
       status: run.status,
       severity: args.severity,
+      evidence: evidence ?? args.evidenceReference,
+      guidance: STALL_GUIDANCE,
       stats: [`silent ${args.silentSeconds}s`, `threshold ${args.thresholdSeconds}s`, run.id],
       body: "",
       transcriptPath: run.transcriptPath,
       notes: run.lastToolCall
-        ? [{ slot: "muted" as const, text: `last tool: ${run.lastToolCall}` }]
+        ? [{ slot: "muted" as const, text: `last tool: ${boundStallText(run.lastToolCall, 512)}` }]
         : [],
     },
   };

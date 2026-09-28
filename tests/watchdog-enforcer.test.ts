@@ -570,3 +570,93 @@ test("resolveKillOnStallForPersona: explicit cfg default true wins over persona-
   assert.equal(resolveKillOnStallForPersona(r, true, false), true);
   assert.equal(resolveKillOnStallForPersona(r, true, true), true);
 });
+
+
+test("A4 reminders halve the effective soft interval, floor at 60s, and stop after hard", () => {
+  const run = runFx({ softStallSeconds: 600 });
+  const nowRef = { value: T0 };
+  const { deps, log, kills } = makeDeps({ runs: [run], nowRef });
+  const wd = new Watchdog(deps);
+  const notices: number[] = [];
+  for (let seconds = 0; seconds <= 3300; seconds += 30) {
+    nowRef.value = T0 + seconds * 1000;
+    const before = log.warns.length;
+    wd.tick();
+    if (log.warns.length > before) notices.push(seconds);
+  }
+  assert.deepEqual(notices, [600, 900, 1050, 1140, ...Array.from({ length: 30 }, (_, i) => 1200 + i * 60), 3000]);
+  assert.equal(kills.length, 0);
+  assert.equal((log.warns.at(-1)!.data as { severity: string }).severity, "hard");
+});
+
+
+for (const change of ["event", "invocation", "resume", "pause", "pausedAt", "completed", "hook", "readopted"] as const) {
+  test(`A4 ${change} disposes the old episode even when next observed already stale`, () => {
+    const run = runFx(); const nowRef = { value: T0 + 120_000 };
+    const { deps, log } = makeDeps({ runs: [run], nowRef });
+    const wd = new Watchdog(deps); wd.tick();
+    assert.equal(log.warns.length, 1);
+    if (change === "event") run.lastEventAt += 1000;
+    if (change === "invocation") run.thisInvocationStartedAt = T0 + 1000;
+    if (change === "resume") run.resumeCount = 1;
+    if (change === "pause") run.status = "paused";
+    if (change === "pausedAt") run.pausedAt = T0 + 121_000;
+    if (change === "completed") run.status = "completed";
+    if (change === "hook") run.hookExecuting = true;
+    if (change === "readopted") run.proc = undefined;
+    if (!["event", "invocation", "resume"].includes(change)) {
+      nowRef.value = T0 + 130_000; wd.tick();
+      assert.equal(run.stalledSince, undefined, "excluded episodes clear their stalled marker");
+      run.status = "running"; run.pausedAt = undefined; run.hookExecuting = false;
+      run.proc = {} as Run["proc"];
+    }
+    nowRef.value = T0 + 150_000; wd.tick();
+    assert.equal(log.warns.length, 2, "new episode gets first attention before old reminder deadline");
+  });
+}
+
+test("A4 hard crossing wins over a due reminder and escalates only once", () => {
+  const run = runFx(); const nowRef = { value: T0 + 120_000 };
+  const { deps, log, kills } = makeDeps({ runs: [run], nowRef, killOnStall: true });
+  const wd = new Watchdog(deps); wd.tick();
+  nowRef.value = T0 + 600_000; wd.tick(); wd.tick();
+  nowRef.value += 600_000; wd.tick();
+  assert.deepEqual(log.warns.map(w => (w.data as { severity: string }).severity), ["soft", "hard"]);
+  assert.equal(kills.length, 1);
+  run.lastEventAt = nowRef.value; wd.tick();
+  nowRef.value += 600_000; wd.tick();
+  assert.equal(kills.length, 2, "new event allows a new hard episode");
+});
+
+
+test("A4 reminders and hard escalation never recapture the first evidence or action observations", () => {
+  const run = runFx(); const nowRef = { value: T0 + 120_000 };
+  let captures = 0; let observations = 0;
+  Object.defineProperty(run, "messages", { get() { captures++; return []; } });
+  const { deps, log } = makeDeps({ runs: [run], nowRef });
+  const wd = new Watchdog({ ...deps, observeActions: () => { observations++; return ["kill"]; } });
+  wd.tick(); const firstCaptures = captures;
+  assert.ok(firstCaptures > 0);
+  const first = log.warns[0].data as { evidence?: string };
+  assert.match(first.evidence!, /unavailable/);
+  for (const seconds of [180, 240, 600, 1200]) { nowRef.value = T0 + seconds * 1000; wd.tick(); }
+  assert.equal(captures, firstCaptures); assert.equal(observations, 1);
+  for (const warning of log.warns.slice(1)) {
+    const notice = warning.data as { evidence?: string; evidenceReference?: string };
+    assert.equal(notice.evidence, undefined); assert.match(notice.evidenceReference!, /first notice/);
+  }
+  run.lastEventAt = nowRef.value; wd.tick();
+  nowRef.value += 120_000; wd.tick();
+  assert.ok(captures > firstCaptures); assert.equal(observations, 2);
+});
+
+test("A4 dispose and removed runs discard their reminder episode", () => {
+  const run = runFx(); const nowRef = { value: T0 + 120_000 };
+  const { deps, log, registry } = makeDeps({ runs: [run], nowRef });
+  const wd = new Watchdog({ ...deps, setInterval: () => ({}) as NodeJS.Timeout, clearInterval: () => {} });
+  const dispose = wd.start(); wd.tick(); dispose();
+  const disposeAgain = wd.start(); wd.tick();
+  assert.equal(log.warns.length, 2); assert.ok((log.warns.at(-1)!.data as { evidence?: string }).evidence);
+  registry.setRuns([]); wd.tick(); registry.setRuns([run]); wd.tick();
+  assert.equal(log.warns.length, 3); disposeAgain();
+});

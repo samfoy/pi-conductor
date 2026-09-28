@@ -6,13 +6,14 @@
  * now) → (transition, next state). No I/O, no clock; `now` is injected
  * by the caller.
  *
- * Slice 1 ships ONLY this detector + the state types + Run.stalledSince.
- * The enforcer (interval ticker, registry hookup, kill path) lands in
- * Slice 2, per docs/v0.10-watchdog-design.md §6.
+ * The enforcer tracks invocation/activity episodes around this detector,
+ * capturing bounded first-notice evidence and scheduling soft reminders.
  */
 
 import type { Run } from "./types.ts";
-import type { TerminationReason, RunRegistry } from "./runs.ts";
+import type { TerminationReason, RunRegistry, RunAction } from "./runs.ts";
+import type { StallNoticeArgs } from "./notifications.ts";
+import { recentStallEvidence } from "./stall-evidence.ts";
 
 // ── Public API ────────────────────────────────────────────────────────
 
@@ -47,8 +48,7 @@ export const DEFAULT_WATCHDOG_CONFIG: WatchdogConfig = {
 };
 
 /**
- * Per-run state machine. Stored externally (the detector is pure); the
- * enforcer (Slice 2) holds a `Map<runId, WatchdogState>`.
+ * Per-run threshold state. The enforcer holds this inside its episode map.
  *
  * - `fresh` — never crossed any threshold (or recovered cleanly).
  * - `soft` — has crossed soft but not hard.
@@ -243,6 +243,8 @@ export interface WatchdogDeps {
    * this returns the conductor-wide default.
    */
   readonly isKillOnStall: (run: Run) => boolean;
+  /** Snapshot once per episode; reminders reuse it, and action effects revalidate. */
+  readonly observeActions?: (run: Run) => RunAction[];
   /**
    * Master enable switch. Mirrors the v0.9 GC pattern: `enabled=false`
    * makes every code path a no-op without changing wiring. Defaults to
@@ -392,7 +394,7 @@ export function classifyStall(
  * Sub-agent stall enforcer. Wraps the pure {@link evaluateRun} with:
  *   - registry subscription (wake on state change)
  *   - interval ticker (catch silent runs that never fire registry events)
- *   - per-run `WatchdogState` map
+ *   - per-run episode state, with soft reminders until the one-shot hard state
  *   - dispatch of soft/hard/recovered transitions to log + kill
  *   - **A2 pre-kill recheck** so a recovered run is not killed by a
  *     stale verdict
@@ -405,7 +407,16 @@ export function classifyStall(
  * from the registry and clears the interval. Idempotent.
  */
 export class Watchdog {
-  private readonly states = new Map<string, WatchdogState>();
+  private readonly states = new Map<string, {
+    state: WatchdogState;
+    lastEventAt: number;
+    invocationStartedAt: number;
+    resumeCount: number;
+    nextReminderAt: number;
+    reminderIntervalMs: number;
+    noticeAt?: number;
+    actions?: RunAction[];
+  }>();
   private timer: NodeJS.Timeout | null = null;
   private unsub: (() => void) | null = null;
   private disposed = false;
@@ -480,25 +491,64 @@ export class Watchdog {
     if (this.deps.isEnabled && !this.deps.isEnabled()) return;
 
     const now = this.deps.now();
-    for (const run of this.deps.registry.list()) {
-      const prev = this.states.get(run.id);
+    const runs = this.deps.registry.list();
+    const ids = new Set(runs.map(run => run.id));
+    for (const id of this.states.keys()) if (!ids.has(id)) this.states.delete(id);
+    for (const run of runs) {
+      if (classifyStall(run, now, this.deps.config) === null) {
+        this.states.delete(run.id);
+        run.stalledSince = undefined;
+        continue;
+      }
+      const invocationStartedAt = run.thisInvocationStartedAt ?? run.startTime;
+      const resumeCount = run.resumeCount ?? 0;
+      let episode = this.states.get(run.id);
+      if (episode && (episode.lastEventAt !== run.lastEventAt
+        || episode.invocationStartedAt !== invocationStartedAt || episode.resumeCount !== resumeCount)) {
+        if (episode.state.kind !== "fresh") {
+          this.dispatch(run, { kind: "recovered", previousKind: episode.state.kind }, this.deps.config);
+        }
+        episode = undefined;
+      }
+      const prev = episode?.state;
       // v0.10 Slice 3: per-run effective config so a spawn that overrode
       // `stall_threshold_seconds` gets its own thresholds. Pure helper;
       // the detector itself stays config-driven.
       const effective = effectiveConfig(run, this.deps.config);
-      const { transition, nextState } = evaluateRun(run, prev, effective, now);
-
-      // Persist state so the next tick can dedupe + detect recovery.
-      this.states.set(run.id, nextState);
-
-      // Garbage-collect terminal runs so the map doesn't grow unbounded.
-      // (For the regular case we set then delete — cheap; the alternative
-      // is to skip the set, but writing first keeps the ordering simple.)
-      if (run.status !== "running") {
-        this.states.delete(run.id);
+      let { transition, nextState } = evaluateRun(run, prev, effective, now);
+      // Hard transitions take precedence; hard advisory-only episodes never remind.
+      const reminder = transition.kind === "none" && nextState.kind === "soft"
+        && episode !== undefined && now >= episode.nextReminderAt;
+      if (reminder) {
+        transition = { kind: "soft", silentSeconds: Math.floor((now - run.lastEventAt) / 1000),
+          thresholdSeconds: effective.softThresholdSeconds };
       }
+      const interval = reminder ? Math.max(60_000, episode!.reminderIntervalMs / 2)
+        : Math.max(60_000, effective.softThresholdSeconds * 1000 / 2);
+      let notice: Partial<StallNoticeArgs> = {};
+      const attention = transition.kind === "soft" || transition.kind === "hard";
+      let actions = episode?.actions;
+      if (attention) {
+        if (episode?.noticeAt === undefined) {
+          try { actions = this.deps.observeActions?.(run); } catch { actions = []; }
+          notice = { evidence: recentStallEvidence(run) };
+        } else {
+          notice = { evidenceReference: `Same stall episode; use the evidence and action snapshot in the first notice at ${new Date(episode.noticeAt).toISOString()} (invocation ${invocationStartedAt}, resume ${resumeCount}, last event ${run.lastEventAt}).` };
+        }
+        notice.availableActions = actions;
+      }
+      this.states.set(run.id, {
+        state: nextState,
+        noticeAt: episode?.noticeAt ?? (attention ? now : undefined),
+        actions,
+        lastEventAt: run.lastEventAt,
+        invocationStartedAt,
+        resumeCount,
+        nextReminderAt: transition.kind === "soft" ? now + interval : episode?.nextReminderAt ?? Infinity,
+        reminderIntervalMs: transition.kind === "soft" ? interval : episode?.reminderIntervalMs ?? interval,
+      });
 
-      this.dispatch(run, transition, effective);
+      this.dispatch(run, transition, effective, notice);
     }
   }
 
@@ -509,17 +559,19 @@ export class Watchdog {
    * recheck**: re-read `now() - run.lastEventAt` and abort the kill if
    * the run recovered between the detector verdict and the dispatch.
    */
-  private dispatch(run: Run, transition: WatchdogTransition, effective: WatchdogConfig): void {
+  private dispatch(run: Run, transition: WatchdogTransition, effective: WatchdogConfig, notice: Partial<StallNoticeArgs> = {}): void {
     switch (transition.kind) {
       case "none":
         return;
       case "soft": {
-        run.stalledSince = this.deps.now();
+        run.stalledSince ??= this.deps.now();
         this.deps.log.warn(
           `watchdog: soft-stall on ${run.id} (silent ${transition.silentSeconds}s)`,
           {
+            ...notice,
             agentId: run.id,
             persona: run.persona,
+            thresholdSeconds: transition.thresholdSeconds,
             silentSeconds: transition.silentSeconds,
             severity: "soft",
           },
@@ -533,8 +585,10 @@ export class Watchdog {
           this.deps.log.warn(
             `watchdog: hard-stall on ${run.id} (silent ${transition.silentSeconds}s) — kill_on_stall=false; leaving alive`,
             {
+              ...notice,
               agentId: run.id,
               persona: run.persona,
+              thresholdSeconds: transition.thresholdSeconds,
               silentSeconds: transition.silentSeconds,
               severity: "hard",
             },
@@ -556,7 +610,7 @@ export class Watchdog {
           // Recovered between detector and kill. Treat as recovered:
           // clear stalledSince, reset state, log info.
           run.stalledSince = undefined;
-          this.states.set(run.id, { kind: "fresh" });
+          this.states.delete(run.id);
           this.deps.log.info(
             `watchdog: kill aborted for ${run.id} — recovered before kill (A2)`,
             {
@@ -571,8 +625,10 @@ export class Watchdog {
         this.deps.log.warn(
           `watchdog: hard-stall on ${run.id} (silent ${transition.silentSeconds}s) — killing (kill_on_stall=true)`,
           {
+            ...notice,
             agentId: run.id,
             persona: run.persona,
+            thresholdSeconds: transition.thresholdSeconds,
             silentSeconds: transition.silentSeconds,
             severity: "hard",
           },

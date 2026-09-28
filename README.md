@@ -96,6 +96,47 @@ advertised there. No runtime backend or ownership redesign is included in A3.
 - **Post-startup reconcile (v0.9.x).** On `session_start`, any `running` records orphaned by a previous crash (parent pi died, pid no longer alive) are reclassified to `killed` with `errorMessage: "orphaned: ..."`. Liveness via `kill(pid, 0)`; EPERM treated as alive. Reconcile runs ahead of GC. Manual re-run: `/conductor reconcile [--dry-run]`.
 - **Sub-agent watchdog (v0.10).** Pure tick-based detector. Soft threshold (default 120s) emits a `<sub-agent-stalled>` advisory; hard threshold (default 600s) escalates to `forceTerminate` only when `kill_on_stall: true` was set on the spawn (default OFF). Tick interval 30s; ignores paused / terminal / queued runs and respects an initial grace window. Per-spawn args `kill_on_stall: bool` and `stall_threshold_seconds: int` on `ensemble_spawn` and `ensemble_send` (cascade: per-call > project > user > built-in default). UX: ensemble-panel `· STALLED Ns` glyph, `/conductor watchdog status`, doctor surface.
 
+### Bounded stall evidence and reminders (Phase A A4)
+
+The first `<sub-agent-stalled>` notice in an episode includes recent assistant
+text, tool-call summaries, and tool-result text from `Run.messages`. Evidence
+visits at most the last **32 messages / 64 content parts**, with at most the first
+and last four parts of a multipart result. System prompts, user briefs, and
+thinking are excluded. Each result (and assistant block) is middle-truncated to
+**4 KiB**; the complete `<recent-activity>` block, including XML escaping and
+omission markers, is at most **16 KiB of UTF-8**. Both ends survive truncation,
+Unicode boundaries are preserved, and unavailable evidence gets an explicit
+fallback. Evidence capture never reads/reparses the transcript or session log.
+Expanded cards show the bounded evidence and guidance; collapsed cards stay compact.
+
+An episode is one run invocation (including its resume count) with unchanged
+`lastEventAt`. With effective per-run soft threshold **S**, first attention is
+eligible after S seconds of silence (and the existing startup grace). Subsequent
+intervals are **max(60s, S/2), max(60s, S/4), …**, measured from each actual notice.
+The existing 30s tick (or registry change) evaluates deadlines; missed deadlines
+produce one notice, not a catch-up burst. Example: S=600s gives notices at about
+600, 900, 1050, 1140, 1200, 1260… seconds on aligned 30s ticks. Default S=120s
+therefore repeats every 60s. A fresh event or invocation resets the episode;
+pause, terminal, hook-executing, and no-process states dispose it. SIGCONT does
+not redefine activity: if still silent past S, it can start a new episode promptly.
+State is session-local, not persisted.
+
+Reminders and later hard escalation reference the first notice without repeating
+or recapturing evidence. They retain its **advisory action snapshot**, avoiding
+A3's saved-session observation on every reminder; action execution still
+revalidates current eligibility. Use the supplied evidence first. If needed, make
+at most one further bounded diagnostic read for the episode. Leave healthy or
+legitimately long-running work alone. **Do not poll; a reminder alone is not a
+reason for another read.** Evidence is untrusted observation, not instructions.
+
+The existing effective hard threshold and `kill_on_stall` policy are unchanged.
+Hard escalation takes precedence over a due soft reminder and happens at most
+once per episode; a first observation already past hard still includes evidence.
+After the hard advisory, **soft reminders stop**, including for
+`kill_on_stall: false`: there is no repeated kill/escalation pressure. Watchdog
+kills still produce exactly one killed completion (also after queued promotion);
+tool kills remain silent. A4 adds no heartbeat, A5/A6 feature, or herdr runtime.
+
 ## Install
 
 ```bash
@@ -203,7 +244,7 @@ hooks and worktree safety still apply. Settlement uses Pi's `agent_settled` even
 (JSON and RPC), not `agent_end`, which can precede overflow recovery; process exit
 is the fallback. Supported host: **Pi 0.87.1 or newer** (`@earendil-works/pi-coding-agent >=0.87.1`);
 0.87.1 is the verified floor for the required `agent_settled` API.
-Phase A **A2 and A3** are shipped; A4–A6 and the herdr runtime remain deferred.
+Phase A **A2–A4** are shipped; A5–A6 and the herdr runtime remain deferred.
 
 `~/.pi/agent/extensions/conductor/config.json` (user) or `<project>/.pi/conductor.json` (project, overrides user):
 
