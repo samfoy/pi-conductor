@@ -15,6 +15,7 @@ import {
   type TranscriptOptions,
 } from "../src/transcript.ts";
 import { emptyUsage, type Run } from "../src/types.ts";
+import { formatToolCallShort } from "../src/event-handler.ts";
 
 function makeRun(overrides: Partial<Run> = {}): Run {
   return {
@@ -753,4 +754,30 @@ test("renderHeader emits exactly 2 lines (top ruler + status), no trailing ruler
   assert.equal(lines.length, 2, "D3: bottom-header ruler dropped in Slice 7");
   assert.match(lines[0]!, /^─+$/, "first line is the top ruler");
   assert.doesNotMatch(lines[1]!, /^─+$/, "second line is NOT a ruler");
+});
+
+test("tool summaries preserve Unicode in collapsed transcripts and widget activity", () => {
+  const command = "H" + "🙂".repeat(40) + "TAIL";
+  // No call IDs: render summary rows without pending-result rows.
+  const run = makeRun({ messages: [{ role: "assistant", content: [
+    { type: "toolCall", name: "read", arguments: { path: "🙂".repeat(30) } },
+    { type: "toolCall", name: "bash", arguments: { command } },
+    { type: "toolCall", name: "custom", arguments: { x: "🙂".repeat(30) } },
+  ] } as unknown as Run["messages"][number]] });
+  for (const width of [40, 80]) {
+    const lines = renderTranscript(run, { ...DEFAULT_OPTS, width });
+    assert.equal(lines.length, 3);
+    for (const line of lines) {
+      assert.equal(Buffer.from(line, "utf8").toString("utf8"), line);
+      assert.doesNotMatch(line, /�/);
+      assert.match(line, /🙂/);
+      assert.ok(visibleWidth(line) <= width);
+    }
+    if (width === 80) assert.ok(lines[1].endsWith("TAIL"));
+  }
+  const activity = formatToolCallShort("bash", { command });
+  assert.equal(Buffer.from(activity, "utf8").toString("utf8"), activity);
+  assert.doesNotMatch(activity, /�|\x1b/);
+  assert.ok(visibleWidth(activity) <= 53);
+  assert.ok(activity.startsWith("$ H")); assert.ok(activity.endsWith("TAIL"));
 });

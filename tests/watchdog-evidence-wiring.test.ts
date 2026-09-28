@@ -161,3 +161,35 @@ test("A4 real event and pause/resume wiring starts fresh evidence episodes", asy
   assert.equal(h.messages.length, 3, "resumed stale silence is a new episode, not a reminder");
   assert.match(h.messages.at(-1)!.content, /<recent-activity>/);
 });
+
+const astralToolCases = [
+  { label: "read path", name: "read", arguments: { path: "🙂".repeat(30) } },
+  { label: "bash head/tail", name: "bash", arguments: { command: "H" + "🙂".repeat(40) + "TAIL" } },
+  { label: "generic value", name: "custom", arguments: { x: "🙂".repeat(30) } },
+  { label: "generic joined pairs", name: "custom", arguments: { a: "x".repeat(29), b: "🙂".repeat(10), c: "tail" } },
+];
+for (const c of astralToolCases) {
+  test(`A4 Unicode tool arguments survive real notification wiring: ${c.label}`, async t => {
+    const h = await harness(t);
+    const out = await h.call("spawn", { persona: "oracle", task: "test", foreground: false, kill_on_stall: false });
+    assert.ok(!out.isError);
+    h.emit(h.children[0], { role: "assistant", content: [{ type: "toolCall", id: "astral", name: c.name, arguments: c.arguments }] });
+    h.emit(h.children[0], { role: "toolResult", toolName: c.name,
+      content: [{ type: "text", text: "RESULT_HEAD\n" + "🙂<&>```".repeat(8000) + "\nRESULT_TAIL" }] });
+    h.tick(120);
+    const first = h.messages.find(m => m.details.id === out.details.agent_id && m.details.kind === "stalled")!;
+    assert.ok(first);
+    for (const text of [first.content, first.details.evidence!, h.render(first, 40), h.render(first, 80)]) {
+      assert.equal(Buffer.from(text, "utf8").toString("utf8"), text, "valid tool arguments must not produce lone surrogates");
+      assert.doesNotMatch(text, /�/, "valid tool arguments must not produce replacement characters");
+      assert.match(text, /🙂/); assert.match(text, /tool call:/);
+    }
+    const block = first.content.match(/<recent-activity>[\s\S]*?<\/recent-activity>/)![0];
+    assert.ok(Buffer.byteLength(block) <= 16 * 1024);
+    const result = block.match(/tool result [^\n]*\n([\s\S]*?)\n<\/recent-activity>/)![1];
+    assert.ok(Buffer.byteLength(result) <= 4 * 1024);
+    assert.match(result, /RESULT_HEAD/); assert.match(result, /RESULT_TAIL/); assert.match(result, /omitted/);
+    assert.match(result, /&lt;&amp;&gt;/); assert.match(result, /&#96;/);
+    assert.equal((first.content.match(/^```/gm) ?? []).length, 2);
+  });
+}

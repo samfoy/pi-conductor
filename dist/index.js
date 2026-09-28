@@ -1115,21 +1115,22 @@ function noteAllocatedId(id, log = (l) => console.error(l)) {
 }
 
 // src/tool-summary.ts
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { sliceByColumn, visibleWidth } from "@earendil-works/pi-tui";
 var MAX_SUMMARY_LEN = 50;
 var MAX_KV_VALUE_LEN = 30;
 var ELLIPSIS = "\u2026";
 var ELLIPSIS_W = 1;
 function shortenMiddle(text, max) {
   if (max <= 0) return "";
-  if (visibleWidth(text) <= max) return text;
+  const width = visibleWidth(text);
+  if (width <= max) return text;
   if (max === ELLIPSIS_W) return ELLIPSIS;
-  if (max < 3) return text.slice(0, max);
+  if (max < 3) return sliceByColumn(text, 0, max, true);
   const budget = max - ELLIPSIS_W;
   const headLen = Math.ceil(budget * 0.6);
   const tailLen = budget - headLen;
-  const head = text.slice(0, headLen);
-  const tail = tailLen > 0 ? text.slice(text.length - tailLen) : "";
+  const head = sliceByColumn(text, 0, headLen, true);
+  const tail = tailLen > 0 ? sliceByColumn(text, width - tailLen, tailLen, true) : "";
   return head + ELLIPSIS + tail;
 }
 function summarizeToolArgs(name, args) {
@@ -1153,8 +1154,8 @@ function summarizeToolArgs(name, args) {
   }
 }
 function shorten(s, max) {
-  if (s.length <= max) return s;
-  return s.slice(0, max - 1) + "\u2026";
+  if (visibleWidth(s) <= max) return s;
+  return sliceByColumn(s, 0, max - 1, true) + ELLIPSIS;
 }
 
 // src/event-handler.ts

@@ -9,7 +9,7 @@
  * conflict.
  */
 
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { sliceByColumn, visibleWidth } from "@earendil-works/pi-tui";
 
 const MAX_SUMMARY_LEN = 50;
 const MAX_KV_VALUE_LEN = 30;
@@ -18,7 +18,8 @@ const ELLIPSIS = "…";
 const ELLIPSIS_W = 1; // visibleWidth("…") === 1
 
 /**
- * Head-and-tail truncate `text` so the rendered width is exactly `max`.
+ * Head-and-tail truncate `text` to at most `max` visible columns.
+ * Whole graphemes can leave a spare column at either cut.
  *
  * When `text` already fits, returns it unchanged. Otherwise returns
  * `head + … + tail` allocated 60:40 across the post-ellipsis budget — both
@@ -36,14 +37,15 @@ const ELLIPSIS_W = 1; // visibleWidth("…") === 1
  */
 export function shortenMiddle(text: string, max: number): string {
   if (max <= 0) return "";
-  if (visibleWidth(text) <= max) return text;
+  const width = visibleWidth(text);
+  if (width <= max) return text;
   if (max === ELLIPSIS_W) return ELLIPSIS;
-  if (max < 3) return text.slice(0, max);
+  if (max < 3) return sliceByColumn(text, 0, max, true);
   const budget = max - ELLIPSIS_W;
   const headLen = Math.ceil(budget * 0.6);
   const tailLen = budget - headLen;
-  const head = text.slice(0, headLen);
-  const tail = tailLen > 0 ? text.slice(text.length - tailLen) : "";
+  const head = sliceByColumn(text, 0, headLen, true);
+  const tail = tailLen > 0 ? sliceByColumn(text, width - tailLen, tailLen, true) : "";
   return head + ELLIPSIS + tail;
 }
 
@@ -69,6 +71,6 @@ export function summarizeToolArgs(name: string, args: Record<string, any>): stri
 }
 
 function shorten(s: string, max: number): string {
-  if (s.length <= max) return s;
-  return s.slice(0, max - 1) + "…";
+  if (visibleWidth(s) <= max) return s;
+  return sliceByColumn(s, 0, max - 1, true) + ELLIPSIS;
 }

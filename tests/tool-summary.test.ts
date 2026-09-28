@@ -147,3 +147,26 @@ test("shortenMiddle: deterministic / pure across repeated calls", () => {
   const text = "the quick brown fox jumps over the lazy dog";
   assert.equal(shortenMiddle(text, 25), shortenMiddle(text, 25));
 });
+
+for (const name of ["read", "write", "edit", "grep", "bash", "custom_tool"]) {
+  test(`summarizeToolArgs: ${name} preserves astral characters when truncated`, () => {
+    const text = "🙂".repeat(30);
+    const out = summarizeToolArgs(name, { path: text, pattern: text, command: "H" + text + "TAIL", x: text });
+    assert.equal(Buffer.from(out, "utf8").toString("utf8"), out, "summary must not split surrogate pairs");
+    assert.doesNotMatch(out, /�/);
+    assert.ok(visibleWidth(out) <= 50);
+    assert.match(out, /🙂/); assert.match(out, /…/);
+    if (name === "bash") { assert.ok(out.startsWith("H")); assert.ok(out.endsWith("TAIL")); }
+  });
+}
+
+test("shortenMiddle: wide graphemes fit small and large column budgets without corruption", () => {
+  for (const text of ["🙂".repeat(40), "H" + "🙂".repeat(40) + "TAIL", "👩‍💻".repeat(40), "漢".repeat(40)]) {
+    for (const max of [0, 1, 2, 3, 4, 5, 50, 51]) {
+      const out = shortenMiddle(text, max);
+      assert.equal(Buffer.from(out, "utf8").toString("utf8"), out, `max=${max} must not split surrogate pairs`);
+      assert.doesNotMatch(out, /�/);
+      assert.ok(visibleWidth(out) <= max, `max=${max} output exceeds its column budget`);
+    }
+  }
+});
