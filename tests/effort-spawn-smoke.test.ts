@@ -69,7 +69,7 @@ test("M1 persistence failure preserves an externally moved ref and its unresolve
   assert.equal(git(cwd, "rev-parse", "HEAD"), base);
 });
 
-test("M1 real fake child and real hook share isolated subdir and private TMPDIR; completion stays unintegrated", { timeout: 15000 }, async () => {
+test("M1 real fake child and real hook share isolated subdir and private TMPDIR; completion integrates without base checkout mutation", { timeout: 15000 }, async () => {
   const cwd = repo(); const root = tmpDir("effort-real-child-"); const stub = join(root, "pi.mjs");
   const base = git(cwd, "rev-parse", "HEAD");
   writeFileSync(stub, `import { execFileSync } from "node:child_process";
@@ -95,7 +95,7 @@ test("M1 real fake child and real hook share isolated subdir and private TMPDIR;
     assert.equal(readFileSync(join(dirname(run.recordPath), "hook-cwd"), "utf8").trim(), join(run.worktreePath!, "pkg"));
     assert.equal(readFileSync(join(dirname(run.recordPath), "hook-tmp"), "utf8"), join(dirname(run.recordPath), "tmp"));
     assert.equal(git(cwd, "show", `${run.worktreeBranch}:pkg/work`), "valuable");
-    assert.equal(git(cwd, "rev-parse", "HEAD"), base); assert.equal(run.mergeResult, undefined);
-    assert.match(run.worktreeKept!, /UNINTEGRATED/);
+    assert.equal(git(cwd, "rev-parse", "HEAD"), base); assert.equal(run.mergeResult?.success, true);
+    assert.match(run.worktreeKept!, /integrated/);
   } finally { if (saved === undefined) delete process.env.PI_BIN; else process.env.PI_BIN = saved; }
 });

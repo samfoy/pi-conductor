@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { EffortPolicy } from "./policy.ts";
 import { validateEffortName } from "./policy.ts";
 
@@ -16,6 +16,11 @@ export interface EffortRecord {
   owner: EffortOwner;
   policy: EffortPolicy;
   members: string[];
+  queue?: string[];
+  status?: "open" | "paused";
+  pausedReason?: string;
+  gatedTip?: string;
+  baseline?: { oid: string; result?: import("../types.ts").HookResult; disabled?: boolean };
   createdAt: number;
   updatedAt: number;
 }
@@ -46,15 +51,27 @@ export function claimEffort(gitRoot: string, name: string, owner: EffortOwner): 
   try { writeFileSync(join(dir, "effort.lock"), JSON.stringify(owner), { flag: "wx" }); }
   catch { throw new Error(`effort "${name}" already claimed; ownership unresolved (no M1 takeover)`); }
 }
-export function writeEffort(record: EffortRecord): void {
-  assertEffortOwner(record, record.owner);
-  const dir = effortDir(record.gitRoot, record.name);
-  const temp = join(dir, `effort-${randomUUID()}.tmp`);
+/** A successful return acknowledges file contents and the rename, including directory metadata. */
+export function writeDurableJson(path: string, value: unknown, fence: () => void): void {
+  const temp = `${path}-${randomUUID()}.tmp`;
+  let fd: number | undefined;
   try {
-    writeFileSync(temp, JSON.stringify(record, null, 2), { flag: "wx" });
-    assertEffortOwner(record, record.owner);
-    renameSync(temp, join(dir, "effort.json"));
-  } finally { if (existsSync(temp)) unlinkSync(temp); }
+    fence();
+    fd = openSync(temp, "wx");
+    writeFileSync(fd, JSON.stringify(value, null, 2));
+    fsyncSync(fd); closeSync(fd); fd = undefined;
+    fence();
+    renameSync(temp, path);
+    fd = openSync(dirname(path), "r");
+    fsyncSync(fd); closeSync(fd); fd = undefined;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    if (existsSync(temp)) unlinkSync(temp);
+  }
+}
+
+export function writeEffort(record: EffortRecord): void {
+  writeDurableJson(join(effortDir(record.gitRoot, record.name), "effort.json"), record, () => assertEffortOwner(record, record.owner));
 }
 export function addEffortMember(record: EffortRecord, id: string): void {
   const current = readEffort(record.gitRoot, record.name);

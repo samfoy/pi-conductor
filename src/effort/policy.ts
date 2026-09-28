@@ -1,5 +1,7 @@
 export interface EffortPolicy {
   verify: string;
+  verifyTimeoutSeconds: number;
+  verifyRetries: number;
   generated?: { paths: string[]; command: string };
   maxParallel: number;
   merger: "auto" | "ask" | "off";
@@ -8,7 +10,13 @@ export interface EffortPolicy {
   history: "squash";
 }
 
-export const EFFORT_NOTICE = "M1: writers are UNINTEGRATED until M2. Baseline is not verified; no automatic integration or landing. Readers, auto plans, chains and retries are unavailable for efforts.";
+export const EFFORT_NOTICE = "M2: new hook-passed writers integrate serially after baseline/candidate verification and repository hooks. Legacy work remains UNINTEGRATED. Interrupted work pauses for inspection; recovery, generated conflict resolution, parallel admission, merger, landing, readers, auto plans, chains and retries are unavailable.";
+
+export function effortSummary(run: import("../types.ts").Run): string {
+  if (!run.effort) return "";
+  const state = run.landedCommit ? `integrated ${run.landedCommit.slice(0, 12)}` : run.mergeResult?.nothingToCommit ? "tree-equal no-op" : run.status === "integrating" ? `integrating (${run.integration?.state ?? "paused"})` : "UNINTEGRATED";
+  return `${run.effort.name}: ${state}${run.mergeResult?.verifyDisabled ? " (effort verify disabled; repository hooks still required)" : ""}${run.integration?.reason ? `: ${run.integration.reason}` : ""}`;
+}
 
 export function validateEffortName(name: string): void {
   if (typeof name !== "string" || !/^[a-z][a-z0-9-]{0,39}$/.test(name)) {
@@ -27,8 +35,10 @@ export function validateTouches(paths: unknown): asserts paths is string[] {
 }
 
 export function resolveEffortPolicy(config: Partial<EffortPolicy> = {}, overrides: Partial<EffortPolicy> = {}): EffortPolicy {
-  const p = { maxParallel: 2, merger: "auto", mergerMaxAttempts: 1, land: "branch", history: "squash", ...config, ...overrides };
+  const p = { verifyTimeoutSeconds: 1200, verifyRetries: 1, maxParallel: 2, merger: "auto", mergerMaxAttempts: 1, land: "branch", history: "squash", ...config, ...overrides };
   if (typeof p.verify !== "string") throw new Error('no verify command: set efforts.verify or explicitly pass verify:"" (verification disabled)');
+  if (!Number.isInteger(p.verifyTimeoutSeconds) || p.verifyTimeoutSeconds < 1) throw new Error("efforts.verifyTimeoutSeconds must be a positive integer");
+  if (!Number.isInteger(p.verifyRetries) || p.verifyRetries < 0 || p.verifyRetries > 1) throw new Error("efforts.verifyRetries must be 0 or 1");
   if (p.verify.includes("\0")) throw new Error("efforts.verify must not contain NUL");
   if (!Number.isInteger(p.maxParallel) || p.maxParallel < 1) throw new Error("efforts.maxParallel must be a positive integer");
   if (!["auto", "ask", "off"].includes(p.merger)) throw new Error("efforts.merger must be auto, ask or off");
@@ -39,7 +49,7 @@ export function resolveEffortPolicy(config: Partial<EffortPolicy> = {}, override
     validateTouches(p.generated?.paths);
     if (typeof p.generated.command !== "string" || !p.generated.command.trim() || p.generated.command.includes("\0")) throw new Error("efforts.generated.command must be nonempty");
   }
-  return { verify: p.verify, maxParallel: p.maxParallel, merger: p.merger as EffortPolicy["merger"], mergerMaxAttempts: 1,
+  return { verify: p.verify, verifyTimeoutSeconds: p.verifyTimeoutSeconds, verifyRetries: p.verifyRetries, maxParallel: p.maxParallel, merger: p.merger as EffortPolicy["merger"], mergerMaxAttempts: 1,
     land: p.land as EffortPolicy["land"], history: "squash",
     ...(p.generated ? { generated: { paths: [...p.generated.paths], command: p.generated.command } } : {}) };
 }

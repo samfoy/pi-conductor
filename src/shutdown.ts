@@ -87,6 +87,9 @@ export async function handleSessionShutdown(
   event: ShutdownEventLike,
   deps: ShutdownDeps,
 ): Promise<void> {
+  for (const run of deps.runs) if (run.effort) run.integrationSuspended = true;
+  const integrations = deps.runs.flatMap(run => run.integrationControl ? [run.integrationControl.suspend()] : []);
+  if (integrations.length) await Promise.all(integrations);
   if (event.reason === "reload") return;
   const stillActive: Run[] = [];
   for (const r of deps.runs) {

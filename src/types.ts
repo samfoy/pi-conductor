@@ -424,6 +424,10 @@ export type MergeStrategy = "squash" | "merge" | "none";
 
 /** v0.14 worktree auto-merge: outcome of a `mergeWorktree` call. */
 export interface MergeResult {
+  reason?: "conflict" | "verify_failed" | "verify_timeout" | "error" | "killed";
+  verify?: HookResult;
+  flakyVerify?: boolean;
+  verifyDisabled?: boolean;
   success: boolean;
   /** Set when the worktree had no new commits vs the base — merge was a no-op. */
   nothingToCommit?: boolean;
@@ -443,6 +447,7 @@ export interface PendingAsk {
 }
 
 export type RunStatus =
+  | "integrating"
   | "blocked"
   | "queued"
   | "running"
@@ -488,8 +493,31 @@ export interface RunEffort {
   touches?: string[];
 }
 
+export interface RunIntegration {
+  state: "queued" | "merging" | "verifying" | "verified" | "paused" | "accepted" | "cancelled";
+  enqueuedAt: number;
+  branchHead: string;
+  expectedTip?: string;
+  candidateOid?: string;
+  candidateTree?: string;
+  candidatePath?: string;
+  logPath?: string;
+  reason?: string;
+  verifyIdentity: { command: string; timeoutSeconds: number; retries: number };
+  attempts: number;
+  commitHook?: HookResult;
+  verify?: HookResult;
+  process?: { pid: number; startTime?: number };
+}
+
 export interface Run {
+  /** Owned integration effects; never restored from a saved record. */
+  integrationControl?: { cancel(): void; suspend(): Promise<void> };
+  integrationSuspended?: boolean;
+  recordWrite?: Promise<void>;
   effort?: RunEffort;
+  integration?: RunIntegration;
+  landedCommit?: string;
   /** Stable id, e.g. `oracle-7f3a`. Used by ensemble_send/stop/etc. */
   id: string;
   /** Persona name as resolved at spawn time. */
@@ -945,6 +973,8 @@ export interface Run {
 /** Persisted record.json shape (subset of Run, no proc/timer references). */
 export interface RunRecord {
   effort?: RunEffort;
+  integration?: RunIntegration;
+  landedCommit?: string;
   id: string;
   persona: string;
   task: string;
@@ -1124,6 +1154,8 @@ export function toRunRecord(r: Run): RunRecord {
     worktreePath: r.worktreePath,
     worktreeBranch: r.worktreeBranch,
     effort: r.effort,
+    integration: r.integration,
+    landedCommit: r.landedCommit,
     worktreeBaseBranch: r.worktreeBaseBranch,
     mergeStrategy: r.mergeStrategy,
     mergeResult: r.mergeResult,

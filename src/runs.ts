@@ -21,8 +21,10 @@ import type { ChildProcess } from "node:child_process";
 import { createRunPipeline } from "./run-pipeline.ts";
 import { capabilitiesFor, subprocessRuntime } from "./subprocess-runtime.ts";
 import { ownedEffort, effortOwner, effortRepository, effortTip } from "./effort/open.ts";
-import { addEffortMember, assertEffortOwner, readEffort, type EffortRecord } from "./effort/store.ts";
-import { EFFORT_NOTICE, validateTouches } from "./effort/policy.ts";
+import { effortEnv } from "./effort/git.ts";
+import { EffortDriver } from "./effort/driver.ts";
+import { addEffortMember, assertEffortOwner, readEffort, writeDurableJson, type EffortRecord } from "./effort/store.ts";
+import { EFFORT_NOTICE, effortSummary, validateTouches } from "./effort/policy.ts";
 import type { Signaler } from "./runtime.ts";
 export type { Signaler } from "./runtime.ts";
 export { buildSubagentEnv, capabilitiesFor, createLineDecoder, RPC_ACK_TIMEOUT_MS } from "./subprocess-runtime.ts";
@@ -898,6 +900,7 @@ export type RunListener = (run: Run) => void;
 export type TerminationReason = "killed" | "timeout" | "stalled" | "aborted";
 
 export class RunRegistry {
+  readonly integrations = new EffortDriver();
   private runs = new Map<string, Run>();
   private listeners = new Set<RunListener>();
 
@@ -921,7 +924,7 @@ export class RunRegistry {
   countActive(): number {
     let n = 0;
     for (const r of this.runs.values()) {
-      if (!isSettled(r.status) && r.status !== "queued") n++;
+      if (!isSettled(r.status) && r.status !== "queued" && r.status !== "integrating") n++;
     }
     return n;
   }
@@ -933,7 +936,7 @@ export class RunRegistry {
   countActiveBy(personaNames: ReadonlySet<string>): number {
     let n = 0;
     for (const r of this.runs.values()) {
-      if (!isSettled(r.status) && r.status !== "queued" && personaNames.has(r.persona)) {
+      if (!isSettled(r.status) && r.status !== "queued" && r.status !== "integrating" && personaNames.has(r.persona)) {
         n++;
       }
     }
@@ -1812,6 +1815,7 @@ export function runActionError(run: Run, action: RunAction, observed: ActionObse
   if (action !== "send" && !observed.owned) {
     return `sub-agent ${run.id} is owned by another conductor (foreign run).`;
   }
+  if (action === "kill" && run.status === "integrating" && !run.integrationControl) return "integration is preserved without a live driver; inspection only until recovery is available";
   if (action === "kill") return isTerminal(run.status) ? `sub-agent ${run.id} is already ${run.status}.` : undefined;
   if (action === "pause" || action === "resume") {
     const required = action === "pause" ? "running" : "paused";
@@ -1952,6 +1956,8 @@ export function resolveSendStrategy(
     if (!run.pendingAsk) return { strategy: { kind: "rejected", reason: `sub-agent ${run.id} has no valid pending owner question; inspect the transcript before abandoning this assignment.` } };
     if (behavior === "steer" || behavior === "follow_up") return { strategy: { kind: "rejected", reason: `sub-agent ${run.id} is blocked on an owner question. Answer with auto or resume to continue its saved session.` } };
   }
+
+  if (run.status === "integrating") return { strategy: { kind: "rejected", reason: `sub-agent ${run.id} is integrating; no saved-session continuation is available.` } };
 
   if (run.effort && isTerminal(run.status)) return { strategy: { kind: "rejected", reason: `${EFFORT_NOTICE} Start a fresh effort writer; only blocked assignments accept owner answers.` } };
 
@@ -2423,8 +2429,7 @@ export async function applyMergeToTerminal(
  */
 export async function settleWorktree(run: Run, terminal: RunStatus): Promise<RunStatus> {
   if (run.effort) {
-    // M1 retains the assignment intact; only later integration may release its assets.
-    run.worktreeKept = `${EFFORT_NOTICE} Worktree ${run.worktreePath ?? "unavailable"}; branch ${run.worktreeBranch ?? "unavailable"} preserved.`;
+    run.worktreeKept = `${effortSummary(run)}. Worktree ${run.worktreePath ?? "unavailable"}; branch ${run.worktreeBranch ?? "unavailable"} preserved.`;
     return terminal;
   }
   if (!run.worktreePath || !run.worktreeBranch) return terminal;
@@ -2588,7 +2593,8 @@ export async function applyHookToTerminal(
   // the hook can still introspect transcript via
   // CONDUCTOR_TRANSCRIPT_PATH.
   try {
-    await writeFinal(run);
+    if (run.effort) await writeFile(join(dirname(run.recordPath), "gate-final.md"), getFinalText(run.messages) || "(no output)");
+    else await writeFinal(run);
   } catch {
     // best-effort
   }
@@ -2601,10 +2607,11 @@ export async function applyHookToTerminal(
       runId: run.id,
       persona: run.persona,
       runDir: dirname(run.finalPath),
-      finalPath: run.finalPath,
+      finalPath: run.effort ? join(dirname(run.recordPath), "gate-final.md") : run.finalPath,
       transcriptPath: run.transcriptPath,
       parentCwd: run.cwd,
       cwd: run.effort?.cwd,
+      extraEnv: run.effort ? effortEnv() : undefined,
       tmpDir: run.effort ? join(dirname(run.recordPath), "tmp") : undefined,
       worktreePath: run.worktreePath,
       onProc: (proc) => {
@@ -2745,6 +2752,7 @@ export function forceTerminate(
     console.warn(`forceTerminate: refusing to mutate foreign run id=${run.id}: ${blocker}`);
     return;
   }
+  if (run.status === "integrating") { run.integrationControl?.cancel(); return; }
   if (run.rejectAnswerDelivery && (reason === "timeout" || reason === "stalled")) {
     run.rejectAnswerDelivery(reason);
     return;
@@ -2908,13 +2916,15 @@ export function discoverContextRetirement(run: Run, sessionDir?: string): void {
   }
 }
 
-export async function writeRecord(run: Run): Promise<void> {
-  try {
+export function writeRecord(run: Run, durableFence?: () => void): Promise<void> {
+  const snapshot = toRunRecord(run);
+  const writing = (run.recordWrite ?? Promise.resolve()).catch(() => {}).then(async () => {
     await mkdir(dirname(run.recordPath), { recursive: true });
-    await writeFile(run.recordPath, JSON.stringify(toRunRecord(run), null, 2));
-  } catch {
-    // best-effort
-  }
+    if (durableFence) writeDurableJson(run.recordPath, snapshot, durableFence);
+    else await writeFile(run.recordPath, JSON.stringify(snapshot, null, 2));
+  });
+  run.recordWrite = writing.catch(() => {});
+  return durableFence ? writing : run.recordWrite;
 }
 
 export async function writeFinal(run: Run): Promise<void> {

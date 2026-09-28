@@ -1,3 +1,6 @@
+import { effortGit, effortOwner } from "./effort/open.ts";
+import { assertEffortOwner, readEffort } from "./effort/store.ts";
+import { effortSummary, resolveEffortPolicy } from "./effort/policy.ts";
 import { appendFile } from "node:fs/promises";
 import type { RunRuntime, RunTransport } from "./runtime.ts";
 import { subprocessRuntime } from "./subprocess-runtime.ts";
@@ -167,6 +170,13 @@ export function createRunPipeline(
       terminal = "failed";
       run.errorMessage = "Owner question cannot be resumed: session missing, retired, or subprocess failed. Use a fresh child with the transcript.";
     }
+    if (run.effort) {
+      try { transport.stop(); } catch { /* already exited */ }
+      const escalation = setTimeout(() => { try { transport.stop("SIGKILL"); } catch { /* already exited */ } }, 2000);
+      await transport.closed;
+      clearTimeout(escalation);
+      await answerRecord;
+    }
     if (
       terminal === "completed" &&
       exitCode === 0 &&
@@ -199,6 +209,45 @@ export function createRunPipeline(
         terminal = "hook_failed";
       }
     }
+    if (run.effort && terminal === "completed" && !isTerminal(run.status)) {
+      run.proc = undefined;
+      run.pid = undefined;
+      try {
+        const record = readEffort(run.effort.gitRoot, run.effort.name);
+        if (!record) throw new Error("effort record missing; integration refused");
+        assertEffortOwner(record, effortOwner(run.parentSessionId));
+        const policy = resolveEffortPolicy(record.policy);
+        if (!run.worktreePath || !run.worktreeBranch) throw new Error("effort assignment workspace missing");
+        if (effortGit(run.worktreePath, "status", "--porcelain", "--untracked-files=all")) throw new Error("writer has uncommitted work; integration refused and workspace preserved");
+        const branchHead = effortGit(run.effort.gitRoot, "rev-parse", "--verify", `refs/heads/${run.worktreeBranch}^{commit}`);
+        run.status = "integrating";
+        run.integration = { state: "queued", enqueuedAt: Date.now(), branchHead, attempts: 0,
+          verifyIdentity: { command: policy.verify, timeoutSeconds: policy.verifyTimeoutSeconds, retries: policy.verifyRetries } };
+        if (run.integrationSuspended) {
+          run.integration.state = "paused";
+          run.integration.reason = "owner runtime shut down; work preserved until recovery is available";
+          await writeRecord(run, () => assertEffortOwner(record, effortOwner(run.parentSessionId)));
+          opts.registry.notify(run);
+          return;
+        }
+        const outcome = await opts.registry.integrations.enqueue(run, () => opts.registry.notify(run));
+        terminal = outcome.terminal;
+        run.mergeResult = outcome.mergeResult;
+        run.landedCommit = outcome.landedCommit;
+        if (!outcome.mergeResult.success) run.errorMessage = `effort integration failed: ${outcome.mergeResult.reason ?? "error"}. ${outcome.mergeResult.errorMessage ?? "Work and evidence preserved."}`;
+      } catch (e) {
+        terminal = "merge_conflict";
+        run.errorMessage = `effort integration refused: ${(e as Error).message}`;
+        run.mergeResult = { success: false, reason: "error", errorMessage: run.errorMessage };
+      }
+    }
+    await settleRun(terminal, exitCode);
+  };
+
+  let settled = false;
+  const settleRun = async (terminal: RunStatus, exitCode?: number) => {
+    if (settled) return;
+    settled = true;
     // Forced termination already published its state; retain discovery without notifying twice.
     if (!applyCloseHandlerTerminal(run, terminal, exitCode)) {
       discoverSessionPathIfMissing(run, opts.sessionDir);
@@ -228,7 +277,8 @@ export function createRunPipeline(
     applySubstanceCheck(run, terminal);
     discoverSessionPathIfMissing(run, opts.sessionDir);
     run.proc = undefined;
-    terminal = await settleWorktree(run, terminal);
+    if (!run.effort) terminal = await settleWorktree(run, terminal);
+    else run.worktreeKept = `${effortSummary(run)}. Branch ${run.worktreeBranch} and worktree ${run.worktreePath} preserved.`;
     // Re-apply the terminal to the run record now that merge may have flipped it.
     if (terminal === "merge_conflict") run.status = terminal;
     if (terminal !== "completed") {
@@ -243,6 +293,7 @@ export function createRunPipeline(
         errorMessage: run.errorMessage,
       });
     }
+    if (run.mergeResult?.reason === "verify_timeout") run.failureClass = "timeout";
     opts.registry.notify(run);
     try {
       transport.stop();

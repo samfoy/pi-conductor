@@ -223,7 +223,7 @@ export class SpawnQueue {
 
 function countWriters(registry: RunRegistry): number {
   return registry.countActiveBy(WRITE_CAPABLE_PERSONAS) + registry.list().filter(r =>
-    r.effort && !WRITE_CAPABLE_PERSONAS.has(r.persona) && !isSettled(r.status) && r.status !== "queued").length;
+    r.effort && !WRITE_CAPABLE_PERSONAS.has(r.persona) && !isSettled(r.status) && r.status !== "queued" && r.status !== "integrating").length;
 }
 
 function mapFromRegistry(r: RunRegistry): Map<string, Run> {

@@ -77,6 +77,7 @@ export type ClassifyResult =
   | "reclassify-killed"
   | "reclassify-failed-queued"
   | "reclassify-pre-schema"
+  | "restore-integrating"
   | "restore-blocked"
   | "skip-terminal"
   | "skip-foreign";
@@ -164,6 +165,7 @@ export function classifyRecord(
     return "skip-foreign";
   }
 
+  if (status === "integrating") return "restore-integrating";
   if (status === "blocked") return "restore-blocked";
 
   // A queued run never spawned. Status → failed regardless of any
@@ -505,6 +507,14 @@ export async function reconcileOrphansAtStartup(
       const dryRun = deps.dryRun === true;
 
       switch (verdict) {
+        case "restore-integrating":
+          if (!dryRun) {
+            const run = buildOrphanRun(record, "integrating");
+            run.integrationSuspended = true;
+            if (run.integration) run.integration = { ...run.integration, state: "paused", reason: "interrupted integration preserved; automatic recovery is unavailable before M5" };
+            deps.registry.register(run);
+          }
+          break;
         case "restore-blocked":
           if (!dryRun) deps.registry.register(buildOrphanRun(record, "blocked"));
           await checkSessionResumability(record, result);
@@ -691,6 +701,8 @@ function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
     worktreePath: record.worktreePath,
     worktreeBranch: record.worktreeBranch,
     effort: record.effort,
+    integration: record.integration,
+    landedCommit: record.landedCommit,
     worktreeBaseBranch: record.worktreeBaseBranch,
     mergeStrategy: record.mergeStrategy,
     mergeResult: record.mergeResult,

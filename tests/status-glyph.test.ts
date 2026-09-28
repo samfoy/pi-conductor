@@ -58,6 +58,7 @@ test("STATUS_GLYPH: covers every RunStatus key (no holes)", () => {
     "completed",
     "failed",
     "hook_failed",
+    "integrating",
     "killed",
     "merge_conflict",
     "paused",

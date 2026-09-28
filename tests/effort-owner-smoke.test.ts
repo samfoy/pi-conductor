@@ -30,12 +30,17 @@ function fixture() {
   git(cwd, "add", "pkg", ".gitignore"); git(cwd, "commit", "-m", "base");
   const stub = join(tmpDir("effort-answer-stub-"), "pi.mjs");
   writeFileSync(stub, `import { writeFileSync, readFileSync } from "node:fs";
+    import { execFileSync } from "node:child_process";
+    import { gitTestEnv } from ${JSON.stringify(new URL("./helpers/git-env.ts", import.meta.url).href)};
     const args = process.argv.slice(2);
     const header = JSON.parse(readFileSync(args[args.indexOf("--session") + 1], "utf8").split("\\n")[0]);
     if (process.cwd() !== header.cwd) throw new Error("session/process cwd mismatch");
     const emit = event => console.log(JSON.stringify(event));
     if (args.at(-1).includes("<owner-answer")) {
-      writeFileSync("answered", "accepted"); emit({ type: "agent_start" });
+      writeFileSync("answered", "accepted");
+      execFileSync("git", ["add", "answered"], { env: gitTestEnv() });
+      execFileSync("git", ["commit", "-m", "answer"], { env: gitTestEnv() });
+      emit({ type: "agent_start" });
       emit({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Answered the owner question and completed the original assignment in its preserved worktree." }] } });
     } else {
       const ask = { askId: "choice", question: "Which option?", evidence: "" };

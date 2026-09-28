@@ -81,6 +81,10 @@ export interface RunHookOptions {
   cwd?: string;
   /** Private run directory for effort hook temporary files. */
   tmpDir?: string;
+  /** Separate effort evidence without overwriting the persona hook log. */
+  logPath?: string;
+  /** Undefined values explicitly remove inherited variables. */
+  extraEnv?: NodeJS.ProcessEnv;
   /**
    * The run's worktree, when it has one: the hook runs in `parentCwd`'s
    * counterpart there (the tree the sub-agent changed, see worktreeCwd)
@@ -173,7 +177,7 @@ export function runHook(opts: RunHookOptions): Promise<HookResult> {
   const clearTimer = deps.clearTimer ?? ((h) => clearTimeout(h as NodeJS.Timeout));
 
   const startedAt = now();
-  const logPath = `${opts.runDir}/hook.log`;
+  const logPath = opts.logPath ?? `${opts.runDir}/hook.log`;
 
   // Best-effort directory ensure; runDir always exists by the time the
   // close handler runs but we don't want to crash if a test fixture
@@ -197,6 +201,11 @@ export function runHook(opts: RunHookOptions): Promise<HookResult> {
     CONDUCTOR_PARENT_CWD: opts.parentCwd,
     ...(opts.worktreePath ? { CONDUCTOR_WORKTREE_PATH: opts.worktreePath } : {}),
   };
+
+  for (const [key, value] of Object.entries(opts.extraEnv ?? {})) {
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
 
   const spawnOpts: SpawnOptions = {
     shell: true,
@@ -338,10 +347,11 @@ export function runHook(opts: RunHookOptions): Promise<HookResult> {
 
     const onChunk = (chunk: Buffer | string): void => {
       const buf = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+      const remaining = Math.max(0, maxLogBytes - totalBytes);
       totalBytes += buf.length;
       // Stream the chunk to the log file (best-effort).
       try {
-        logStream.write(buf);
+        if (remaining > 0) logStream.write(buf.subarray(0, remaining));
       } catch {
         // ignore
       }
@@ -349,7 +359,7 @@ export function runHook(opts: RunHookOptions): Promise<HookResult> {
       const text = buf.toString("utf8");
       const merged = tailLineBuffer + text;
       const lines = merged.split("\n");
-      tailLineBuffer = lines.pop() ?? "";
+      tailLineBuffer = boundedLine(lines.pop() ?? "");
       for (const line of lines) appendTailLine(tailLines, line);
       // Maintain per-byte cap on the buffered tail text so a single huge
       // line doesn't balloon memory.
@@ -400,8 +410,16 @@ export function runHook(opts: RunHookOptions): Promise<HookResult> {
 
 // ── Tail helpers ──────────────────────────────────────────────────────
 
+function boundedLine(line: string): string {
+  const bytes = Buffer.from(line, "utf8");
+  if (bytes.length < TAIL_MAX_BYTES) return line;
+  let tail = bytes.subarray(-(TAIL_MAX_BYTES - 1)).toString("utf8");
+  while (Buffer.byteLength(tail, "utf8") >= TAIL_MAX_BYTES) tail = tail.slice(1);
+  return tail;
+}
+
 function appendTailLine(lines: string[], line: string): void {
-  lines.push(line);
+  lines.push(boundedLine(line));
   if (lines.length > TAIL_MAX_LINES) {
     lines.splice(0, lines.length - TAIL_MAX_LINES);
   }

@@ -19,7 +19,7 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { effortRepository, effortTip } from "./effort/open.ts";
+import { effortRepository, effortGit } from "./effort/open.ts";
 import { readEffort, listEfforts } from "./effort/store.ts";
 import { EFFORT_NOTICE } from "./effort/policy.ts";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -1282,7 +1282,7 @@ function runEffortCmd(opts: Pick<RegisterCommandsOpts, "getCwd">, ctx: Extension
     if (action !== "list" && action !== "status") throw new Error("Only effort list/status are available");
     const records = action === "list" ? listEfforts(gitRoot) : [readEffort(gitRoot, name ?? "")];
     if (records.some(r => !r)) throw new Error("effort not found");
-    ctx.ui.notify(`${EFFORT_NOTICE}\n${JSON.stringify(records.map(effort => ({ effort, tip: effortTip(effort!) })), null, 2)}`, "info");
+    ctx.ui.notify(`${EFFORT_NOTICE}\n${JSON.stringify(records.map(effort => ({ effort, tip: effortGit(effort!.gitRoot, "rev-parse", "--verify", `${effort!.intRef}^{commit}`) })), null, 2)}`, "info");
   } catch (e) { ctx.ui.notify(`${(e as Error).message}. ${EFFORT_NOTICE}`, "error"); }
 }
 

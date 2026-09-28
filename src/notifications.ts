@@ -1,3 +1,4 @@
+import { effortSummary } from "./effort/policy.ts";
 /**
  * pi-conductor — <sub-agent-completed> notification card.
  *
@@ -170,6 +171,7 @@ export function formatCompletionNotification(run: Run, actions: RunAction[] = av
     lines.push(`  <error>${escapeXml(run.errorMessage)}</error>`);
   }
   // v0.20 W4: a kept worktree or branch is a note, never an <error>.
+  if (run.integration) lines.push(`  <integration>${escapeXml(JSON.stringify({ effort: run.effort?.name, landedCommit: run.landedCommit, ...run.integration, reason: run.mergeResult?.reason ?? run.integration.reason }))}</integration>`);
   if (run.worktreeKept) {
     const attrs = [
       run.worktreePath && ` path="${escapeXmlAttr(run.worktreePath)}"`,
@@ -244,7 +246,7 @@ function headerLine(
     run.status === "timeout"   ? "⏱" :
     run.status === "hook_failed" ? "⊗" :
     run.status === "aborted"   ? "⏹" : "✗"; // v0.17: aborted (turn limit)
-  const verb = statusVerb(run.status) + (run.effort ? ` — UNINTEGRATED (${run.effort.name})` : "");
+  const verb = statusVerb(run.status) + (run.effort ? ` — ${effortSummary(run)}` : "");
   const usagePart = usageStr ? `, ${usageStr}` : "";
   let line = `## ${glyph} \`${run.persona}\` ${verb} (${elapsed}${usagePart}) — id \`${run.id}\``;
   if (resumed) {
@@ -416,7 +418,7 @@ export function buildCompletionMessage(run: Run, canFocus = false, sessionId?: s
   const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
 
   const stats = [elapsedStr(perSendStart, perSendEnd)];
-  if (run.effort) stats.push(`UNINTEGRATED (${run.effort.name})`);
+  if (run.effort) stats.push(effortSummary(run));
   const usageStr = formatUsage(perSend);
   if (usageStr) stats.push(usageStr);
   stats.push(run.id);
@@ -438,6 +440,7 @@ export function buildCompletionMessage(run: Run, canFocus = false, sessionId?: s
     stats.push("session retired; use a fresh child with the handoff");
     notes.push({ slot: "warning", text: retirement });
   }
+  if (run.integration) notes.push({ slot: "muted", text: `Integration: ${effortSummary(run)}; ${run.mergeResult?.reason ?? run.integration.state}; verify ${run.integration.verify?.durationMs ?? 0}ms; log ${run.integration.verify?.logPath ?? run.integration.commitHook?.logPath ?? "not run"}` });
   if (run.errorMessage) notes.push({ slot: "error", text: run.errorMessage });
   if (run.worktreeKept) notes.push({ slot: "warning", text: run.worktreeKept });
   if (run.nonSubstantiveFinal) {

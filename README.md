@@ -29,7 +29,7 @@ pi-conductor closes that gap. The parent pi session is the conductor, sub-agents
   - **Review / verification:** `critic`, `redteam`, `finalizer`, `verifier`
   - **Debugging:** `investigator`
   - **Other:** `profiler`, `scribe`
-- **LLM tools:** `ensemble_list`, `ensemble_status`, `ensemble_spawn`, `ensemble_send`, `ensemble_pause`, `ensemble_resume`, `ensemble_kill`, `ensemble_focus`, `ensemble_recommend` (v0.18 memory-ranked persona suggestions), `ensemble_auto` (v0.18 autonomous plan execution), `ensemble_cwd` (show or change the default cwd for spawns), `ensemble_effort` (open/status of unintegrated efforts).
+- **LLM tools:** `ensemble_list`, `ensemble_status`, `ensemble_spawn`, `ensemble_send`, `ensemble_pause`, `ensemble_resume`, `ensemble_kill`, `ensemble_focus`, `ensemble_recommend` (v0.18 memory-ranked persona suggestions), `ensemble_auto` (v0.18 autonomous plan execution), `ensemble_cwd` (show or change the default cwd for spawns), `ensemble_effort` (open/status of verified serial efforts).
 - **Slash commands:** `/conductor list | show | doctor | on | off | status | stop | pause | resume | queue | focus | history | pin | unpin | gc | reconcile | watchdog | send | worktree | cwd | effort`. `send <id> <message>` resumes or steers a run like `ensemble_send`; `worktree list | merge <id> | clean` inspects and settles kept worktrees.
 
 ### Spawning + lifecycle
@@ -321,7 +321,7 @@ settlement. Prompt rejection is a failed run, not completion. As with explicit
 RPC, extension dialogs are auto-cancelled; provider extensions remain enabled.
 This does not address independently oversized persona/system-prompt argv.
 
-## Named efforts (M1 — unintegrated writers)
+## Named efforts (M2 — verified serial integration)
 
 `ensemble_effort({action:"open", effort:"feature", verify:"npm test"})` captures
 an attached base branch and commit from the conductor's requested checkout and
@@ -329,11 +329,39 @@ creates **`refs/heads/conductor-int/feature` without checking it out**. Status i
 available through `ensemble_effort({action:"status", effort:"feature"})` and
 `/conductor effort list` or `/conductor effort status feature`.
 
-**M1 writers are UNINTEGRATED until M2.** No baseline verification, merge queue,
-verified-tip guarantee, or automatic landing is implemented here. A completed
-run means the child and its configured completion hook passed, not that its work
-was integrated. The worktree and branch are retained on success, failure and kill;
-dirty work is never discarded. Legacy worktree merge/clean and GC skip effort assets.
+**New writers finish only after integration.** Native settlement waits for the
+child process to exit and the original persona hook to pass, then enters
+`integrating` without a child slot. A serial FIFO per canonical repository merges
+against the current integration tip using `merge-tree`. Candidate construction
+uses ordinary `git commit` in a detached worktree, with repository hooks intact;
+`efforts.verify` gates the exact post-hook commit before a conditional ref update.
+The main checkout, index and branch are not changed. Completion cards, result refs,
+chains/retries, memory and `done` remain deferred to the shared settlement tail.
+A6 blocked writers are never enqueued. Existing M1 completions stay UNINTEGRATED;
+neither reload nor inspecting a legacy member certifies it.
+
+The baseline is checked in an isolated worktree on first integration, and again
+if the tip is not a previously gated tip. Opening alone is **not** a green-baseline
+claim. A red baseline pauses the effort queue, not unrelated running builders.
+A no-op requires tree equality to this gated tip. Candidate verification retries
+a red result once on the same commit (`verifyRetries: 0` disables that retry);
+two reds settle `merge_conflict` with `verify_failed` or `verify_timeout`.
+Command launch/output failures, required-hook failures, missing prerequisites,
+unexpected dirty changes, ownership uncertainty, WAL failures and stale CAS pause
+for inspection. No builder retry or automatic merger is attempted.
+
+`ensemble_status` exposes the integration stage, captured OIDs, reason, bounded
+logs and verification duration; completed cards include the same evidence.
+Kill cancels only the owned integration and waits for its process group before
+settlement. Quit/reload stop active verification and preserve integrating records;
+restart restores them for inspection, **not automatic recovery**. A crashed driver
+claim is also retained. Before M5 there is no resume/requeue command: inspect work
+and logs rather than repeatedly spawning into a paused effort.
+
+Writer branches, candidate worktrees and evidence are retained even on success
+in this interim slice. Dirty work is never discarded, and legacy worktree
+merge/clean and GC skip effort assets. This favors recoverability over disk reuse;
+there is no automatic landing or destructive cleanup.
 
 Spawn with `effort:"feature"` and optional `touches:["src/**"]`. The first spawn
 can open the effort using config. Every effort writer gets its own worktree,
@@ -348,13 +376,19 @@ Policy precedence is explicit open override (`verify`, `land`) > project
 `<requested cwd>/.pi/conductor.json` > user config > defaults, frozen at open:
 
 ```json
-{"efforts":{"verify":"npm test","generated":{"paths":["dist/**"],"command":"npm run build"},"maxParallel":2,"merger":"auto","mergerMaxAttempts":1,"land":"branch","history":"squash"}}
+{"efforts":{"verify":"npm test","verifyTimeoutSeconds":1200,"verifyRetries":1,"generated":{"paths":["dist/**"],"command":"npm run build"},"maxParallel":2,"merger":"auto","mergerMaxAttempts":1,"land":"branch","history":"squash"}}
 ```
 
 There is **no default verify command**. Explicit `verify:""` records disabled
-verification; it does not disable repository hooks. Generated policy, maxParallel,
-merger and land are captured only; they do not activate integration or relax the
-legacy writer cap in M1. Names match `^[a-z][a-z0-9-]{0,39}$`. Scope/generated paths
+verification; it does not disable repository hooks, and status explicitly labels
+the weaker guarantee. Verify and candidate hooks have bounded output and a timeout
+(default 1200 seconds); effort commands scrub inherited `GIT_*`/`HERDR_*` variables
+and use private temporary directories. Candidate hooks may stage changes, but the
+resulting post-hook tree must be clean and pass verification. There is no automatic
+dependency installation or base `node_modules` modification: hooks needing a local
+installation pause when it is missing. Generated policy, maxParallel, merger and
+land remain captured-only; M2 does not resolve generated conflicts or relax the
+legacy active-writer cap. Names match `^[a-z][a-z0-9-]{0,39}$`. Scope/generated paths
 are nonempty repo-relative literal, `*` or `**` globs; traversal, absolute paths
 and other glob syntax are rejected. Omitted scope remains undeclared.
 
@@ -369,7 +403,7 @@ The canonical repository root is the main checkout, even for linked-worktree
 callers; the captured base remains the caller's branch. An exclusive `effort.lock`
 claim and atomic `effort.json` replacements retain owner session/pid/start identity,
 frozen policy and ordered member ids. Existing refs/records/claims fail closed.
-There is no takeover or destructive effort action in M1: even stale claims remain
+There is no takeover or destructive effort action in M2: even stale claims remain
 for review. A failed creation/persistence retains its claim and any created ref;
 rollback never deletes a ref that another actor may have replaced. The claim is
 not evidence of successful open if `effort.json` is absent. Inspect the preserved

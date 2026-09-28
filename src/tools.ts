@@ -7,9 +7,9 @@
  *   - ensemble_spawn  (foreground default, with auto-downgrade-on-queue)
  */
 
-import { openEffort, effortRepository, effortTip } from "./effort/open.ts";
+import { openEffort, effortRepository, effortGit } from "./effort/open.ts";
 import { readEffort, type EffortRecord } from "./effort/store.ts";
-import { EFFORT_NOTICE } from "./effort/policy.ts";
+import { EFFORT_NOTICE, effortSummary } from "./effort/policy.ts";
 import { subprocessRuntime } from "./subprocess-runtime.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
@@ -168,7 +168,7 @@ function registerEffortTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
     name: CONDUCTOR_LLM_TOOLS.effort,
     label: "Effort",
     description: `Open or inspect a named effort in the conductor cwd. ${EFFORT_NOTICE}`,
-    promptSnippet: "Open or inspect an unintegrated effort",
+    promptSnippet: "Open or inspect a verified serial effort",
     parameters: Type.Object({
       action: Type.Union([Type.Literal("open"), Type.Literal("status")]),
       effort: Type.String(),
@@ -186,8 +186,8 @@ function registerEffortTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
             })
           : readEffort(effortRepository(cwd).gitRoot, params.effort);
         if (!effort) throw new Error("effort not found");
-        const tip = effortTip(effort);
-        return { content: [{ type: "text" as const, text: `${EFFORT_NOTICE}\n${JSON.stringify({ effort, tip }, null, 2)}` }], details: { effort, tip } };
+        const tip = effortGit(effort.gitRoot, "rev-parse", "--verify", `${effort.intRef}^{commit}`);
+        return { content: [{ type: "text" as const, text: `${EFFORT_NOTICE}\n${!effort.baseline ? "Baseline not verified yet; gated on first integration." : effort.baseline.disabled ? "Effort verify disabled; repository hooks still required." : "Baseline result recorded."}\n${JSON.stringify({ effort, tip }, null, 2)}` }], details: { effort, tip } };
       } catch (e) { return errorResult(`${(e as Error).message}. ${EFFORT_NOTICE}`); }
     },
   });
@@ -343,6 +343,7 @@ function registerStatusTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           },
         ],
         details: {
+          integrating: groups.integrating.map(summary),
           blocked: groups.blocked.map(summary),
           running: groups.running.map(summary),
           queued: groups.queued.map(summary),
@@ -1561,6 +1562,7 @@ export function formatPersonaListForLLM(personas: Persona[]): string {
 }
 
 interface StatusGroups {
+  integrating: Run[];
   blocked: Run[];
   running: Run[];
   queued: Run[];
@@ -1576,6 +1578,7 @@ interface StatusGroups {
 
 function groupByStatus(runs: Run[]): StatusGroups {
   const g: StatusGroups = {
+    integrating: [],
     blocked: [],
     running: [],
     queued: [],
@@ -1600,6 +1603,9 @@ function toStatusSummary(r: Run, canFocus: boolean, sessionId?: string) {
     status: r.status,
     pending_ask: r.pendingAsk,
     effort: r.effort,
+    integration: r.integration,
+    landedCommit: r.landedCommit,
+    mergeResult: r.mergeResult,
     elapsed: elapsedStr(r.startTime, r.finishedAt),
     usage: formatUsage(r.usage),
     lastToolCall: r.lastToolCall,
@@ -1610,6 +1616,7 @@ function toStatusSummary(r: Run, canFocus: boolean, sessionId?: string) {
 function formatStatusForLLM(g: StatusGroups, queueSize: number, summaries: Map<string, ReturnType<typeof toStatusSummary>>): string {
   const lines: string[] = [];
   const counts: string[] = [];
+  if (g.integrating.length) counts.push(`${g.integrating.length} integrating`);
   if (g.blocked.length) counts.push(`${g.blocked.length} blocked`);
   if (g.running.length) counts.push(`${g.running.length} running`);
   if (g.paused.length) counts.push(`${g.paused.length} paused`);
@@ -1619,6 +1626,7 @@ function formatStatusForLLM(g: StatusGroups, queueSize: number, summaries: Map<s
   lines.push(counts.length === 0 ? "No sub-agents." : `Sub-agents: ${counts.join(", ")}.`);
 
   const groupOrder: Array<[string, Run[]]> = [
+    ["Integrating", g.integrating],
     ["Blocked (awaiting owner)", g.blocked],
     ["Running", g.running],
     ["Paused", g.paused],
@@ -1645,7 +1653,7 @@ function formatStatusForLLM(g: StatusGroups, queueSize: number, summaries: Map<s
       const tokenPart = formatUsage({ turns: 0, input: r.usage.input, output: r.usage.output, cost: r.usage.cost });
       const usageStr = [turnPart, tokenPart].filter(Boolean).join(" ");
       const usagePart = usageStr ? `[${usageStr}]` : "";
-      const hint = (r.lastToolCall ? ` → ${r.lastToolCall}` : "") + (r.effort ? ` effort=${r.effort.name} UNINTEGRATED` : "");
+      const hint = (r.lastToolCall ? ` → ${r.lastToolCall}` : "") + (r.effort ? ` effort=${effortSummary(r)}` : "");
       lines.push(
         `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} available_actions=${summaries.get(r.id)!.available_actions.join(",") || "(none)"}`,
       );

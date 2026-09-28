@@ -7,7 +7,7 @@ import { resolveEffortPolicy, validateEffortName, type EffortPolicy } from "./po
 import { assertEffortOwner, claimEffort, readEffort, writeEffort, type EffortOwner, type EffortRecord } from "./store.ts";
 
 export function effortGit(cwd: string, ...args: string[]): string {
-  return execFileSync("git", args, { cwd, env: gitEnv(), encoding: "utf8", stdio: "pipe" }).trim();
+  return execFileSync("git", args, { cwd, env: Object.fromEntries(Object.entries(gitEnv()).filter(([key]) => !key.startsWith("HERDR_"))), encoding: "utf8", stdio: "pipe", timeout: 30000 }).trim();
 }
 /** Canonical repository identity is the main worktree, not the caller's linked checkout. */
 export function effortRepository(cwd: string): { gitRoot: string; requestedRoot: string } {
@@ -47,7 +47,7 @@ export function openEffort(cwd: string, name: string, sessionId: string | undefi
   if (readEffort(gitRoot, name)) throw new Error(`effort "${name}" already exists`);
   claimEffort(gitRoot, name, owner);
   const now = Date.now();
-  const record: EffortRecord = { schema: 1, name, gitRoot, intRef: `refs/heads/conductor-int/${name}`, baseBranch: baseRef.slice(11), baseOid, owner, policy, members: [], createdAt: now, updatedAt: now };
+  const record: EffortRecord = { schema: 1, name, gitRoot, intRef: `refs/heads/conductor-int/${name}`, baseBranch: baseRef.slice(11), baseOid, owner, policy, members: [], queue: [], status: "open", createdAt: now, updatedAt: now };
   // Never roll back a ref: even an equal OID cannot prove another actor did not replace it.
   // Failed creation/persistence retains the claim for explicit review, with no checkout writes.
   effortGit(gitRoot, "update-ref", record.intRef, baseOid, "");

@@ -37,8 +37,10 @@ function repo() {
   return cwd;
 }
 function fake(t: test.TestContext) {
+  const realSpawn = cp.spawn;
   const procs: any[] = []; const launches: cp.SpawnOptions[] = []; // ChildProcess protocol doubles
   t.mock.method(cp, "spawn", (command: string, args: string[] | cp.SpawnOptions, options?: cp.SpawnOptions) => {
+    if (!Array.isArray(args) && command !== "m1-hook") return realSpawn(command, args);
     const proc = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough(), unref() {}, kill() { queueMicrotask(() => proc.emit("close", 0)); return true; } });
     procs.push(proc); launches.push(options ?? args as cp.SpawnOptions); if (command === "m1-hook") queueMicrotask(() => proc.emit("close", 0, null)); return proc;
   });
@@ -91,18 +93,18 @@ test("M1 queue resolves NEW integration tip at dequeue, forces isolated writer, 
   writeFileSync(join(path, "pkg", "work"), "work\n"); git(path, "add", "pkg/work"); git(path, "commit", "-m", "work");
   finish(procs[0]); await done;
   assert.equal(run.status, "completed", run.errorMessage);
-  assert.equal(run.mergeResult, undefined, "M1 must never call ordinary base merge");
+  assert.equal(run.mergeResult?.success, true, "M2 integrates without ordinary base merge");
   assert.equal(git(cwd, "show", `${branch}:pkg/work`), "work");
   assert.equal(git(cwd, "rev-parse", "HEAD"), base);
   assert.equal(git(cwd, "symbolic-ref", "--short", "HEAD"), "main");
   assert.deepEqual(readFileSync(join(cwd, ".git", "index")), index);
   assert.equal(readFileSync(join(cwd, "pkg", "file"), "utf8"), "base\n");
   assert.equal(git(cwd, "status", "--porcelain"), "");
-  assert.match(formatCompletionNotification(run), /UNINTEGRATED/);
-  assert.match(buildCompletionMessage(run).details.stats.join(" "), /UNINTEGRATED/);
+  assert.match(formatCompletionNotification(run), /integrated|no-op/);
+  assert.match(buildCompletionMessage(run).details.stats.join(" "), /integrated|no-op/);
   const status = await tools(cwd, registry, queue).get("ensemble_status").execute("status", { agent_id: run.id }, undefined, undefined, { mode: "json" });
   assert.deepEqual(status.details.finished[0].effort, run.effort);
-  assert.match(status.content[0].text, /UNINTEGRATED/);
+  assert.match(status.content[0].text, /integrated|no-op/);
   assert.deepEqual(JSON.parse(readFileSync(run.recordPath, "utf8")).effort, run.effort);
 });
 
@@ -129,10 +131,10 @@ test("M1 linked-caller subdirectory and A6 answer retain same assignment/worktre
   assert.equal(launches[1].cwd, join(path, "pkg"));
   assert.equal(run.task, "original"); assert.equal(run.worktreeBranch, branch);
   emit(procs[1], { type: "agent_start" }); finish(procs[1]); await resumed.done;
-  assert.equal(run.status, "completed"); assert.equal(run.mergeResult, undefined);
+  assert.equal(run.status, "completed"); assert.equal(run.mergeResult?.nothingToCommit, true);
   assert.equal(launches[2].cwd, join(path, "pkg"), "hook runs in the same isolated subdirectory");
   assert.equal(run.hookResult?.passed, true);
-  assert.match(formatCompletionNotification(run), /UNINTEGRATED/);
+  assert.match(formatCompletionNotification(run), /integrated|no-op/);
 });
 
 for (const terminal of ["failed", "hook_failed", "killed", "completed"] as const) {

@@ -52,6 +52,7 @@ export function statusColorSlot(status: RunStatus): ThemeColor {
     case "merge_conflict":
     case "aborted": // v0.17: turn-limit termination — error class
       return "error";
+    case "integrating":
     case "blocked":
     case "paused":
       return "warning";

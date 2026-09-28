@@ -140,6 +140,7 @@ export function formatRow(
   const name = theme.fg("accent", r.persona) + theme.fg("dim", `:${r.id.split("-").pop() ?? r.id}`);
   const elapsed = theme.fg("dim", elapsedStr(r.startTime, r.finishedAt));
   const activity =
+    r.status === "integrating" ? theme.fg("warning", ` · ${r.effort?.name}: ${r.integration?.state ?? "paused"}${r.integration?.reason ? `: ${r.integration.reason}` : ""}`) :
     r.status === "queued"
       ? theme.fg("dim", " (queued)")
       : r.status === "blocked"
@@ -209,6 +210,7 @@ function statusColorSlot(s: RunStatus): string {
       return "dim";
     case "running":
       return "accent";
+    case "integrating":
     case "blocked":
     case "paused":
       return "warning";
