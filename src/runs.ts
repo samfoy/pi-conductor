@@ -17,17 +17,20 @@
  * may be called either directly (slot available) or by the queue draining.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import { createRunPipeline } from "./run-pipeline.ts";
+import { capabilitiesFor, subprocessRuntime } from "./subprocess-runtime.ts";
+import type { Signaler } from "./runtime.ts";
+export type { Signaler } from "./runtime.ts";
+export { buildSubagentEnv, capabilitiesFor, createLineDecoder, RPC_ACK_TIMEOUT_MS } from "./subprocess-runtime.ts";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { mkdir, writeFile, appendFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { StringDecoder } from "node:string_decoder";
 import { appendFileEvidence } from "./file-evidence.ts";
-import { RpcStdinQueue } from "./rpc-stdin.ts";
 import { dirname, join, resolve, sep } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { noteAllocatedId } from "./gc/id-reuse.ts";
-import { applyEvent, qualifyModel } from "./event-handler.ts";
+import { qualifyModel } from "./event-handler.ts";
 import { filterParentContext, filterParentContextCompact } from "./context-filter.ts";
 import { resolveInheritContext } from "./inherit-context.ts";
 import { seedSessionFile, sessionHeaderCwd } from "./session-seed.ts";
@@ -38,7 +41,6 @@ import { resolveMaxTurns, resolveGraceTurns } from "./turn-limit.ts";
 import { runHook, defaultKillGroup } from "./hook-runner.ts";
 import { classifyFailure, shouldRetry } from "./failure-classify.ts";
 import { resolveRetryPolicy } from "./retry.ts";
-import { recordRunOutcome } from "./memory.ts";
 import { loadConfigWithErrors } from "./config.ts";
 import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage, currentBranch, worktreeHasUncommittedChanges, branchHasUnmergedCommits, restoreWorktree, refExists, worktreeCwd } from "./worktree.ts";
 import { readProcessStartTime } from "./reconcile-startup.ts";
@@ -219,57 +221,6 @@ export function allocateRunId(persona: string, registry: Map<string, Run>): stri
   }
   // Last resort — append timestamp for uniqueness.
   return `${persona}-${shortHash()}-${Date.now()}`;
-}
-
-// ── pi invocation discovery (lifted from pi-essentials) ──────────────
-
-/**
- * v0.10 A1: build the env a sub-agent pi subprocess inherits. Sets
- * `CONDUCTOR_SUBAGENT=1` so the child's conductor extension knows to
- * skip auto-GC (and any other parent-only side effects) on its own
- * `session_start`. Without this, the child would run a full GC pass
- * and leak its `gc auto: …` summary into stderr — which the parent
- * captures (`runs.ts` stdio=["ignore","pipe","pipe"]) and assigns to
- * `run.errorMessage`.
- *
- * Transitive sub-spawns (a sub-agent's own `bash` calls, or a sub-agent
- * legitimately spawning another `pi --session …` process) inherit the
- * marker, which is the desired behavior — conductor-context propagates.
- */
-export function buildSubagentEnv(
-  baseEnv: NodeJS.ProcessEnv = process.env,
-): NodeJS.ProcessEnv {
-  return { ...baseEnv, CONDUCTOR_SUBAGENT: "1" };
-}
-
-function getPiInvocation(args: string[]): { command: string; args: string[] } {
-  // Test-friendly override: PI_BIN=<path-to-pi-cli.js> forces a specific
-  // pi CLI invocation regardless of how the parent was started.
-  const piBinEnv = process.env.PI_BIN;
-  if (piBinEnv && existsSync(piBinEnv)) {
-    return { command: process.execPath, args: [piBinEnv, ...args] };
-  }
-
-  const currentScript = process.argv[1];
-  const isBunVirtual = currentScript?.startsWith("/$bunfs/root/");
-  // Only re-invoke via process.argv[1] when it looks like pi's own CLI.
-  // When the parent is something else (tsx, jest, mocha, a normal node
-  // script), this would otherwise spawn `node <foreign-script>` and crash
-  // before pi ever loads. Detect by basename + ancestor dir containing
-  // "pi-coding-agent".
-  if (currentScript && !isBunVirtual && existsSync(currentScript)) {
-    const looksLikePi =
-      /(^|\/)(pi|cli\.js)$/.test(currentScript) &&
-      currentScript.includes("pi-coding-agent");
-    if (looksLikePi) {
-      return { command: process.execPath, args: [currentScript, ...args] };
-    }
-  }
-  const execName = (process.execPath.split("/").pop() || "").toLowerCase();
-  if (!/^(node|bun)(\.exe)?$/.test(execName)) {
-    return { command: process.execPath, args };
-  }
-  return { command: "pi", args };
 }
 
 // ── Prompt construction ──────────────────────────────────────────────
@@ -1217,7 +1168,7 @@ export function sendsSinceSpawn(run: Run): number {
 /**
  * v0.12 slice 3 — stamp `Run.steerable` and `Run.streamingMode`
  * immediately after the subprocess spawn returns. Pure helper extracted
- * from `runPiSubprocess` so the smoke pin in
+ * from `createRunPipeline` so the smoke pin in
  * `tests/runs-streaming-strategy.test.ts` can verify the post-spawn
  * shape without forking a real `pi --mode rpc` subprocess (slice 6 owns
  * the live integration).
@@ -1333,7 +1284,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // skip-foreign prefers this over parentPid. See classifyRecord.
     parentSessionId: opts.parentSessionId,
     // v0.12 slice 4 — stamp the cascade-collapsed steerable on the Run
-    // BEFORE the spawn pipeline runs. `runPiSubprocess` re-stamps via
+    // BEFORE the spawn pipeline runs. `createRunPipeline` re-stamps via
     // `stampSpawnStreamingMode` (idempotent) once the subprocess is
     // up; setting it here means resolveSendStrategy and the watchdog
     // see a consistent shape during the brief pre-spawn window.
@@ -1495,7 +1446,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
       ? collectInheritedSkillPaths({ cwd: opts.cwd })
       : undefined,
     // v0.12 slice 4 — thread the cascade-collapsed steerable so the
-    // argv shape matches the runPiSubprocess `steerable` we pass
+    // argv shape matches the createRunPipeline `steerable` we pass
     // below. Both must agree or pi will boot with the wrong stdio.
     steerable: opts.steerable === true,
     // Item 12 candidate #3 — thread the per-call inherit_context
@@ -1513,7 +1464,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
   // (e.g. ensemble_send mid-run) can find it without waiting for finalize().
   if (plan.seededSessionPath) run.sessionPath = plan.seededSessionPath;
 
-  const done = runPiSubprocess(run, plan.piArgs, {
+  const done = createRunPipeline(run, plan.piArgs, {
     registry: opts.registry,
     cwd: effectiveCwd, // v0.13: opts.cwd's counterpart in the worktree when one was created
     timeoutMs: opts.timeoutMs,
@@ -1523,7 +1474,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // one — in resume mode the path is fixed.
     sessionDir: plan.seededSessionPath ? undefined : sessionDir,
     // v0.12 slice 4 — thread the cascade-collapsed steerable into
-    // runPiSubprocess so the subprocess `stdio[0]` branch (`pipe` vs
+    // createRunPipeline so the subprocess `stdio[0]` branch (`pipe` vs
     // `ignore`) and the post-spawn `Run.streamingMode` stamp match
     // the argv shape produced above. Slice 3 hard-coded `false`; the
     // dead value was a known TODO.
@@ -1595,52 +1546,6 @@ export function failBeforeSpawn(
 
 // ── Shared subprocess plumbing ─────────────────────────────────────────
 
-interface RunPiSubprocessOpts {
-  registry: RunRegistry;
-  cwd: string;
-  timeoutMs: number;
-  onUpdate?: (run: Run) => void;
-  onComplete?: (run: Run) => void;
-  /** When provided, finalize() will populate run.sessionPath from this dir. */
-  sessionDir?: string;
-  /** Explicit control opt-in. Transport is independently selected by buildPiArgs. */
-  steerable: boolean;
-  /** Complete user prompt; injected through the FIFO if argv selects RPC. */
-  initialPrompt?: string;
-  /** Retain the assignment's question until native prompt acceptance. */
-  answer?: { ask: NonNullable<Run["pendingAsk"]>; cwd: string };
-  /**
-   * v0.11 on_complete_hook (slice 2): pre-resolved hook to invoke after
-   * a clean (exit-0) natural close. Undefined skips hook execution. The
-   * caller resolves via {@link resolveCloseHook} (or directly through
-   * {@link resolveOnCompleteHook} for tests). The close handler:
-   *   - skips when undefined OR exit !== 0 OR run already terminal,
-   *   - sets `run.hookExecuting = true` + `run.hookProc` for the
-   *     duration so the watchdog suppresses stall classification and
-   *     `forceTerminate` can SIGTERM the hook's process group,
-   *   - branches the close terminal to `hook_failed` on non-zero exit,
-   *   - uses an idempotency guard so a `forceTerminate`-driven hook
-   *     death does not double-flip `run.status`.
-   */
-  resolvedHook?: ResolvedHook;
-  /**
-   * v0.15 chains: callback fired after writeFinal when the run reaches
-   * `completed`. See {@link applyChainIfPresent}.
-   */
-  onChain?: (run: Run) => void;
-  /**
-   * v0.18 classified retry: callback fired from finalize when a
-   * non-completed terminal is retryable. See {@link applyRetryIfNeeded}.
-   */
-  onRetry?: (run: Run) => void;
-  /**
-   * v0.16 event bus adapter. Threaded from SpawnOptions/SendToRunOptions into
-   * runPiSubprocess so the finalize closure can emit lifecycle events.
-   * Undefined means no events emitted.
-   */
-  events?: ConductorEventEmitter;
-}
-
 /**
  * Resolve the {@link ResolvedHook} for a sub-agent at terminal-close time
  * from the four cascade layers documented in `src/hook-cascade.ts`. Slice
@@ -1708,403 +1613,6 @@ function hookSpecFromOpts(
 ): HookSpec | undefined {
   if (command === undefined) return undefined;
   return { command, timeoutSeconds };
-}
-
-/**
- * Spawn `pi` with the supplied argv, attach event handlers that mutate the
- * supplied Run, and return a promise that resolves when the run reaches a
- * terminal status.
- *
- * Used by both `spawnRun` (fresh spawn, with --session-dir) and `sendToRun`
- * (resume, with --session <path>) so both paths share identical event
- * handling, transcript appending, finalize semantics, and timeout logic.
- */
-function runPiSubprocess(
-  run: Run,
-  piArgs: string[],
-  opts: RunPiSubprocessOpts,
-): Promise<Run> {
-  const invocation = getPiInvocation(piArgs);
-
-  // The argv builder owns transport selection; steering remains an independent opt-in.
-  const rpc = piArgs[1] === "rpc";
-  const stdinKind: "ignore" | "pipe" = rpc ? "pipe" : "ignore";
-  run.onComplete = opts.onComplete;
-
-  let awaitingAnswer = opts.answer !== undefined;
-  let answerRecord = Promise.resolve();
-  const restoreAnswer = async (reason: string): Promise<Run> => {
-    await answerRecord;
-    if (isTerminal(run.status)) return run;
-    run.rejectAnswerDelivery = undefined;
-    run.pendingAsk = opts.answer!.ask;
-    run.cwd = opts.answer!.cwd;
-    run.status = "blocked";
-    run.finishedAt = Date.now();
-    run.proc = undefined;
-    run.pid = undefined;
-    run.failureClass = undefined;
-    run.errorMessage = `Owner answer delivery failed before acceptance: ${reason}. Question ${run.pendingAsk.askId} remains outstanding; retry ensemble_send.`;
-    await writeRecord(run);
-    opts.registry.notify(run);
-    try { opts.onComplete?.(run); } catch { /* notification errors cannot lose the question */ }
-    return run;
-  };
-  let proc: ChildProcess;
-  try {
-    proc = spawn(invocation.command, invocation.args, {
-      cwd: opts.cwd,
-      shell: false,
-      stdio: [stdinKind, "pipe", "pipe"],
-      // Worktrees may not contain the spawning project's untracked config.
-      env: { ...buildSubagentEnv(), CONDUCTOR_CONFIG_CWD: run.cwd, CONDUCTOR_RUN_ID: run.id },
-    });
-  } catch (e) {
-    if (awaitingAnswer) return restoreAnswer(`spawn failed: ${(e as Error).message}`);
-    run.status = "failed";
-    run.errorMessage = `spawn failed: ${(e as Error).message}`;
-    run.finishedAt = Date.now();
-    // v0.18: classify the in-process spawn failure (e.g. `spawn pi
-    // ENOENT` → environment) before persistence, same as the finalize
-    // and forceTerminate stamp sites.
-    run.failureClass = classifyFailure({
-      terminal: "failed",
-      errorMessage: run.errorMessage,
-    });
-    opts.registry.notify(run);
-    void writeRecord(run);
-    void writeFinal(run);
-    if (opts.onComplete) opts.onComplete(run);
-    return Promise.resolve(run);
-  }
-  answerRecord = attachSpawnedProc(run, proc);
-  const processClosed = new Promise<void>(resolve => proc.once("close", () => resolve()));
-
-  stampSpawnStreamingMode(run, opts.steerable === true);
-  run.streamingMode = rpc ? "rpc" : "print";
-
-  // All stdin writes share the existing FIFO, including the initial large prompt.
-  if (rpc && proc.stdin) {
-    const queue = new RpcStdinQueue(proc.stdin);
-    // Writable emits error even when the write callback observes it (early-exit EPIPE).
-    proc.stdin.on("error", (e: Error) => queue.destroy(e.message));
-    run.rpcStdinQueue = queue;
-    if (typeof opts.initialPrompt === "string" && opts.initialPrompt.length > 0) {
-      void queue
-        .enqueue({
-          id: `init-${run.id}`,
-          type: "prompt",
-          message: opts.initialPrompt,
-        })
-        .catch((e: Error) => {
-          if (finalized) return;
-          run.errorMessage = `initial prompt delivery failed: ${e.message}`;
-          void finalize("failed", 1);
-        });
-    }
-  }
-
-  // Hard timeout.
-  run.timeoutTimer = setTimeout(() => {
-    if (run.status === "running" || run.status === "paused") {
-      forceTerminate(run, "timeout", opts.registry, opts.onComplete);
-    }
-  }, opts.timeoutMs);
-
-  // Stream parsing.
-  let stderr = "";
-  let finalized = false;
-  let donePromiseResolve: (r: Run) => void;
-  const done = new Promise<Run>((resolve) => {
-    donePromiseResolve = resolve;
-  });
-
-  const finalize = async (terminal: RunStatus, exitCode?: number) => {
-    if (finalized) return;
-    finalized = true;
-    run.rpcStdinQueue?.destroy("settled");
-    for (const ack of run.pendingAcks?.values() ?? []) {
-      clearTimeout(ack.timer);
-      ack.reject(new Error("sub-agent settled before acknowledgement"));
-    }
-    run.pendingAcks?.clear();
-    if (run.timeoutTimer) {
-      clearTimeout(run.timeoutTimer);
-      run.timeoutTimer = undefined;
-    }
-    const rest = stdoutLines.end();
-    if (rest.trim()) processLine(rest);
-    if (opts.answer) await answerRecord;
-    discoverSessionPathIfMissing(run, opts.sessionDir);
-    discoverContextRetirement(run, opts.sessionDir);
-    if ((awaitingAnswer || run.pendingAsk) && !isTerminal(run.status)) {
-      if (awaitingAnswer || (terminal === "completed" && run.sessionPath && !contextRetirementNotice(run))) {
-        try { proc.kill(); } catch { /* already exited */ }
-        const killFallback = setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* already exited */ } }, 2000);
-        await processClosed;
-        clearTimeout(killFallback);
-        // A user kill during teardown abandons the ask and owns its notification.
-        if (isTerminal(run.status)) { donePromiseResolve(run); return; }
-        if (awaitingAnswer) {
-          await restoreAnswer(run.errorMessage || stderr.trim() || `subprocess exited with code ${exitCode} before accepting the answer`);
-          donePromiseResolve(run);
-          return;
-        }
-        run.status = "blocked";
-        run.finishedAt = Date.now();
-        run.exitCode = exitCode;
-        run.proc = undefined;
-        run.pid = undefined;
-        run.failureClass = undefined;
-        await writeRecord(run);
-        opts.registry.notify(run);
-        try { opts.onComplete?.(run); } catch { /* listener errors cannot wedge settlement */ }
-        donePromiseResolve(run);
-        return;
-      }
-      run.pendingAsk = undefined;
-      terminal = "failed";
-      run.errorMessage = "Owner question cannot be resumed: session missing, retired, or subprocess failed. Use a fresh child with the transcript.";
-    }
-    // v0.11 on_complete_hook (slice 2): fire the resolved hook between
-    // stream-drain and `applyCloseHandlerTerminal`. Gates are strict:
-    // only on natural exit-zero close with a resolved hook AND when
-    // forceTerminate hasn't already flipped the run terminal. The
-    // helper writes final.md ahead of the spawn (so the hook can read
-    // it via env), sets run.hookExecuting/hookProc for the duration,
-    // and applies the W7 idempotency guard if forceTerminate fires
-    // mid-flight. On hook failure the helper returns "hook_failed";
-    // we let the existing applyCloseHandlerTerminal path persist that
-    // terminal as the run's official status.
-    if (
-      terminal === "completed" &&
-      exitCode === 0 &&
-      opts.resolvedHook &&
-      !isTerminal(run.status)
-    ) {
-      try {
-        terminal = await applyHookToTerminal(
-          run,
-          opts.resolvedHook,
-          terminal,
-          { events: opts.events },
-        );
-      } catch (e) {
-        // Defensive: applyHookToTerminal's own try/finally clears the
-        // hook flags even on throw, but a thrown helper means the
-        // hook helper itself blew up unexpectedly. Surface as
-        // hook_failed so the lifecycle terminates cleanly.
-        run.hookResult = {
-          passed: false,
-          command: opts.resolvedHook.command,
-          exitCode: null,
-          durationMs: 0,
-          logPath: "",
-          tailText: `(applyHookToTerminal threw) ${(e as Error).message}`,
-          tailBytes: 0,
-          tailLines: 0,
-          failureKind: "spawn_error",
-        };
-        terminal = "hook_failed";
-      }
-    }
-    // Race-fix: if `forceTerminate` already settled the run (e.g. the
-    // user pressed Ctrl+C, the timeout timer fired, or session_shutdown
-    // ran), `applyCloseHandlerTerminal` returns false. The errorMessage
-    // fallback, registry.notify, persistence writes, and onComplete all
-    // already executed on the forceTerminate path — we skip them.
-    //
-    // BUT: pi's session-file discovery is owned by the close-handler
-    // path, not forceTerminate (sync forceTerminate runs before pi
-    // writes the .jsonl). We must still call discoverSessionPathIfMissing
-    // here so the force-killed sub-agent stays resumable via
-    // ensemble_send. We also clear run.proc and kill() the handle
-    // (idempotent; SIGTERM may have been sent already), then resolve
-    // `done` with the correct (forceTerminate-set) state.
-    if (!applyCloseHandlerTerminal(run, terminal, exitCode)) {
-      discoverSessionPathIfMissing(run, opts.sessionDir);
-      await writeRecord(run);
-      run.proc = undefined;
-      try {
-        proc.kill();
-      } catch {
-        // already dead
-      }
-      // v0.16-S3: emit lifecycle event for force-terminated runs (run.status
-      // already set by forceTerminate; emit before resolving done).
-      emitFinalizeEvent(run, opts.events);
-      // v0.18 classified retry: forceTerminate-settled runs (stall/timeout/
-      // abort) never reach the normal `.finally` below, so dispatch retry
-      // here. failureClass was stamped by forceTerminate; retryPolicy at
-      // spawn. shouldRetry gates non-retryable classes (e.g. user kill).
-      applyRetryIfNeeded(run, opts.onRetry);
-      // v0.18 memory: record the (forceTerminate) outcome too.
-      recordRunOutcome(run);
-      donePromiseResolve(run);
-      return;
-    }
-    if (terminal === "failed" && !run.errorMessage) {
-      run.errorMessage = stderr.trim() || `pi subprocess exited with code ${exitCode}`;
-    }
-    applySubstanceCheck(run, terminal);
-    discoverSessionPathIfMissing(run, opts.sessionDir);
-    run.proc = undefined;
-    terminal = await settleWorktree(run, terminal);
-    // Re-apply the terminal to the run record now that merge may have flipped it.
-    if (terminal === "merge_conflict") run.status = terminal;
-    // v0.18 failure classification: stamp non-completed terminals on the
-    // natural-exit path (failed / hook_failed / merge_conflict). The
-    // forceTerminate path stamps timeout/stall/turns itself and short-
-    // circuits above via applyCloseHandlerTerminal returning false, so we
-    // only reach here for exit-driven terminals. Uses the resolved
-    // `terminal` (post merge-flip) + stderr probes.
-    if (terminal !== "completed") {
-      // hook_failed diagnostics live in run.hookResult.tailText, not the
-      // subprocess stderr (the subprocess exited 0 before the hook ran).
-      const tail =
-        terminal === "hook_failed" ? run.hookResult?.tailText ?? stderr : stderr;
-      run.failureClass = classifyFailure({
-        terminal,
-        exitCode,
-        stderrTail: tail,
-        errorMessage: run.errorMessage,
-      });
-    }
-    opts.registry.notify(run);
-    try {
-      proc.kill();
-    } catch {
-      // already dead
-    }
-    // Persist record + final BEFORE resolving done so callers awaiting
-    // result.done can read both files immediately.
-    Promise.all([writeRecord(run), writeFinal(run)])
-      .catch(() => {})
-      .finally(() => {
-        if (opts.onComplete) {
-          try {
-            opts.onComplete(run);
-          } catch {
-            // never crash the spawner on listener errors
-          }
-        }
-        // v0.15 chains: fire after writeFinal so {final} template can read finalPath.
-        applyChainIfPresent(run, run.status as RunStatus, opts.onChain);
-        // v0.18 classified retry: fire on retryable non-completed terminals.
-        // Mutually exclusive with the chain above (chain is completed-only).
-        applyRetryIfNeeded(run, opts.onRetry);
-        // v0.18 memory: record the outcome (success AND failure) for
-        // cross-session persona scoring. Best-effort; never throws.
-        recordRunOutcome(run);
-        // v0.16-S3: emit completed/failed lifecycle event.
-        emitFinalizeEvent(run, opts.events);
-        donePromiseResolve(run);
-      });
-  };
-
-  const processLine = (line: string) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-
-    // Append every parseable JSON line to the transcript (fire-and-forget I/O).
-    void appendFile(run.transcriptPath, line + "\n").catch(() => {});
-
-    let event: any;
-    try {
-      event = JSON.parse(trimmed);
-    } catch {
-      return;
-    }
-
-    if (!finalized && awaitingAnswer && ((!rpc && event.type === "agent_start") ||
-        (rpc && event.type === "response" && event.command === "prompt" && event.id === `init-${run.id}` && event.success === true))) {
-      // Pi 0.87.1 emits agent_start only after print prompt preflight; RPC has an explicit ack.
-      awaitingAnswer = false;
-      run.rejectAnswerDelivery = undefined;
-      run.pendingAsk = undefined;
-      answerRecord = answerRecord.then(() => writeRecord(run));
-    }
-    if (event.type === "response" && event.command === "prompt" && event.id === `init-${run.id}` && event.success === false) {
-      run.errorMessage = `initial prompt rejected: ${event.error ?? "unknown error"}`;
-      void finalize("failed", 1);
-      return;
-    }
-
-    // Pure state-machine logic lives in applyEvent (see src/event-handler.ts).
-    // This wrapper handles I/O (transcript append) and listener notification.
-    const effect = applyEvent(run, event);
-    if (effect.kind === "finalize") {
-      void finalize(effect.status, effect.exitCode);
-      return;
-    }
-    if (effect.kind === "compacted") {
-      // v0.16-S4: delegate to the exported helper (also used by unit tests).
-      applyCompactionLine(run, opts.events);
-      opts.registry.notify(run);
-      return;
-    }
-    if (effect.kind === "updated") {
-      opts.registry.notify(run);
-      if (opts.onUpdate) opts.onUpdate(run);
-    }
-
-    // v0.17-S4: turn-limit enforcement — checked after every event.
-    checkTurnLimit(run, opts.registry, (r, reason) =>
-      forceTerminate(r, reason, opts.registry, opts.onComplete),
-    );
-  };
-
-  if (awaitingAnswer) run.rejectAnswerDelivery = reason => {
-    run.errorMessage = reason;
-    void finalize("failed", 1);
-  };
-  const stdoutLines = createLineDecoder(processLine);
-  proc.stdout?.on("data", (data: Buffer) => stdoutLines.write(data));
-
-  proc.stderr?.on("data", (data: Buffer) => {
-    stderr += data.toString();
-  });
-
-  proc.on("close", (code) => {
-    if (finalized) return;
-    if ((code ?? 0) === 0) void finalize("completed", 0);
-    else void finalize("failed", code ?? 0);
-  });
-
-  proc.on("error", () => {
-    run.errorMessage = "failed to spawn pi process";
-    void finalize("failed", 1);
-  });
-
-  proc.unref();
-  return done;
-}
-
-/**
- * Split a byte stream into newline-terminated lines for `onLine`. `end()`
- * returns the unterminated tail. Used for the pi subprocess stdout (print
- * and RPC mode alike). The StringDecoder holds back a multibyte UTF-8
- * character a pipe chunk cut in half, instead of decoding it to U+FFFD.
- */
-export function createLineDecoder(onLine: (line: string) => void): {
-  write(chunk: Buffer): void;
-  end(): string;
-} {
-  const decoder = new StringDecoder("utf8");
-  let buffer = "";
-  return {
-    write(chunk) {
-      buffer += decoder.write(chunk);
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const line of lines) onLine(line);
-    },
-    end() {
-      const rest = buffer + decoder.end();
-      buffer = "";
-      return rest;
-    },
-  };
 }
 
 function mapFromRegistry(r: RunRegistry): Map<string, Run> {
@@ -2224,15 +1732,6 @@ export type SendToRunResult =
 /** Canonical tokens: send starts a saved session; resume sends SIGCONT. */
 export const RUN_ACTIONS = ["send", "steer", "follow_up", "pause", "resume", "kill", "focus"] as const;
 export type RunAction = typeof RUN_ACTIONS[number];
-
-/** Current subprocess capabilities; a future backend can supply its own values. */
-export function capabilitiesFor(run: Run) {
-  const exited = run.proc?.exitCode != null || run.proc?.signalCode != null;
-  return {
-    pause: !!run.proc?.pid && !exited,
-    liveSend: run.streamingMode === "rpc" && run.steerable !== false && !!run.rpcStdinQueue?.writable && !exited,
-  };
-}
 
 export function supportsFocus(ctx?: { mode?: string; hasUI?: boolean } | null): boolean {
   return ctx?.mode === "tui";
@@ -2441,110 +1940,6 @@ export function resolveSendStrategy(
 }
 
 /**
- * v0.12 slice 4 — 30 seconds. Hard cap on how long we wait for the
- * sub-agent to ack a `steer` / `follow_up` command. Real-world ack
- * RTTs from `[pi-dist] modes/rpc/rpc-mode.js` are sub-second; 30s is
- * generous. Pinned for the faked-clock test in
- * `tests/ensemble-send.test.ts: running steerable + ack timeout`.
- */
-export const RPC_ACK_TIMEOUT_MS = 30_000;
-
-let rpcSendCounter = 0;
-
-/**
- * v0.12 slice 4 — enqueue a `steer` or `follow_up` RPC command on a
- * live steerable run and register a `pendingAcks` entry so the matching
- * `response` line on stdout resolves the returned ack promise.
- *
- * Lifecycle:
- *   - allocates a fresh `id` (`send-<runId>-<counter>`) so
- *     `routeRpcResponse` can correlate stdout responses to the ack.
- *   - sets up a 30s timeout timer that, on fire, removes the entry
- *     from `run.pendingAcks` and rejects the ack promise.
- *   - calls `RpcStdinQueue.enqueue` and waits for the kernel-write
- *     ack. On EPIPE / queue-destroyed / non-RPC subprocess, returns
- *     `{kind: "epipe", reason}`.
- *   - on successful enqueue, returns `{kind: "queued", ack}` where
- *     `ack` resolves to `{delivered, deliveredAt}` on response and
- *     rejects on timeout.
- *
- * Pure with respect to the rest of the spawn pipeline (no
- * subprocess, no registry mutation — the caller flips run.status).
- */
-function enqueueRpcSendWithAck(
-  run: Run,
-  type: "steer" | "follow_up",
-  message: string,
-):
-  | { kind: "queued"; ack: Promise<{ delivered: boolean; deliveredAt: number }> }
-  | { kind: "epipe"; reason: string } {
-  const queue = run.rpcStdinQueue;
-  if (!queue) {
-    return {
-      kind: "epipe",
-      reason: `sub-agent ${run.id} finished before steer was delivered (stdin queue gone).`,
-    };
-  }
-  // Lazy-init the correlation Map.
-  if (!run.pendingAcks) run.pendingAcks = new Map();
-  rpcSendCounter += 1;
-  const id = `send-${run.id}-${rpcSendCounter}`;
-  const ackPromise = new Promise<{ delivered: boolean; deliveredAt: number }>(
-    (resolve, reject) => {
-      const timer = setTimeout(() => {
-        // Self-removal from the Map: the timeout fires and the entry
-        // must clean itself up so a late-arriving `response` no-ops in
-        // routeRpcResponse instead of double-firing.
-        run.pendingAcks?.delete(id);
-        reject(
-          new Error(
-            `ack timeout — sub-agent may have received the message; check via ensemble_status`,
-          ),
-        );
-      }, RPC_ACK_TIMEOUT_MS);
-      run.pendingAcks!.set(id, {
-        resolve: (delivered: boolean) =>
-          resolve({ delivered, deliveredAt: Date.now() }),
-        reject,
-        timer,
-      });
-    },
-  );
-  // Fire-and-forget: the enqueue Promise resolves on kernel-write; if
-  // the pipe died (EPIPE), the queue rejects. Either way we surface
-  // through the ack promise (timeout) or via this catch (EPIPE).
-  let epipeFlag: { msg: string } | null = null;
-  void queue.enqueue({ id, type, message }).catch((err: Error) => {
-    // Sub-agent finished before steer was delivered. Clean up the
-    // pendingAcks entry and reject the ack promise with the Q3 lock
-    // wording.
-    const entry = run.pendingAcks?.get(id);
-    if (entry) {
-      clearTimeout(entry.timer);
-      run.pendingAcks?.delete(id);
-      entry.reject(
-        new Error(
-          `sub-agent ${run.id} finished before steer was delivered (${err.message}).`,
-        ),
-      );
-    }
-    epipeFlag = { msg: err.message };
-  });
-  // Detection of synchronous EPIPE — if the queue rejected
-  // synchronously (already-destroyed queue, etc.), the .catch above
-  // fired this tick. Surface as an `epipe` result so the caller can
-  // turn the started envelope back into a rejection without ever
-  // flipping run.status to running.
-  if (epipeFlag) {
-    return {
-      kind: "epipe",
-      reason: `sub-agent ${run.id} finished before steer was delivered.`,
-    };
-  }
-  return { kind: "queued", ack: ackPromise };
-}
-
-/**
  * pi resumes in its session header's cwd, which for a worktree run is the
  * worktree or a subdirectory of it, and exits 1 when that directory is
  * gone. A merge or a clean release removes it, so put a worktree back at
@@ -2661,7 +2056,7 @@ export function sendToRun(
     // completion envelope when the run eventually terminates. Not a
     // resume: the subprocess is the same one.
     snapshotInvocationMarkers(run, "steerCount");
-    const result = enqueueRpcSendWithAck(run, cmdType, trimmed);
+    const result = subprocessRuntime.deliver(run, cmdType, trimmed);
     if (result.kind === "epipe") {
       return { kind: "rejected", reason: result.reason };
     }
@@ -2736,7 +2131,7 @@ export function sendToRun(
   );
   const piArgs = buildResumePiArgs(run, trimmed);
 
-  const done = runPiSubprocess(run, piArgs, {
+  const done = createRunPipeline(run, piArgs, {
     answer,
     registry: opts.registry,
     cwd: run.cwd,
@@ -2770,7 +2165,7 @@ export function sendToRun(
 
 /**
  * Race-fix helper used by the closure-local `finalize` inside
- * `runPiSubprocess` (the `proc.on("close")` path).
+ * `createRunPipeline` (the `proc.on("close")` path).
  *
  * The conductor has two paths that can settle a Run to a terminal
  * state:
@@ -2848,7 +2243,7 @@ export function applyCloseHandlerTerminal(
  * the new count. The snapshot of tokensBefore is taken before incrementing.
  *
  * In production this logic lives inside the processLine closure in
- * runPiSubprocess; this export lets tests call it without a live subprocess.
+ * createRunPipeline; this export lets tests call it without a live subprocess.
  */
 export function applyCompactionLine(
   run: Run,
@@ -3226,7 +2621,7 @@ export type TurnLimitTerminateFn = (run: Run, reason: TerminationReason) => void
 export type GraceEnqueueFn = (run: Run, message: string) => void;
 
 const defaultGraceEnqueue: GraceEnqueueFn = (run, message) => {
-  enqueueRpcSendWithAck(run, "follow_up", message);
+  subprocessRuntime.deliver(run, "follow_up", message);
 };
 
 /**
@@ -3336,51 +2731,7 @@ export function forceTerminate(
       }
     }
   }
-  if (run.proc) {
-    try {
-      run.proc.kill("SIGTERM");
-    } catch {
-      // already dead
-    }
-    // Force-kill after 2s if it hasn't exited.
-    setTimeout(() => {
-      try {
-        run.proc?.kill("SIGKILL");
-      } catch {
-        // already dead
-      }
-    }, 2000).unref();
-  }
-  // v0.11 on_complete_hook (slice 2): if a hook subprocess is in-flight
-  // when the parent forceTerminates, SIGTERM its process group so the
-  // hook helper's close listener fires and unwinds cleanly. We negate
-  // the pid in `defaultKillGroup` (uses `process.kill(-pid, sig)`); the
-  // injection seam observes the positive pid so tests can pin the
-  // contract without forking real subprocesses. The hook helper's
-  // close-listener will resolve with whatever exit code the kill
-  // produced, but the close handler's idempotency guard
-  // (`applyHookToTerminal`) drops that result because
-  // `isTerminal(run.status)` is now true. A 2s SIGKILL fallback
-  // mirrors the existing run.proc kill ladder.
-  if (run.hookProc?.pid !== undefined) {
-    const hookPid = run.hookProc.pid;
-    try {
-      killGroup(hookPid, "SIGTERM");
-    } catch {
-      // defaultKillGroup already swallows ESRCH/EPERM; this guards
-      // against test stubs that throw unexpectedly.
-    }
-    setTimeout(() => {
-      try {
-        killGroup(hookPid, "SIGKILL");
-      } catch {
-        // already dead / test stub
-      }
-    }, 2000).unref();
-    // Clear immediately so the close handler's `finally` block in
-    // `applyHookToTerminal` is a no-op and W5's assertion holds.
-    run.hookProc = undefined;
-  }
+  subprocessRuntime.terminate(run, killGroup);
   run.pendingAsk = undefined;
   run.askExecution = undefined;
   discoverContextRetirement(run);
@@ -3424,27 +2775,14 @@ export function forceTerminate(
   }
 }
 
-/**
- * Send a Unix signal to a pid. Defaults to `process.kill` but accepts an
- * injectable mock so pauseRun / resumeRun happy-path tests don't have to
- * fork real processes. forceTerminate uses `run.proc.kill(...)` directly
- * via the ChildProcess handle and is exercised by the existing
- * state-machine tests.
- */
-export type Signaler = (pid: number, signal: NodeJS.Signals | number) => void;
-
-const defaultSignaler: Signaler = (pid, signal) => {
-  process.kill(pid, signal);
-};
-
 export function pauseRun(
   run: Run,
   registry: RunRegistry,
-  signaler: Signaler = defaultSignaler,
+  signaler?: Signaler,
 ): boolean {
   if (validateRunAction(run, "pause")) return false;
   try {
-    signaler(run.proc!.pid!, "SIGSTOP");
+    subprocessRuntime.signal(run, "SIGSTOP", signaler);
   } catch {
     return false;
   }
@@ -3458,11 +2796,11 @@ export function pauseRun(
 export function resumeRun(
   run: Run,
   registry: RunRegistry,
-  signaler: Signaler = defaultSignaler,
+  signaler?: Signaler,
 ): boolean {
   if (validateRunAction(run, "resume")) return false;
   try {
-    signaler(run.proc!.pid!, "SIGCONT");
+    subprocessRuntime.signal(run, "SIGCONT", signaler);
   } catch {
     return false;
   }
@@ -3504,7 +2842,7 @@ function findRunSessionFile(run: Run, sessionDir = join(dirname(run.recordPath),
   return run.sessionPath ?? findSessionFile(sessionDir);
 }
 
-function discoverContextRetirement(run: Run, sessionDir?: string): void {
+export function discoverContextRetirement(run: Run, sessionDir?: string): void {
   const sessionPath = findRunSessionFile(run, sessionDir);
   if (savedSessionRetired(sessionPath)) {
     run.sessionPath = sessionPath;
@@ -3512,7 +2850,7 @@ function discoverContextRetirement(run: Run, sessionDir?: string): void {
   }
 }
 
-async function writeRecord(run: Run): Promise<void> {
+export async function writeRecord(run: Run): Promise<void> {
   try {
     await mkdir(dirname(run.recordPath), { recursive: true });
     await writeFile(run.recordPath, JSON.stringify(toRunRecord(run), null, 2));
@@ -3521,7 +2859,7 @@ async function writeRecord(run: Run): Promise<void> {
   }
 }
 
-async function writeFinal(run: Run): Promise<void> {
+export async function writeFinal(run: Run): Promise<void> {
   try {
     await mkdir(dirname(run.finalPath), { recursive: true });
     await writeFile(run.finalPath, getFinalText(run.messages) || "(no output)");

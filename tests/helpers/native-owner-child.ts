@@ -15,6 +15,7 @@ const agentDir = join(process.env.HOME!, "agent");
 const emit = (event: unknown) => process.stdout.write(JSON.stringify(event) + "\n");
 let scenario = rpc ? "" : args.at(-1)!;
 let release: (() => void) | undefined;
+process.on("SIGUSR2", () => release?.());
 let deferredSend: { id: string; type: string; message: string } | undefined;
 const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
 const faux = fauxProvider({ tokensPerSecond: Infinity });
@@ -23,6 +24,13 @@ modelRuntime.registerNativeProvider(faux.provider);
 const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
   extensionFactories: [pi => {
     registerTools(pi, { getRegistry: () => new RunRegistry() } as any, process.env);
+    pi.on("agent_settled", async () => {
+      if (scenario.includes("H1_RELOAD")) {
+        const keepAlive = setInterval(() => {}, 1000);
+        try { await new Promise<void>(resolve => { release = resolve; emit({ type: "probe", point: "before-settle" }); }); }
+        finally { clearInterval(keepAlive); }
+      }
+    });
     pi.on("tool_execution_start", async e => {
       if (e.toolName === "ask_owner" && scenario.includes("B2_INFLIGHT")) {
         await new Promise<void>(resolve => { release = resolve; emit({ type: "probe", point: "before-start" }); });

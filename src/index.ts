@@ -653,17 +653,15 @@ export default function (pi: ExtensionAPI): void {
     // sanitizer warning dedup set so a fresh session re-warns about
     // pre-existing wedges. See src/shutdown.ts for the rationale and
     // the unit tests in tests/shutdown.test.ts for the invariants.
-    handleSessionShutdown(event, {
+    await handleSessionShutdown(event, {
       runs: registry.list(),
       resetSanitizer: () => sanitizerHook.reset(),
       // A1: close the orphan-creation window. SIGTERM races the runtime
       // teardown; without this the on-disk record stays "running" until
       // the next session_start runs the GC orphan sweep.
-      reconcileRunning: (runs, reason) => {
+      reconcileRunning: async (runs, reason) => {
         const now = Date.now();
-        for (const r of runs) {
-          void reconcileRecord(r, "killed", `shutdown: ${reason}`, now);
-        }
+        await Promise.all(runs.map(r => reconcileRecord(r, "killed", `shutdown: ${reason}`, now)));
       },
     });
     ctxRef = null;

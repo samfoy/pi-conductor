@@ -10,6 +10,7 @@
  * capturing bounded first-notice evidence and scheduling soft reminders.
  */
 
+import { isObservableHere } from "./runtime.ts";
 import type { Run } from "./types.ts";
 import type { TerminationReason, RunRegistry, RunAction } from "./runs.ts";
 import type { StallNoticeArgs } from "./notifications.ts";
@@ -148,7 +149,7 @@ export function evaluateRun(
   // (Terminal runs are already excluded at (1); the on_complete_hook
   // window — where the owning session's proc is transiently gone — is
   // excluded at (2b) above.)
-  if (run.proc === undefined) {
+  if (!isObservableHere(run)) {
     return { transition: { kind: "none" }, nextState: current };
   }
 
@@ -372,7 +373,7 @@ export function classifyStall(
   // session (see `evaluateRun` (2c)); `lastEventAt` is frozen and would
   // render a false stall. A session that can't observe a run must not
   // classify its stall state.
-  if (run.proc === undefined) return null;
+  if (!isObservableHere(run)) return null;
   const eff = effectiveConfig(run, defaults);
   const silentMs = Math.max(0, nowMs - run.lastEventAt);
   const silentSeconds = Math.floor(silentMs / 1000);

@@ -23,6 +23,7 @@
  * Spec: oracle-3l2e (v0.8.2 backlog P0 #1 — parent-reload contract).
  */
 
+import { subprocessRuntime } from "./subprocess-runtime.ts";
 import type { Run } from "./types.ts";
 
 /**
@@ -62,14 +63,14 @@ export interface ShutdownDeps {
    * orphan sweep. With this hook, the record flips to `killed` with a
    * shutdown-reason marker before the runtime tears down.
    *
-   * Best-effort, fire-and-forget. Skipped on reason="reload" so the
+   * Best-effort, awaited before shutdown completes. Skipped on reason="reload" so the
    * v0.8.2 lifecycle preservation feature (commit 1c72856) keeps its
    * "don't touch records on developer reload" invariant.
    *
    * Optional so existing test fixtures and the unit-tests don't need
    * to wire it; production sites in src/index.ts always provide it.
    */
-  reconcileRunning?: (runs: Run[], reason: ShutdownEventLike["reason"]) => void;
+  reconcileRunning?: (runs: Run[], reason: ShutdownEventLike["reason"]) => void | Promise<void>;
 }
 
 /**
@@ -82,29 +83,31 @@ export interface ShutdownDeps {
  * Otherwise: SIGTERM every running/paused run (best-effort, throws
  * swallowed) and reset the sanitizer dedup set.
  */
-export function handleSessionShutdown(
+export async function handleSessionShutdown(
   event: ShutdownEventLike,
   deps: ShutdownDeps,
-): void {
+): Promise<void> {
   if (event.reason === "reload") return;
   const stillActive: Run[] = [];
   for (const r of deps.runs) {
     if (r.status === "running" || r.status === "paused") {
       stillActive.push(r);
       try {
-        r.proc?.kill("SIGTERM");
+        subprocessRuntime.stopProcess(r);
       } catch {
         // already dead — non-fatal
       }
     }
   }
+  let reconciliation: void | Promise<void> = undefined;
   if (stillActive.length > 0 && deps.reconcileRunning) {
     try {
-      deps.reconcileRunning(stillActive, event.reason);
+      reconciliation = deps.reconcileRunning(stillActive, event.reason);
     } catch {
       // best-effort — orphan sweep on next session_start picks up
       // anything we missed
     }
   }
   deps.resetSanitizer();
+  try { await reconciliation; } catch { /* next startup retries best-effort reconciliation */ }
 }

@@ -7,6 +7,7 @@
  *   - ensemble_spawn  (foreground default, with auto-downgrade-on-queue)
  */
 
+import { subprocessRuntime } from "./subprocess-runtime.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { readFileSync, existsSync } from "node:fs";
@@ -873,7 +874,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         // Honor abort.
         signal?.addEventListener("abort", () => {
           try {
-            result.run.proc?.kill("SIGTERM");
+            subprocessRuntime.stopProcess(result.run);
           } catch {
             // already dead
           }
@@ -1149,7 +1150,7 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         // Honor abort.
         signal?.addEventListener("abort", () => {
           try {
-            result.run.proc?.kill("SIGTERM");
+            subprocessRuntime.stopProcess(result.run);
           } catch {
             // already dead
           }

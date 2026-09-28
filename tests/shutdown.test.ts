@@ -194,7 +194,7 @@ test("handleSessionShutdown: reason=quit reconciles running/paused runs after SI
     {
       runs,
       resetSanitizer: () => {},
-      reconcileRunning: (rs, reason) => reconciled.push({ runs: rs, reason }),
+      reconcileRunning: (rs, reason) => { reconciled.push({ runs: rs, reason }); },
     },
   );
   assert.equal(reconciled.length, 1, "reconcileRunning called once");
@@ -212,7 +212,7 @@ test("handleSessionShutdown: reason=reload does NOT call reconcileRunning (lifec
     {
       runs,
       resetSanitizer: () => {},
-      reconcileRunning: (rs, reason) => reconciled.push({ runs: rs, reason }),
+      reconcileRunning: (rs, reason) => { reconciled.push({ runs: rs, reason }); },
     },
   );
   assert.equal(reconciled.length, 0, "reload skips the reconciler entirely");
@@ -246,8 +246,25 @@ test("handleSessionShutdown: no running/paused runs skips reconcileRunning", () 
     {
       runs,
       resetSanitizer: () => {},
-      reconcileRunning: (rs, reason) => reconciled.push({ runs: rs, reason }),
+      reconcileRunning: (rs, reason) => { reconciled.push({ runs: rs, reason }); },
     },
   );
   assert.equal(reconciled.length, 0, "reconcileRunning not called when nothing was active");
+});
+
+
+test("handleSessionShutdown: quit waits for requested record reconciliation", async () => {
+  let release!: () => void;
+  const persisted = new Promise<void>(resolve => { release = resolve; });
+  let finished = false;
+  const shutdown = Promise.resolve(handleSessionShutdown({ reason: "quit" }, {
+    runs: [makeRun("await-record", "running", [])],
+    resetSanitizer: () => {},
+    reconcileRunning: () => persisted,
+  })).then(() => { finished = true; });
+  try {
+    await Promise.resolve();
+    assert.equal(finished, false, "shutdown must not finish before its record write");
+  } finally { release(); await shutdown; }
+  assert.equal(finished, true);
 });
