@@ -45,7 +45,7 @@ export interface NotificationNote {
  * never drift from the numbers in the envelope.
  */
 export interface EnsembleNotificationDetails {
-  kind: "completed" | "stalled" | "asked";
+  kind: "completed" | "stalled" | "asked" | "answer_failed";
   /** Absent only on historical persisted cards. */
   available_actions?: RunAction[];
   id: string;
@@ -118,7 +118,9 @@ function perSendNumbers(run: Run): PerSendNumbers {
 export function formatCompletionNotification(run: Run, actions: RunAction[] = availableActions(run)): string {
   if (run.status === "blocked") {
     const ask = run.pendingAsk;
-    return `<sub-agent-asked>\n  <agent-id>${escapeXml(run.id)}</agent-id>\n  <status>blocked</status>\n  <ask-id>${escapeXml(ask?.askId ?? "")}</ask-id>\n  <question>${escapeXml(ask?.question ?? "Question unavailable; inspect transcript")}</question>\n${ask?.evidence ?? ""}\n  <available-actions>${actions.join(", ")}</available-actions>\n  <guidance>Answer via ensemble_send on this agent id. Assignment unresolved; do independent work while deciding.</guidance>\n  <transcript>${escapeXml(run.transcriptPath)}</transcript>\n</sub-agent-asked>`;
+    const tag = run.errorMessage ? "sub-agent-answer-failed" : "sub-agent-asked";
+    const error = run.errorMessage ? `\n  <error>${escapeXml(run.errorMessage)}</error>` : "";
+    return `<${tag}>${error}\n  <agent-id>${escapeXml(run.id)}</agent-id>\n  <status>blocked</status>\n  <ask-id>${escapeXml(ask?.askId ?? "")}</ask-id>\n  <question>${escapeXml(ask?.question ?? "Question unavailable; inspect transcript")}</question>\n${ask?.evidence ?? ""}\n  <available-actions>${actions.join(", ")}</available-actions>\n  <guidance>Answer via ensemble_send on this agent id. Assignment unresolved; do independent work while deciding.</guidance>\n  <transcript>${escapeXml(run.transcriptPath)}</transcript>\n</${tag}>`;
   }
   const finalText = getFinalText(run.messages);
   const perSend = perSendNumbers(run);
@@ -459,7 +461,7 @@ export function buildCompletionMessage(run: Run, canFocus = false): Notification
     content: formatCompletionNotification(run, actions),
     display: true,
     details: {
-      kind: run.status === "blocked" ? "asked" : "completed",
+      kind: run.status === "blocked" ? (run.errorMessage ? "answer_failed" : "asked") : "completed",
       available_actions: actions,
       id: run.id,
       persona: run.persona,

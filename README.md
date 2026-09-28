@@ -347,7 +347,20 @@ Answer through the existing send surface:
 
 `auto` also works. The answer is framed with the outstanding ask id and question,
 and resumes the saved Pi session and **original assignment/worktree**, not a new
-task. Preflight failures preserve the question. `/conductor send` and the overlay's
+task. The question remains pending until Pi accepts the replacement prompt: a
+native `agent_start` after print preflight, or a correlated successful initial
+`prompt` response for RPC. Spawn alone is not acceptance. Pre-acceptance exit,
+timeout, spawn error or RPC rejection restores `blocked` with the same question,
+session and worktree; a `<sub-agent-answer-failed>` notice explains delivery failure
+without claiming assignment completion. Retry with `ensemble_send`.
+
+Live sends are closed while an ask execution is unresolved, reopening if it fails.
+Already-in-flight or extension-queued input can still reach Pi. Only a consumed
+user message followed by a real assistant response supersedes the earlier stopping
+ask; queue updates and arbitrary progress do not. Native settlement then produces
+one truthful completion or question, never an obsolete blocked card.
+
+`/conductor send` and the overlay's
 `s` control do the same; `ensemble_resume` is SIGCONT, not an answer tool.
 
 Blocked runs consume no concurrency slot, have no running process (print and both

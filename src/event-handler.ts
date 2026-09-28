@@ -95,12 +95,14 @@ export function applyEvent(run: Run, event: unknown): EventEffect {
     const calls = assistant?.role === "assistant" ? assistant.content.filter(p => p.type === "toolCall") : [];
     if (!run.pendingAsk && calls.length === 1 && calls[0].name === "ask_owner" && calls[0].id === e.toolCallId && typeof e.args?.question === "string" && e.args.question.trim()) {
       run.askExecution = { askId: e.toolCallId, question: e.args.question.trim() };
+      run.askContinuation = false;
     }
     return NONE;
   }
   if (e.type === "tool_execution_end" && e.toolName === "ask_owner") {
     const execution = run.askExecution;
     run.askExecution = undefined;
+    if (e.isError !== false) run.askContinuation = undefined;
     const details = e.result?.details;
     if (execution && e.isError === false && execution.askId === e.toolCallId && details?.askId === e.toolCallId && details.question === execution.question && typeof details.evidence === "string" && !run.pendingAsk) {
       run.pendingAsk = { ...execution, evidence: details.evidence };
@@ -122,6 +124,15 @@ export function applyEvent(run: Run, event: unknown): EventEffect {
       return { kind: "compacted" };
     }
     const msg = e.message as AgentMessage;
+    if (!run.rejectAnswerDelivery && (run.pendingAsk || run.askExecution)) {
+      if (msg.role === "user") run.askContinuation = true;
+      if (msg.role === "assistant" && run.askContinuation) {
+        // A consumed queued message plus a real next response supersedes the stopping ask.
+        run.pendingAsk = undefined;
+        run.askExecution = undefined;
+        run.askContinuation = undefined;
+      }
+    }
     run.messages.push(msg);
     run.lastEventAt = Date.now();
     if (msg.role === "assistant") {

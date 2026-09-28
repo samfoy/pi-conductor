@@ -1607,6 +1607,8 @@ interface RunPiSubprocessOpts {
   steerable: boolean;
   /** Complete user prompt; injected through the FIFO if argv selects RPC. */
   initialPrompt?: string;
+  /** Retain the assignment's question until native prompt acceptance. */
+  answer?: { ask: NonNullable<Run["pendingAsk"]>; cwd: string };
   /**
    * v0.11 on_complete_hook (slice 2): pre-resolved hook to invoke after
    * a clean (exit-0) natural close. Undefined skips hook execution. The
@@ -1729,6 +1731,25 @@ function runPiSubprocess(
   const stdinKind: "ignore" | "pipe" = rpc ? "pipe" : "ignore";
   run.onComplete = opts.onComplete;
 
+  let awaitingAnswer = opts.answer !== undefined;
+  let answerRecord = Promise.resolve();
+  const restoreAnswer = async (reason: string): Promise<Run> => {
+    await answerRecord;
+    if (isTerminal(run.status)) return run;
+    run.rejectAnswerDelivery = undefined;
+    run.pendingAsk = opts.answer!.ask;
+    run.cwd = opts.answer!.cwd;
+    run.status = "blocked";
+    run.finishedAt = Date.now();
+    run.proc = undefined;
+    run.pid = undefined;
+    run.failureClass = undefined;
+    run.errorMessage = `Owner answer delivery failed before acceptance: ${reason}. Question ${run.pendingAsk.askId} remains outstanding; retry ensemble_send.`;
+    await writeRecord(run);
+    opts.registry.notify(run);
+    try { opts.onComplete?.(run); } catch { /* notification errors cannot lose the question */ }
+    return run;
+  };
   let proc: ChildProcess;
   try {
     proc = spawn(invocation.command, invocation.args, {
@@ -1739,6 +1760,7 @@ function runPiSubprocess(
       env: { ...buildSubagentEnv(), CONDUCTOR_CONFIG_CWD: run.cwd, CONDUCTOR_RUN_ID: run.id },
     });
   } catch (e) {
+    if (awaitingAnswer) return restoreAnswer(`spawn failed: ${(e as Error).message}`);
     run.status = "failed";
     run.errorMessage = `spawn failed: ${(e as Error).message}`;
     run.finishedAt = Date.now();
@@ -1755,7 +1777,7 @@ function runPiSubprocess(
     if (opts.onComplete) opts.onComplete(run);
     return Promise.resolve(run);
   }
-  void attachSpawnedProc(run, proc);
+  answerRecord = attachSpawnedProc(run, proc);
   const processClosed = new Promise<void>(resolve => proc.once("close", () => resolve()));
 
   stampSpawnStreamingMode(run, opts.steerable === true);
@@ -1812,16 +1834,22 @@ function runPiSubprocess(
     }
     const rest = stdoutLines.end();
     if (rest.trim()) processLine(rest);
+    if (opts.answer) await answerRecord;
     discoverSessionPathIfMissing(run, opts.sessionDir);
     discoverContextRetirement(run, opts.sessionDir);
-    if (run.pendingAsk && !isTerminal(run.status)) {
-      if (terminal === "completed" && run.sessionPath && !contextRetirementNotice(run)) {
+    if ((awaitingAnswer || run.pendingAsk) && !isTerminal(run.status)) {
+      if (awaitingAnswer || (terminal === "completed" && run.sessionPath && !contextRetirementNotice(run))) {
         try { proc.kill(); } catch { /* already exited */ }
         const killFallback = setTimeout(() => { try { proc.kill("SIGKILL"); } catch { /* already exited */ } }, 2000);
         await processClosed;
         clearTimeout(killFallback);
         // A user kill during teardown abandons the ask and owns its notification.
         if (isTerminal(run.status)) { donePromiseResolve(run); return; }
+        if (awaitingAnswer) {
+          await restoreAnswer(run.errorMessage || stderr.trim() || `subprocess exited with code ${exitCode} before accepting the answer`);
+          donePromiseResolve(run);
+          return;
+        }
         run.status = "blocked";
         run.finishedAt = Date.now();
         run.exitCode = exitCode;
@@ -1988,7 +2016,15 @@ function runPiSubprocess(
       return;
     }
 
-    if (event.type === "response" && event.id === `init-${run.id}` && event.success === false) {
+    if (!finalized && awaitingAnswer && ((!rpc && event.type === "agent_start") ||
+        (rpc && event.type === "response" && event.command === "prompt" && event.id === `init-${run.id}` && event.success === true))) {
+      // Pi 0.87.1 emits agent_start only after print prompt preflight; RPC has an explicit ack.
+      awaitingAnswer = false;
+      run.rejectAnswerDelivery = undefined;
+      run.pendingAsk = undefined;
+      answerRecord = answerRecord.then(() => writeRecord(run));
+    }
+    if (event.type === "response" && event.command === "prompt" && event.id === `init-${run.id}` && event.success === false) {
       run.errorMessage = `initial prompt rejected: ${event.error ?? "unknown error"}`;
       void finalize("failed", 1);
       return;
@@ -2018,6 +2054,10 @@ function runPiSubprocess(
     );
   };
 
+  if (awaitingAnswer) run.rejectAnswerDelivery = reason => {
+    run.errorMessage = reason;
+    void finalize("failed", 1);
+  };
   const stdoutLines = createLineDecoder(processLine);
   proc.stdout?.on("data", (data: Buffer) => stdoutLines.write(data));
 
@@ -2224,7 +2264,7 @@ type ActionObservations = ReturnType<typeof observeRunActions>;
 export function runActionError(run: Run, action: RunAction, observed: ActionObservations): string | undefined {
   if (action === "focus") return observed.canFocus ? undefined : "Focused stream requires terminal UI (TUI mode).";
   if (action === "send" || action === "steer" || action === "follow_up") {
-    if (run.pendingAsk && run.status !== "blocked") return `sub-agent ${run.id} is settling an owner question; wait for sub-agent-asked before answering.`;
+    if ((run.pendingAsk || run.askExecution) && run.status !== "blocked") return `sub-agent ${run.id} is settling an owner question; wait for sub-agent-asked before answering.`;
     if (observed.retirementNotice) return `sub-agent ${run.id}: ${observed.retirementNotice}`;
   }
   if (action !== "send" && !observed.owned) {
@@ -2648,6 +2688,7 @@ export function sendToRun(
   // resolveSendStrategy guarantees sessionPath is set on spawn-resume,
   // but TS can't see through a free-function call — capture it.
   const sessionPath = run.sessionPath as string;
+  const answer = run.pendingAsk ? { ask: run.pendingAsk, cwd: run.cwd } : undefined;
   const worktreeBlocker = restoreResumeWorktree(run, () => readFileSync(sessionPath, "utf8"));
   if (worktreeBlocker) return { kind: "rejected", reason: worktreeBlocker };
 
@@ -2655,8 +2696,8 @@ export function sendToRun(
   if (pendingAsk) trimmed = `<owner-answer ask-id=${JSON.stringify(pendingAsk.askId)}>\nQuestion: ${pendingAsk.question}\nAnswer: ${trimmed}\nContinue the original assignment, not a new task.\n</owner-answer>`;
 
   // Reset terminal state so listeners and the panel see this as a fresh run.
-  run.pendingAsk = undefined;
   run.askExecution = undefined;
+  run.askContinuation = undefined;
   run.failureClass = undefined;
   run.nonSubstantiveFinal = undefined;
   run.status = "running";
@@ -2696,6 +2737,7 @@ export function sendToRun(
   const piArgs = buildResumePiArgs(run, trimmed);
 
   const done = runPiSubprocess(run, piArgs, {
+    answer,
     registry: opts.registry,
     cwd: run.cwd,
     timeoutMs: opts.timeoutMs,
@@ -3250,6 +3292,11 @@ export function forceTerminate(
     console.warn(`forceTerminate: refusing to mutate foreign run id=${run.id}: ${blocker}`);
     return;
   }
+  if (run.rejectAnswerDelivery && (reason === "timeout" || reason === "stalled")) {
+    run.rejectAnswerDelivery(reason);
+    return;
+  }
+  run.rejectAnswerDelivery = undefined;
   if (run.timeoutTimer) {
     clearTimeout(run.timeoutTimer);
     run.timeoutTimer = undefined;

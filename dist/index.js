@@ -1368,12 +1368,14 @@ function applyEvent(run, event) {
     const calls = assistant?.role === "assistant" ? assistant.content.filter((p) => p.type === "toolCall") : [];
     if (!run.pendingAsk && calls.length === 1 && calls[0].name === "ask_owner" && calls[0].id === e.toolCallId && typeof e.args?.question === "string" && e.args.question.trim()) {
       run.askExecution = { askId: e.toolCallId, question: e.args.question.trim() };
+      run.askContinuation = false;
     }
     return NONE;
   }
   if (e.type === "tool_execution_end" && e.toolName === "ask_owner") {
     const execution = run.askExecution;
     run.askExecution = void 0;
+    if (e.isError !== false) run.askContinuation = void 0;
     const details = e.result?.details;
     if (execution && e.isError === false && execution.askId === e.toolCallId && details?.askId === e.toolCallId && details.question === execution.question && typeof details.evidence === "string" && !run.pendingAsk) {
       run.pendingAsk = { ...execution, evidence: details.evidence };
@@ -1391,6 +1393,14 @@ function applyEvent(run, event) {
       return { kind: "compacted" };
     }
     const msg = e.message;
+    if (!run.rejectAnswerDelivery && (run.pendingAsk || run.askExecution)) {
+      if (msg.role === "user") run.askContinuation = true;
+      if (msg.role === "assistant" && run.askContinuation) {
+        run.pendingAsk = void 0;
+        run.askExecution = void 0;
+        run.askContinuation = void 0;
+      }
+    }
     run.messages.push(msg);
     run.lastEventAt = Date.now();
     if (msg.role === "assistant") {
@@ -3504,6 +3514,28 @@ function runPiSubprocess(run, piArgs, opts) {
   const rpc = piArgs[1] === "rpc";
   const stdinKind = rpc ? "pipe" : "ignore";
   run.onComplete = opts.onComplete;
+  let awaitingAnswer = opts.answer !== void 0;
+  let answerRecord = Promise.resolve();
+  const restoreAnswer = async (reason) => {
+    await answerRecord;
+    if (isTerminal(run.status)) return run;
+    run.rejectAnswerDelivery = void 0;
+    run.pendingAsk = opts.answer.ask;
+    run.cwd = opts.answer.cwd;
+    run.status = "blocked";
+    run.finishedAt = Date.now();
+    run.proc = void 0;
+    run.pid = void 0;
+    run.failureClass = void 0;
+    run.errorMessage = `Owner answer delivery failed before acceptance: ${reason}. Question ${run.pendingAsk.askId} remains outstanding; retry ensemble_send.`;
+    await writeRecord(run);
+    opts.registry.notify(run);
+    try {
+      opts.onComplete?.(run);
+    } catch {
+    }
+    return run;
+  };
   let proc;
   try {
     proc = spawn(invocation.command, invocation.args, {
@@ -3514,6 +3546,7 @@ function runPiSubprocess(run, piArgs, opts) {
       env: { ...buildSubagentEnv(), CONDUCTOR_CONFIG_CWD: run.cwd, CONDUCTOR_RUN_ID: run.id }
     });
   } catch (e) {
+    if (awaitingAnswer) return restoreAnswer(`spawn failed: ${e.message}`);
     run.status = "failed";
     run.errorMessage = `spawn failed: ${e.message}`;
     run.finishedAt = Date.now();
@@ -3527,7 +3560,7 @@ function runPiSubprocess(run, piArgs, opts) {
     if (opts.onComplete) opts.onComplete(run);
     return Promise.resolve(run);
   }
-  void attachSpawnedProc(run, proc);
+  answerRecord = attachSpawnedProc(run, proc);
   const processClosed = new Promise((resolve5) => proc.once("close", () => resolve5()));
   stampSpawnStreamingMode(run, opts.steerable === true);
   run.streamingMode = rpc ? "rpc" : "print";
@@ -3573,10 +3606,11 @@ function runPiSubprocess(run, piArgs, opts) {
     }
     const rest = stdoutLines.end();
     if (rest.trim()) processLine(rest);
+    if (opts.answer) await answerRecord;
     discoverSessionPathIfMissing(run, opts.sessionDir);
     discoverContextRetirement(run, opts.sessionDir);
-    if (run.pendingAsk && !isTerminal(run.status)) {
-      if (terminal === "completed" && run.sessionPath && !contextRetirementNotice(run)) {
+    if ((awaitingAnswer || run.pendingAsk) && !isTerminal(run.status)) {
+      if (awaitingAnswer || terminal === "completed" && run.sessionPath && !contextRetirementNotice(run)) {
         try {
           proc.kill();
         } catch {
@@ -3590,6 +3624,11 @@ function runPiSubprocess(run, piArgs, opts) {
         await processClosed;
         clearTimeout(killFallback);
         if (isTerminal(run.status)) {
+          donePromiseResolve(run);
+          return;
+        }
+        if (awaitingAnswer) {
+          await restoreAnswer(run.errorMessage || stderr.trim() || `subprocess exited with code ${exitCode} before accepting the answer`);
           donePromiseResolve(run);
           return;
         }
@@ -3697,7 +3736,13 @@ function runPiSubprocess(run, piArgs, opts) {
     } catch {
       return;
     }
-    if (event.type === "response" && event.id === `init-${run.id}` && event.success === false) {
+    if (!finalized && awaitingAnswer && (!rpc && event.type === "agent_start" || rpc && event.type === "response" && event.command === "prompt" && event.id === `init-${run.id}` && event.success === true)) {
+      awaitingAnswer = false;
+      run.rejectAnswerDelivery = void 0;
+      run.pendingAsk = void 0;
+      answerRecord = answerRecord.then(() => writeRecord(run));
+    }
+    if (event.type === "response" && event.command === "prompt" && event.id === `init-${run.id}` && event.success === false) {
       run.errorMessage = `initial prompt rejected: ${event.error ?? "unknown error"}`;
       void finalize2("failed", 1);
       return;
@@ -3721,6 +3766,10 @@ function runPiSubprocess(run, piArgs, opts) {
       opts.registry,
       (r, reason) => forceTerminate(r, reason, opts.registry, opts.onComplete)
     );
+  };
+  if (awaitingAnswer) run.rejectAnswerDelivery = (reason) => {
+    run.errorMessage = reason;
+    void finalize2("failed", 1);
   };
   const stdoutLines = createLineDecoder(processLine);
   proc.stdout?.on("data", (data) => stdoutLines.write(data));
@@ -3799,7 +3848,7 @@ function observeRunActions(run, canFocus = false) {
 function runActionError(run, action, observed) {
   if (action === "focus") return observed.canFocus ? void 0 : "Focused stream requires terminal UI (TUI mode).";
   if (action === "send" || action === "steer" || action === "follow_up") {
-    if (run.pendingAsk && run.status !== "blocked") return `sub-agent ${run.id} is settling an owner question; wait for sub-agent-asked before answering.`;
+    if ((run.pendingAsk || run.askExecution) && run.status !== "blocked") return `sub-agent ${run.id} is settling an owner question; wait for sub-agent-asked before answering.`;
     if (observed.retirementNotice) return `sub-agent ${run.id}: ${observed.retirementNotice}`;
   }
   if (action !== "send" && !observed.owned) {
@@ -4031,6 +4080,7 @@ function sendToRun(run, message, opts) {
     return { kind: "started", run, done: done2, ack: result.ack };
   }
   const sessionPath = run.sessionPath;
+  const answer = run.pendingAsk ? { ask: run.pendingAsk, cwd: run.cwd } : void 0;
   const worktreeBlocker = restoreResumeWorktree(run, () => readFileSync8(sessionPath, "utf8"));
   if (worktreeBlocker) return { kind: "rejected", reason: worktreeBlocker };
   const pendingAsk = run.pendingAsk;
@@ -4039,8 +4089,8 @@ Question: ${pendingAsk.question}
 Answer: ${trimmed}
 Continue the original assignment, not a new task.
 </owner-answer>`;
-  run.pendingAsk = void 0;
   run.askExecution = void 0;
+  run.askContinuation = void 0;
   run.failureClass = void 0;
   run.nonSubstantiveFinal = void 0;
   run.status = "running";
@@ -4067,6 +4117,7 @@ Continue the original assignment, not a new task.
   );
   const piArgs = buildResumePiArgs(run, trimmed);
   const done = runPiSubprocess(run, piArgs, {
+    answer,
     registry: opts.registry,
     cwd: run.cwd,
     timeoutMs: opts.timeoutMs,
@@ -4323,6 +4374,11 @@ function forceTerminate(run, reason, registry, onComplete, killGroup = defaultKi
     console.warn(`forceTerminate: refusing to mutate foreign run id=${run.id}: ${blocker}`);
     return;
   }
+  if (run.rejectAnswerDelivery && (reason === "timeout" || reason === "stalled")) {
+    run.rejectAnswerDelivery(reason);
+    return;
+  }
+  run.rejectAnswerDelivery = void 0;
   if (run.timeoutTimer) {
     clearTimeout(run.timeoutTimer);
     run.timeoutTimer = void 0;
@@ -8766,7 +8822,7 @@ function formatStatusForLLM(g, queueSize, summaries) {
 function foregroundFinalResult(r, canFocus, answering) {
   const actions = availableActions(r, canFocus);
   const ref = resultRef(r);
-  const answerNotice = answering ? `Answered question ${answering.askId}: ${answering.question}
+  const answerNotice = answering ? `${r.status === "blocked" && r.errorMessage ? "Answer delivery failed for" : "Answered"} question ${answering.askId}: ${answering.question}
 ` : "";
   const summary = answerNotice + renderForegroundSummary(r, actions) + (ref ? `
   result-ref: ${ref} \u2014 pass files: ['${ref}'] for the full evidence.` : "");
@@ -9357,7 +9413,10 @@ function perSendNumbers(run) {
 function formatCompletionNotification(run, actions = availableActions(run)) {
   if (run.status === "blocked") {
     const ask = run.pendingAsk;
-    return `<sub-agent-asked>
+    const tag = run.errorMessage ? "sub-agent-answer-failed" : "sub-agent-asked";
+    const error = run.errorMessage ? `
+  <error>${escapeXml(run.errorMessage)}</error>` : "";
+    return `<${tag}>${error}
   <agent-id>${escapeXml(run.id)}</agent-id>
   <status>blocked</status>
   <ask-id>${escapeXml(ask?.askId ?? "")}</ask-id>
@@ -9366,7 +9425,7 @@ ${ask?.evidence ?? ""}
   <available-actions>${actions.join(", ")}</available-actions>
   <guidance>Answer via ensemble_send on this agent id. Assignment unresolved; do independent work while deciding.</guidance>
   <transcript>${escapeXml(run.transcriptPath)}</transcript>
-</sub-agent-asked>`;
+</${tag}>`;
   }
   const finalText = getFinalText(run.messages);
   const perSend = perSendNumbers(run);
@@ -9570,7 +9629,7 @@ function buildCompletionMessage(run, canFocus = false) {
     content: formatCompletionNotification(run, actions),
     display: true,
     details: {
-      kind: run.status === "blocked" ? "asked" : "completed",
+      kind: run.status === "blocked" ? run.errorMessage ? "answer_failed" : "asked" : "completed",
       available_actions: actions,
       id: run.id,
       persona: run.persona,

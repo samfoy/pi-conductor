@@ -22,6 +22,7 @@ const dir=args.includes('--session-dir')?flag('--session-dir'):dirname(flag('--s
 const session=args.includes('--session')?flag('--session'):join(dir,'fake.jsonl');
 const emit=e=>process.stdout.write(JSON.stringify(e)+'\\n');
 const finish=prompt=>{
+ emit({type:'agent_start'});
  writeFileSync(join(dir,'receipt.json'),JSON.stringify({prompt,args,cwd:process.cwd()}));
  if(!args.includes('--session')) writeFileSync(session,JSON.stringify({type:'session',id:'fake-child',cwd:process.cwd()})+'\\n');
  const asking=!prompt.includes('<owner-answer')&&!prompt.includes('CONTROL');

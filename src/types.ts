@@ -813,6 +813,10 @@ export interface Run {
   pendingAsk?: PendingAsk;
   /** Unaccepted execution correlation; never persisted. */
   askExecution?: { askId: string; question: string };
+  /** A user message was consumed after the ask; wait for the next assistant response. */
+  askContinuation?: boolean;
+  /** Invocation-local rollback for a timeout/stall before owner-answer acceptance. */
+  rejectAnswerDelivery?: (reason: string) => void;
   contextRetired?: boolean;
   /**
    * Persona system-prompt body captured at spawn time. Pi sessions do NOT

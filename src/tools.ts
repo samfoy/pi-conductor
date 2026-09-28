@@ -1606,7 +1606,7 @@ function formatStatusForLLM(g: StatusGroups, queueSize: number, summaries: Map<s
 function foregroundFinalResult(r: Run, canFocus: boolean, answering?: { askId: string; question: string }) {
   const actions = availableActions(r, canFocus);
   const ref = resultRef(r);
-  const answerNotice = answering ? `Answered question ${answering.askId}: ${answering.question}\n` : "";
+  const answerNotice = answering ? `${r.status === "blocked" && r.errorMessage ? "Answer delivery failed for" : "Answered"} question ${answering.askId}: ${answering.question}\n` : "";
   const summary = answerNotice + renderForegroundSummary(r, actions) + (ref ? `\n  result-ref: ${ref} — pass files: ['${ref}'] for the full evidence.` : "");
   if (r.status === "blocked") return {
     content: [{ type: "text" as const, text: `${summary}\nQuestion ${r.pendingAsk?.askId}: ${r.pendingAsk?.question}${r.pendingAsk?.evidence ?? ""}\nAnswer via ensemble_send; the original assignment is unresolved.` }],

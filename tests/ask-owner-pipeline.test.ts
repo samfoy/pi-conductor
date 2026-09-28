@@ -12,6 +12,7 @@ import { reconcileOrphansAtStartup } from "../src/reconcile-startup.ts";
 import { isTerminal, type Persona, type Run } from "../src/types.ts";
 import { sandboxPi, tmpDir } from "./helpers/tmp.ts";
 
+import { applyEvent } from "../src/event-handler.ts";
 import { registerTools } from "../src/tools.ts";
 import { SpawnQueue } from "../src/queue.ts";
 import { planReclaim } from "../src/gc/policy.ts";
@@ -77,7 +78,9 @@ for (const transport of ["print", "rpc", "large"]) {
     assert.equal(sendToRun(run, "A", { registry, timeoutMs: 4000, callerCwd: run.cwd, files: ["missing"] }).kind, "rejected");
     assert.deepEqual((run as any).pendingAsk, ask);
     const resumed = sendToRun(run, "Use option A", { registry, timeoutMs: 4000, persona: { ...persona, onCompleteHook: "a6-check" }, onComplete: r => cards.push(buildCompletionMessage(r)) });
-    assert.equal(resumed.kind, "started"); assert.equal((run as any).pendingAsk, undefined);
+    assert.equal(resumed.kind, "started"); assert.deepEqual(run.pendingAsk, ask, "retain until native acceptance");
+    emit(procs[1], { type: "agent_start" });
+    assert.equal(run.pendingAsk, undefined);
     assert.equal(run.task, original); assert.match(launches[1].args.at(-1), /owner-answer.*question-1/s); assert.match(launches[1].args.at(-1), /Which option\?.*Use option A/s);
     emit(procs[1], { type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Implemented option A and verified the assignment successfully with focused checks." }] } });
     emit(procs[1], { type: "agent_settled" });
@@ -150,4 +153,57 @@ test("A6 registered status/cards, GC, failure and auto controls keep unresolved 
   const rejected = sendToRun(run, "A", { registry, timeoutMs: 4000 });
   assert.equal(rejected.kind, "rejected"); assert.deepEqual(run.pendingAsk, ask);
   assert.equal(procs.length, 1);
+});
+
+for (const failure of ["sync-spawn", "async-spawn", "wrong-ack"]) {
+  test(`B1 ${failure}: failed dispatch preserves durable ask without ordinary completion effects`, { timeout: 5000 }, async t => {
+    const { procs } = fakeSpawn(t); const registry = new RunRegistry();
+    const cards: string[] = [];
+    const onComplete = (r: Run) => cards.push(buildCompletionMessage(r).content);
+    const result = await spawnRun({ registry, persona, cwd: tmpDir("a6-dispatch-"), task: "original", mode: "background", timeoutMs: 4000, onComplete });
+    saveSession(result.run); accepted(procs[0]); emit(procs[0], { type: "agent_settled" }); await result.done;
+    const run = result.run;
+    if (failure === "sync-spawn") { t.mock.method(cp, "spawn", () => { throw new Error("spawn EACCES"); }); syncBuiltinESMExports(); }
+    const sent = sendToRun(run, failure === "wrong-ack" ? "x".repeat(100000) : "B", { registry, timeoutMs: 4000, onComplete, onCompleteHook: "a6-check" });
+    assert.equal(sent.kind, "started"); if (sent.kind !== "started") return;
+    assert.deepEqual(run.pendingAsk, ask);
+    if (failure === "async-spawn") procs[1].emit("error", new Error("spawn ENOENT"));
+    if (failure === "wrong-ack") {
+      emit(procs[1], { type: "response", command: "prompt", id: "unrelated", success: true });
+      emit(procs[1], { type: "response", command: "follow_up", id: `init-${run.id}`, success: true });
+      emit(procs[1], { type: "agent_start" });
+      assert.deepEqual(run.pendingAsk, ask, "RPC requires correlated prompt acceptance, not arbitrary progress");
+      emit(procs[1], { type: "response", command: "prompt", id: `init-${run.id}`, success: false, error: "preflight refused" });
+    }
+    await sent.done;
+    assert.equal(run.status, "blocked"); assert.deepEqual(run.pendingAsk, ask);
+    const saved = JSON.parse(readFileSync(run.recordPath, "utf8"));
+    assert.equal(saved.status, "blocked"); assert.deepEqual(saved.pendingAsk, ask); assert.equal(saved.task, "original");
+    assert.equal(run.failureClass, undefined); assert.equal(run.hookResult, undefined); assert.equal(existsSync(run.finalPath), false);
+    assert.equal(cards.length, 2); assert.match(cards[1], /sub-agent-answer-failed/); assert.doesNotMatch(cards[1], /sub-agent-completed|sub-agent-asked/);
+    assert.equal(registry.countActive(), 0);
+  });
+}
+
+test("B2 shared admission reopens after rejected execution; only consumed user plus subsequent assistant supersedes an accepted ask", { timeout: 5000 }, async t => {
+  const { procs } = fakeSpawn(t); const registry = new RunRegistry();
+  const result = await spawnRun({ registry, persona, cwd: tmpDir("a6-admission-"), task: "original", mode: "background", timeoutMs: 4000, steerable: true });
+  const run = result.run;
+  saveSession(run);
+  applyEvent(run, { type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", name: "ask_owner", id: ask.askId }] } });
+  applyEvent(run, { type: "tool_execution_start", toolCallId: ask.askId, toolName: "ask_owner", args: { question: ask.question } });
+  for (const streamingBehavior of ["auto", "steer", "follow_up"] as const) assert.equal(sendToRun(run, "B", { registry, timeoutMs: 4000, streamingBehavior }).kind, "rejected");
+  applyEvent(run, { ...end, isError: true });
+  assert.ok(availableActions(run).includes("follow_up"));
+  accepted(procs[0]);
+  for (const event of [{ type: "turn_start" }, { type: "queue_update", steering: [], followUp: ["B"] }, { type: "tool_execution_update" }, { type: "response", id: "unrelated", success: true }]) {
+    applyEvent(run, event); assert.deepEqual(run.pendingAsk, ask);
+  }
+  applyEvent(run, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Still waiting" }] } });
+  assert.deepEqual(run.pendingAsk, ask, "assistant progress without consumed input is not an owner answer");
+  applyEvent(run, { type: "message_end", message: { role: "user", content: "B" } });
+  assert.deepEqual(run.pendingAsk, ask, "input alone is not yet a native continuation");
+  emit(procs[0], { type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Used B and verified the original assignment completely." }] } });
+  emit(procs[0], { type: "agent_settled" }); await result.done;
+  assert.equal(run.status, "completed"); assert.equal(run.pendingAsk, undefined);
 });
