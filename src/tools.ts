@@ -1623,7 +1623,7 @@ function toStatusSummary(r: Run, canFocus: boolean, sessionId?: string, registry
     persona: r.persona,
     status: r.status,
     pending_ask: r.pendingAsk,
-    runtime: r.runtime ?? "subprocess",
+    runtime: r.runtime === undefined ? "subprocess" : r.runtime,
     effort: r.effort,
     integration: r.integration,
     landedCommit: r.landedCommit,
@@ -1678,7 +1678,7 @@ function formatStatusForLLM(g: StatusGroups, queueSize: number, summaries: Map<s
       const waitReason = summaries.get(r.id)!.wait_reason;
       const hint = (waitReason ? ` ${waitReason}` : "") + (r.lastToolCall ? ` → ${r.lastToolCall}` : "") + (r.effort ? ` effort=${effortSummary(r)}` : "");
       lines.push(
-        `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} runtime=${r.runtime ?? "subprocess"} available_actions=${summaries.get(r.id)!.available_actions.join(",") || "(none)"}`,
+        `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} runtime=${r.runtime === undefined ? "subprocess" : r.runtime} available_actions=${summaries.get(r.id)!.available_actions.join(",") || "(none)"}`,
       );
     }
   }
@@ -1983,7 +1983,7 @@ export function buildOnRetryCallback(
     });
     args.queue.enqueueOrSpawn({
       persona: args.persona,
-      runtime: failedRun.runtime ?? "subprocess",
+      runtime: failedRun.runtime === undefined ? "subprocess" : failedRun.runtime,
       task,
       mode: "background",
       cwd: args.cwd,

@@ -1187,7 +1187,7 @@ export function toRunRecord(r: Run): RunRecord {
     systemPrompt: r.systemPrompt,
     tools: r.tools,
     excludeTools: r.excludeTools,
-    runtime: r.runtime ?? "subprocess",
+    runtime: r.runtime === undefined ? "subprocess" : r.runtime,
     steerable: r.steerable,
     streamingMode: r.streamingMode,
     hookResult: r.hookResult,

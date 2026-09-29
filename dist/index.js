@@ -44,7 +44,7 @@ function toRunRecord(r) {
     systemPrompt: r.systemPrompt,
     tools: r.tools,
     excludeTools: r.excludeTools,
-    runtime: r.runtime ?? "subprocess",
+    runtime: r.runtime === void 0 ? "subprocess" : r.runtime,
     steerable: r.steerable,
     streamingMode: r.streamingMode,
     hookResult: r.hookResult,
@@ -746,7 +746,7 @@ async function reconcileOrphansAtStartup(deps) {
 function buildOrphanRun(record, status) {
   return {
     id: record.id,
-    runtime: record.runtime ?? "subprocess",
+    runtime: record.runtime === void 0 ? "subprocess" : record.runtime,
     persona: record.persona,
     task: record.task,
     model: record.model,
@@ -1088,29 +1088,32 @@ function optionalNonNegativeInteger(fm, key) {
 async function loadPersonasFromDir(dir, source) {
   const personas = [];
   const errors = [];
-  if (!existsSync(dir)) return { personas, errors };
+  const blockedNames = [];
+  if (!existsSync(dir)) return { personas, errors, blockedNames };
   let entries;
   try {
     entries = await readdir2(dir);
   } catch (e) {
     errors.push({ path: dir, reason: `cannot read directory: ${e.message}` });
-    return { personas, errors };
+    return { personas, errors, blockedNames };
   }
   for (const entry of entries) {
     if (!entry.endsWith(".md") || entry.startsWith("_")) continue;
     const filePath = join2(dir, entry);
+    let raw;
     try {
       const st = await stat2(filePath);
       if (!st.isFile()) continue;
       const text = await readFile2(filePath, "utf-8");
-      const raw = parseFrontmatter(text);
+      raw = parseFrontmatter(text);
       const persona = validateAndBuild(raw, source, filePath);
       personas.push(persona);
     } catch (e) {
       errors.push({ path: filePath, reason: e.message });
+      if (raw?.frontmatter.runtime !== void 0) blockedNames.push(entry.slice(0, -3));
     }
   }
-  return { personas, errors };
+  return { personas, errors, blockedNames };
 }
 async function resolvePersonas(opts) {
   const overrides = opts.personaOverrides ?? {};
@@ -1120,12 +1123,14 @@ async function resolvePersonas(opts) {
   const errors = [...builtin.errors, ...user.errors, ...project.errors];
   const personas = /* @__PURE__ */ new Map();
   const shadowed = /* @__PURE__ */ new Map();
-  const ordered = [...builtin.personas, ...user.personas, ...project.personas];
-  for (const p of ordered) {
-    const list = shadowed.get(p.name) ?? [];
-    list.push(p);
-    shadowed.set(p.name, list);
-    personas.set(p.name, p);
+  for (const layer of [builtin, user, project]) {
+    for (const p of layer.personas) {
+      const list = shadowed.get(p.name) ?? [];
+      list.push(p);
+      shadowed.set(p.name, list);
+      personas.set(p.name, p);
+    }
+    for (const name of layer.blockedNames) personas.delete(name);
   }
   for (const [name, ov] of Object.entries(overrides)) {
     if (ov.disabled) {
@@ -4787,9 +4792,10 @@ function prepareSpawnEvidence(opts, registry) {
 }
 function prepareSpawnRuntime(opts) {
   const layers = loadConfigWithErrors(opts.cwd);
+  const personaRuntime = layers.config.personaOverrides[opts.persona.name]?.runtime;
   const resolved = resolveRuntime({
     perCall: opts.runtime,
-    persona: layers.config.personaOverrides[opts.persona.name]?.runtime ?? opts.persona.runtime,
+    persona: personaRuntime === void 0 ? opts.persona.runtime : personaRuntime,
     project: layers.project.runtime,
     user: layers.user.runtime,
     env: opts.runtimeEnv ?? process.env
@@ -6744,13 +6750,13 @@ async function buildDoctorReport(opts) {
   }
   lines.push("");
   lines.push("## Runtime");
-  lines.push(`  configured: ${cfg.runtime ?? "auto"} (project > user > auto; persona/per-call may override)`);
+  lines.push(`  configured: ${cfg.runtime === void 0 ? "auto" : cfg.runtime} (project > user > auto; persona/per-call may override)`);
   lines.push("  legacy records without a runtime tag: subprocess; resume/retry preserve the concrete backend");
   for (const p of resolved.personas.values()) {
     const selected = resolveRuntime({ persona: p.runtime, project: project.runtime, user: user.runtime, env: opts.env ?? process.env });
     lines.push(selected.ok ? `  ${p.name}: ${selected.kind} [${selected.source}]${unsupportedRuntimeReason(selected.kind) ? " \u2014 unavailable; use runtime: subprocess" : ""}` : `  ${p.name}: ${selected.reason}`);
   }
-  for (const r of opts.registry.list()) lines.push(`  ${r.id}: saved=${r.runtime ?? "subprocess (legacy)"}`);
+  for (const r of opts.registry.list()) lines.push(`  ${r.id}: saved=${r.runtime === void 0 ? "subprocess (legacy)" : r.runtime}`);
   lines.push(`  active:        ${opts.registry.countActive()}`);
   lines.push(`  queued:        ${opts.queue.size()}`);
   lines.push(`  total tracked: ${opts.registry.list().length}`);
@@ -8077,8 +8083,8 @@ function formatRunRow(r, livenessProbe = defaultLivenessProbe) {
   const u = formatUsage(r.usage);
   const usagePart = u ? `[${u}]` : "";
   const hint = r.lastToolCall ? ` \u2192 ${r.lastToolCall}` : "";
-  const liveness = (r.runtime ?? "subprocess") === "subprocess" && r.status === "running" && r.pid !== void 0 && !livenessProbe(r.pid) ? " \xB7 pid-gone" : "";
-  return `  ${STATUS_GLYPH[r.status] ?? "\xB7"} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} runtime=${r.runtime ?? "subprocess"}${liveness}`;
+  const liveness = (r.runtime === void 0 || r.runtime === "subprocess") && r.status === "running" && r.pid !== void 0 && !livenessProbe(r.pid) ? " \xB7 pid-gone" : "";
+  return `  ${STATUS_GLYPH[r.status] ?? "\xB7"} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} runtime=${r.runtime === void 0 ? "subprocess" : r.runtime}${liveness}`;
 }
 function runHistory(_opts, ctx, arg) {
   const root = runsRoot();
@@ -10559,7 +10565,7 @@ function toStatusSummary(r, canFocus, sessionId, registry) {
     persona: r.persona,
     status: r.status,
     pending_ask: r.pendingAsk,
-    runtime: r.runtime ?? "subprocess",
+    runtime: r.runtime === void 0 ? "subprocess" : r.runtime,
     effort: r.effort,
     integration: r.integration,
     landedCommit: r.landedCommit,
@@ -10607,7 +10613,7 @@ function formatStatusForLLM(g, queueSize, summaries) {
       const waitReason = summaries.get(r.id).wait_reason;
       const hint = (waitReason ? ` ${waitReason}` : "") + (r.lastToolCall ? ` \u2192 ${r.lastToolCall}` : "") + (r.effort ? ` effort=${effortSummary(r)}` : "");
       lines.push(
-        `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} runtime=${r.runtime ?? "subprocess"} available_actions=${summaries.get(r.id).available_actions.join(",") || "(none)"}`
+        `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} runtime=${r.runtime === void 0 ? "subprocess" : r.runtime} available_actions=${summaries.get(r.id).available_actions.join(",") || "(none)"}`
       );
     }
   }
@@ -10808,7 +10814,7 @@ function buildOnRetryCallback(args) {
     });
     args.queue.enqueueOrSpawn({
       persona: args.persona,
-      runtime: failedRun.runtime ?? "subprocess",
+      runtime: failedRun.runtime === void 0 ? "subprocess" : failedRun.runtime,
       task,
       mode: "background",
       cwd: args.cwd,

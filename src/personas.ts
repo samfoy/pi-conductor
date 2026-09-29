@@ -425,35 +425,40 @@ function optionalNonNegativeInteger(
 async function loadPersonasFromDir(
   dir: string,
   source: PersonaSource,
-): Promise<{ personas: Persona[]; errors: PersonaLoadError[] }> {
+): Promise<{ personas: Persona[]; errors: PersonaLoadError[]; blockedNames: string[] }> {
   const personas: Persona[] = [];
   const errors: PersonaLoadError[] = [];
+  const blockedNames: string[] = [];
 
-  if (!existsSync(dir)) return { personas, errors };
+  if (!existsSync(dir)) return { personas, errors, blockedNames };
 
   let entries: string[];
   try {
     entries = await readdir(dir);
   } catch (e) {
     errors.push({ path: dir, reason: `cannot read directory: ${(e as Error).message}` });
-    return { personas, errors };
+    return { personas, errors, blockedNames };
   }
 
   for (const entry of entries) {
     if (!entry.endsWith(".md") || entry.startsWith("_")) continue;
     const filePath = join(dir, entry);
+    let raw: RawPersonaFile | undefined;
     try {
       const st = await stat(filePath);
       if (!st.isFile()) continue;
       const text = await readFile(filePath, "utf-8");
-      const raw = parseFrontmatter(text);
+      raw = parseFrontmatter(text);
       const persona = validateAndBuild(raw, source, filePath);
       personas.push(persona);
     } catch (e) {
       errors.push({ path: filePath, reason: (e as Error).message });
+      // A broken runtime-bearing override must not expose a lower-priority persona.
+      // Its filename, not malformed frontmatter.name, identifies the blocked candidate.
+      if (raw?.frontmatter.runtime !== undefined) blockedNames.push(entry.slice(0, -3));
     }
   }
-  return { personas, errors };
+  return { personas, errors, blockedNames };
 }
 
 /**
@@ -476,12 +481,14 @@ export async function resolvePersonas(opts: {
   const personas = new Map<string, Persona>();
   const shadowed = new Map<string, Persona[]>();
 
-  const ordered: Persona[] = [...builtin.personas, ...user.personas, ...project.personas];
-  for (const p of ordered) {
-    const list = shadowed.get(p.name) ?? [];
-    list.push(p);
-    shadowed.set(p.name, list);
-    personas.set(p.name, p);
+  for (const layer of [builtin, user, project]) {
+    for (const p of layer.personas) {
+      const list = shadowed.get(p.name) ?? [];
+      list.push(p);
+      shadowed.set(p.name, list);
+      personas.set(p.name, p);
+    }
+    for (const name of layer.blockedNames) personas.delete(name);
   }
 
   // Apply overrides (model/thinking/timeout/disabled).

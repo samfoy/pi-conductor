@@ -669,7 +669,7 @@ export async function reconcileOrphansAtStartup(
 export function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
   return {
     id: record.id,
-    runtime: record.runtime ?? "subprocess",
+    runtime: record.runtime === undefined ? "subprocess" : record.runtime,
     persona: record.persona,
     task: record.task,
     model: record.model,

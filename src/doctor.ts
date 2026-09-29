@@ -372,7 +372,7 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
 
   lines.push("");
   lines.push("## Runtime");
-  lines.push(`  configured: ${cfg.runtime ?? "auto"} (project > user > auto; persona/per-call may override)`);
+  lines.push(`  configured: ${cfg.runtime === undefined ? "auto" : cfg.runtime} (project > user > auto; persona/per-call may override)`);
   lines.push("  legacy records without a runtime tag: subprocess; resume/retry preserve the concrete backend");
   for (const p of resolved.personas.values()) {
     const selected = resolveRuntime({ persona: p.runtime, project: project.runtime, user: user.runtime, env: opts.env ?? process.env });
@@ -380,7 +380,7 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
       ? `  ${p.name}: ${selected.kind} [${selected.source}]${unsupportedRuntimeReason(selected.kind) ? " — unavailable; use runtime: subprocess" : ""}`
       : `  ${p.name}: ${selected.reason}`);
   }
-  for (const r of opts.registry.list()) lines.push(`  ${r.id}: saved=${r.runtime ?? "subprocess (legacy)"}`);
+  for (const r of opts.registry.list()) lines.push(`  ${r.id}: saved=${r.runtime === undefined ? "subprocess (legacy)" : r.runtime}`);
   lines.push(`  active:        ${opts.registry.countActive()}`);
   lines.push(`  queued:        ${opts.queue.size()}`);
   lines.push(`  total tracked: ${opts.registry.list().length}`);

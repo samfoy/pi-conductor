@@ -11,7 +11,7 @@ import { spawnRun, sendToRun, failBeforeSpawn, RunRegistry, runsRoot, availableA
 import { SpawnQueue } from "../src/queue.ts";
 import { buildOrphanRun, classifyRecord, reconcileOrphansAtStartup } from "../src/reconcile-startup.ts";
 import { loadConfigWithErrors, userConfigPath } from "../src/config.ts";
-import { resolvePersonas, projectPersonasDir } from "../src/personas.ts";
+import { resolvePersonas, projectPersonasDir, userPersonasDir } from "../src/personas.ts";
 import { walkInventory } from "../src/gc/inventory.ts";
 import { planReclaim } from "../src/gc/policy.ts";
 import { requeueEffortRun, recoverEffort } from "../src/effort/reconcile.ts";
@@ -301,4 +301,118 @@ test("H2 explicit native RPC retains subprocess runtime and live actions", async
   assert.ok(availableActions(spawned.run).includes("steer")); assert.ok(availableActions(spawned.run).includes("follow_up"));
   child.proc.emit("close", 1); await spawned.done;
   assert.equal(toRunRecord(spawned.run).runtime, "subprocess");
+});
+
+
+for (const selector of ["rpc", ""] as const) test(`H2 B1 invalid project runtime ${JSON.stringify(selector)} cannot launch fallback persona`, async t => {
+  const child = fakeChild(t); const opts = options(); const queue = new SpawnQueue(opts.registry, 1);
+  t.after(() => { child.proc.emit("close", 1); for (const r of opts.registry.list()) clearTimeout(r.timeoutTimer); });
+  mkdirSync(projectPersonasDir(opts.cwd), { recursive: true });
+  writeFileSync(join(projectPersonasDir(opts.cwd), "inspector.md"), `---\nname: inspector\ndescription: project\nruntime: "${selector}"\n---\nProject only.`);
+  const before = existsSync(runsRoot()) ? readdirSync(runsRoot()).sort() : [];
+  const registered = tools(opts.cwd, {}, queue, opts.registry);
+  const response = await registered.get("ensemble_spawn").execute("invalid", { persona: "inspector", task: "must not fall back", foreground: false });
+  assert.equal(child.launches(), 0, "invalid shadowing persona must not launch a lower-priority fallback");
+  assert.match(response.content[0].text, /not found|runtime/);
+  assert.deepEqual(opts.registry.list(), []); assert.equal(queue.size(), 0);
+  assert.deepEqual(existsSync(runsRoot()) ? readdirSync(runsRoot()).sort() : [], before);
+  const resolved = await resolvePersonas({ cwd: opts.cwd });
+  assert.equal(resolved.personas.has("inspector"), false);
+  assert.equal(resolved.personas.has("oracle"), true, "unrelated personas still resolve");
+  assert.ok(resolved.errors.some(e => e.path.endsWith("inspector.md") && /runtime/.test(e.reason)));
+});
+
+test("H2 B1 invalid candidate masks its filename, never an unrelated malformed metadata name", async () => {
+  const cwd = tmpDir("h2-shadow-name-"); mkdirSync(projectPersonasDir(cwd), { recursive: true });
+  writeFileSync(join(projectPersonasDir(cwd), "inspector.md"), "---\nname: oracle\ndescription: invalid inspector candidate\nruntime: rpc\n---\nProbe");
+  const resolved = await resolvePersonas({ cwd });
+  assert.equal(resolved.personas.has("inspector"), false, "candidate filename identifies the unavailable override");
+  assert.equal(resolved.personas.has("oracle"), true, "invalid metadata cannot mask an unrelated persona");
+});
+
+test("H2 B1 valid higher-priority project override still launches explicit subprocess under herdr", async t => {
+  const child = fakeChild(t); const opts = options(); const queue = new SpawnQueue(opts.registry, 1);
+  t.after(() => { child.proc.emit("close", 1); for (const r of opts.registry.list()) clearTimeout(r.timeoutTimer); });
+  mkdirSync(projectPersonasDir(opts.cwd), { recursive: true });
+  mkdirSync(userPersonasDir(), { recursive: true });
+  const invalidUserPath = join(userPersonasDir(), "inspector.md");
+  writeFileSync(invalidUserPath, "---\nname: inspector\ndescription: invalid user\nruntime: rpc\n---\nUser");
+  t.after(() => rmSync(invalidUserPath));
+  writeFileSync(join(projectPersonasDir(opts.cwd), "inspector.md"), "---\nname: inspector\ndescription: valid project\nruntime: subprocess\n---\nOnly the project persona.");
+  const registered = tools(opts.cwd, herdr, queue, opts.registry);
+  await registered.get("ensemble_spawn").execute("valid", { persona: "inspector", task: "probe", foreground: false });
+  assert.equal(child.launches(), 1); assert.equal(opts.registry.list()[0]!.runtime, "subprocess");
+  assert.match(opts.registry.list()[0]!.systemPrompt!, /Only the project persona/);
+  assert.equal((await resolvePersonas({ cwd: opts.cwd })).personas.get("inspector")?.source, "project");
+});
+
+for (const selector of [null, "", "future-runtime"] as const) test(`H2 B2 direct spawn rejects present invalid override ${JSON.stringify(selector)} before all effects`, async t => {
+  const child = fakeChild(t); let workspaceCalls = 0;
+  t.mock.method(cp, "execSync", () => { workspaceCalls++; throw new Error("not a git repository"); }); syncBuiltinESMExports();
+  const opts = options({ worktree: true });
+  mkdirSync(join(opts.cwd, ".pi")); const configPath = join(opts.cwd, ".pi/conductor.json");
+  const config = JSON.stringify({ personaOverrides: { inspector: { runtime: selector } } }); writeFileSync(configPath, config);
+  const before = existsSync(runsRoot()) ? readdirSync(runsRoot()).sort() : [];
+  let launched: ReturnType<typeof spawnRun> | undefined; let error: unknown;
+  t.after(async () => { if (launched) { clearTimeout(launched.run.timeoutTimer); child.proc.emit("close", 1); await launched.done; } });
+  try { launched = spawnRun(opts); } catch (e) { error = e; }
+  assert.equal(child.launches(), 0, "present invalid persona runtime must not launch a subprocess");
+  assert.ok(error instanceof Error); assert.match(error.message, /runtime/);
+  assert.equal(workspaceCalls, 0); assert.deepEqual(opts.registry.list(), []);
+  assert.deepEqual(existsSync(runsRoot()) ? readdirSync(runsRoot()).sort() : [], before);
+  assert.deepEqual(readdirSync(opts.cwd), [".pi"]); assert.equal(readFileSync(configPath, "utf8"), config);
+});
+
+for (const selector of [null, "", "future-runtime"] as const) test(`H2 B2 raw record ${JSON.stringify(selector)} cannot gain send authority after roundtrip`, async t => {
+  const child = fakeChild(t); const original = run({ status: "blocked", pendingAsk: { askId: "ask-1", question: "Proceed?", evidence: "Keep evidence" } });
+  const workspace = join(original.cwd, "kept-worktree"); mkdirSync(workspace);
+  writeFileSync(join(workspace, "evidence.txt"), "unchanged workspace");
+  original.worktreePath = workspace; original.worktreeBranch = "kept-branch";
+  original.sessionPath = join(original.cwd, "session.jsonl");
+  const session = JSON.stringify({ type: "session", id: "saved", cwd: workspace }) + "\n"; writeFileSync(original.sessionPath, session);
+  // Parse raw disk data: do not let a test fixture normalize the invalid value first.
+  const raw = JSON.parse(JSON.stringify({ ...toRunRecord(original), runtime: selector }));
+  assert.equal(classifyRecord(raw, () => assert.fail("no PID probes"), 1), "skip-unsupported-runtime");
+  const restored = buildOrphanRun(raw, "blocked");
+  const roundtrip = JSON.parse(JSON.stringify(toRunRecord(restored)));
+  const target = buildOrphanRun(roundtrip, "blocked"); const before = structuredClone(target);
+  const registry = new RunRegistry(); registry.register(target);
+  const sent = sendToRun(target, "yes", { registry, timeoutMs: 4000 });
+  t.after(async () => { if (sent.kind === "started") { clearTimeout(target.timeoutTimer); child.proc.emit("close", 1); await sent.done; } });
+  assert.equal(child.launches(), 0, "present invalid saved runtime must not launch after restore/serialization");
+  assert.equal(sent.kind, "rejected"); if (sent.kind === "rejected") assert.match(sent.reason, /runtime.*unavailable/);
+  assert.equal(restored.runtime, selector); assert.equal(roundtrip.runtime, selector);
+  assert.deepEqual(target, before, "state, ask and worktree metadata remain unchanged");
+  assert.equal(readFileSync(original.sessionPath, "utf8"), session);
+  assert.equal(readFileSync(join(workspace, "evidence.txt"), "utf8"), "unchanged workspace");
+  assert.equal(existsSync(target.recordPath), false, "refusal writes no record");
+});
+
+test("H2 B2 truly absent record tag is still legacy subprocess", () => {
+  const raw = toRunRecord(run()); delete (raw as { runtime?: unknown }).runtime;
+  const restored = buildOrphanRun(JSON.parse(JSON.stringify(raw)), "completed");
+  assert.equal(restored.runtime, "subprocess"); assert.equal(toRunRecord(restored).runtime, "subprocess");
+});
+
+
+test("H2 B2 retry cannot normalize a present null runtime into subprocess", async t => {
+  const child = fakeChild(t); const opts = options(); const queue = new SpawnQueue(opts.registry, 1);
+  t.after(() => { child.proc.emit("close", 1); for (const r of opts.registry.list()) clearTimeout(r.timeoutTimer); });
+  const retry = buildOnRetryCallback({ originalTask: "probe", persona, cfg: DEFAULT_CONFIG, queue, cwd: opts.cwd, pushNotification() {}, getParentMessages: () => [] });
+  let error: unknown;
+  try { retry(run({ runtime: null as never, status: "failed" })); } catch (e) { error = e; }
+  assert.equal(child.launches(), 0, "invalid retry runtime must not launch a subprocess");
+  assert.ok(error instanceof Error); assert.match(error.message, /runtime/);
+  assert.deepEqual(opts.registry.list(), []);
+});
+
+test("H2 B2 status and doctor never present null as a supported or automatic backend", async () => {
+  const opts = options(); const r = run({ runtime: null as never, status: "running", pid: 123 }); opts.registry.register(r);
+  const queue = new SpawnQueue(opts.registry, 1); const registered = tools(opts.cwd, {}, queue, opts.registry);
+  const status = await registered.get("ensemble_status").execute("status", {});
+  assert.equal(status.details.running[0].runtime, null); assert.match(status.content[0].text, /runtime=null/);
+  assert.match(formatRunRowForTest(r, () => assert.fail("null backend cannot probe subprocess PID")), /runtime=null/);
+  mkdirSync(join(opts.cwd, ".pi")); writeFileSync(join(opts.cwd, ".pi/conductor.json"), '{"runtime":null}');
+  const report = await buildDoctorReport({ cwd: opts.cwd, registry: opts.registry, queue, conductorMode: false, env: {} });
+  assert.match(report, /configured: null/); assert.match(report, /saved=null/);
 });

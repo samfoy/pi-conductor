@@ -1235,8 +1235,9 @@ export function prepareSpawnEvidence<T extends { task: string; files?: readonly 
 /** Resolve once before any admission effects; queued options retain the concrete kind. */
 export function prepareSpawnRuntime<T extends Pick<SpawnOptions, "runtime" | "runtimeEnv" | "persona" | "cwd">>(opts: T): T & { runtime: RuntimeKind } {
   const layers = loadConfigWithErrors(opts.cwd);
+  const personaRuntime = layers.config.personaOverrides[opts.persona.name]?.runtime;
   const resolved = resolveRuntime({ perCall: opts.runtime,
-    persona: layers.config.personaOverrides[opts.persona.name]?.runtime ?? opts.persona.runtime,
+    persona: personaRuntime === undefined ? opts.persona.runtime : personaRuntime,
     project: layers.project.runtime, user: layers.user.runtime, env: opts.runtimeEnv ?? process.env });
   if (!resolved.ok) throw new Error(resolved.reason);
   assertSupportedRuntime(resolved.kind);
