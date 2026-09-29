@@ -30,3 +30,7 @@ export function registerAskOwner(pi: ExtensionAPI, getRegistry: () => RunRegistr
     },
   });
 }
+
+export function formatOwnerAnswer(ask: { askId: string; question: string }, text: string): string {
+  return `<owner-answer ask-id=${JSON.stringify(ask.askId)}>\nQuestion: ${ask.question}\nAnswer: ${text}\nContinue the original assignment, not a new task.\n</owner-answer>`;
+}

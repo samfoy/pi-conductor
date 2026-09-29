@@ -1,3 +1,4 @@
+import { formatOwnerAnswer } from "./ask-owner.ts";
 /**
  * pi-conductor — Run registry and subprocess spawning.
  *
@@ -2197,7 +2198,7 @@ export function sendToRun(
   if (worktreeBlocker) return { kind: "rejected", reason: worktreeBlocker };
 
   const pendingAsk = run.pendingAsk;
-  if (pendingAsk) trimmed = `<owner-answer ask-id=${JSON.stringify(pendingAsk.askId)}>\nQuestion: ${pendingAsk.question}\nAnswer: ${trimmed}\nContinue the original assignment, not a new task.\n</owner-answer>`;
+  if (pendingAsk) trimmed = formatOwnerAnswer(pendingAsk, trimmed);
 
   // Reset terminal state so listeners and the panel see this as a fresh run.
   run.askExecution = undefined;

@@ -1,3 +1,5 @@
+import { CONTROL_PREFIX, dispatchInboxRequest, inboxMarker, readInbox, readInboxAck, writeInboxAck } from "./herdr/inbox.ts";
+import { formatOwnerAnswer } from "./ask-owner.ts";
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, writeSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { VERSION, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -61,9 +63,16 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
   let accepted = false, closing = false;
   let ctxRef: ExtensionContext | undefined;
   let statePath = "";
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let compacting = false, compactionFinished = false;
+  let inFlight: { text?: string } | undefined;
+  const executingAsks = new Set<string>();
+  const runDir = env.CONDUCTOR_RUN_DIR ?? "";
   const updates = new Map<string, number>();
   const compactions = new Set<string>();
   const dispose = () => {
+    if (timer) clearInterval(timer);
+    timer = undefined; compacting = false; compactionFinished = false; inFlight = undefined; executingAsks.clear();
     try { flush(); } finally {
       if (fd !== undefined) { const owned = fd; fd = undefined; closeSync(owned); }
       hello = undefined; pending = undefined; updates.clear(); compactions.clear();
@@ -93,6 +102,13 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
     try {
       flush();
       const type = event.type;
+      if (type === "session_before_compact") { compacting = true; compactionFinished = false; }
+      if (type === "session_compact" || type === "session_compact_failed") compactionFinished = true;
+      if (compactionFinished && (type === "turn_start" || type === "before_agent_start" || type === "agent_before_settle")) compacting = false;
+      if (type === "tool_execution_start" && event.toolName === "ask_owner" && typeof event.toolCallId === "string") executingAsks.add(event.toolCallId);
+      if (type === "turn_end") executingAsks.clear();
+      if (inFlight?.text !== undefined && (type === "agent_start" || (type === "message_start" && isRecord(event.message) && event.message.role === "user" &&
+          Array.isArray(event.message.content) && event.message.content.some(p => isRecord(p) && p.type === "text" && p.text === inFlight?.text)))) inFlight = undefined;
       if (type === "message_end") {
         if (isRecord(event.message) && event.message.role !== "compactionSummary") pending = event.message;
       } else if (type === "agent_start" || type === "agent_end" || type === "agent_settled") {
@@ -179,7 +195,8 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
         reload = true;
       }
       statePath = join(launchDir, nonce);
-      accepted = statePresent(`${statePath}.accepted.json`, expected);
+      accepted = statePresent(`${statePath}.accepted.json`, expected) || readInbox(runDir, nonce).some(({ request }) =>
+        (request.kind === "initial" || request.kind === "reply") && readInboxAck(runDir, request)?.accepted === true);
       closing = statePresent(`${statePath}.closing.json`, expected);
       if (closing && !accepted) throw new Error("closing without initial acceptance");
       hello = expected;
@@ -188,8 +205,63 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
       fd = openSync(join(runDir, "transcript.jsonl"), constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
       if (!fstatSync(fd).isFile() || fstatSync(fd).nlink !== 1) throw new Error("invalid transcript file");
       if (!reload) write({ type: "conductor_child", event: "launch", ...hello });
+      timer = setInterval(pump, 250);
+      timer.unref();
     } catch (error) {
       failed(ctx, error);
+    }
+  });
+  function ownerAsk(ctx: ExtensionContext): { askId: string; question: string } | undefined {
+    const messages = ctx.sessionManager.getBranch().filter(e => e.type === "message").map(e => e.message);
+    const result = messages.at(-1), assistant = messages.at(-2);
+    if (result?.role !== "toolResult" || result.toolName !== "ask_owner" || result.isError !== false || assistant?.role !== "assistant") return;
+    const calls = assistant.content.filter(p => p.type === "toolCall");
+    const details = result.details;
+    if (calls.length !== 1 || calls[0].name !== "ask_owner" || calls[0].id !== result.toolCallId || !isRecord(details) ||
+        details.askId !== result.toolCallId || typeof details.question !== "string" || !details.question.trim() || typeof details.evidence !== "string" ||
+        Buffer.byteLength(details.evidence) > 4 * 1048576 || typeof calls[0].arguments.question !== "string" || calls[0].arguments.question.trim() !== details.question) return;
+    return { askId: result.toolCallId, question: details.question };
+  }
+  function pump() {
+    if (!hello || !ctxRef || closing || inFlight) return;
+    if (compacting && compactionFinished && ctxRef.isIdle()) compacting = false;
+    if (compacting) return;
+    try {
+      const entries = readInbox(runDir, hello.launchNonce);
+      const unacked = entries.filter(e => !readInboxAck(runDir, e.request));
+      // A void native call may have been lost before input. Preserve its renamed request;
+      // neither a tick nor reload can infer rejection or automatically replay it.
+      if (unacked.some(e => e.dispatched)) return;
+      const next = unacked[0];
+      if (!next) return;
+      dispatchInboxRequest(runDir, next.request);
+      inFlight = {};
+      pi.sendUserMessage(inboxMarker(next.request), { deliverAs: next.request.kind === "steer" || next.request.kind === "grace" ? "steer" : "followUp" });
+    } catch (error) { failed(ctxRef!, error); }
+  }
+  pi.on("input", (event, ctx) => {
+    if (!event.text.startsWith(CONTROL_PREFIX) || env.CONDUCTOR_SUBAGENT !== "1" || env.CONDUCTOR_RUNTIME !== "herdr" || pi.getFlag("conductor-launch") === undefined) return;
+    if (!hello || closing || compacting) return { action: "handled" };
+    try {
+      const entries = readInbox(runDir, hello.launchNonce);
+      const entry = entries.find(e => e.dispatched && inboxMarker(e.request) === event.text);
+      if (!entry || readInboxAck(runDir, entry.request)) return { action: "handled" };
+      const r = entry.request, ask = ownerAsk(ctx);
+      const busy = executingAsks.size > 0 || (r.kind === "reply" ? !ctx.isIdle() || ctx.hasPendingMessages() : !!ask);
+      const duplicateReply = r.kind === "reply" && entries.some(e => e.request.kind === "reply" && e.request.askId === r.askId && readInboxAck(runDir, e.request)?.accepted);
+      const code = busy ? "busy" : r.kind === "reply" && (!ask || ask.askId !== r.askId || duplicateReply) ? "stale-ask" : undefined;
+      const transformed = r.kind === "reply" && ask ? formatOwnerAnswer(ask, r.text) : r.text;
+      // Pi catches handler exceptions and continues with raw input. Catch locally, and
+      // publish acceptance here, not in the pump or after returning transformed text.
+      writeInboxAck(runDir, r, code);
+      if (code) { inFlight = undefined; return { action: "handled" }; }
+      inFlight = { text: transformed };
+      if (r.kind === "initial" || r.kind === "reply") accepted = true;
+      return { action: "transform", text: transformed };
+    } catch (error) {
+      if (hello) (processState[faultKey] ??= new Set()).add(faultIdentity(hello));
+      try { failed(ctx, error); } catch { /* Even diagnostics must not let a marker escape. */ }
+      return { action: "handled" };
     }
   });
   pi.on("session_before_switch", (event, ctx) => { observe({ ...event }, ctx); return hello ? { cancel: true } : undefined; });

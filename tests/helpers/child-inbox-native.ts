@@ -1,0 +1,179 @@
+// Private esbuild harness aliases Pi and all companion modules to the installed 0.87.1.
+import assert from "node:assert/strict";
+import fs, { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import type { TestContext } from "node:test";
+import { join } from "node:path";
+import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { VERSION, createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { installChildBridge } from "../../src/child-bridge.ts";
+import { installContextRetirement } from "../../src/context-retirement.ts";
+import { registerTools } from "../../src/tools.ts";
+import { RunRegistry } from "../../src/runs.ts";
+import { appendFileEvidence } from "../../src/file-evidence.ts";
+import { writeInboxRequest, readInboxAck, inboxMarker, CONTROL_PREFIX, type InboxRequest } from "../../src/herdr/inbox.ts";
+
+const turn = () => new Promise<void>(resolve => setImmediate(resolve));
+const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r; }); return { promise, resolve }; };
+
+export async function nativeWitness(root: string, scenario: string, t: TestContext) {
+  assert.equal(VERSION, "0.87.1");
+  const runId = `oracle-${scenario}`, runDir = join(root, runId), agentDir = join(runDir, "agent");
+  mkdirSync(join(runDir, "session"), { recursive: true });
+  let sm = SessionManager.create(runDir, join(runDir, "session"));
+  const binding = { runId, launchNonce: "nonce-1", sessionId: sm.getSessionId(), sessionFile: sm.getSessionFile(), paneId: "fake-pane", terminalId: "fake-terminal", tabId: "fake-tab", workspaceId: "fake-workspace", socketPath: join(root, "fake.sock"), createdTab: true };
+  const env = { CONDUCTOR_SUBAGENT: "1", CONDUCTOR_RUNTIME: "herdr", CONDUCTOR_RUN_DIR: runDir, CONDUCTOR_RUN_ID: runId,
+    HERDR_ENV: "1", HERDR_SOCKET_PATH: binding.socketPath, HERDR_PANE_ID: binding.paneId, HERDR_TAB_ID: binding.tabId, HERDR_WORKSPACE_ID: binding.workspaceId };
+  const faux = fauxProvider({ tokensPerSecond: Infinity, models: [{ id: "offline", contextWindow: 8192, maxTokens: 1024 }] });
+  const runtime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: null, modelsStorePath: join(agentDir, "models.json"), refreshOnCreate: false, allowModelNetwork: false });
+  const settings = { compaction: { enabled: false, keepRecentTokens: 0, reserveTokens: scenario === "threshold" ? 8191 : 0 }, retry: { enabled: false }, cacheWarming: "off" };
+  const settingsManager = SettingsManager.inMemory(settings);
+  let bridge!: ReturnType<typeof installChildBridge>, session: any, sequence = 0, shutdowns = 0, starts = 0;
+  const errors: any[] = [], seen: string[] = [], inputs: string[] = [], compactEvents: any[] = [];
+  let intercept = scenario === "intercept", settling = false;
+  let late: InboxRequest | undefined, compactionMode = scenario;
+  const held = deferred(), entered = deferred();
+  let holdPreflight = scenario === "inflight";
+  const put = (kind: InboxRequest["kind"] = "initial", text = "Prepared task", askId?: string) => {
+    const r: InboxRequest = { v: 1, launchNonce: binding.launchNonce, requestId: `request-${++sequence}`, sequence, kind, text, ...(askId ? { askId } : {}) };
+    writeInboxRequest(runDir, r); return r;
+  };
+  const response = (text = "offline done") => (context: any) => {
+    const user = [...context.messages].reverse().find((m: any) => m.role === "user");
+    const content = typeof user?.content === "string" ? user.content : user?.content?.filter((p: any) => p.type === "text").map((p: any) => p.text).join("\n");
+    seen.push(content); assert.ok(!content?.includes(CONTROL_PREFIX), "raw marker must never reach model");
+    return fauxAssistantMessage(text);
+  };
+  async function open() {
+    writeFileSync(join(runDir, "record.json"), JSON.stringify({ id: runId, runtime: "herdr", herdr: binding }));
+    const loader = new DefaultResourceLoader({ cwd: runDir, agentDir, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+      extensionFactories: [pi => {
+        pi.registerProvider(faux.provider); pi.registerFlag("conductor-launch", { type: "string" });
+        pi.on("agent_settled", () => {
+          if (scenario === "settle-race" && !settling) { settling = true; late = put("steer", "Too late"); t.mock.timers.tick(250); }
+        });
+        bridge = installChildBridge(pi, { env });
+        installContextRetirement(pi);
+        registerTools(pi, { getRegistry: () => new RunRegistry() } as never, env);
+      }, pi => {
+        pi.on("input", e => { inputs.push(e.text); assert.ok(!e.text.startsWith(CONTROL_PREFIX), "marker must be consumed or transformed before later extensions"); if (intercept) return { action: "handled" }; });
+        pi.on("before_agent_start", async () => { if (holdPreflight) { entered.resolve(); await held.promise; holdPreflight = false; } });
+        pi.on("agent_start", () => { starts++; });
+        pi.on("session_before_compact", e => {
+          compactEvents.push({ type: "before", reason: e.reason });
+          t.mock.timers.tick(250);
+          if (compactionMode === "compaction-cancel") return { cancel: true };
+          return { compaction: { summary: "Offline summary", firstKeptEntryId: compactionMode === "compaction-failure" ? "not-a-real-entry" : e.preparation.firstKeptEntryId, tokensBefore: e.preparation.tokensBefore } };
+        });
+        pi.on("session_compact", async e => {
+          compactEvents.push({ type: "success", reason: e.reason });
+          t.mock.timers.tick(250);
+          await turn();
+        });
+        pi.on("session_compact_failed", e => { compactEvents.push({ type: "failed", reason: e.reason, aborted: e.aborted }); });
+      }],
+    });
+    await loader.reload(); loader.getExtensions().runtime.flagValues.set("conductor-launch", binding.launchNonce);
+    ({ session } = await createAgentSession({ cwd: runDir, agentDir, modelRuntime: runtime, model: faux.getModel(), resourceLoader: loader, settingsManager, sessionManager: sm, tools: ["ask_owner"] }));
+    await session.bindExtensions({ mode: "tui", onError: (e: any) => errors.push(e), shutdownHandler: () => { shutdowns++; } });
+    assert.equal(JSON.parse(readFileSync(join(runDir, "launch", `${binding.launchNonce}.json`), "utf8")).piVersion, "0.87.1");
+  }
+  const close = async () => { await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); bridge.dispose(); session.dispose(); };
+  const tick = async () => { t.mock.timers.tick(250); await turn(); };
+  const ack = (r: InboxRequest) => readInboxAck(runDir, r);
+  const settle = () => { const d = deferred(); const off = session.subscribe((e: any) => { if (e.type === "agent_settled") { off(); d.resolve(); } }); return d.promise; };
+  const record = () => JSON.parse(readFileSync(join(runDir, "record.json"), "utf8"));
+  const savedEnv = process.env.CONDUCTOR_SUBAGENT;
+  process.env.CONDUCTOR_SUBAGENT = "1";
+  try {
+    await open();
+    if (["compaction-success", "compaction-failure", "compaction-cancel", "threshold", "overflow"].includes(scenario)) {
+      faux.setResponses([response("Unaccepted seed history")]); await session.prompt("Human seed");
+      const r = put();
+      if (scenario.startsWith("compaction-")) {
+        if (scenario === "compaction-failure") {
+          // Native failure after before_compact, without relying on a provider/network error.
+          const append = t.mock.method(sm, "appendCompaction", () => { throw new Error("native compaction failed"); });
+          try { await assert.rejects(session.compact(), /native compaction failed/); } finally { append.mock.restore(); }
+        } else if (scenario === "compaction-cancel") await assert.rejects(session.compact(), /cancelled/);
+        else await session.compact();
+      } else {
+        settingsManager.setCompactionEnabled(true);
+        faux.setResponses(scenario === "overflow" ? [fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long: 9000 tokens > 8192 maximum" }), response("Overflow recovered")] : [response("Threshold continued")]);
+        await session.prompt("Trigger native recovery");
+        settingsManager.setCompactionEnabled(false);
+      }
+      assert.equal(ack(r), undefined, "no input during native compaction, including asynchronous success handlers");
+      if (scenario === "threshold") assert.ok(compactEvents.some(e => e.type === "failed" && e.reason === "threshold" && e.aborted), "A2 cancellation emits native failure terminal");
+      else if (scenario === "overflow") assert.ok(compactEvents.some(e => e.type === "success" && e.reason === "overflow"), "positive overflow recovery remains enabled");
+      else assert.ok(compactEvents.some(e => e.type === (scenario === "compaction-success" ? "success" : "failed")));
+      faux.setResponses([response()]); const done = settle(); await tick(); await done;
+      assert.equal(ack(r)?.accepted, true, "native compaction terminal must reopen pump");
+      assert.equal(shutdowns, 1);
+    } else if (scenario === "ask-reply" || scenario === "stale-branch") {
+      const path = join(runDir, "evidence.txt"); writeFileSync(path, "CRLF\r\n漢🙂 & <payload>\r\n");
+      faux.setResponses([fauxAssistantMessage([fauxToolCall("ask_owner", { question: "Choose?", files: [path] }, { id: "ask-native" })], { stopReason: "toolUse" })]);
+      const r = put(); const done = settle(); await tick(); await done;
+      assert.equal(ack(r)?.accepted, true); assert.equal(shutdowns, 1);
+      const result: any = sm.getBranch().filter(e => e.type === "message").at(-1);
+      assert.equal(result.message.details.askId, "ask-native"); assert.equal(result.message.isError, false);
+      const answer = appendFileEvidence("  Answer\r\n🙂  ", [path], { cwd: runDir, registry: new RunRegistry() });
+      writeFileSync(path, "CHANGED AFTER ACCEPTANCE");
+      await close(); binding.launchNonce = "nonce-2"; sm = SessionManager.open(binding.sessionFile!);
+      if (scenario === "stale-branch") sm.branch(sm.getBranch().find(e => e.type === "message" && e.message.role === "user")!.id);
+      await open();
+      const reply = put("reply", answer, "ask-native");
+      faux.setResponses([response()]);
+      if (scenario === "stale-branch") {
+        await tick(); assert.equal(ack(reply)?.code, "stale-ask"); assert.equal(shutdowns, 1); assert.equal(starts, 1);
+      } else {
+        const doneReply = settle(); await tick(); await doneReply;
+        assert.equal(ack(reply)?.accepted, true); assert.equal(shutdowns, 2);
+        assert.equal(seen.at(-1), `<owner-answer ask-id="ask-native">\nQuestion: Choose?\nAnswer: ${answer}\nContinue the original assignment, not a new task.\n</owner-answer>`);
+        assert.equal(seen.at(-1)!.split("<owner-answer").length, 2, "owner framing exactly once");
+        assert.ok(seen.at(-1)!.includes("CRLF\r\n漢🙂 &amp; &lt;payload&gt;\r\n"));
+      }
+      assert.equal(record().herdr.launchNonce, "nonce-2");
+    } else {
+      const text = "  /skill:literal\r\n漢🙂\u2028\u2029\n<files>snapshot</files>  ";
+      const r = put("initial", text);
+      if (scenario === "preflight") session.agent.state.model = undefined;
+      faux.setResponses([response()]);
+      if (scenario === "ack-failure") {
+        const native = fs.writeSync;
+        const write = t.mock.method(fs, "writeSync", (fd: number, buffer: Buffer, offset: number, length: number) => {
+          if (buffer.includes('"accepted":true')) throw new Error("native ack write failure");
+          return native(fd, buffer, offset, length);
+        }); syncBuiltinESMExports();
+        try { await tick(); } finally { write.mock.restore(); syncBuiltinESMExports(); }
+        assert.equal(ack(r), undefined); assert.equal(faux.state.callCount, 0); assert.deepEqual(inputs, []);
+        await session.reload(); await tick(); assert.equal(ack(r), undefined); assert.equal(starts, 0);
+        assert.equal(faux.state.callCount, 0, "faulted input cannot resurrect on reload");
+      } else if (scenario === "intercept" || scenario === "preflight") {
+        await tick();
+        assert.equal(ack(r)?.accepted, true, "bridge input accepted even though native run never starts");
+        assert.equal(starts, 0); assert.equal(faux.state.callCount, 0); assert.equal(shutdowns, 0);
+        assert.deepEqual(inputs, [text]);
+        await session.reload(); await tick(); assert.equal(inputs.length, 1, "durable ack suppresses replay even without execution");
+        if (scenario === "preflight") assert.ok(errors.some(e => /No model selected/.test(e.error)));
+      } else if (scenario === "inflight") {
+        t.mock.timers.tick(250); await entered.promise;
+        assert.equal(ack(r)?.accepted, true); assert.equal(starts, 0);
+        const second = put("steer", "Must wait for native start"); await tick(); assert.equal(ack(second), undefined);
+        const done = settle(); held.resolve(); await done;
+        await tick(); assert.equal(ack(second), undefined, "settled while pump held means no accepted control");
+      } else {
+        const done = settle(); await tick(); await done; await turn();
+        assert.equal(ack(r)?.accepted, true); assert.deepEqual(seen, [text]); assert.deepEqual(inputs, [text]); assert.equal(shutdowns, 1);
+        if (scenario === "settle-race") { assert.ok(late); assert.equal(ack(late!), undefined, "native deferred settle marker is handled without ack"); }
+        await session.prompt(CONTROL_PREFIX + "foreign:1:unknown");
+        await session.reload(); await tick(); assert.equal(seen.length, 1); assert.equal(shutdowns, 1);
+      }
+    }
+    if (scenario !== "preflight") assert.deepEqual(errors, []);
+    return { version: VERSION, scenario, starts, shutdowns, providerCalls: faux.state.callCount, compaction: compactEvents };
+  } finally {
+    held.resolve(); await close();
+    if (savedEnv === undefined) delete process.env.CONDUCTOR_SUBAGENT; else process.env.CONDUCTOR_SUBAGENT = savedEnv;
+  }
+}
