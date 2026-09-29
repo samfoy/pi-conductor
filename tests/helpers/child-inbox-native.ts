@@ -4,14 +4,14 @@ import fs, { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import type { TestContext } from "node:test";
 import { join } from "node:path";
-import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { Type, fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { VERSION, createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { installChildBridge } from "../../src/child-bridge.ts";
 import { installContextRetirement } from "../../src/context-retirement.ts";
 import { registerTools } from "../../src/tools.ts";
 import { RunRegistry } from "../../src/runs.ts";
 import { appendFileEvidence } from "../../src/file-evidence.ts";
-import { writeInboxRequest, readInboxAck, inboxMarker, CONTROL_PREFIX, type InboxRequest } from "../../src/herdr/inbox.ts";
+import { writeInboxRequest, readInboxAck, readInbox, inboxMarker, CONTROL_PREFIX, type InboxRequest } from "../../src/herdr/inbox.ts";
 
 const turn = () => new Promise<void>(resolve => setImmediate(resolve));
 const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r; }); return { promise, resolve }; };
@@ -26,9 +26,10 @@ export async function nativeWitness(root: string, scenario: string, t: TestConte
     HERDR_ENV: "1", HERDR_SOCKET_PATH: binding.socketPath, HERDR_PANE_ID: binding.paneId, HERDR_TAB_ID: binding.tabId, HERDR_WORKSPACE_ID: binding.workspaceId };
   const faux = fauxProvider({ tokensPerSecond: Infinity, models: [{ id: "offline", contextWindow: 8192, maxTokens: 1024 }] });
   const runtime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: null, modelsStorePath: join(agentDir, "models.json"), refreshOnCreate: false, allowModelNetwork: false });
-  const settings = { compaction: { enabled: false, keepRecentTokens: 0, reserveTokens: scenario === "threshold" ? 8191 : 0 }, retry: { enabled: false }, cacheWarming: "off" };
+  const settings = { compaction: { enabled: false, keepRecentTokens: 0, reserveTokens: (scenario.includes("threshold") || scenario.startsWith("early-between-turn")) ? 8191 : 0 }, retry: { enabled: false }, cacheWarming: "off" };
   const settingsManager = SettingsManager.inMemory(settings);
-  let bridge!: ReturnType<typeof installChildBridge>, session: any, sequence = 0, shutdowns = 0, starts = 0;
+  let bridge!: ReturnType<typeof installChildBridge>, session: any, nativeCtx: any, sequence = 0, shutdowns = 0, starts = 0;
+  const modelInputs: string[][] = [];
   const errors: any[] = [], seen: string[] = [], inputs: string[] = [], compactEvents: any[] = [];
   let intercept = scenario === "intercept", settling = false;
   let late: InboxRequest | undefined, compactionMode = scenario;
@@ -39,8 +40,10 @@ export async function nativeWitness(root: string, scenario: string, t: TestConte
     writeInboxRequest(runDir, r); return r;
   };
   const response = (text = "offline done") => (context: any) => {
-    const user = [...context.messages].reverse().find((m: any) => m.role === "user");
-    const content = typeof user?.content === "string" ? user.content : user?.content?.filter((p: any) => p.type === "text").map((p: any) => p.text).join("\n");
+    const users = context.messages.filter((m: any) => m.role === "user").map((m: any) =>
+      typeof m.content === "string" ? m.content : m.content?.filter((p: any) => p.type === "text").map((p: any) => p.text).join("\n"));
+    modelInputs.push(users);
+    const content = users.at(-1);
     seen.push(content); assert.ok(!content?.includes(CONTROL_PREFIX), "raw marker must never reach model");
     return fauxAssistantMessage(text);
   };
@@ -55,7 +58,10 @@ export async function nativeWitness(root: string, scenario: string, t: TestConte
         bridge = installChildBridge(pi, { env });
         installContextRetirement(pi);
         registerTools(pi, { getRegistry: () => new RunRegistry() } as never, env);
+        if (scenario.startsWith("early-between-turn")) pi.registerTool({ name: "native_continue", label: "Continue", description: "Offline next-turn compaction fixture", parameters: Type.Object({}),
+          async execute() { settingsManager.setCompactionEnabled(true); return { content: [{ type: "text", text: "Continue" }], details: {} }; } });
       }, pi => {
+        pi.on("session_start", (_e, ctx) => { nativeCtx = ctx; });
         pi.on("input", e => { inputs.push(e.text); assert.ok(!e.text.startsWith(CONTROL_PREFIX), "marker must be consumed or transformed before later extensions"); if (intercept) return { action: "handled" }; });
         pi.on("before_agent_start", async () => { if (holdPreflight) { entered.resolve(); await held.promise; holdPreflight = false; } });
         pi.on("agent_start", () => { starts++; });
@@ -74,7 +80,7 @@ export async function nativeWitness(root: string, scenario: string, t: TestConte
       }],
     });
     await loader.reload(); loader.getExtensions().runtime.flagValues.set("conductor-launch", binding.launchNonce);
-    ({ session } = await createAgentSession({ cwd: runDir, agentDir, modelRuntime: runtime, model: faux.getModel(), resourceLoader: loader, settingsManager, sessionManager: sm, tools: ["ask_owner"] }));
+    ({ session } = await createAgentSession({ cwd: runDir, agentDir, modelRuntime: runtime, model: faux.getModel(), resourceLoader: loader, settingsManager, sessionManager: sm, tools: ["ask_owner", ...(scenario.startsWith("early-between-turn") ? ["native_continue"] : [])] }));
     await session.bindExtensions({ mode: "tui", onError: (e: any) => errors.push(e), shutdownHandler: () => { shutdowns++; } });
     assert.equal(JSON.parse(readFileSync(join(runDir, "launch", `${binding.launchNonce}.json`), "utf8")).piVersion, "0.87.1");
   }
@@ -87,7 +93,74 @@ export async function nativeWitness(root: string, scenario: string, t: TestConte
   process.env.CONDUCTOR_SUBAGENT = "1";
   try {
     await open();
-    if (["compaction-success", "compaction-failure", "compaction-cancel", "threshold", "overflow"].includes(scenario)) {
+    if (scenario.startsWith("early-")) {
+      faux.setResponses([response("Unaccepted seed history")]); await session.prompt("Human seed");
+      const r = put("initial", "  Held-auth task\r\n漢🙂  ");
+      const requestPath = join(runDir, "inbox", r.launchNonce, `${String(r.sequence).padStart(6, "0")}-${r.requestId}.json`);
+      const requestBytes = readFileSync(requestPath);
+      const authEntered = deferred(), releaseAuth = deferred();
+      const nativeAuth = session._getSummarizationRequestAuth;
+      const auth = t.mock.method(session, "_getSummarizationRequestAuth", async (...args: any[]) => {
+        authEntered.resolve(); await releaseAuth.promise;
+        if (scenario.endsWith("auth-failure")) throw new Error("held native summarization auth failure");
+        return nativeAuth.apply(session, args);
+      });
+      const send = t.mock.method(session, "sendUserMessage");
+      const manual = scenario.startsWith("early-manual"), betweenTurns = scenario.startsWith("early-between-turn");
+      if (!manual) {
+        settingsManager.setCompactionEnabled(!betweenTurns);
+        faux.setResponses(betweenTurns ? [fauxAssistantMessage([fauxToolCall("native_continue", {}, { id: "continue-1" })], { stopReason: "toolUse" }), response("Next turn")]
+          : scenario.endsWith("overflow") ? [fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long: 9000 tokens > 8192 maximum" }), response("Recovery")]
+          : [response("Threshold continued")]);
+      }
+      const operation = (manual ? session.compact() : session.prompt("Trigger early compaction")).then(() => undefined, (e: Error) => e);
+      let operationError: Error | undefined;
+      try {
+        await authEntered.promise;
+        assert.equal(session.isCompacting, true);
+        assert.equal(nativeCtx.isIdle(), false, "public idle reflects the early native controller");
+        assert.equal(nativeCtx.signal !== undefined, betweenTurns, "between-turn compaction retains the native run signal");
+        assert.equal(compactEvents.length, 0, "auth is held before session_before_compact");
+        await tick();
+        assert.deepEqual(readInbox(runDir, r.launchNonce), [{ request: r, dispatched: false }], "native held-auth compaction must leave the request undispatched");
+        assert.deepEqual(readFileSync(requestPath), requestBytes, "held-auth request bytes remain untouched");
+        assert.equal(ack(r), undefined); assert.equal(send.mock.callCount(), 0, "no native prompt invocation during compaction auth");
+        if (scenario.endsWith("reload")) {
+          await session.reload(); await tick();
+          assert.deepEqual(readInbox(runDir, r.launchNonce), [{ request: r, dispatched: false }], "reload must not turn an active run signal into compaction dispatch permission");
+          assert.equal(send.mock.callCount(), 0);
+        }
+        if (scenario.endsWith("cancel")) session.abortCompaction();
+      } finally { releaseAuth.resolve(); operationError = await operation; auth.mock.restore(); send.mock.restore(); }
+      if (manual && scenario !== "early-manual-success") assert.ok(operationError, "manual auth failure/cancel must actually reject");
+      else assert.equal(operationError, undefined);
+      if (scenario.includes("threshold") || betweenTurns) assert.ok(compactEvents.some(e => e.type === "failed" && e.reason === "threshold"), "automatic threshold completion/cancellation is observed");
+      else assert.ok(compactEvents.some(e => e.type === (scenario.endsWith("auth-failure") || scenario.endsWith("cancel") ? "failed" : "success")));
+      settingsManager.setCompactionEnabled(false);
+      faux.setResponses([response()]); const done = settle(); await tick(); await done;
+      assert.equal(ack(r)?.accepted, true); assert.ok(modelInputs.at(-1)?.includes(r.text), "provider receives the exact held-auth request alongside A2 guidance");
+      assert.equal(inputs.filter(text => text === r.text).length, 1); assert.equal(shutdowns, 1);
+    } else if (scenario.startsWith("streaming-")) {
+      const providerEntered = deferred(), releaseProvider = deferred();
+      faux.setResponses([async () => { providerEntered.resolve(); await releaseProvider.promise; return fauxAssistantMessage("Streaming seed finished"); }, response()]);
+      const operation = session.prompt("Human seed");
+      const send = t.mock.method(session, "sendUserMessage");
+      const r = put(scenario.endsWith("steer") ? "steer" : "follow_up", "  Live control\r\n漢🙂  ");
+      try {
+        await providerEntered.promise;
+        assert.equal(nativeCtx.isIdle(), false); assert.ok(nativeCtx.signal && !nativeCtx.signal.aborted);
+        if (scenario.includes("reload")) {
+          const signal = nativeCtx.signal;
+          await session.reload();
+          assert.equal(nativeCtx.signal, signal, "native signal identity survives same-process reload");
+        }
+        await tick();
+        assert.equal(ack(r)?.accepted, true, "healthy live streaming controls must not be blocked by the early-compaction guard");
+        assert.equal(send.mock.callCount(), 1); assert.ok(session.pendingMessageCount > 0);
+      } finally { releaseProvider.resolve(); await operation; send.mock.restore(); }
+      assert.equal(seen.at(-1), r.text); assert.equal(inputs.filter(text => text === r.text).length, 1);
+      assert.equal(shutdowns, 0, "a live control alone is not initial assignment acceptance");
+    } else if (["compaction-success", "compaction-failure", "compaction-cancel", "threshold", "overflow"].includes(scenario)) {
       faux.setResponses([response("Unaccepted seed history")]); await session.prompt("Human seed");
       const r = put();
       if (scenario.startsWith("compaction-")) {

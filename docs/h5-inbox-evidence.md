@@ -37,9 +37,11 @@ accepted/closing state and process-lifetime fault tombstone remain authoritative
   happen once. A scheduled/accepted input is held through idle preflight or
   queued-message consumption; native `agent_start` / matching user
   `message_start`, not a permanent busy flag, releases that in-flight gate.
-- `session_before_compact` closes the pump. Both success and failure/cancellation
-  mark the attempt finished, **then native idle or a following turn boundary**
-  reopens it: success handlers can still be running while Pi owns a compaction
+- Dispatch first requires native idle, or a non-aborted native run signal inside
+  an observed `turn_start`–`turn_end` interval. This excludes compaction's early
+  auth phase before `session_before_compact`. That event also closes the pump;
+  success/failure/cancellation finish the attempt, then native idle or a following
+  turn boundary reopens it. Success handlers can still run while Pi owns its
   controller. A2 threshold cancellation and overflow recovery stay unchanged.
 - The input handler consumes all reserved malformed/foreign/unknown/duplicate
   markers. Only a dispatched current request can transform. It writes its
@@ -122,6 +124,49 @@ CONTRIBUTING.md. Normal full-suite/typecheck/build/diff checks and repository
 commit hooks remain required. H4 native/tee tests, A6 native/corrections, A2
 retirement, tool-policy and M5 recovery/reload settlement barriers are included
 in the focused regression gate. No human TUI or real-pane acceptance is claimed.
+
+## Early-compaction correction (critic-5gnj)
+
+The initial H5 native test only ticked from `session_before_compact` and later
+handlers. It missed the authentication await **before** that event, when native
+`compact()` has already installed its controller. The added held-auth witness
+first failed the exact `native held-auth compaction must leave the request
+undispatched` assertion: `.sending.json` existed with no ack.
+
+API choice, checked against installed 0.87.1 source:
+- `ExtensionContext.isIdle()` delegates to `AgentSession.isIdle`, which includes
+  the native manual/automatic compaction controllers (`agent-session.js:875,
+  928, 2447`). It is false throughout held summarization auth.
+- `ExtensionContext.signal` is a live getter delegating to `agent.signal`
+  (`extensions/runner.js:597`, `agent-session.js:2449`,
+  `pi-agent-core/dist/agent.js:212`). A signal exists during healthy streaming
+  **and between-turn automatic compaction**, so signal presence alone is unsafe.
+- `turn_end` precedes `_compactBeforeNextAssistantResponse` in native
+  `prepareNextTurn`; `turn_start` follows it (`agent-session.js:295–423`). The
+  bridge records only this observed turn interval in a weak set of native
+  signals. Signal identity survives same-process reload; weak keys avoid a new
+  invocation ledger or retained session objects. The existing late-event gate
+  remains in place. Production never patches native compaction internals.
+
+Nine added native compaction scenarios hold `_getSummarizationRequestAuth` in
+the **test harness only**: manual success/auth-failure/cancel, pre-prompt A2
+threshold cancellation, post-run overflow success, and between-turn threshold,
+auth-failure, cancellation and reload. Each proves unchanged request bytes,
+`dispatched:false`, no ack and zero `sendUserMessage` calls before releasing
+auth; the later tick accepts the exact text once. Four positive streaming
+controls prove both steer and follow-up still enqueue during a held provider
+call, with and without native reload. The harness now runs 26 scenarios.
+
+Correction mutations both fail the intended native undispatched assertion:
+1. Remove the new pre-rename native-state guard: fails during manual held auth.
+2. Keep idle/signal checks but remove observed-turn membership: manual and
+   post-run cases pass, then between-turn held auth fails. This witnesses why
+   the turn phase cannot be replaced with signal presence alone.
+
+Both use snapshot restoration with SHA256 verification. Run the existing
+`tests/child-inbox-native.test.ts` command above to execute these new scenarios
+and all earlier ack, ask, compaction and fault controls. No replay or acceptance
+semantics were weakened; no H6/public-runtime code was changed.
 
 ## Complexity pass
 

@@ -27,7 +27,7 @@ function fixture() {
   const pi = { getFlag: () => binding.launchNonce, on: (name: string, h: (e: any, c: any) => unknown) => {
     handlers.set(name, [...handlers.get(name) ?? [], h]);
   }, sendUserMessage: (...args: unknown[]) => { sent.push(args); } };
-  const ctx = { isIdle: () => idle, hasPendingMessages: () => queued,
+  const ctx = { signal: undefined as AbortSignal | undefined, isIdle: () => idle, hasPendingMessages: () => queued,
     sessionManager: { getSessionId: () => binding.sessionId, getSessionFile: () => sessionFile, getBranch: () => branch },
     ui: { notify: (s: string) => diagnostics.push(s) }, shutdown: () => { shutdowns++; } };
   const fire = (type: string, fields: Record<string, unknown> = {}) => (handlers.get(type) ?? []).map(h => h({ type, ...fields }, ctx));
@@ -179,11 +179,11 @@ test("H5 pump holds idle preflight and queued text until native start/message, n
   try {
     const r = f.put(), second = f.put(f.request(2, "steer")); f.start(); t.mock.timers.tick(250); f.input(r);
     t.mock.timers.tick(1000); assert.equal(f.sent.length, 1, "ack is not native start; do not overlap idle preflights");
-    f.state({ idle: false }); f.fire("agent_start"); t.mock.timers.tick(250); assert.equal(f.sent.length, 2);
+    f.state({ idle: false }); f.ctx.signal = new AbortController().signal; f.fire("agent_start"); f.fire("turn_start"); t.mock.timers.tick(250); assert.equal(f.sent.length, 2);
     f.input(second); const third = f.put(f.request(3, "follow_up"));
     f.fire("turn_end"); t.mock.timers.tick(1000); assert.equal(f.sent.length, 2, "a turn boundary does not prove queued input consumption");
     f.fire("message_start", { message: { role: "user", content: [{ type: "text", text: second.text }] } });
-    t.mock.timers.tick(250); assert.equal(f.sent.length, 3); assert.equal(f.sent[2][0], inboxMarker(third));
+    f.fire("turn_start"); t.mock.timers.tick(250); assert.equal(f.sent.length, 3); assert.equal(f.sent[2][0], inboxMarker(third));
   } finally { f.dispose(); }
 });
 
@@ -291,4 +291,18 @@ test("H5 dispatch helper refuses malformed path identity before touching a reque
   const f = fixture();
   try { assert.throws(() => dispatchInboxRequest(f.runDir, f.request(1, "initial", { requestId: "../escape" })), /invalid/); }
   finally { f.dispose(); }
+});
+
+test("H5 nonidle without an observed live turn is not dispatch permission", t => {
+  t.mock.timers.enable({ apis: ["setInterval"] }); const f = fixture();
+  try {
+    const r = f.put(); f.start(); f.state({ idle: false });
+    t.mock.timers.tick(250); assert.equal(f.sent.length, 0, "early compaction has no turn signal");
+    const controller = new AbortController(); f.ctx.signal = controller.signal;
+    t.mock.timers.tick(250); assert.equal(f.sent.length, 0, "a run signal alone does not establish an active turn");
+    f.fire("turn_start"); controller.abort();
+    t.mock.timers.tick(250); assert.equal(f.sent.length, 0, "an aborted turn cannot admit controls during manual compact's abort phase");
+    assert.deepEqual(readInbox(f.runDir, r.launchNonce), [{ request: r, dispatched: false }]);
+    f.state({ idle: true }); t.mock.timers.tick(250); assert.equal(f.sent.length, 1);
+  } finally { f.dispose(); }
 });

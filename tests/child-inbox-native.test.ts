@@ -39,7 +39,9 @@ test("H5 installed Pi 0.87.1 native input acceptance, compaction, A6 and reload"
   await build({ entryPoints: [fileURLToPath(new URL("./helpers/child-inbox-native.ts", import.meta.url))], outfile: output, bundle: true, platform: "node", format: "esm", packages: "external", alias, external: Object.values(alias), logLevel: "silent" });
   const { nativeWitness } = await import(pathToFileURL(output).href);
   t.mock.timers.enable({ apis: ["setInterval"] });
-  for (const scenario of ["healthy", "intercept", "preflight", "ack-failure", "settle-race", "ask-reply", "stale-branch", "compaction-success", "compaction-failure", "compaction-cancel", "threshold", "overflow", "inflight"]) {
+  for (const scenario of ["early-manual-success", "early-manual-auth-failure", "early-manual-cancel", "early-auto-threshold", "early-auto-overflow",
+    "early-between-turn-threshold", "early-between-turn-auth-failure", "early-between-turn-cancel", "early-between-turn-reload",
+    "streaming-steer", "streaming-follow_up", "streaming-reload-steer", "streaming-reload-follow_up", "healthy", "intercept", "preflight", "ack-failure", "settle-race", "ask-reply", "stale-branch", "compaction-success", "compaction-failure", "compaction-cancel", "threshold", "overflow", "inflight"]) {
     t.diagnostic(JSON.stringify(await nativeWitness(root, scenario, t)));
   }
 });

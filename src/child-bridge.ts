@@ -18,7 +18,10 @@ interface BridgeOptions { env?: NodeJS.ProcessEnv; now?: () => number }
 // A full disk cannot reliably store a failure marker. Keep faults for this process's
 // lifetime, across module reload; disposal must never erase an incomplete invocation.
 const faultKey = Symbol.for("pi-conductor.child-bridge.tee-faults.v1");
-const processState = globalThis as typeof globalThis & { [faultKey]?: Set<string> };
+// Native run signals survive reload but span between-turn compaction too. Remember
+// only observed turn intervals, weakly, so reload preserves live-control eligibility.
+const turnKey = Symbol.for("pi-conductor.child-bridge.active-turns.v1");
+const processState = globalThis as typeof globalThis & { [faultKey]?: Set<string>; [turnKey]?: WeakSet<AbortSignal> };
 const faultIdentity = (h: Hello): string => JSON.stringify([h.runId, h.launchNonce, h.sessionId, h.sessionFile, h.pid, h.pidStartTime]);
 
 function writeAll(fd: number, buffer: Buffer): void {
@@ -102,6 +105,9 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
     try {
       flush();
       const type = event.type;
+      const signal = ctx.signal;
+      if (signal && type === "turn_start") (processState[turnKey] ??= new WeakSet()).add(signal);
+      if (signal && (type === "turn_end" || type === "agent_end")) processState[turnKey]?.delete(signal);
       if (type === "session_before_compact") { compacting = true; compactionFinished = false; }
       if (type === "session_compact" || type === "session_compact_failed") compactionFinished = true;
       if (compactionFinished && (type === "turn_start" || type === "before_agent_start" || type === "agent_before_settle")) compacting = false;
@@ -234,6 +240,10 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
       if (unacked.some(e => e.dispatched)) return;
       const next = unacked[0];
       if (!next) return;
+      // isIdle includes native compaction before session_before_compact. A live
+      // signal permits controls only inside a turn, not during between-turn auth.
+      const signal = ctxRef.signal;
+      if (!ctxRef.isIdle() && (!signal || signal.aborted || !processState[turnKey]?.has(signal))) return;
       dispatchInboxRequest(runDir, next.request);
       inFlight = {};
       pi.sendUserMessage(inboxMarker(next.request), { deliverAs: next.request.kind === "steer" || next.request.kind === "grace" ? "steer" : "followUp" });

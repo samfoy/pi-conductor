@@ -12180,6 +12180,7 @@ var token2 = (value) => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{
 var text = (value) => typeof value === "string" && !!value.trim() && !/[\0\r\n]/.test(value);
 var path = (value) => text(value) && isAbsolute4(value) && resolve6(value) === value;
 var faultKey = /* @__PURE__ */ Symbol.for("pi-conductor.child-bridge.tee-faults.v1");
+var turnKey = /* @__PURE__ */ Symbol.for("pi-conductor.child-bridge.active-turns.v1");
 var processState = globalThis;
 var faultIdentity = (h) => JSON.stringify([h.runId, h.launchNonce, h.sessionId, h.sessionFile, h.pid, h.pidStartTime]);
 function writeAll(fd, buffer) {
@@ -12282,6 +12283,9 @@ function installChildBridge(pi, options = {}) {
     try {
       flush();
       const type = event.type;
+      const signal = ctx.signal;
+      if (signal && type === "turn_start") (processState[turnKey] ??= /* @__PURE__ */ new WeakSet()).add(signal);
+      if (signal && (type === "turn_end" || type === "agent_end")) processState[turnKey]?.delete(signal);
       if (type === "session_before_compact") {
         compacting = true;
         compactionFinished = false;
@@ -12450,6 +12454,8 @@ function installChildBridge(pi, options = {}) {
       if (unacked.some((e) => e.dispatched)) return;
       const next = unacked[0];
       if (!next) return;
+      const signal = ctxRef.signal;
+      if (!ctxRef.isIdle() && (!signal || signal.aborted || !processState[turnKey]?.has(signal))) return;
       dispatchInboxRequest(runDir2, next.request);
       inFlight = {};
       pi.sendUserMessage(inboxMarker(next.request), { deliverAs: next.request.kind === "steer" || next.request.kind === "grace" ? "steer" : "followUp" });
