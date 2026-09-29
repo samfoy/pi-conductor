@@ -52,6 +52,20 @@ for (const field of ["pane_id", "terminal_id", "workspace_id", "tab_id", "agent"
 for (const pid of [-5, 0, 1, 1.5, NaN, Infinity, 100]) {
   test(`child refuses unsafe or mismatched pid ${pid}`, () => noSignal({...childEvidence, hello: {...hello, pid}}));
 }
+test("child refuses a schema-valid id session instead of a path", () => {
+  noSignal({...childEvidence, pane: {...livePane, agent_session: {...livePane.agent_session, kind: "id"}}});
+});
+for (const pid of [1, 99.5]) {
+  test(`child refuses consistently evidenced unsafe PID ${pid}`, () => {
+    noSignal({...childEvidence, binding: {...binding, childPid: pid}, hello: {...hello, pid},
+      process: {...childEvidence.process, pid}});
+  });
+}
+test("child refuses a matching hello and pane session outside the binding", () => {
+  const sessionFile = "/private/foreign/session.jsonl";
+  noSignal({...childEvidence, hello: {...hello, sessionFile},
+    pane: {...livePane, agent_session: {...livePane.agent_session, value: sessionFile}}});
+});
 test("socket mismatch and ambiguous evidence never prove ownership", () => {
   assert.equal(provePaneOurs({...emptyEvidence, socketPath: "/foreign"}).ok, false);
   noSignal({...childEvidence, socketPath: "/foreign"});

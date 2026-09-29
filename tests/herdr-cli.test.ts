@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { createHerdrCli, resolveHerdrBin } from "../src/herdr/cli.js";
 import { buildHerdrEnv, tabCreateArgs, createRunTab, closeEmptyPane } from "../src/herdr/placement.js";
 import { tmpDir } from "./helpers/tmp.js";
-import { invocation, pane } from "./fixtures/herdr-evidence.js";
+import { invocation, pane, livePane } from "./fixtures/herdr-evidence.js";
 
 const fakeBin = fileURLToPath(new URL("./fixtures/fake-herdr.mjs", import.meta.url));
 const secret = "SENTINEL-secret-DO-NOT-LOG";
@@ -71,6 +71,7 @@ test("fake create -> inspect -> persisted binding -> proof -> empty cleanup", {t
   assert.deepEqual(await closeEmptyPane(f.cli, binding, () => invocation), {ok: true});
   const state = f.read();
   assert.equal(state.closed, true);
+  assert.deepEqual(state.calls.filter((c: {args: string[]}) => c.args[1] === "close").map((c: {args: string[]}) => c.args), [["pane", "close", "pane_fake"]]);
   assert.deepEqual(state.calls.map((c: {args: string[]}) => c.args.slice(0, 2)), [["tab", "create"], ["pane", "get"], ["pane", "get"], ["pane", "close"]]);
   assert.deepEqual(state.calls[0].args, tabCreateArgs({workspaceId: "ws_fake", cwd: "/cwd with spaces/$(no-shell)", runId: invocation.runId, env: forwarded}));
   for (const call of state.calls) {
@@ -78,6 +79,15 @@ test("fake create -> inspect -> persisted binding -> proof -> empty cleanup", {t
     assert.deepEqual(call.routingNames, ["HERDR_SOCKET_PATH"]);
   }
 });
+test("cleanup zero destructive calls for a shell with a valid non-null session", {timeout: 5000}, async () => {
+  const f = fixture();
+  const binding = await f.create();
+  f.patch({pane: {...f.read().pane, agent_session: {...livePane.agent_session}}});
+  const result = await closeEmptyPane(f.cli, binding, () => invocation);
+  assert.deepEqual(f.read().calls.filter((c: {args: string[]}) => c.args[1] === "close"), [], "zero destructive calls for non-null session");
+  assert.deepEqual(result, {ok: false, state: "unknown", reason: "pane not empty"});
+});
+
 for (const field of ["pane_id", "terminal_id", "workspace_id", "tab_id", "agent", "agent_session"]) {
   test(`cleanup zero destructive calls on changed ${field}`, {timeout: 5000}, async () => {
     const f = fixture();
