@@ -1,5 +1,24 @@
 # H4 child bridge evidence
 
+## Correction: failed tee must survive extension reload
+
+Critic `critic-12ma` rejected `28eb8fb626a78a0b7d5330da755c4d2915015c49`: after ENOSPC, disposal forgot lost events and reload reused old acceptance to emit a clean settlement. Zero-byte failure left valid JSONL, so suffix validation was insufficient.
+
+The correction retains a process-lifetime `Set` under `globalThis[Symbol.for("pi-conductor.child-bridge.tee-faults.v1")]`. Keys contain run ID, nonce, session ID/file, PID and process start time. The tee records a fault before rethrowing, including deferred flush failures during disposal. Startup checks the tombstone before restoring acceptance or reopening the transcript. It diagnoses the fault and remains inert, leaving both intact and partial evidence untouched. No failure-marker disk write is required. No new file/protocol, repair path, parent behavior or H5 work was added; this replaces the write path's forget-on-disposal behavior with 12 net production lines.
+
+Tests first reproduced four false completions: 0/17-byte failures at an event boundary and at disposal. Each regression then disposes the bridge and imports two fresh module generations (asserting different factory identities). Production `applyEvent` must never see completed settlement, no closing marker or shutdown request may occur, and transcript bytes must stay unchanged. Controls cover healthy module reload, another run and a fresh nonce using an intact transcript. Tests isolate and restore the process-global registry; production retains fault keys until process exit.
+
+The existing private **Pi 0.87.1** faux-provider harness also injects 0/17-byte tee failures, performs two native reload/prompt cycles, and observes **zero shutdown requests** and no new transcript bytes. Existing native replacement/A6 controls retain their 20/26/23 records and one shutdown request each. The exact resolved native module URLs below remain unchanged; repository Pi remains 0.84.3.
+
+Verification for this correction:
+- Baseline `npm test`: **2446 pass / 12 skip / 0 fail**.
+- H4 focused command below: **99 pass / 0 skip / 0 fail**.
+- `npm test`: **2451 pass / 12 skip / 0 fail**, 2463 total.
+- `npm run typecheck`, `git diff --check`: clean. Two `npm run build` executions followed by `cmp` of both bundle artifacts: byte-equivalent.
+- Mutation deleting only fault retention: **5 intended failures / 1 healthy control pass**. All four import-based regressions failed at `H4 failed tee reload must not finalize completed through production applyEvent`; the native witness failed at `H4 native failed tee reload must not finalize completed`. Snapshot restoration matched SHA-256 `456bc0749e2050d15fbd9bd082bc28bad6f1206f2af217b3a1b1fad41efd5ee9`, followed by green focused/full gates.
+
+Limits: memory retention applies only within the same process/JS global, including normal extension-module reload. Full process-restart recovery retains existing claim semantics; this adds no durable crash-recovery or transcript repair guarantee. A new nonce is not a repair of a partial prior line. No tombstone expiry is introduced, because expiry could recertify an incomplete invocation.
+
 ## Scope and private contract
 
 Base: `6ad11dbf23f705bd110d1e890635484476145f98`. Branch: `feature/h4-child-bridge`.

@@ -13,6 +13,12 @@ const path = (value: unknown): value is string => text(value) && isAbsolute(valu
 type Hello = LaunchHello & Pick<HerdrBinding, "terminalId">;
 interface BridgeOptions { env?: NodeJS.ProcessEnv; now?: () => number }
 
+// A full disk cannot reliably store a failure marker. Keep faults for this process's
+// lifetime, across module reload; disposal must never erase an incomplete invocation.
+const faultKey = Symbol.for("pi-conductor.child-bridge.tee-faults.v1");
+const processState = globalThis as typeof globalThis & { [faultKey]?: Set<string> };
+const faultIdentity = (h: Hello): string => JSON.stringify([h.runId, h.launchNonce, h.sessionId, h.sessionFile, h.pid, h.pidStartTime]);
+
 function writeAll(fd: number, buffer: Buffer): void {
   for (let offset = 0; offset < buffer.length;) {
     const count = writeSync(fd, buffer, offset, buffer.length - offset);
@@ -65,8 +71,13 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
     }
   };
   const write = (record: Record<string, unknown>) => {
-    const buffer = Buffer.from(JSON.stringify({ ...record, _c: { n: hello!.launchNonce } }) + "\n", "utf8");
-    writeAll(fd!, buffer);
+    try {
+      const buffer = Buffer.from(JSON.stringify({ ...record, _c: { n: hello!.launchNonce } }) + "\n", "utf8");
+      writeAll(fd!, buffer);
+    } catch (error) {
+      if (hello) (processState[faultKey] ??= new Set()).add(faultIdentity(hello));
+      throw error;
+    }
   };
   function flush() {
     const message = pending; pending = undefined;
@@ -153,6 +164,7 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
       if (process.pid <= 1 || (process.platform === "linux" && !pidStartTime)) throw new Error("missing process identity");
       const expected: Hello = { v: 1, bridgeProtocol: PROTOCOL, runId, launchNonce: nonce, pid: process.pid, pidStartTime,
         paneId: b.paneId, terminalId: b.terminalId, sessionId, sessionFile, piVersion: VERSION, conductorVersion: packageInfo.version, at: Date.now() };
+      if (processState[faultKey]?.has(faultIdentity(expected))) throw new Error("invocation tee previously failed; reload cannot resume it; preserve evidence for the parent");
       const launchDir = join(runDir, "launch");
       mkdirSync(launchDir, { recursive: true });
       if (realpathSync(launchDir) !== launchDir) throw new Error("invalid launch directory");

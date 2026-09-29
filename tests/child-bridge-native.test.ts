@@ -18,6 +18,10 @@ process.env.CONDUCTOR_MEMORY_PATH = join(root, "memory.jsonl");
 
 test("H4 installed Pi 0.87.1 native bridge / replacement / A6 / reload / shutdown request", { timeout: 60000 }, async t => {
   t.after(() => stop());
+  const faultKey = Symbol.for("pi-conductor.child-bridge.tee-faults.v1");
+  const prior = Object.getOwnPropertyDescriptor(globalThis, faultKey);
+  Object.defineProperty(globalThis, faultKey, { value: new Set<string>(), writable: true, configurable: true });
+  t.after(() => { if (prior) Object.defineProperty(globalThis, faultKey, prior); else Reflect.deleteProperty(globalThis, faultKey); });
   const nativeRoot = process.env.CONDUCTOR_NATIVE_PI_ROOT ?? resolve(dirname(process.execPath), "../lib/node_modules/@earendil-works/pi-coding-agent");
   const version = JSON.parse(readFileSync(join(nativeRoot, "package.json"), "utf8")).version;
   assert.equal(version, "0.87.1", "native witness requires installed Pi 0.87.1, not a skipped or older parity test");
@@ -36,5 +40,8 @@ test("H4 installed Pi 0.87.1 native bridge / replacement / A6 / reload / shutdow
   const { nativeWitness } = await import(pathToFileURL(output).href);
   for (const scenario of ["sole", "batch", "failed"]) {
     t.diagnostic(JSON.stringify(await nativeWitness(root, scenario)));
+  }
+  for (const bytes of [0, 17]) {
+    t.diagnostic(JSON.stringify(await nativeWitness(root, `tee-${bytes}`, { bytes, context: t })));
   }
 });

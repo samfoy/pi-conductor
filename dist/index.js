@@ -12053,6 +12053,9 @@ var PROTOCOL = 1;
 var token = (value) => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value);
 var text = (value) => typeof value === "string" && !!value.trim() && !/[\0\r\n]/.test(value);
 var path = (value) => text(value) && isAbsolute3(value) && resolve5(value) === value;
+var faultKey = /* @__PURE__ */ Symbol.for("pi-conductor.child-bridge.tee-faults.v1");
+var processState = globalThis;
+var faultIdentity = (h) => JSON.stringify([h.runId, h.launchNonce, h.sessionId, h.sessionFile, h.pid, h.pidStartTime]);
 function writeAll(fd, buffer) {
   for (let offset = 0; offset < buffer.length; ) {
     const count = writeSync(fd, buffer, offset, buffer.length - offset);
@@ -12119,8 +12122,13 @@ function installChildBridge(pi, options = {}) {
     }
   };
   const write = (record) => {
-    const buffer = Buffer.from(JSON.stringify({ ...record, _c: { n: hello.launchNonce } }) + "\n", "utf8");
-    writeAll(fd, buffer);
+    try {
+      const buffer = Buffer.from(JSON.stringify({ ...record, _c: { n: hello.launchNonce } }) + "\n", "utf8");
+      writeAll(fd, buffer);
+    } catch (error) {
+      if (hello) (processState[faultKey] ??= /* @__PURE__ */ new Set()).add(faultIdentity(hello));
+      throw error;
+    }
   };
   function flush() {
     const message = pending;
@@ -12246,6 +12254,7 @@ function installChildBridge(pi, options = {}) {
         conductorVersion: package_default.version,
         at: Date.now()
       };
+      if (processState[faultKey]?.has(faultIdentity(expected))) throw new Error("invocation tee previously failed; reload cannot resume it; preserve evidence for the parent");
       const launchDir = join23(runDir2, "launch");
       mkdirSync11(launchDir, { recursive: true });
       if (realpathSync6(launchDir) !== launchDir) throw new Error("invalid launch directory");

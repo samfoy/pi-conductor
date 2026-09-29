@@ -1,6 +1,8 @@
 // Compiled only into a private harness with explicit installed Pi 0.87.1 aliases.
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import type { TestContext } from "node:test";
 import { join } from "node:path";
 import { Type, fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { VERSION, createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -10,7 +12,7 @@ import { RunRegistry } from "../../src/runs.ts";
 import { applyEvent } from "../../src/event-handler.ts";
 import type { Run } from "../../src/types.ts";
 
-export async function nativeWitness(root: string, scenario: string) {
+export async function nativeWitness(root: string, scenario: string, fault?: { bytes: number; context: TestContext }) {
   assert.equal(VERSION, "0.87.1", "native version gate must not silently use repository Pi");
   const runId = `oracle-${scenario}`;
   const runDir = join(root, runId), agentDir = join(root, "agent");
@@ -55,6 +57,7 @@ export async function nativeWitness(root: string, scenario: string) {
   try {
     await session.bindExtensions({ mode: "tui", onError: e => errors.push(e), shutdownHandler: () => {
       shutdowns++;
+      if (fault) return; // Failure assertions below inspect complete records without parsing a torn suffix.
       assert.equal(rows().at(-1).type, "agent_settled", "native shutdown request follows synchronous flush");
       assert.equal(JSON.parse(readFileSync(join(runDir, "launch/native-nonce.closing.json"), "utf8")).pid, process.pid);
     } });
@@ -76,7 +79,41 @@ export async function nativeWitness(root: string, scenario: string) {
     const calls = [fauxToolCall("ask_owner", { question: "Wrong original" }, { id: "native-ask" })];
     if (scenario === "batch") calls.push(fauxToolCall("control", {}, { id: "sibling" }));
     faux.setResponses([fauxAssistantMessage(calls, { stopReason: "toolUse" }), fauxAssistantMessage("Recovery finished")]);
-    await session.prompt("Accepted assignment needs decision");
+    const nativeWrite = fs.writeSync;
+    let remaining = fault?.bytes ?? 0, faultFd: number | undefined;
+    const writeMock = fault?.context.mock.method(fs, "writeSync", (fd: number, buffer: Buffer, offset: number, length: number) => {
+      if (faultFd === undefined && Buffer.isBuffer(buffer) && buffer.includes('"type":"message_end"') && buffer.includes('"_c":')) faultFd = fd;
+      if (fd !== faultFd) return nativeWrite(fd, buffer, offset, length);
+      if (remaining === 0) throw Object.assign(new Error("native tee full disk"), { code: "ENOSPC" });
+      const written = nativeWrite(fd, buffer, offset, Math.min(length, remaining));
+      remaining -= written; return written;
+    });
+    syncBuiltinESMExports();
+    try { await session.prompt("Accepted assignment needs decision"); }
+    finally { writeMock?.mock.restore(); syncBuiltinESMExports(); }
+    if (fault) {
+      assert.notEqual(faultFd, undefined, "native tee write was reached");
+      assert.equal(remaining, 0);
+      assert.equal(shutdowns, 0, "failed tee is inert before reload");
+      const damaged = readFileSync(join(runDir, "transcript.jsonl"));
+      for (let generation = 0; generation < 2; generation++) {
+        await session.reload();
+        faux.setResponses([fauxAssistantMessage("Human turn after failed invocation")]);
+        await session.prompt("Do not certify the incomplete assignment");
+        const after = readFileSync(join(runDir, "transcript.jsonl"));
+        const suffix = after.subarray(damaged.length).toString("utf8");
+        const effects = suffix.split("\n").flatMap(line => {
+          try { return [applyEvent({ messages: [], usage: {} } as unknown as Run, JSON.parse(line))]; } catch { return []; }
+        });
+        assert.ok(!effects.some(e => e.kind === "finalize" && e.status === "completed"), "H4 native failed tee reload must not finalize completed");
+        assert.deepEqual(after, damaged, "native reload must preserve the failed transcript unchanged");
+        assert.equal(existsSync(join(runDir, "launch/native-nonce.closing.json")), false);
+        assert.equal(shutdowns, 0);
+        assert.equal(bridge.acceptInitial(binding.launchNonce), false);
+      }
+      assert.deepEqual(errors, []);
+      return { version: VERSION, scenario, faultBytes: fault.bytes, shutdowns };
+    }
     const run = { id: runId, messages: [], usage: { turns: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 } } as unknown as Run;
     const transcript = rows();
     // This is the production consumer, with the current-nonce read filter H7 will own.
