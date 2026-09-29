@@ -3,6 +3,7 @@ import { lstatSync, readdirSync, readFileSync, readlinkSync, writeFileSync } fro
 import { join } from "node:path";
 import type { HookResult } from "../types.ts";
 import { effortGit } from "./open.ts";
+import { assertCandidateIndexFlags } from "./git.ts";
 import { isGeneratedPath, type EffortPolicy } from "./policy.ts";
 
 /** No rename inference: both the deletion and addition must satisfy the boundary. */
@@ -43,7 +44,7 @@ export async function regenerateCandidate(cwd: string, expectedHead: string, gen
   const changed = [...new Set([...paths, ...staged])];
   const outside = changed.filter(path => path === ".git" || !isGeneratedPath(path, generated));
   if (outside.length) throw new Error(`generated command edited paths outside generated policy: ${JSON.stringify(outside)}`);
-  if (effortGit(cwd, "ls-files", "-v", "-z").split("\0").filter(Boolean).some(line => !line.startsWith("H "))) throw new Error("generated command changed index flags; refusing integration");
+  assertCandidateIndexFlags(cwd);
   for (const path of changed) {
     if (after[path]?.startsWith("link:")) throw new Error(`generated symlink artifacts are unsupported: ${JSON.stringify(path)}`);
   }

@@ -2628,8 +2628,13 @@ function mergeTree(root, tip, branch) {
   const result = spawnSync("git", ["merge-tree", "--write-tree", "--name-only", "-z", tip, branch], { cwd: root, env: gitEnv(), encoding: "utf8", timeout: 3e4, maxBuffer: 1024 * 1024 });
   return { ...parseMergeTree(result.stdout ?? "", result.status, result.error?.message ?? result.stderr), output: result.stdout ?? "" };
 }
+function assertCandidateIndexFlags(path) {
+  const unsafe = effortGit(path, "ls-files", "-v", "-z").split("\0").filter((entry) => entry && !entry.startsWith("H "));
+  if (unsafe.length) throw new Error(`candidate has unsafe index flags: ${JSON.stringify(unsafe)}; refusing integration`);
+}
 function assertCandidate(path, oid) {
   if (effortGit(path, "rev-parse", "HEAD") !== oid) throw new Error("candidate HEAD changed after verification setup");
+  assertCandidateIndexFlags(path);
   if (effortGit(path, "status", "--porcelain", "--untracked-files=all")) throw new Error("candidate has unexpected dirty changes; refusing integration");
   if (effortGit(path, "rev-parse", "--abbrev-ref", "HEAD") !== "HEAD") throw new Error("candidate must stay detached");
 }
@@ -2936,7 +2941,7 @@ async function regenerateCandidate(cwd, expectedHead, generated, evidencePath, c
   const changed = [.../* @__PURE__ */ new Set([...paths, ...staged])];
   const outside = changed.filter((path) => path === ".git" || !isGeneratedPath(path, generated));
   if (outside.length) throw new Error(`generated command edited paths outside generated policy: ${JSON.stringify(outside)}`);
-  if (effortGit(cwd, "ls-files", "-v", "-z").split("\0").filter(Boolean).some((line) => !line.startsWith("H "))) throw new Error("generated command changed index flags; refusing integration");
+  assertCandidateIndexFlags(cwd);
   for (const path of changed) {
     if (after[path]?.startsWith("link:")) throw new Error(`generated symlink artifacts are unsupported: ${JSON.stringify(path)}`);
   }
