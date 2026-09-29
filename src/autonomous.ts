@@ -35,6 +35,7 @@ import type { RunStatus } from "./types.ts";
 // ── Plan + config types ──────────────────────────────────────────────────
 
 export interface AutoStep {
+  runtime?: import("./runtime.ts").RuntimeKind;
   persona: string;
   task: string;
   /** When true, re-evaluate the parent's output before advancing (S3). */
@@ -195,6 +196,7 @@ export interface AutoDeps {
     persona: string;
     task: string;
     retryAttempt: number;
+    runtime?: import("./runtime.ts").RuntimeKind;
     cwd?: string;
   }) => Promise<SpawnedStepResult>;
   /** Optional progress hook (per spawn terminal). */
@@ -251,7 +253,7 @@ export async function runAutonomous(
         return finalize(state);
       }
 
-      const res = await deps.spawnStep({ persona: step.persona, task, retryAttempt: attempt, cwd: step.cwd });
+      const res = await deps.spawnStep({ persona: step.persona, task, retryAttempt: attempt, runtime: step.runtime, cwd: step.cwd });
       state.stepsRun += 1;
       state.spentUsd += res.costUsd;
 

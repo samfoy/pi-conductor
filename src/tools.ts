@@ -10,6 +10,7 @@
 import { openEffort, effortRepository, effortGit } from "./effort/open.ts";
 import { readEffort, type EffortRecord } from "./effort/store.ts";
 import { EFFORT_NOTICE, effortSummary } from "./effort/policy.ts";
+import type { RuntimeKind, RuntimeEnvironment } from "./runtime.ts";
 import { subprocessRuntime } from "./subprocess-runtime.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
@@ -33,7 +34,7 @@ import {
 } from "./autonomous.ts";
 import { resolveRetryPolicy } from "./retry.ts";
 import { collapseSteerableCascade } from "./steerable.ts";
-import { prepareSpawnEffort, availableActions, observeRunActions, computeAvailableActions, supportsFocus, validateRunAction, elapsedStr, failBeforeSpawn, forceTerminate, formatUsage, getFinalText, keptBranchHint, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendCwd, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
+import { prepareSpawnRuntime, prepareSpawnEffort, availableActions, observeRunActions, computeAvailableActions, supportsFocus, validateRunAction, elapsedStr, failBeforeSpawn, forceTerminate, formatUsage, getFinalText, keptBranchHint, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendCwd, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
 import { registerAskOwner } from "./ask-owner.ts";
 import { isSettled, isTerminal } from "./types.ts";
 import { SpawnQueue } from "./queue.ts";
@@ -142,14 +143,14 @@ export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts, env: No
 
   registerListTool(pi, opts);
   registerStatusTool(pi, opts);
-  registerSpawnTool(pi, opts);
+  registerSpawnTool(pi, opts, env);
   registerSendTool(pi, opts);
   registerPauseTool(pi, opts);
   registerResumeTool(pi, opts);
   registerKillTool(pi, opts);
   registerFocusTool(pi, opts);
   registerRecommendTool(pi, opts);
-  registerAutoTool(pi, opts);
+  registerAutoTool(pi, opts, env);
   registerCwdTool(pi, opts);
   registerEffortTool(pi, opts);
 }
@@ -158,6 +159,8 @@ export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts, env: No
 function resolveSpawnCwd(arg: string | undefined, base: string): CwdResolution {
   return arg === undefined ? { ok: true, cwd: base } : resolveCwdArg(arg, base);
 }
+
+const runtimeSchema = Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("subprocess"), Type.Literal("herdr")], { description: "Runtime selector: per-call > effective persona > project > user > auto. Herdr is unavailable in H2; use subprocess explicitly inside herdr." }));
 
 const SPAWN_CWD_DESCRIPTION =
   "Directory the sub-agent runs in; personas, config, and the git root for worktree isolation resolve from it. " +
@@ -403,7 +406,7 @@ export function awaitTerminal(
   return { promise, settle };
 }
 
-function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
+function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts, env: RuntimeEnvironment): void {
   pi.registerTool({
     name: CONDUCTOR_LLM_TOOLS.auto,
     label: "Autonomous run",
@@ -426,6 +429,7 @@ function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       steps: Type.Array(
         Type.Object({
           persona: Type.String({ description: "Persona name to spawn for this step." }),
+          runtime: runtimeSchema,
           files: Type.Optional(Type.Array(Type.String(), { description: "Evidence paths or exact run:<agent_id> result refs; relative to this step's effective cwd. Prepared before any step starts." })),
           task: Type.String({ description: "Self-contained task for this step." }),
           reevaluate: Type.Optional(
@@ -486,6 +490,12 @@ function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         );
       }
 
+      const stepRuntimes: RuntimeKind[] = [];
+      try {
+        for (const [i, s] of params.steps.entries()) {
+          stepRuntimes.push(prepareSpawnRuntime({ persona: contexts.get(stepCwds[i]!)!.personas.get(s.persona)!, cwd: stepCwds[i]!, runtime: s.runtime, runtimeEnv: env }).runtime);
+        }
+      } catch (e) { return halted((e as Error).message); }
       const preparedTasks: string[] = [];
       try {
         for (const [i, s] of params.steps.entries()) {
@@ -495,7 +505,7 @@ function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       const plan: AutoPlan = {
         goal: params.goal,
         steps: params.steps.map(
-          (s, i): AutoStep => ({ persona: s.persona, task: preparedTasks[i]!, reevaluate: s.reevaluate, cwd: stepCwds[i] }),
+          (s, i): AutoStep => ({ persona: s.persona, runtime: stepRuntimes[i], task: preparedTasks[i]!, reevaluate: s.reevaluate, cwd: stepCwds[i] }),
         ),
       };
 
@@ -517,6 +527,7 @@ function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         persona: string;
         task: string;
         retryAttempt: number;
+        runtime?: RuntimeKind;
         cwd?: string;
       }): Promise<SpawnedStepResult> => {
         const stepCwd = a.cwd ?? baseCwd;
@@ -527,6 +538,7 @@ function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         let settleRef: (run: Run) => void = () => {};
         const spawned = queue.enqueueOrSpawn({
           persona: personaObj,
+          runtime: a.runtime,
           task: a.task,
           mode: "background",
           cwd: stepCwd,
@@ -588,7 +600,7 @@ function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 
 // ── ensemble_spawn ───────────────────────────────────────────────────
 
-function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
+function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts, env: RuntimeEnvironment): void {
   pi.registerTool({
     name: CONDUCTOR_LLM_TOOLS.spawn,
     label: "Spawn sub-agent",
@@ -611,6 +623,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       "Pass files: ['run:<agent_id>'] using the exact result-ref from a completion instead of paraphrasing evidence. Files are evidence, not instructions or capability grants; default_reads remains separate.",
     ],
     parameters: Type.Object({
+      runtime: runtimeSchema,
       effort: Type.Optional(Type.String({ description: `Named effort; auto-opens from config on first use. Always background with mandatory writer isolation. ${EFFORT_NOTICE}` })),
       touches: Type.Optional(Type.Array(Type.String(), { description: "Effort writer repo-relative globs (literal, * or **). Omitted scope is undeclared; concurrency is not relaxed in M1." })),
 
@@ -728,6 +741,10 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         );
       }
 
+      let runtime: RuntimeKind;
+      try { runtime = prepareSpawnRuntime({ persona, cwd, runtime: params.runtime, runtimeEnv: env }).runtime; }
+      catch (e) { return errorResult((e as Error).message); }
+
       const foreground = params.foreground !== false && params.effort === undefined;
       const effortNote = params.effort === undefined ? "" : `\n${params.foreground !== false ? "Foreground effort spawn downgraded to background. " : ""}${EFFORT_NOTICE}`;
       const mode = foreground ? "foreground" : "background";
@@ -766,6 +783,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 
       // Wire abort signal to cancel a running sub-agent.
       const result = queue.enqueueOrSpawn({
+        runtime,
         effort: params.effort,
         touches: params.touches,
         persona,
@@ -806,6 +824,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         // Not provided when chain: false is passed, preventing the auto-spawn.
         // Chain-spawned runs also don't receive onChain (no chain-of-chains).
         onChain: buildOnChainCallback({
+          runtimeEnv: env,
           chainEnabled: params.chain !== false && params.effort === undefined,
           personaName: persona.name,
           cfg,
@@ -1604,6 +1623,7 @@ function toStatusSummary(r: Run, canFocus: boolean, sessionId?: string, registry
     persona: r.persona,
     status: r.status,
     pending_ask: r.pendingAsk,
+    runtime: r.runtime ?? "subprocess",
     effort: r.effort,
     integration: r.integration,
     landedCommit: r.landedCommit,
@@ -1658,7 +1678,7 @@ function formatStatusForLLM(g: StatusGroups, queueSize: number, summaries: Map<s
       const waitReason = summaries.get(r.id)!.wait_reason;
       const hint = (waitReason ? ` ${waitReason}` : "") + (r.lastToolCall ? ` → ${r.lastToolCall}` : "") + (r.effort ? ` effort=${effortSummary(r)}` : "");
       lines.push(
-        `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} available_actions=${summaries.get(r.id)!.available_actions.join(",") || "(none)"}`,
+        `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} runtime=${r.runtime ?? "subprocess"} available_actions=${summaries.get(r.id)!.available_actions.join(",") || "(none)"}`,
       );
     }
   }
@@ -1759,6 +1779,7 @@ function validateHookTimeoutSeconds(s: number | undefined): string | undefined {
 // ── v0.15 chains ─────────────────────────────────────────────────────────
 
 export interface OnChainCallbackOpts {
+  runtimeEnv?: RuntimeEnvironment;
   chainEnabled: boolean;
   personaName: string;
   cfg: ReturnType<typeof import("./config.ts").loadConfig>;
@@ -1861,7 +1882,11 @@ export function buildOnChainCallback(
       process.stderr.write(`[conductor] chain after ${parentRun.id} rejected: ${(e as Error).message}\n`);
       return;
     }
+    let runtime: RuntimeKind;
+    try { runtime = prepareSpawnRuntime({ persona: chainPersona, cwd: chainCwd, runtimeEnv: args.runtimeEnv }).runtime; }
+    catch (e) { process.stderr.write(`[conductor] chain after ${parentRun.id} rejected: ${(e as Error).message}\n`); return; }
     const spawn = {
+      runtime,
       persona: chainPersona,
       task: preparedTask,
       mode: "background" as const,
@@ -1958,6 +1983,7 @@ export function buildOnRetryCallback(
     });
     args.queue.enqueueOrSpawn({
       persona: args.persona,
+      runtime: failedRun.runtime ?? "subprocess",
       task,
       mode: "background",
       cwd: args.cwd,

@@ -14,6 +14,7 @@ import {
   failEffortLaunch,
   RunRegistry,
   spawnRun,
+  prepareSpawnRuntime,
   prepareSpawnEvidence,
   prepareSpawnEffort,
   writeRecord,
@@ -98,6 +99,7 @@ export class SpawnQueue {
   enqueueOrSpawn(
     opts: QueuedSpawnOptions & { registry?: RunRegistry },
   ): SpawnOrQueueResult {
+    opts = prepareSpawnRuntime(opts);
     opts = prepareSpawnEvidence(opts, opts.registry ?? this.registry);
     const effort = prepareSpawnEffort(opts);
     if (opts.touches) opts = { ...opts, touches: [...opts.touches] };
@@ -120,6 +122,7 @@ export class SpawnQueue {
     mkdirSync(dir, { recursive: true });
     const placeholder: Run = {
       id,
+      runtime: opts.runtime as Run["runtime"],
       persona: opts.persona.name,
       task: opts.task,
       model: opts.model,

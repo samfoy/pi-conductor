@@ -11,6 +11,7 @@
  * Spec: docs/v0.9-gc-design.md §2 (D1\u2013D8); docs/v0.9-gc-plan.md "Slice 1".
  */
 
+import { unsupportedRuntimeReason } from "../runtime.ts";
 import { isTerminal, type GcConfig } from "../types.ts";
 import type { InventoryEntry } from "./inventory.ts";
 
@@ -166,6 +167,7 @@ function decideForEntry(
   now: number,
   orphanThresholdMs: number,
 ): ReclaimAction {
+  if (unsupportedRuntimeReason(entry.runtime) || unsupportedRuntimeReason(entry.inMemory?.runtime)) return { kind: "keep", id: entry.id, reason: "unsupported runtime; evidence preserved" };
   if (entry.effort || entry.inMemory?.effort) return { kind: "keep", id: entry.id, reason: "unresolved effort ownership" };
   // Rule 1: active-in-memory gate (load-bearing per slice 1 acceptance).
   if (entry.inMemory) {

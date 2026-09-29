@@ -26,7 +26,7 @@ import { EffortDriver } from "./effort/driver.ts";
 import { addEffortMember, assertEffortOwner, assertRunEffortOwner, readEffort, listEfforts, writeDurableJson, writeDurableFile, type EffortRecord } from "./effort/store.ts";
 import { admitEffortWriter, consumesSlot, type AdmissionLimits } from "./effort/admit.ts";
 import { EFFORT_NOTICE, effortSummary, validateTouches } from "./effort/policy.ts";
-import type { Signaler } from "./runtime.ts";
+import { resolveRuntime, assertSupportedRuntime, unsupportedRuntimeReason, type RuntimeKind, type RuntimeChoice, type RuntimeEnvironment, type Signaler } from "./runtime.ts";
 export type { Signaler } from "./runtime.ts";
 export { buildSubagentEnv, capabilitiesFor, createLineDecoder, RPC_ACK_TIMEOUT_MS } from "./subprocess-runtime.ts";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -973,6 +973,8 @@ export class RunRegistry {
 // ── Spawn ────────────────────────────────────────────────────────────
 
 export interface SpawnOptions {
+  runtime?: RuntimeChoice;
+  runtimeEnv?: RuntimeEnvironment;
   effort?: string;
   touches?: string[];
   files?: readonly string[];
@@ -1230,6 +1232,17 @@ export function prepareSpawnEvidence<T extends { task: string; files?: readonly 
   return { ...opts, task, files: undefined };
 }
 
+/** Resolve once before any admission effects; queued options retain the concrete kind. */
+export function prepareSpawnRuntime<T extends Pick<SpawnOptions, "runtime" | "runtimeEnv" | "persona" | "cwd">>(opts: T): T & { runtime: RuntimeKind } {
+  const layers = loadConfigWithErrors(opts.cwd);
+  const resolved = resolveRuntime({ perCall: opts.runtime,
+    persona: layers.config.personaOverrides[opts.persona.name]?.runtime ?? opts.persona.runtime,
+    project: layers.project.runtime, user: layers.user.runtime, env: opts.runtimeEnv ?? process.env });
+  if (!resolved.ok) throw new Error(resolved.reason);
+  assertSupportedRuntime(resolved.kind);
+  return { ...opts, runtime: resolved.kind };
+}
+
 /** Validate before registry/queue/process effects, shared by immediate and queued spawns. */
 export function prepareSpawnEffort(opts: Pick<SpawnOptions, "effort" | "touches" | "persona" | "cwd" | "parentSessionId">): EffortRecord | undefined {
   if (opts.effort === undefined) {
@@ -1243,6 +1256,7 @@ export function prepareSpawnEffort(opts: Pick<SpawnOptions, "effort" | "touches"
 
 /** Spawn immediately; foreground/background callers await the same terminal promise. */
 export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
+  opts = prepareSpawnRuntime(opts);
   opts = prepareSpawnEvidence(opts, opts.registry);
   const effort = prepareSpawnEffort(opts);
   const id = opts.preAllocatedId ?? allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
@@ -1252,6 +1266,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
 
   const run: Run = {
     id,
+    runtime: opts.runtime as RuntimeKind,
     // A queued placeholder may still be writing this same record.
     recordWrite: opts.registry.get(id)?.recordWrite,
     persona: opts.persona.name,
@@ -1558,15 +1573,17 @@ export function failEffortLaunch(run: Run, registry: RunRegistry, errorMessage: 
  * the conductor as the run's own card (e.g. a chain successor's).
  */
 export function failBeforeSpawn(
-  opts: Pick<SpawnOptions, "registry" | "persona" | "task" | "mode" | "cwd" | "model" | "thinking" | "parentSessionId" | "onComplete">,
+  opts: Pick<SpawnOptions, "registry" | "persona" | "task" | "mode" | "cwd" | "model" | "thinking" | "parentSessionId" | "onComplete" | "runtime" | "runtimeEnv">,
   errorMessage: string,
 ): Run {
+  const runtime = prepareSpawnRuntime(opts).runtime;
   const id = allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
   const dir = runDir(id);
   mkdirSync(dir, { recursive: true });
   const now = Date.now();
   const run: Run = {
     id,
+    runtime,
     persona: opts.persona.name,
     task: opts.task,
     model: opts.model,
@@ -1836,6 +1853,8 @@ type ActionObservations = ReturnType<typeof observeRunActions>;
 /** Pure eligibility, shared by reports and execution gates. Undefined means eligible. */
 export function runActionError(run: Run, action: RunAction, observed: ActionObservations): string | undefined {
   if (action === "focus") return observed.canFocus ? undefined : "Focused stream requires terminal UI (TUI mode).";
+  const unsupported = unsupportedRuntimeReason(run.runtime);
+  if (unsupported) return unsupported;
   if (action === "send" || action === "steer" || action === "follow_up") {
     if (observed.effortOwnershipError) return observed.effortOwnershipError;
     if (action === "send" && observed.effortAdmissionError) return observed.effortAdmissionError;

@@ -642,10 +642,10 @@ function formatRunRow(
   // legitimately may have a dead pid, and legacy runs predating the
   // pid schema bump (v0.9.x) have no pid to probe.
   const liveness =
-    r.status === "running" && r.pid !== undefined && !livenessProbe(r.pid)
+    (r.runtime ?? "subprocess") === "subprocess" && r.status === "running" && r.pid !== undefined && !livenessProbe(r.pid)
       ? " · pid-gone"
       : "";
-  return `  ${STATUS_GLYPH[r.status] ?? "·"} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint}${liveness}`;
+  return `  ${STATUS_GLYPH[r.status] ?? "·"} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} runtime=${r.runtime ?? "subprocess"}${liveness}`;
 }
 
 /**

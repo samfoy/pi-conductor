@@ -263,6 +263,8 @@ function everyOption(): Required<Omit<QueuedOptions, "effort" | "touches">> & { 
   return {
     persona: builderPersona(),
     task: "drift",
+    runtime: "subprocess",
+    runtimeEnv: {},
     effort: undefined,
     touches: undefined,
     files: [],

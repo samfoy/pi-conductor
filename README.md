@@ -42,6 +42,40 @@ pi-conductor closes that gap. The parent pi session is the conductor, sub-agents
 - **Per-spawn `cwd`** on `ensemble_spawn` and on each `ensemble_auto` step sets where the sub-agent runs and where personas, config, and the git root for `worktree: true` isolation resolve. `~` and relative paths resolve against the conductor's default cwd; a missing directory is rejected before any run starts. `ensemble_send` resumes and chain successors keep the original run's cwd. A chain successor gets the same worktree decision as `ensemble_spawn`, branching from the current HEAD; a write-capable successor after a parent whose branch was kept unmerged fails instead of starting without that work.
 - **Conductor default cwd.** pi can't change a session's cwd, so the conductor keeps its own: `/conductor cwd [<path>|--reset]` or the `ensemble_cwd` tool (`{ path?, reset? }`) sets or clears an override for later spawns. With no argument, both report the effective cwd and its source. The override is saved as a `conductor-cwd` session entry, so it survives `/reload` and resume.
 
+### Runtime selection (H2 interim)
+
+`runtime: "auto" | "subprocess" | "herdr"` is accepted on `ensemble_spawn`,
+each `ensemble_auto` step, persona frontmatter, and config (top-level or
+`personaOverrides.<name>.runtime`). Precedence is **per-call > effective persona
+> project global > user global > auto**. Persona overrides keep the existing
+field-level project-over-user merge, above frontmatter.
+
+`auto` selects herdr only when `HERDR_ENV=1` and both `HERDR_SOCKET_PATH` and
+`HERDR_PANE_ID` are nonempty; otherwise it selects subprocess. **The herdr backend
+is not implemented yet.** Selecting it fails before queue, run, effort or worktree
+creation. Explicit herdr outside that environment also fails; there is no silent
+fallback. Inside herdr, pass **`runtime: "subprocess"`** on a spawn/auto step (or
+set that value in your effective persona/config) to keep using native subprocesses.
+H2 does not create panes, run herdr commands, or connect a bridge/monitor.
+
+The concrete backend is frozen before queue admission and persisted in `record.json`.
+Queue drain, retries and saved-session sends retain it; legacy records without a
+tag always mean subprocess, including inside herdr. Auto validates/freezes every
+step before starting the plan, including retries. A chain is a **fresh successor**:
+its persona and current config/environment resolve when it fires, not from its
+parent's runtime or per-call selector. Pin the successor persona/config to subprocess
+if needed. Unsupported successors are reported without creating a run.
+
+`ensemble_status` reports `runtime` alongside the existing `available_actions`.
+Doctor reports configured selection, each persona's effective kind/source, saved
+kinds and legacy behaviour using read-only checks; it does not run a herdr health
+probe. Tagged herdr records are preserved by startup reconciliation and GC,
+without subprocess PID probes/signals; effort recovery/requeue also refuses them.
+Subprocess print and RPC are **transports, not runtimes**: explicit steering and
+A5's automatic large-prompt RPC both remain subprocess, and automatic RPC does
+not grant steering. A6 answers and M5 integration verification retain their existing
+subprocess semantics; verification commands are independent of the agent selector.
+
 ### Available actions (Phase A A3)
 
 `ensemble_status` reports `available_actions` for every run, including queued,

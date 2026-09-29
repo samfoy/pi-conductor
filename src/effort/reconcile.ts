@@ -1,3 +1,4 @@
+import { assertSupportedRuntime } from "../runtime.ts";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
@@ -80,6 +81,7 @@ function uncertainDelivery(run: Run): void {
 }
 export async function recoverEffort(original: EffortRecord, opts: RecoveryOptions): Promise<{ runs: Run[]; done: Promise<void> }> {
   if (process.env.CONDUCTOR_SUBAGENT === "1") return { runs: [], done: Promise.resolve() };
+  for (const run of [...records(original), ...opts.registry.list().filter(r => r.effort?.gitRoot === original.gitRoot && r.effort.name === original.name)]) assertSupportedRuntime(run.runtime);
   let record = adoptEffort(original, effortOwner(opts.sessionId));
   const active = opts.registry.list().filter(r => r.effort?.gitRoot === original.gitRoot && r.effort.name === original.name && r.integrationControl);
   if (active.length) {
@@ -93,6 +95,7 @@ export async function recoverEffort(original: EffortRecord, opts: RecoveryOption
   const runnable: Run[] = [], restored: Run[] = [];
   try {
     const saved = records(record);
+    for (const run of saved) assertSupportedRuntime(run.runtime);
     const order = [...new Set([...(record.queue ?? []), ...saved.filter(r => r.status === "integrating").sort((a, b) => (a.integration?.enqueuedAt ?? a.startTime) - (b.integration?.enqueuedAt ?? b.startTime) || a.id.localeCompare(b.id)).map(r => r.id)])];
     const missing = [...new Set([...record.members, ...order])].filter(id => !saved.some(r => r.id === id));
     record = { ...record, members: [...new Set([...record.members, ...saved.map(r => r.id)])], queue: order,
@@ -186,6 +189,7 @@ export async function recoverEffort(original: EffortRecord, opts: RecoveryOption
 
 /** Slash-command only: the caller has obtained explicit human confirmation. */
 export async function requeueEffortRun(run: Run, opts: RecoveryOptions, replacement?: string, expectedOid?: string): Promise<{ done: Promise<void> }> {
+  assertSupportedRuntime(run.runtime);
   if (!run.effort || run.status === "blocked" || run.status === "running" || run.status === "paused" || (run.status === "integrating" && (!run.integrationSuspended || run.integrationControl || run.integration?.state !== "paused"))) throw new Error("requeue requires a stopped preserved writer, never a blocked ask or live assignment");
   let record = adoptEffort(readEffort(run.effort.gitRoot, run.effort.name)!, effortOwner(opts.sessionId));
   const lock = join(effortDir(record.gitRoot, "integration-driver"), "driver.lock");

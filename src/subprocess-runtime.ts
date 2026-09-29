@@ -4,10 +4,12 @@ import { dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { RpcStdinQueue } from "./rpc-stdin.ts";
 import type { Run } from "./types.ts";
+import { assertSupportedRuntime, unsupportedRuntimeReason } from "./runtime.ts";
 import type { RunRuntime, RunSink, RunTransport, Signaler, Delivery } from "./runtime.ts";
 
 export class SubprocessRuntime implements RunRuntime {
   launch(run: Run, args: string[], cwd: string, sink: RunSink, initialPrompt?: string): RunTransport {
+    assertSupportedRuntime(run.runtime);
     const invocation = getPiInvocation(args);
     const tmp = run.effort ? join(dirname(run.recordPath), "tmp") : undefined;
     if (tmp) mkdirSync(tmp, { recursive: true });
@@ -41,6 +43,7 @@ export class SubprocessRuntime implements RunRuntime {
   }
 
   capabilities(run: Run) {
+    if (unsupportedRuntimeReason(run.runtime)) return { pause: false, liveSend: false };
     const exited = run.proc?.exitCode != null || run.proc?.signalCode != null;
     return {
       pause: !!run.proc?.pid && !exited,
@@ -49,18 +52,22 @@ export class SubprocessRuntime implements RunRuntime {
   }
 
   deliver(run: Run, type: "steer" | "follow_up", message: string) {
-    return enqueueRpcSendWithAck(run, type, message);
+    const reason = unsupportedRuntimeReason(run.runtime);
+    return reason ? { kind: "epipe" as const, reason } : enqueueRpcSendWithAck(run, type, message);
   }
 
   stopProcess(run: Run): void {
+    assertSupportedRuntime(run.runtime);
     run.proc?.kill("SIGTERM");
   }
 
   signal(run: Run, signal: NodeJS.Signals, signaler: Signaler = process.kill): void {
+    assertSupportedRuntime(run.runtime);
     signaler(run.proc!.pid!, signal);
   }
 
   terminate(run: Run, killGroup: (pid: number, signal: NodeJS.Signals) => void): void {
+    assertSupportedRuntime(run.runtime);
     if (run.proc) {
       try {
         run.proc.kill("SIGTERM");

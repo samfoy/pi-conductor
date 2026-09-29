@@ -70,6 +70,7 @@ export interface InventoryEntry {
    */
   holdsWorktree?: boolean;
   effort?: RunRecord["effort"];
+  runtime?: RunRecord["runtime"];
 }
 
 interface SafeStat {
@@ -203,6 +204,7 @@ async function buildEntry(
     malformed: false,
     holdsWorktree: holdsKeptWorktree(record),
     effort: record.effort,
+    runtime: record.runtime,
   };
 }
 

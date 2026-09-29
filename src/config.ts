@@ -19,6 +19,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { parseRuntimeChoice } from "./runtime.ts";
 import { DEFAULT_CONFIG, type ConductorConfig } from "./types.ts";
 
 export function userConfigPath(): string {
@@ -75,6 +76,8 @@ function mergeConfig(base: ConductorConfig, raw: unknown): ConductorConfig {
   if (!raw || typeof raw !== "object") return base;
   const r = raw as Record<string, unknown>;
   const out: ConductorConfig = { ...base };
+  // Preserve invalid selectors for fail-closed spawn validation, not silent auto fallback.
+  if (r.runtime !== undefined) out.runtime = r.runtime as ConductorConfig["runtime"];
   // Effort policy is validated at open, not silently weakened on malformed values.
   if (r.efforts !== undefined) {
     out.efforts = r.efforts && typeof r.efforts === "object" && !Array.isArray(r.efforts)
@@ -240,6 +243,12 @@ export function loadConfigWithErrors(cwd: string): LoadConfigResult {
 
   const p = safeReadJson(projectConfigPath(cwd));
   if (p.error) errors.push(p.error);
+  for (const [path, raw] of [[userConfigPath(), u.value], [projectConfigPath(cwd), p.value]] as const) {
+    if (raw && typeof raw === "object" && "runtime" in raw) {
+      try { parseRuntimeChoice(raw.runtime); }
+      catch (e) { errors.push({ path, reason: (e as Error).message }); }
+    }
+  }
   const projectCfg = mergeConfig({ ...DEFAULT_CONFIG }, p.value);
 
   // Combined view: defaults <- user <- project.

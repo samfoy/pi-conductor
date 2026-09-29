@@ -45,6 +45,7 @@ import { readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { unsupportedRuntimeReason } from "./runtime.ts";
 import type { Run, RunRecord, RunStatus } from "./types.ts";
 import { TERMINAL_STATUSES, emptyUsage } from "./types.ts";
 
@@ -80,6 +81,7 @@ export type ClassifyResult =
   | "restore-effort"
   | "restore-integrating"
   | "restore-blocked"
+  | "skip-unsupported-runtime"
   | "skip-terminal"
   | "skip-foreign";
 
@@ -135,6 +137,7 @@ export function classifyRecord(
   ) => defaultParentLivenessProbe(pid, startTime),
   selfSessionId: string | undefined = undefined,
 ): ClassifyResult {
+  if (unsupportedRuntimeReason(record.runtime)) return "skip-unsupported-runtime";
   const status = record.status;
 
   // Terminal statuses are the GC's territory.
@@ -509,6 +512,9 @@ export async function reconcileOrphansAtStartup(
       const dryRun = deps.dryRun === true;
 
       switch (verdict) {
+        case "skip-unsupported-runtime":
+          result.errors.push({ id: record.id, message: unsupportedRuntimeReason(record.runtime)! });
+          break;
         case "restore-effort":
           if (!dryRun) {
             const run = buildOrphanRun(record, record.status);
@@ -663,6 +669,7 @@ export async function reconcileOrphansAtStartup(
 export function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
   return {
     id: record.id,
+    runtime: record.runtime ?? "subprocess",
     persona: record.persona,
     task: record.task,
     model: record.model,

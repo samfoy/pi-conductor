@@ -67,6 +67,7 @@ export const FOREIGN_SPAWN_TOOLS: readonly string[] = ["subagent", "agent"];
  * denylist of edit tools is partial enforcement, not a sandbox.
  */
 export interface Persona {
+  runtime?: import("./runtime.ts").RuntimeChoice;
   /** Unique name within the resolved scope (project overrides user overrides builtin). */
   name: string;
   /** One-line description shown in /conductor list and orchestrator prompt. */
@@ -189,6 +190,7 @@ export interface ChainStep {
 }
 
 export interface ConductorConfig {
+  runtime?: import("./runtime.ts").RuntimeChoice;
   efforts?: Partial<import("./effort/policy.ts").EffortPolicy>;
   /** Retire managed child sessions on automatic context pressure. */
   contextRetirement: boolean;
@@ -322,6 +324,7 @@ export interface GcConfig {
 }
 
 export interface PersonaOverride {
+  runtime?: import("./runtime.ts").RuntimeChoice;
   disabled?: boolean;
   model?: string;
   thinking?: ThinkingLevel;
@@ -538,6 +541,8 @@ export interface RunIntegration {
 }
 
 export interface Run {
+  /** Concrete backend, fixed at acceptance. Missing legacy tags mean subprocess. */
+  readonly runtime?: import("./runtime.ts").RuntimeKind;
   waitReason?: string;
   /** Owned integration effects; never restored from a saved record. */
   integrationControl?: { cancel(): void; suspend(): Promise<void> };
@@ -1004,6 +1009,8 @@ export interface Run {
 
 /** Persisted record.json shape (subset of Run, no proc/timer references). */
 export interface RunRecord {
+  /** Concrete backend, fixed at acceptance. Missing legacy tags mean subprocess. */
+  readonly runtime?: import("./runtime.ts").RuntimeKind;
   effort?: RunEffort;
   integration?: RunIntegration;
   landedCommit?: string;
@@ -1180,6 +1187,7 @@ export function toRunRecord(r: Run): RunRecord {
     systemPrompt: r.systemPrompt,
     tools: r.tools,
     excludeTools: r.excludeTools,
+    runtime: r.runtime ?? "subprocess",
     steerable: r.steerable,
     streamingMode: r.streamingMode,
     hookResult: r.hookResult,

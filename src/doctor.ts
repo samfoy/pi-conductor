@@ -5,10 +5,10 @@
  * ExtensionCommandContext.notify pipe.
  */
 
-import { existsSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { resolveRuntime, unsupportedRuntimeReason, type RuntimeEnvironment } from "./runtime.ts";
+import { existsSync, accessSync, constants } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { effectiveExcludeTools, resolvePersonas } from "./personas.ts";
 import {
   loadConfigWithErrors,
@@ -25,6 +25,7 @@ import { planReclaim } from "./gc/policy.ts";
 import type { PostStartupReconcileResult } from "./reconcile-startup.ts";
 
 export interface DoctorReportOptions {
+  env?: RuntimeEnvironment;
   cwd: string;
   registry: RunRegistry;
   queue: SpawnQueue;
@@ -88,7 +89,7 @@ function spawnToolLines(loaded: readonly string[] | undefined): string[] {
 }
 
 export async function buildDoctorReport(opts: DoctorReportOptions): Promise<string> {
-  const { config: cfg, errors: configErrors } = loadConfigWithErrors(opts.cwd);
+  const { config: cfg, user, project, errors: configErrors } = loadConfigWithErrors(opts.cwd);
   const resolved = await resolvePersonas({
     cwd: opts.cwd,
     personaOverrides: cfg.personaOverrides,
@@ -371,6 +372,15 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
 
   lines.push("");
   lines.push("## Runtime");
+  lines.push(`  configured: ${cfg.runtime ?? "auto"} (project > user > auto; persona/per-call may override)`);
+  lines.push("  legacy records without a runtime tag: subprocess; resume/retry preserve the concrete backend");
+  for (const p of resolved.personas.values()) {
+    const selected = resolveRuntime({ persona: p.runtime, project: project.runtime, user: user.runtime, env: opts.env ?? process.env });
+    lines.push(selected.ok
+      ? `  ${p.name}: ${selected.kind} [${selected.source}]${unsupportedRuntimeReason(selected.kind) ? " — unavailable; use runtime: subprocess" : ""}`
+      : `  ${p.name}: ${selected.reason}`);
+  }
+  for (const r of opts.registry.list()) lines.push(`  ${r.id}: saved=${r.runtime ?? "subprocess (legacy)"}`);
   lines.push(`  active:        ${opts.registry.countActive()}`);
   lines.push(`  queued:        ${opts.queue.size()}`);
   lines.push(`  total tracked: ${opts.registry.list().length}`);
@@ -472,21 +482,14 @@ function formatBytes(n: number): string {
   return `${gb.toFixed(2)} GB`;
 }
 
-/**
- * v0.11 slice 5 — lightweight PATH probe for the first whitespace-
- * delimited token of a hook command. Uses `command -v` (POSIX) rather
- * than `which` (not always present). Returns `true` when the check
- * passes (binary found) or is indeterminate (shell built-in, piped
- * command, `execSync` error). Only returns `false` when the probe
- * definitively reports the binary is NOT on PATH.
- */
+/** Advisory executable lookup only: doctor must not spawn even a shell probe. */
 function isBinaryOnPath(command: string): boolean {
   const bin = command.trim().split(/\s+/)[0];
-  if (!bin || bin.startsWith("/")) return true; // absolute path — no PATH check needed
-  try {
-    execSync(`command -v ${JSON.stringify(bin)}`, { stdio: "pipe" });
-    return true;
-  } catch {
-    return false;
-  }
+  if (!bin || bin.startsWith("/")) return true;
+  // Shell syntax/builtins are indeterminate without running a shell.
+  if ([":", "cd", "export", "unset", "set", "test", "[", "command", "eval", "exec", "exit", "read"].includes(bin)) return true;
+  return (process.env.PATH ?? "").split(delimiter).some(dir => {
+    try { accessSync(join(dir, bin), constants.X_OK); return true; }
+    catch { return false; }
+  });
 }

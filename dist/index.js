@@ -44,6 +44,7 @@ function toRunRecord(r) {
     systemPrompt: r.systemPrompt,
     tools: r.tools,
     excludeTools: r.excludeTools,
+    runtime: r.runtime ?? "subprocess",
     steerable: r.steerable,
     streamingMode: r.streamingMode,
     hookResult: r.hookResult,
@@ -464,17 +465,48 @@ var init_worktree = __esm({
   }
 });
 
+// src/runtime.ts
+function parseRuntimeChoice(value) {
+  if (value === "auto" || value === "subprocess" || value === "herdr") return value;
+  throw new Error(`runtime must be auto, subprocess or herdr; got ${JSON.stringify(value)}`);
+}
+function resolveRuntime(input) {
+  const layers = [["per-call", input.perCall], ["persona", input.persona], ["project", input.project], ["user", input.user]];
+  const [source, value] = layers.find(([, value2]) => value2 !== void 0) ?? ["auto", "auto"];
+  let choice;
+  try {
+    choice = parseRuntimeChoice(value);
+  } catch (e) {
+    return { ok: false, reason: e.message };
+  }
+  const insideHerdr = input.env.HERDR_ENV === "1" && !!input.env.HERDR_SOCKET_PATH && !!input.env.HERDR_PANE_ID;
+  if (choice === "herdr" && !insideHerdr) return { ok: false, reason: "runtime herdr requested but HERDR_ENV/HERDR_SOCKET_PATH/HERDR_PANE_ID are not all set" };
+  return { ok: true, kind: choice === "auto" ? insideHerdr ? "herdr" : "subprocess" : choice, source };
+}
+function unsupportedRuntimeReason(kind) {
+  if (kind === void 0 || kind === "subprocess") return;
+  return `runtime ${String(kind)} backend is unavailable; use runtime: subprocess for a fresh spawn. Saved runs cannot migrate backends.`;
+}
+function assertSupportedRuntime(kind) {
+  const reason = unsupportedRuntimeReason(kind);
+  if (reason) throw new Error(reason);
+}
+function isObservableHere(run) {
+  return run.proc !== void 0;
+}
+
 // src/effort/reconcile.ts
 import { randomUUID as randomUUID3 } from "node:crypto";
 import { existsSync as existsSync9, mkdirSync as mkdirSync9, readFileSync as readFileSync12, readdirSync as readdirSync5, realpathSync as realpathSync5 } from "node:fs";
 import { dirname as dirname12, join as join14, relative as relative3 } from "node:path";
 
 // src/reconcile-startup.ts
-init_types();
 import { readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+init_types();
 function classifyRecord(record, isAlive, _now, selfPid = process.pid, isParentAlive = (pid, startTime) => defaultParentLivenessProbe(pid, startTime), selfSessionId = void 0) {
+  if (unsupportedRuntimeReason(record.runtime)) return "skip-unsupported-runtime";
   const status = record.status;
   if (!record.effort && TERMINAL_STATUSES.includes(status)) {
     return "skip-terminal";
@@ -597,6 +629,9 @@ async function reconcileOrphansAtStartup(deps) {
       );
       const dryRun = deps.dryRun === true;
       switch (verdict) {
+        case "skip-unsupported-runtime":
+          result.errors.push({ id: record.id, message: unsupportedRuntimeReason(record.runtime) });
+          break;
         case "restore-effort":
           if (!dryRun) {
             const run = buildOrphanRun(record, record.status);
@@ -711,6 +746,7 @@ async function reconcileOrphansAtStartup(deps) {
 function buildOrphanRun(record, status) {
   return {
     id: record.id,
+    runtime: record.runtime ?? "subprocess",
     persona: record.persona,
     task: record.task,
     model: record.model,
@@ -907,6 +943,7 @@ function validateAndBuild(raw, source, sourcePath) {
   const worktree = optionalBoolean(frontmatter, "worktree") ?? false;
   const timeoutMinutes = optionalNumber(frontmatter, "timeout_minutes") ?? 60;
   const readOnly = optionalBoolean(frontmatter, "read_only") ?? false;
+  const runtime = frontmatter.runtime === void 0 ? void 0 : parseRuntimeChoice(frontmatter.runtime);
   const onCompleteHook = optionalStringAllowEmpty(frontmatter, "on_complete_hook");
   const onCompleteHookTimeoutSeconds = optionalPositiveInteger(
     frontmatter,
@@ -938,6 +975,7 @@ function validateAndBuild(raw, source, sourcePath) {
     source,
     sourcePath,
     readOnly,
+    runtime,
     onCompleteHook,
     onCompleteHookTimeoutSeconds,
     maxTurns,
@@ -1096,9 +1134,11 @@ async function resolvePersonas(opts) {
     }
     const base = personas.get(name);
     if (!base) continue;
+    let runtime = base.runtime;
     let tools = base.tools;
     let excludeTools = base.excludeTools;
     try {
+      if (ov.runtime !== void 0) runtime = parseRuntimeChoice(ov.runtime);
       if (ov.tools !== void 0) tools = parseToolList(ov.tools, "tools");
       if (ov.exclude_tools !== void 0) {
         excludeTools = parseToolList(ov.exclude_tools, "exclude_tools");
@@ -1110,6 +1150,7 @@ async function resolvePersonas(opts) {
     }
     personas.set(name, {
       ...base,
+      runtime,
       tools,
       excludeTools,
       model: ov.model ?? base.model,
@@ -1132,10 +1173,10 @@ import { execFileSync } from "node:child_process";
 import { realpathSync as realpathSync3 } from "node:fs";
 
 // src/config.ts
-init_types();
 import { existsSync as existsSync2, readFileSync as readFileSync2 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { join as join3 } from "node:path";
+init_types();
 function userConfigPath() {
   return join3(homedir2(), ".pi", "agent", "extensions", "conductor", "config.json");
 }
@@ -1157,6 +1198,7 @@ function mergeConfig(base, raw) {
   if (!raw || typeof raw !== "object") return base;
   const r = raw;
   const out = { ...base };
+  if (r.runtime !== void 0) out.runtime = r.runtime;
   if (r.efforts !== void 0) {
     out.efforts = r.efforts && typeof r.efforts === "object" && !Array.isArray(r.efforts) ? { ...out.efforts, ...r.efforts } : { verify: void 0 };
   }
@@ -1283,6 +1325,15 @@ function loadConfigWithErrors(cwd) {
   const userCfg = mergeConfig({ ...DEFAULT_CONFIG }, u.value);
   const p = safeReadJson(projectConfigPath(cwd));
   if (p.error) errors.push(p.error);
+  for (const [path, raw] of [[userConfigPath(), u.value], [projectConfigPath(cwd), p.value]]) {
+    if (raw && typeof raw === "object" && "runtime" in raw) {
+      try {
+        parseRuntimeChoice(raw.runtime);
+      } catch (e) {
+        errors.push({ path, reason: e.message });
+      }
+    }
+  }
   const projectCfg = mergeConfig({ ...DEFAULT_CONFIG }, p.value);
   let merged = mergeConfig({ ...DEFAULT_CONFIG }, u.value);
   merged = mergeConfig(merged, p.value);
@@ -1961,6 +2012,7 @@ var RpcStdinQueue = class {
 // src/subprocess-runtime.ts
 var SubprocessRuntime = class {
   launch(run, args, cwd, sink, initialPrompt) {
+    assertSupportedRuntime(run.runtime);
     const invocation = getPiInvocation(args);
     const tmp = run.effort ? join7(dirname4(run.recordPath), "tmp") : void 0;
     if (tmp) mkdirSync3(tmp, { recursive: true });
@@ -1997,6 +2049,7 @@ var SubprocessRuntime = class {
     } };
   }
   capabilities(run) {
+    if (unsupportedRuntimeReason(run.runtime)) return { pause: false, liveSend: false };
     const exited = run.proc?.exitCode != null || run.proc?.signalCode != null;
     return {
       pause: !!run.proc?.pid && !exited,
@@ -2004,15 +2057,19 @@ var SubprocessRuntime = class {
     };
   }
   deliver(run, type, message) {
-    return enqueueRpcSendWithAck(run, type, message);
+    const reason = unsupportedRuntimeReason(run.runtime);
+    return reason ? { kind: "epipe", reason } : enqueueRpcSendWithAck(run, type, message);
   }
   stopProcess(run) {
+    assertSupportedRuntime(run.runtime);
     run.proc?.kill("SIGTERM");
   }
   signal(run, signal, signaler = process.kill) {
+    assertSupportedRuntime(run.runtime);
     signaler(run.proc.pid, signal);
   }
   terminate(run, killGroup) {
+    assertSupportedRuntime(run.runtime);
     if (run.proc) {
       try {
         run.proc.kill("SIGTERM");
@@ -4728,6 +4785,19 @@ function prepareSpawnEvidence(opts, registry) {
   const task = appendFileEvidence(opts.task, opts.files, { cwd: opts.cwd, registry, limit: loadConfigWithErrors(opts.cwd).config.inlineAttachmentLimitBytes });
   return { ...opts, task, files: void 0 };
 }
+function prepareSpawnRuntime(opts) {
+  const layers = loadConfigWithErrors(opts.cwd);
+  const resolved = resolveRuntime({
+    perCall: opts.runtime,
+    persona: layers.config.personaOverrides[opts.persona.name]?.runtime ?? opts.persona.runtime,
+    project: layers.project.runtime,
+    user: layers.user.runtime,
+    env: opts.runtimeEnv ?? process.env
+  });
+  if (!resolved.ok) throw new Error(resolved.reason);
+  assertSupportedRuntime(resolved.kind);
+  return { ...opts, runtime: resolved.kind };
+}
 function prepareSpawnEffort(opts) {
   if (opts.effort === void 0) {
     if (opts.touches !== void 0) throw new Error("touches requires an effort");
@@ -4738,6 +4808,7 @@ function prepareSpawnEffort(opts) {
   return ownedEffort(opts.cwd, opts.effort, opts.parentSessionId);
 }
 function spawnRun(opts) {
+  opts = prepareSpawnRuntime(opts);
   opts = prepareSpawnEvidence(opts, opts.registry);
   const effort = prepareSpawnEffort(opts);
   const id = opts.preAllocatedId ?? allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
@@ -4746,6 +4817,7 @@ function spawnRun(opts) {
   mkdirSync8(dir, { recursive: true });
   const run = {
     id,
+    runtime: opts.runtime,
     // A queued placeholder may still be writing this same record.
     recordWrite: opts.registry.get(id)?.recordWrite,
     persona: opts.persona.name,
@@ -4998,12 +5070,14 @@ function failEffortLaunch(run, registry, errorMessage, onComplete) {
   return { run, done };
 }
 function failBeforeSpawn(opts, errorMessage) {
+  const runtime = prepareSpawnRuntime(opts).runtime;
   const id = allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
   const dir = runDir(id);
   mkdirSync8(dir, { recursive: true });
   const now = Date.now();
   const run = {
     id,
+    runtime,
     persona: opts.persona.name,
     task: opts.task,
     model: opts.model,
@@ -5123,6 +5197,8 @@ function observeRunActions(run, canFocus = false, sessionId, registry) {
 }
 function runActionError(run, action, observed) {
   if (action === "focus") return observed.canFocus ? void 0 : "Focused stream requires terminal UI (TUI mode).";
+  const unsupported = unsupportedRuntimeReason(run.runtime);
+  if (unsupported) return unsupported;
   if (action === "send" || action === "steer" || action === "follow_up") {
     if (observed.effortOwnershipError) return observed.effortOwnershipError;
     if (action === "send" && observed.effortAdmissionError) return observed.effortAdmissionError;
@@ -5847,6 +5923,7 @@ function uncertainDelivery(run) {
 }
 async function recoverEffort(original, opts) {
   if (process.env.CONDUCTOR_SUBAGENT === "1") return { runs: [], done: Promise.resolve() };
+  for (const run of [...records(original), ...opts.registry.list().filter((r) => r.effort?.gitRoot === original.gitRoot && r.effort.name === original.name)]) assertSupportedRuntime(run.runtime);
   let record = adoptEffort(original, effortOwner(opts.sessionId));
   const active = opts.registry.list().filter((r) => r.effort?.gitRoot === original.gitRoot && r.effort.name === original.name && r.integrationControl);
   if (active.length) {
@@ -5863,6 +5940,7 @@ async function recoverEffort(original, opts) {
   const runnable = [], restored = [];
   try {
     const saved = records(record);
+    for (const run of saved) assertSupportedRuntime(run.runtime);
     const order = [.../* @__PURE__ */ new Set([...record.queue ?? [], ...saved.filter((r) => r.status === "integrating").sort((a, b) => (a.integration?.enqueuedAt ?? a.startTime) - (b.integration?.enqueuedAt ?? b.startTime) || a.id.localeCompare(b.id)).map((r) => r.id)])];
     const missing = [.../* @__PURE__ */ new Set([...record.members, ...order])].filter((id) => !saved.some((r) => r.id === id));
     record = {
@@ -5985,6 +6063,7 @@ async function recoverEffort(original, opts) {
   return { runs: restored, done };
 }
 async function requeueEffortRun(run, opts, replacement, expectedOid) {
+  assertSupportedRuntime(run.runtime);
   if (!run.effort || run.status === "blocked" || run.status === "running" || run.status === "paused" || run.status === "integrating" && (!run.integrationSuspended || run.integrationControl || run.integration?.state !== "paused")) throw new Error("requeue requires a stopped preserved writer, never a blocked ask or live assignment");
   let record = adoptEffort(readEffort(run.effort.gitRoot, run.effort.name), effortOwner(opts.sessionId));
   const lock = join14(effortDir(record.gitRoot, "integration-driver"), "driver.lock");
@@ -6123,10 +6202,9 @@ var STATUS_GLYPH = {
 };
 
 // src/doctor.ts
-import { existsSync as existsSync12 } from "node:fs";
-import { execSync as execSync2 } from "node:child_process";
+import { existsSync as existsSync12, accessSync, constants as constants2 } from "node:fs";
 import { homedir as homedir8 } from "node:os";
-import { join as join17 } from "node:path";
+import { delimiter, join as join17 } from "node:path";
 
 // src/gc/last-gc.ts
 import { existsSync as existsSync10, statSync as statSync4, utimesSync, writeFileSync as writeFileSync5 } from "node:fs";
@@ -6264,7 +6342,8 @@ async function buildEntry(id, runDir2, registry) {
     inMemory,
     malformed: false,
     holdsWorktree: holdsKeptWorktree(record),
-    effort: record.effort
+    effort: record.effort,
+    runtime: record.runtime
   };
 }
 
@@ -6354,6 +6433,7 @@ function planReclaim(inventory, config, now) {
   };
 }
 function decideForEntry(entry, config, now, orphanThresholdMs) {
+  if (unsupportedRuntimeReason(entry.runtime) || unsupportedRuntimeReason(entry.inMemory?.runtime)) return { kind: "keep", id: entry.id, reason: "unsupported runtime; evidence preserved" };
   if (entry.effort || entry.inMemory?.effort) return { kind: "keep", id: entry.id, reason: "unresolved effort ownership" };
   if (entry.inMemory) {
     const mem = entry.inMemory;
@@ -6445,7 +6525,7 @@ function spawnToolLines(loaded) {
   ];
 }
 async function buildDoctorReport(opts) {
-  const { config: cfg, errors: configErrors } = loadConfigWithErrors(opts.cwd);
+  const { config: cfg, user, project, errors: configErrors } = loadConfigWithErrors(opts.cwd);
   const resolved = await resolvePersonas({
     cwd: opts.cwd,
     personaOverrides: cfg.personaOverrides
@@ -6664,6 +6744,13 @@ async function buildDoctorReport(opts) {
   }
   lines.push("");
   lines.push("## Runtime");
+  lines.push(`  configured: ${cfg.runtime ?? "auto"} (project > user > auto; persona/per-call may override)`);
+  lines.push("  legacy records without a runtime tag: subprocess; resume/retry preserve the concrete backend");
+  for (const p of resolved.personas.values()) {
+    const selected = resolveRuntime({ persona: p.runtime, project: project.runtime, user: user.runtime, env: opts.env ?? process.env });
+    lines.push(selected.ok ? `  ${p.name}: ${selected.kind} [${selected.source}]${unsupportedRuntimeReason(selected.kind) ? " \u2014 unavailable; use runtime: subprocess" : ""}` : `  ${p.name}: ${selected.reason}`);
+  }
+  for (const r of opts.registry.list()) lines.push(`  ${r.id}: saved=${r.runtime ?? "subprocess (legacy)"}`);
   lines.push(`  active:        ${opts.registry.countActive()}`);
   lines.push(`  queued:        ${opts.queue.size()}`);
   lines.push(`  total tracked: ${opts.registry.list().length}`);
@@ -6738,12 +6825,15 @@ function formatBytes(n) {
 function isBinaryOnPath(command) {
   const bin = command.trim().split(/\s+/)[0];
   if (!bin || bin.startsWith("/")) return true;
-  try {
-    execSync2(`command -v ${JSON.stringify(bin)}`, { stdio: "pipe" });
-    return true;
-  } catch {
-    return false;
-  }
+  if ([":", "cd", "export", "unset", "set", "test", "[", "command", "eval", "exec", "exit", "read"].includes(bin)) return true;
+  return (process.env.PATH ?? "").split(delimiter).some((dir) => {
+    try {
+      accessSync(join17(dir, bin), constants2.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
 }
 
 // src/history.ts
@@ -7138,11 +7228,6 @@ async function maybeAutoRunGc(opts) {
     `gc auto: scanned=${result.scanned} archive=${sumPlan.archive} delete=${sumPlan.delete} reconcile=${sumPlan.reconcile} reclaimedMB=${mb} failed=${failedCount} dur=${result.durationMs}ms`
   );
   return { ran: true, result };
-}
-
-// src/runtime.ts
-function isObservableHere(run) {
-  return run.proc !== void 0;
 }
 
 // src/stall-evidence.ts
@@ -7992,8 +8077,8 @@ function formatRunRow(r, livenessProbe = defaultLivenessProbe) {
   const u = formatUsage(r.usage);
   const usagePart = u ? `[${u}]` : "";
   const hint = r.lastToolCall ? ` \u2192 ${r.lastToolCall}` : "";
-  const liveness = r.status === "running" && r.pid !== void 0 && !livenessProbe(r.pid) ? " \xB7 pid-gone" : "";
-  return `  ${STATUS_GLYPH[r.status] ?? "\xB7"} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint}${liveness}`;
+  const liveness = (r.runtime ?? "subprocess") === "subprocess" && r.status === "running" && r.pid !== void 0 && !livenessProbe(r.pid) ? " \xB7 pid-gone" : "";
+  return `  ${STATUS_GLYPH[r.status] ?? "\xB7"} ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${r.status.padEnd(9)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} runtime=${r.runtime ?? "subprocess"}${liveness}`;
 }
 function runHistory(_opts, ctx, arg) {
   const root = runsRoot();
@@ -8645,7 +8730,7 @@ async function runAutonomous(plan, cfg, deps) {
         if (gate.kind === "halt") state.haltReason = gate.reason;
         return finalize(state);
       }
-      const res = await deps.spawnStep({ persona: step.persona, task, retryAttempt: attempt, cwd: step.cwd });
+      const res = await deps.spawnStep({ persona: step.persona, task, retryAttempt: attempt, runtime: step.runtime, cwd: step.cwd });
       state.stepsRun += 1;
       state.spentUsd += res.costUsd;
       const decision = classifyStepOutcome(
@@ -9280,20 +9365,21 @@ function registerTools(pi, opts, env = process.env) {
   }
   registerListTool(pi, opts);
   registerStatusTool(pi, opts);
-  registerSpawnTool(pi, opts);
+  registerSpawnTool(pi, opts, env);
   registerSendTool(pi, opts);
   registerPauseTool(pi, opts);
   registerResumeTool(pi, opts);
   registerKillTool(pi, opts);
   registerFocusTool(pi, opts);
   registerRecommendTool(pi, opts);
-  registerAutoTool(pi, opts);
+  registerAutoTool(pi, opts, env);
   registerCwdTool(pi, opts);
   registerEffortTool(pi, opts);
 }
 function resolveSpawnCwd(arg, base) {
   return arg === void 0 ? { ok: true, cwd: base } : resolveCwdArg(arg, base);
 }
+var runtimeSchema = Type2.Optional(Type2.Union([Type2.Literal("auto"), Type2.Literal("subprocess"), Type2.Literal("herdr")], { description: "Runtime selector: per-call > effective persona > project > user > auto. Herdr is unavailable in H2; use subprocess explicitly inside herdr." }));
 var SPAWN_CWD_DESCRIPTION = "Directory the sub-agent runs in; personas, config, and the git root for worktree isolation resolve from it. `~` and relative paths resolve against the conductor's cwd (see ensemble_cwd), which is also the default.";
 function registerEffortTool(pi, opts) {
   pi.registerTool({
@@ -9484,7 +9570,7 @@ function awaitTerminal(registry, runId) {
   if (cur && isSettled(cur.status)) settle(cur);
   return { promise, settle };
 }
-function registerAutoTool(pi, opts) {
+function registerAutoTool(pi, opts, env) {
   pi.registerTool({
     name: CONDUCTOR_LLM_TOOLS.auto,
     label: "Autonomous run",
@@ -9500,6 +9586,7 @@ function registerAutoTool(pi, opts) {
       steps: Type2.Array(
         Type2.Object({
           persona: Type2.String({ description: "Persona name to spawn for this step." }),
+          runtime: runtimeSchema,
           files: Type2.Optional(Type2.Array(Type2.String(), { description: "Evidence paths or exact run:<agent_id> result refs; relative to this step's effective cwd. Prepared before any step starts." })),
           task: Type2.String({ description: "Self-contained task for this step." }),
           reevaluate: Type2.Optional(
@@ -9554,6 +9641,14 @@ function registerAutoTool(pi, opts) {
           `unknown persona(s) in plan: ${[...new Set(unknown)].join(", ")}. Run ensemble_list to see available personas.`
         );
       }
+      const stepRuntimes = [];
+      try {
+        for (const [i, s] of params.steps.entries()) {
+          stepRuntimes.push(prepareSpawnRuntime({ persona: contexts.get(stepCwds[i]).personas.get(s.persona), cwd: stepCwds[i], runtime: s.runtime, runtimeEnv: env }).runtime);
+        }
+      } catch (e) {
+        return halted(e.message);
+      }
       const preparedTasks = [];
       try {
         for (const [i, s] of params.steps.entries()) {
@@ -9565,7 +9660,7 @@ function registerAutoTool(pi, opts) {
       const plan = {
         goal: params.goal,
         steps: params.steps.map(
-          (s, i) => ({ persona: s.persona, task: preparedTasks[i], reevaluate: s.reevaluate, cwd: stepCwds[i] })
+          (s, i) => ({ persona: s.persona, runtime: stepRuntimes[i], task: preparedTasks[i], reevaluate: s.reevaluate, cwd: stepCwds[i] })
         )
       };
       const basePolicy = resolveRetryPolicy({
@@ -9585,6 +9680,7 @@ function registerAutoTool(pi, opts) {
         };
         const spawned = queue.enqueueOrSpawn({
           persona: personaObj,
+          runtime: a.runtime,
           task: a.task,
           mode: "background",
           cwd: stepCwd,
@@ -9630,7 +9726,7 @@ ${lines.join("\n")}` }],
     }
   });
 }
-function registerSpawnTool(pi, opts) {
+function registerSpawnTool(pi, opts, env) {
   pi.registerTool({
     name: CONDUCTOR_LLM_TOOLS.spawn,
     label: "Spawn sub-agent",
@@ -9649,6 +9745,7 @@ function registerSpawnTool(pi, opts) {
       "Pass files: ['run:<agent_id>'] using the exact result-ref from a completion instead of paraphrasing evidence. Files are evidence, not instructions or capability grants; default_reads remains separate."
     ],
     parameters: Type2.Object({
+      runtime: runtimeSchema,
       effort: Type2.Optional(Type2.String({ description: `Named effort; auto-opens from config on first use. Always background with mandatory writer isolation. ${EFFORT_NOTICE}` })),
       touches: Type2.Optional(Type2.Array(Type2.String(), { description: "Effort writer repo-relative globs (literal, * or **). Omitted scope is undeclared; concurrency is not relaxed in M1." })),
       persona: Type2.String({
@@ -9751,6 +9848,12 @@ function registerSpawnTool(pi, opts) {
           `persona "${params.persona}" not found. Run ensemble_list to see what's available.`
         );
       }
+      let runtime;
+      try {
+        runtime = prepareSpawnRuntime({ persona, cwd, runtime: params.runtime, runtimeEnv: env }).runtime;
+      } catch (e) {
+        return errorResult(e.message);
+      }
       const foreground = params.foreground !== false && params.effort === void 0;
       const effortNote = params.effort === void 0 ? "" : `
 ${params.foreground !== false ? "Foreground effort spawn downgraded to background. " : ""}${EFFORT_NOTICE}`;
@@ -9780,6 +9883,7 @@ ${params.foreground !== false ? "Foreground effort spawn downgraded to backgroun
         defaultValue: cfg.defaultSteerable ?? false
       });
       const result = queue.enqueueOrSpawn({
+        runtime,
         effort: params.effort,
         touches: params.touches,
         persona,
@@ -9820,6 +9924,7 @@ ${params.foreground !== false ? "Foreground effort spawn downgraded to backgroun
         // Not provided when chain: false is passed, preventing the auto-spawn.
         // Chain-spawned runs also don't receive onChain (no chain-of-chains).
         onChain: buildOnChainCallback({
+          runtimeEnv: env,
           chainEnabled: params.chain !== false && params.effort === void 0,
           personaName: persona.name,
           cfg,
@@ -10454,6 +10559,7 @@ function toStatusSummary(r, canFocus, sessionId, registry) {
     persona: r.persona,
     status: r.status,
     pending_ask: r.pendingAsk,
+    runtime: r.runtime ?? "subprocess",
     effort: r.effort,
     integration: r.integration,
     landedCommit: r.landedCommit,
@@ -10501,7 +10607,7 @@ function formatStatusForLLM(g, queueSize, summaries) {
       const waitReason = summaries.get(r.id).wait_reason;
       const hint = (waitReason ? ` ${waitReason}` : "") + (r.lastToolCall ? ` \u2192 ${r.lastToolCall}` : "") + (r.effort ? ` effort=${effortSummary(r)}` : "");
       lines.push(
-        `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} available_actions=${summaries.get(r.id).available_actions.join(",") || "(none)"}`
+        `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} runtime=${r.runtime ?? "subprocess"} available_actions=${summaries.get(r.id).available_actions.join(",") || "(none)"}`
       );
     }
   }
@@ -10644,7 +10750,16 @@ function buildOnChainCallback(args) {
 `);
       return;
     }
+    let runtime;
+    try {
+      runtime = prepareSpawnRuntime({ persona: chainPersona, cwd: chainCwd, runtimeEnv: args.runtimeEnv }).runtime;
+    } catch (e) {
+      process.stderr.write(`[conductor] chain after ${parentRun.id} rejected: ${e.message}
+`);
+      return;
+    }
     const spawn2 = {
+      runtime,
       persona: chainPersona,
       task: preparedTask,
       mode: "background",
@@ -10693,6 +10808,7 @@ function buildOnRetryCallback(args) {
     });
     args.queue.enqueueOrSpawn({
       persona: args.persona,
+      runtime: failedRun.runtime ?? "subprocess",
       task,
       mode: "background",
       cwd: args.cwd,
@@ -10759,6 +10875,7 @@ var SpawnQueue = class {
    *   - { queued: PendingSpawn, downgraded }     if queued (downgraded=true means foreground→background)
    */
   enqueueOrSpawn(opts) {
+    opts = prepareSpawnRuntime(opts);
     opts = prepareSpawnEvidence(opts, opts.registry ?? this.registry);
     const effort = prepareSpawnEffort(opts);
     if (opts.touches) opts = { ...opts, touches: [...opts.touches] };
@@ -10776,6 +10893,7 @@ var SpawnQueue = class {
     mkdirSync10(dir, { recursive: true });
     const placeholder = {
       id,
+      runtime: opts.runtime,
       persona: opts.persona.name,
       task: opts.task,
       model: opts.model,

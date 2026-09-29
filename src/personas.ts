@@ -9,6 +9,7 @@
  * adding a runtime dependency.
  */
 
+import { parseRuntimeChoice } from "./runtime.ts";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -207,6 +208,7 @@ function validateAndBuild(
   // spawn-time prompt assembly prepends READ_ONLY_PERSONA_ENFORCER
   // (see src/runs.ts: assemblePersonaSystemPrompt).
   const readOnly = optionalBoolean(frontmatter, "read_only") ?? false;
+  const runtime = frontmatter.runtime === undefined ? undefined : parseRuntimeChoice(frontmatter.runtime);
   // v0.11 slice 4 — on_complete_hook frontmatter parsing. The Persona
   // type field shipped in slice 1a; this slice populates it from
   // YAML. Empty string is preserved (cascade resolver treats it as
@@ -251,6 +253,7 @@ function validateAndBuild(
     source,
     sourcePath,
     readOnly,
+    runtime,
     onCompleteHook,
     onCompleteHookTimeoutSeconds,
     maxTurns,
@@ -491,9 +494,11 @@ export async function resolvePersonas(opts: {
     if (!base) continue; // override of nonexistent persona is a no-op (doctor will warn)
     // Tool lists replace the persona's whole array. A malformed one drops
     // the persona (like a malformed file) rather than silently loosening it.
+    let runtime = base.runtime;
     let tools = base.tools;
     let excludeTools = base.excludeTools;
     try {
+      if (ov.runtime !== undefined) runtime = parseRuntimeChoice(ov.runtime);
       if (ov.tools !== undefined) tools = parseToolList(ov.tools, "tools");
       if (ov.exclude_tools !== undefined) {
         excludeTools = parseToolList(ov.exclude_tools, "exclude_tools");
@@ -505,6 +510,7 @@ export async function resolvePersonas(opts: {
     }
     personas.set(name, {
       ...base,
+      runtime,
       tools,
       excludeTools,
       model: ov.model ?? base.model,
