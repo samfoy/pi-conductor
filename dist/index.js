@@ -1148,7 +1148,7 @@ function ownedEffort(cwd, name, sessionId) {
 
 // src/commands.ts
 init_types();
-import { existsSync as existsSync13, readdirSync as readdirSync3, readFileSync as readFileSync11, statSync as statSync5 } from "node:fs";
+import { existsSync as existsSync13, readdirSync as readdirSync4, readFileSync as readFileSync12, statSync as statSync5 } from "node:fs";
 import { join as join19, dirname as dirname13 } from "node:path";
 
 // src/status-glyph.ts
@@ -2636,7 +2636,7 @@ function shellQuote2(value) {
 
 // src/effort/driver.ts
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync7, unlinkSync as unlinkSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { mkdirSync as mkdirSync6, readFileSync as readFileSync8, unlinkSync as unlinkSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { dirname as dirname7, join as join8 } from "node:path";
 
 // src/hook-runner.ts
@@ -2890,6 +2890,83 @@ function renderTail(lines) {
 
 // src/effort/driver.ts
 init_worktree();
+
+// src/effort/process-group.ts
+import { readdirSync as readdirSync2, readFileSync as readFileSync7 } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
+function linuxProcesses() {
+  if (process.platform !== "linux") throw new Error("live group teardown requires readable Linux procfs identity evidence");
+  return readdirSync2("/proc").filter((name) => /^\d+$/.test(name)).flatMap((name) => {
+    let raw;
+    try {
+      raw = readFileSync7(`/proc/${name}/stat`, "utf8");
+    } catch (error) {
+      if (["ENOENT", "ESRCH"].includes(error.code ?? "")) return [];
+      throw error;
+    }
+    const fields = raw.slice(raw.lastIndexOf(")") + 2).trim().split(/\s+/);
+    const member = { pid: Number(name), pgid: Number(fields[2]), sid: Number(fields[3]), startTime: Number(fields[19]), state: fields[0] };
+    if (raw.lastIndexOf(")") < 0 || !/^[A-Za-z]$/.test(member.state) || ![member.pid, member.pgid, member.sid, member.startTime].every((n) => Number.isSafeInteger(n) && n >= 0)) throw new Error(`unreadable process identity: ${name}`);
+    return [member];
+  });
+}
+async function stopOwnedProcessGroup(group, deps = {}) {
+  if (!Number.isSafeInteger(group.pid) || group.pid <= 1) throw new Error("invalid owned process group");
+  const signal = deps.signal ?? process.kill;
+  const processes = deps.processes ?? linuxProcesses;
+  const now = deps.now ?? (() => performance.now());
+  const wait = deps.wait ?? delay;
+  const known = /* @__PURE__ */ new Map();
+  if (group.startTime !== void 0) known.set(group.pid, group.startTime);
+  const send = (sig) => {
+    try {
+      signal(-group.pid, sig);
+      return true;
+    } catch (error) {
+      if (error.code === "ESRCH") return false;
+      throw new Error(`group ${group.pid} signal ${sig} unconfirmed: ${error.message}`);
+    }
+  };
+  const observe = () => {
+    if (!send(0)) return [];
+    if (!Number.isSafeInteger(group.startTime) || group.startTime <= 0) throw new Error("missing owned group start identity");
+    const members = processes().filter((p) => p.pgid === group.pid);
+    if (!members.length) {
+      if (!send(0)) return [];
+      throw new Error(`group ${group.pid} exists but membership is unknown`);
+    }
+    if (members.some((p) => p.sid !== group.pid || p.pid === group.pid && p.startTime !== group.startTime) || !members.some((p) => known.get(p.pid) === p.startTime)) throw new Error(`group ${group.pid} identity continuity lost; refusing signal`);
+    for (const p of members) known.set(p.pid, p.startTime);
+    return members;
+  };
+  const active = (members) => members.some((p) => p.state !== "Z" && p.state !== "X");
+  const initial = observe();
+  if (!initial.length) return;
+  if (active(initial) && !send("SIGTERM")) return;
+  const escalationAt = now() + 2e3;
+  const deadline = escalationAt + 1e3;
+  let escalated = false;
+  let zombies;
+  for (; ; ) {
+    const members = observe();
+    if (!members.length) return;
+    if (!active(members)) {
+      const identities = members.map((p) => `${p.pid}:${p.startTime}`).sort().join(",");
+      if (identities === zombies) return;
+      zombies = identities;
+    } else {
+      zombies = void 0;
+      if (!escalated && now() >= escalationAt) {
+        if (!send("SIGKILL")) return;
+        escalated = true;
+      }
+    }
+    if (now() >= deadline) throw new Error(`group ${group.pid} teardown unconfirmed after TERM/KILL deadline`);
+    await wait(25);
+  }
+}
+
+// src/effort/driver.ts
 var EffortDriver = class {
   queues = /* @__PURE__ */ new Map();
   flights = /* @__PURE__ */ new Set();
@@ -2905,16 +2982,17 @@ var EffortDriver = class {
           if (job.cancelled || job.finished) return;
           this.fence(job);
           job.cancelled = true;
-          job.stop?.();
+          void job.stop?.();
           if (!job.flight) this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
         },
         suspend: async () => {
           job.suspended = true;
           run.integrationControl = void 0;
-          job.stop?.();
+          await job.stop?.();
           try {
             await job.flight;
           } catch {
+            if (job.teardownError) throw job.teardownError;
           }
         }
       };
@@ -2934,7 +3012,7 @@ var EffortDriver = class {
     const record = readEffort(job.run.effort.gitRoot, job.run.effort.name);
     if (!record) throw new Error("effort record missing");
     assertEffortOwner(record, job.owner);
-    if (job.claim && JSON.parse(readFileSync7(job.claim.path, "utf8")).token !== job.claim.token) throw new Error("integration driver claim changed");
+    if (job.claim && JSON.parse(readFileSync8(job.claim.path, "utf8")).token !== job.claim.token) throw new Error("integration driver claim changed");
     return record;
   }
   async persist(job) {
@@ -3003,6 +3081,11 @@ var EffortDriver = class {
           job.flight = this.integrate(job);
           await job.flight;
         } catch (error) {
+          if (job.teardownError) {
+            claimed = false;
+            this.pause(job, job.teardownError.message);
+            break;
+          }
           if (job.cancelled) this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
           else this.pause(job, error.message);
         } finally {
@@ -3014,7 +3097,7 @@ var EffortDriver = class {
       for (const job of this.queues.get(root) ?? []) if (!job.finished) this.pause(job, `integration driver ownership unresolved: ${error.message}`);
     } finally {
       try {
-        if (claimed && JSON.parse(readFileSync7(lock, "utf8")).token === token) unlinkSync2(lock);
+        if (claimed && JSON.parse(readFileSync8(lock, "utf8")).token === token) unlinkSync2(lock);
       } catch {
       }
       this.flights.delete(root);
@@ -3028,14 +3111,23 @@ var EffortDriver = class {
     entry.logPath = logPath;
     const tmpDir = join8(dirname7(logPath), "tmp");
     mkdirSync6(tmpDir, { recursive: true });
-    let closed = false;
-    let escalation;
+    let group;
+    let teardown;
     const stop = () => {
-      if (closed || !job.proc?.pid) return;
-      defaultKillGroup(job.proc.pid, "SIGTERM");
-      if (!escalation) escalation = setTimeout(() => {
-        if (!closed && job.proc?.pid) defaultKillGroup(job.proc.pid, "SIGKILL");
-      }, 2e3);
+      if (!group) return Promise.resolve();
+      if (!teardown) {
+        teardown = stopOwnedProcessGroup(group);
+        void teardown.catch((error) => {
+          job.teardownError = new Error(`integration process-group teardown unconfirmed: ${error.message}`);
+          entry.teardownError = job.teardownError.message;
+          job.suspended = true;
+          run.integrationControl = void 0;
+          this.pause(job, job.teardownError.message);
+          void writeRecord(run, () => assertEffortOwner(readEffort(run.effort.gitRoot, run.effort.name), job.owner)).catch(() => {
+          });
+        });
+      }
+      return teardown;
     };
     job.stop = stop;
     const monitor = setInterval(() => {
@@ -3046,11 +3138,12 @@ var EffortDriver = class {
           job.suspended = true;
           run.integrationControl = void 0;
         }
-        stop();
+        void stop();
       }
     }, 100);
+    let result;
     try {
-      const result = await runHook({
+      result = await runHook({
         resolved: { command, source: "project", timeoutSeconds: entry.verifyIdentity.timeoutSeconds },
         runId: run.id,
         persona: run.persona,
@@ -3064,29 +3157,33 @@ var EffortDriver = class {
         onEnd: (result2) => {
           if (entry.state === "verifying") entry.verify = result2;
         },
+        deps: { killGroup: () => {
+          void stop();
+        } },
         onProc: (proc) => {
-          job.proc = proc;
-          if (proc.pid) entry.process = { pid: proc.pid, startTime: readProcessStartTime(proc.pid) };
-          proc.once("close", () => {
-            closed = true;
-          });
+          if (proc.pid) {
+            group = { pid: proc.pid, startTime: readProcessStartTime(proc.pid) };
+            entry.process = { ...group };
+          }
           void this.persist(job).catch(() => {
             if (!job.cancelled) {
               job.suspended = true;
               run.integrationControl = void 0;
             }
-            stop();
+            void stop();
           });
         }
       });
-      this.fence(job);
-      return result;
     } finally {
       clearInterval(monitor);
-      if (escalation) clearTimeout(escalation);
-      job.stop = void 0;
-      job.proc = void 0;
+      try {
+        if (teardown) await teardown;
+      } finally {
+        job.stop = void 0;
+      }
     }
+    this.fence(job);
+    return result;
   }
   async integrate(job) {
     const run = job.run;
@@ -3179,12 +3276,12 @@ Conductor-Run: ${run.id}
 };
 
 // src/runs.ts
-import { existsSync as existsSync8, mkdirSync as mkdirSync8, readFileSync as readFileSync10, readdirSync as readdirSync2, statSync as statSync3 } from "node:fs";
+import { existsSync as existsSync8, mkdirSync as mkdirSync8, readFileSync as readFileSync11, readdirSync as readdirSync3, statSync as statSync3 } from "node:fs";
 import { mkdir, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir as homedir7 } from "node:os";
 
 // src/file-evidence.ts
-import { closeSync as closeSync2, constants, fstatSync, openSync as openSync2, readFileSync as readFileSync8, readSync, realpathSync as realpathSync4 } from "node:fs";
+import { closeSync as closeSync2, constants, fstatSync, openSync as openSync2, readFileSync as readFileSync9, readSync, realpathSync as realpathSync4 } from "node:fs";
 import { dirname as dirname8, isAbsolute as isAbsolute2, join as join10 } from "node:path";
 
 // src/conductor-cwd.ts
@@ -3306,7 +3403,7 @@ function sourceRun(id, registry) {
   if (dirname8(dir) !== root) throw new Error(`files: run record outside canonical runs directory: ${id}`);
   const recordPath = join10(dir, "record.json");
   if (realpathSync4(recordPath) !== recordPath) throw new Error(`files: invalid run record path: ${id}`);
-  const r = inspect(recordPath, (fd) => JSON.parse(readFileSync8(fd, "utf8")));
+  const r = inspect(recordPath, (fd) => JSON.parse(readFileSync9(fd, "utf8")));
   if (!r || r.id !== id || typeof r.persona !== "string" || !r.persona || typeof r.cwd !== "string" || !isAbsolute2(r.cwd) || !(isTerminal(r.status) || r.status === "running" || r.status === "paused" || r.status === "queued") || typeof r.finalPath !== "string" || realpathSync4(r.finalPath) !== realpathSync4(join10(dir, "final.md")) || typeof r.recordPath !== "string" || realpathSync4(r.recordPath) !== recordPath || r.sessionPath !== void 0 && typeof r.sessionPath !== "string") {
     throw new Error(`files: invalid run record: ${id}`);
   }
@@ -3778,7 +3875,7 @@ ${diag}
 init_worktree();
 
 // src/workspace-doctrine.ts
-import { existsSync as existsSync7, readFileSync as readFileSync9, statSync as statSync2 } from "node:fs";
+import { existsSync as existsSync7, readFileSync as readFileSync10, statSync as statSync2 } from "node:fs";
 import { homedir as homedir6, tmpdir } from "node:os";
 import { dirname as dirname10, join as join11, relative as relative2, resolve as resolve3, sep as sep2 } from "node:path";
 var MAX_WALK_DEPTH = 6;
@@ -3844,7 +3941,7 @@ function loadWorkspaceDoctrine(workdir) {
     const start = resolve3(workdir);
     const path = findAgentsMd(start);
     if (!path || childNativeAgentsDirs(start).includes(dirname10(path))) return "";
-    let text = readFileSync9(path, "utf8").trim();
+    let text = readFileSync10(path, "utf8").trim();
     if (!text) return "";
     if (text.length > MAX_DOCTRINE_CHARS) text = truncateDoctrine(text, path);
     return `${DOCTRINE_HEADING}
@@ -3881,7 +3978,7 @@ function resolveTimeoutMs(persona, ov, cfg) {
 function findSessionFile(sessionDir) {
   let entries;
   try {
-    entries = readdirSync2(sessionDir);
+    entries = readdirSync3(sessionDir);
   } catch {
     return void 0;
   }
@@ -3952,7 +4049,7 @@ var READ_ONLY_PERSONA_ENFORCER = [
 function assemblePersonaSystemPrompt(persona, cwd) {
   const blocks = persona.readOnly === true ? [READ_ONLY_PERSONA_ENFORCER, persona.systemPrompt] : [persona.systemPrompt];
   try {
-    const preamble = readFileSync10(join12(builtinPersonasDir(), "_preamble.md"), "utf8").trim();
+    const preamble = readFileSync11(join12(builtinPersonasDir(), "_preamble.md"), "utf8").trim();
     if (preamble) blocks.push(preamble);
   } catch {
   }
@@ -4817,7 +4914,7 @@ function sendToRun(run, message, opts) {
   if (run.effort && (!run.effort.cwd || !run.worktreeBranch || !refExists(run.effort.gitRoot, `refs/heads/${run.worktreeBranch}`))) {
     return { kind: "rejected", reason: "effort assignment branch/cwd is missing; preserve the outstanding question and inspect the effort before recovery" };
   }
-  const worktreeBlocker = restoreResumeWorktree(run, () => readFileSync10(sessionPath, "utf8"));
+  const worktreeBlocker = restoreResumeWorktree(run, () => readFileSync11(sessionPath, "utf8"));
   if (worktreeBlocker) return { kind: "rejected", reason: worktreeBlocker };
   const pendingAsk = run.pendingAsk;
   if (pendingAsk) trimmed = `<owner-answer ask-id=${JSON.stringify(pendingAsk.askId)}>
@@ -4847,7 +4944,7 @@ Continue the original assignment, not a new task.
   opts.registry.notify(run);
   run.model = resumeModel(
     run.model,
-    () => readFileSync10(sessionPath, "utf8"),
+    () => readFileSync11(sessionPath, "utf8"),
     opts.isRegisteredModel,
     opts.currentModelProvider
   );
@@ -7167,7 +7264,7 @@ function runHistory(_opts, ctx, arg) {
     {
       listRunIds: () => {
         try {
-          return readdirSync3(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+          return readdirSync4(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
         } catch {
           return [];
         }
@@ -7175,7 +7272,7 @@ function runHistory(_opts, ctx, arg) {
       readRecord: (id) => {
         const p = join19(runDir(id), "record.json");
         try {
-          return JSON.parse(readFileSync11(p, "utf8"));
+          return JSON.parse(readFileSync12(p, "utf8"));
         } catch {
           return void 0;
         }
@@ -7183,7 +7280,7 @@ function runHistory(_opts, ctx, arg) {
       readFinalText: (id) => {
         const p = join19(runDir(id), "final.md");
         try {
-          return readFileSync11(p, "utf8");
+          return readFileSync12(p, "utf8");
         } catch {
           return void 0;
         }
@@ -7659,11 +7756,11 @@ Resolve manually in the worktree and run /conductor worktree merge ${runId} agai
 // src/tools.ts
 init_types();
 import { Type as Type2 } from "@sinclair/typebox";
-import { readFileSync as readFileSync13, existsSync as existsSync15 } from "node:fs";
+import { readFileSync as readFileSync14, existsSync as existsSync15 } from "node:fs";
 import { dirname as dirname14 } from "node:path";
 
 // src/chain.ts
-import { readFileSync as readFileSync12, existsSync as existsSync14 } from "node:fs";
+import { readFileSync as readFileSync13, existsSync as existsSync14 } from "node:fs";
 var DEFAULT_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nOriginal task:\n{task}\n\n---\nFinal output:\n{final}";
 var WORKTREE_CHAIN_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nThe work is on branch `{worktreeBranch}` (not yet merged to `{baseBranch}`).\nRun the following to inspect the changes:\n\n```bash\ngit diff {baseBranch}...{worktreeBranch}\n```\n\nOriginal task:\n{task}";
 var FINAL_PLACEHOLDER = "(no final output)";
@@ -7685,7 +7782,7 @@ function buildChainTask(taskTemplate, context) {
   let finalContent = FINAL_PLACEHOLDER;
   if (existsSync14(context.finalPath)) {
     try {
-      finalContent = readFileSync12(context.finalPath, "utf-8");
+      finalContent = readFileSync13(context.finalPath, "utf-8");
     } catch {
     }
   }
@@ -9722,7 +9819,7 @@ function buildOnChainCallback(args) {
       let parentFinal = "";
       if (existsSync15(parentRun.finalPath)) {
         try {
-          parentFinal = readFileSync13(parentRun.finalPath, "utf-8");
+          parentFinal = readFileSync14(parentRun.finalPath, "utf-8");
         } catch {
         }
       }
@@ -11973,7 +12070,13 @@ function installSanitizerHook(pi, opts) {
 async function handleSessionShutdown(event, deps) {
   for (const run of deps.runs) if (run.effort) run.integrationSuspended = true;
   const integrations = deps.runs.flatMap((run) => run.integrationControl ? [run.integrationControl.suspend()] : []);
-  if (integrations.length) await Promise.all(integrations);
+  if (integrations.length) {
+    const results = await Promise.allSettled(integrations);
+    const failure = results.find((r) => r.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
+  }
+  const uncertain = deps.runs.find((run) => run.status === "integrating" && run.integration?.teardownError);
+  if (uncertain) throw new Error(uncertain.integration.teardownError);
   if (event.reason === "reload") return;
   const stillActive = [];
   for (const r of deps.runs) {

@@ -1,9 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { ChildProcess } from "node:child_process";
 import type { HookResult, MergeResult, Run, RunStatus } from "../types.ts";
-import { runHook, defaultKillGroup } from "../hook-runner.ts";
+import { runHook } from "../hook-runner.ts";
 import { buildMergeCommitMessage } from "../worktree.ts";
 import { readProcessStartTime } from "../reconcile-startup.ts";
 import { writeRecord } from "../runs.ts";
@@ -11,12 +10,14 @@ import { effortGit, effortOwner, effortTip } from "./open.ts";
 import { assertEffortOwner, effortDir, readEffort, writeEffort, type EffortOwner, type EffortRecord } from "./store.ts";
 import { assertCandidate, checkedCas, effortEnv, mergeTree, shellQuote } from "./git.ts";
 import { nextIntegration } from "./core.ts";
+import { stopOwnedProcessGroup, type OwnedProcessGroup } from "./process-group.ts";
 
 export interface IntegrationOutcome { terminal: RunStatus; mergeResult: MergeResult; landedCommit?: string }
 interface Job {
   run: Run; owner: EffortOwner; notify: () => void; resolve: (outcome: IntegrationOutcome) => void;
-  cancelled: boolean; suspended: boolean; finished: boolean; proc?: ChildProcess;
-  stop?: () => void; flight?: Promise<void>; ready?: Promise<void>;
+  cancelled: boolean; suspended: boolean; finished: boolean;
+  stop?: () => Promise<void>; flight?: Promise<void>; ready?: Promise<void>;
+  teardownError?: Error;
   claim?: { path: string; token: string };
 }
 
@@ -36,12 +37,13 @@ export class EffortDriver {
         cancel: () => {
           if (job.cancelled || job.finished) return;
           this.fence(job);
-          job.cancelled = true; job.stop?.();
+          job.cancelled = true; void job.stop?.();
           if (!job.flight) this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
         },
         suspend: async () => {
-          job.suspended = true; run.integrationControl = undefined; job.stop?.();
-          try { await job.flight; } catch { /* suspension intentionally rejects the in-flight gate */ }
+          job.suspended = true; run.integrationControl = undefined;
+          await job.stop?.();
+          try { await job.flight; } catch { if (job.teardownError) throw job.teardownError; }
         },
       };
       writeEffort({ ...record, queue: [...new Set([...(record.queue ?? []), run.id])], updatedAt: Date.now() });
@@ -112,6 +114,7 @@ export class EffortDriver {
           job.flight = this.integrate(job);
           await job.flight;
         } catch (error) {
+          if (job.teardownError) { claimed = false; this.pause(job, job.teardownError.message); break; }
           if (job.cancelled) this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
           else this.pause(job, (error as Error).message);
         } finally { job.flight = undefined; job.claim = undefined; }
@@ -130,31 +133,44 @@ export class EffortDriver {
     const run = job.run; const entry = run.integration!;
     entry.logPath = logPath;
     const tmpDir = join(dirname(logPath), "tmp"); mkdirSync(tmpDir, { recursive: true });
-    let closed = false; let escalation: NodeJS.Timeout | undefined;
-    const stop = () => {
-      if (closed || !job.proc?.pid) return;
-      defaultKillGroup(job.proc.pid, "SIGTERM");
-      if (!escalation) escalation = setTimeout(() => { if (!closed && job.proc?.pid) defaultKillGroup(job.proc.pid, "SIGKILL"); }, 2000);
+    let group: OwnedProcessGroup | undefined;
+    let teardown: Promise<void> | undefined;
+    const stop = (): Promise<void> => {
+      if (!group) return Promise.resolve();
+      if (!teardown) {
+        teardown = stopOwnedProcessGroup(group);
+        void teardown.catch(error => {
+          job.teardownError = new Error(`integration process-group teardown unconfirmed: ${(error as Error).message}`);
+          entry.teardownError = job.teardownError.message;
+          job.suspended = true; run.integrationControl = undefined;
+          this.pause(job, job.teardownError.message);
+          void writeRecord(run, () => assertEffortOwner(readEffort(run.effort!.gitRoot, run.effort!.name)!, job.owner)).catch(() => {});
+        });
+      }
+      return teardown;
     };
     job.stop = stop;
     const monitor = setInterval(() => {
-      try { this.fence(job); } catch { if (!job.cancelled) { job.suspended = true; run.integrationControl = undefined; } stop(); }
+      try { this.fence(job); } catch { if (!job.cancelled) { job.suspended = true; run.integrationControl = undefined; } void stop(); }
     }, 100);
+    let result: HookResult;
     try {
-      const result = await runHook({
+      result = await runHook({
         resolved: { command, source: "project", timeoutSeconds: entry.verifyIdentity.timeoutSeconds },
         runId: run.id, persona: run.persona, runDir: dirname(run.recordPath), finalPath: run.finalPath,
         transcriptPath: run.transcriptPath, parentCwd: cwd, logPath, tmpDir,
         extraEnv: effortEnv({ CONDUCTOR_EFFORT: run.effort!.name, CONDUCTOR_CANDIDATE: entry.candidateOid, TMPDIR: tmpDir }),
         onEnd: result => { if (entry.state === "verifying") entry.verify = result; },
-        onProc: proc => { job.proc = proc; if (proc.pid) entry.process = { pid: proc.pid, startTime: readProcessStartTime(proc.pid) }; proc.once("close", () => { closed = true; }); void this.persist(job).catch(() => { if (!job.cancelled) { job.suspended = true; run.integrationControl = undefined; } stop(); }); },
+        deps: { killGroup: () => { void stop(); } },
+        onProc: proc => { if (proc.pid) { group = { pid: proc.pid, startTime: readProcessStartTime(proc.pid) }; entry.process = { ...group }; } void this.persist(job).catch(() => { if (!job.cancelled) { job.suspended = true; run.integrationControl = undefined; } void stop(); }); },
       });
-      this.fence(job);
-      return result;
     } finally {
-      clearInterval(monitor); if (escalation) clearTimeout(escalation);
-      job.stop = undefined; job.proc = undefined;
+      clearInterval(monitor);
+      try { if (teardown) await teardown; }
+      finally { job.stop = undefined; }
     }
+    this.fence(job);
+    return result;
   }
 
   private async integrate(job: Job): Promise<void> {

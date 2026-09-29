@@ -501,6 +501,8 @@ export interface RunIntegration {
   candidateOid?: string;
   candidateTree?: string;
   candidatePath?: string;
+  /** A failed group teardown is not cleared by reload or another shutdown attempt. */
+  teardownError?: string;
   logPath?: string;
   reason?: string;
   verifyIdentity: { command: string; timeoutSeconds: number; retries: number };

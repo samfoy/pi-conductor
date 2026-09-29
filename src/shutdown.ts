@@ -89,7 +89,13 @@ export async function handleSessionShutdown(
 ): Promise<void> {
   for (const run of deps.runs) if (run.effort) run.integrationSuspended = true;
   const integrations = deps.runs.flatMap(run => run.integrationControl ? [run.integrationControl.suspend()] : []);
-  if (integrations.length) await Promise.all(integrations);
+  if (integrations.length) {
+    const results = await Promise.allSettled(integrations);
+    const failure = results.find(r => r.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
+  }
+  const uncertain = deps.runs.find(run => run.status === "integrating" && run.integration?.teardownError);
+  if (uncertain) throw new Error(uncertain.integration!.teardownError);
   if (event.reason === "reload") return;
   const stillActive: Run[] = [];
   for (const r of deps.runs) {

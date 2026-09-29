@@ -358,6 +358,21 @@ restart restores them for inspection, **not automatic recovery**. A crashed driv
 claim is also retained. Before M5 there is no resume/requeue command: inspect work
 and logs rather than repeatedly spawning into a paused effort.
 
+Integration teardown is independent of shell exit: TERM-resistant descendants
+with closed stdio still get SIGKILL after the two-second TERM grace. Linux procfs
+membership, session IDs and observed PID/start-time anchors guard each signal.
+Completion requires a vanished group or two stable zombie/dead-only observations;
+conductor cannot reap orphan zombies, but they cannot execute further work. There
+is a one-second confirmation deadline after escalation, not an indefinite wait.
+Missing identity/procfs access, EPERM, lost group continuity or a still-live group
+at the deadline preserve the work and driver claim with `teardownError`; shutdown
+rejects, including repeat attempts, rather than claiming teardown succeeded.
+Live-group confirmation currently requires Linux and readable procfs; elsewhere
+only an already-gone group (ESRCH) can be acknowledged. POSIX signalling remains
+check-then-signal, not an atomic PID/start binding. Processes that escape the owned
+session/group are not supervised. Normal successful commands incur no teardown
+scan or grace wait. Ordinary persona-hook behavior is unchanged.
+
 Writer branches, candidate worktrees and evidence are retained even on success
 in this interim slice. Dirty work is never discarded, and legacy worktree
 merge/clean and GC skip effort assets. This favors recoverability over disk reuse;
