@@ -4542,6 +4542,8 @@ function spawnRun(opts) {
   mkdirSync8(dir, { recursive: true });
   const run = {
     id,
+    // A queued placeholder may still be writing this same record.
+    recordWrite: opts.registry.get(id)?.recordWrite,
     persona: opts.persona.name,
     task: opts.task,
     model: opts.model,
@@ -4643,141 +4645,151 @@ function spawnRun(opts) {
     })()
   };
   opts.registry.register(run);
-  if (!opts.preAllocatedId) {
-    opts.events?.emitCreated({
+  try {
+    if (!opts.preAllocatedId) {
+      opts.events?.emitCreated({
+        id: run.id,
+        persona: run.persona,
+        description: run.task,
+        isBackground: run.mode === "background"
+      });
+    }
+    opts.events?.emitStarted({
       id: run.id,
       persona: run.persona,
-      description: run.task,
-      isBackground: run.mode === "background"
+      description: run.task
     });
-  }
-  opts.events?.emitStarted({
-    id: run.id,
-    persona: run.persona,
-    description: run.task
-  });
-  let effectiveCwd = opts.cwd;
-  let worktreeFence;
-  if (opts.worktree || effort) {
-    const spec = resolveWorktreeSpec(effort?.gitRoot ?? opts.cwd, run.id);
-    if (spec === null) {
-      if (effort) throw new Error("effort repository disappeared; refusing shared cwd fallback");
-      process.stderr.write(
-        `[conductor] worktree: true but ${opts.cwd} is not inside a git repo; falling back to shared cwd for run ${run.id}
+    let effectiveCwd = opts.cwd;
+    let worktreeFence;
+    if (opts.worktree || effort) {
+      const spec = resolveWorktreeSpec(effort?.gitRoot ?? opts.cwd, run.id);
+      if (spec === null) {
+        if (effort) throw new Error("effort repository disappeared; refusing shared cwd fallback");
+        process.stderr.write(
+          `[conductor] worktree: true but ${opts.cwd} is not inside a git repo; falling back to shared cwd for run ${run.id}
 `
-      );
-    } else {
-      try {
-        const baseBranch = effort?.baseBranch ?? currentBranch(spec.gitRoot);
-        const from = effort ? effortTip(effort) : void 0;
-        createWorktree(spec, { from });
-        if (run.effort) run.effort.spawnBase = from;
-        run.worktreePath = spec.worktreePath;
-        run.worktreeBranch = spec.branch;
-        if (baseBranch) run.worktreeBaseBranch = baseBranch;
-        effectiveCwd = worktreeCwd(effort ? { ...spec, gitRoot: effortRepository(opts.cwd).requestedRoot } : spec, opts.cwd);
-        if (run.effort) run.effort.cwd = effectiveCwd;
-        worktreeFence = { path: spec.worktreePath, branch: spec.branch, gitRoot: spec.gitRoot };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        process.stderr.write(`[conductor] worktree creation failed for ${run.id}: ${msg}
+        );
+      } else {
+        try {
+          const baseBranch = effort?.baseBranch ?? currentBranch(spec.gitRoot);
+          const from = effort ? effortTip(effort) : void 0;
+          createWorktree(spec, { from });
+          if (run.effort) run.effort.spawnBase = from;
+          run.worktreePath = spec.worktreePath;
+          run.worktreeBranch = spec.branch;
+          if (baseBranch) run.worktreeBaseBranch = baseBranch;
+          effectiveCwd = worktreeCwd(effort ? { ...spec, gitRoot: effortRepository(opts.cwd).requestedRoot } : spec, opts.cwd);
+          if (run.effort) run.effort.cwd = effectiveCwd;
+          worktreeFence = { path: spec.worktreePath, branch: spec.branch, gitRoot: spec.gitRoot };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`[conductor] worktree creation failed for ${run.id}: ${msg}
 `);
-        if (effort) {
-          run.status = "failed";
-          run.errorMessage = `effort isolation failed; no child started: ${msg}. ${EFFORT_NOTICE}`;
-          run.failureClass = "environment";
-          run.finishedAt = Date.now();
-          const done2 = writeRecord(run).then(() => {
-            opts.registry.notify(run);
-            opts.onComplete?.(run);
-            return run;
-          });
-          return { run, done: done2 };
+          if (effort) throw err;
         }
       }
     }
+    void writeRecord(run);
+    const prompt = buildSubAgentPrompt(opts.persona, opts.task, {
+      cwd: effectiveCwd,
+      requestedCwd: opts.cwd,
+      worktree: worktreeFence
+    });
+    const sessionDir = join13(dir, "session");
+    mkdirSync8(sessionDir, { recursive: true });
+    const plan = planSpawnPiArgs({
+      persona: opts.persona,
+      parentMessages: opts.parentMessages,
+      sessionDir,
+      // Item 13: prepend read-only enforcer when applicable. Same
+      // assembly used at the Run.systemPrompt capture above so the
+      // initial spawn argv and resume argv stay byte-identical for
+      // a given persona. Doctrine stays keyed on opts.cwd: from a worktree
+      // pi already loads every ancestor AGENTS.md natively.
+      systemPrompt: assemblePersonaSystemPrompt(opts.persona, opts.cwd),
+      prompt,
+      // pi runs a seeded `--session` in its header's cwd, not the process
+      // cwd, so the header must name the worktree for the child to work there.
+      cwd: effectiveCwd,
+      model: opts.model,
+      thinking: opts.thinking,
+      // PRD #15: when `inherit_skills: true`, pass the parent's user +
+      // project skill dirs to the sub-agent via `--skill <path>`. The
+      // flag is consumed at spawn time and not propagated into the
+      // sub-agent's env, so a sub-agent spawning a further sub-agent
+      // does NOT re-inherit (we discourage that pattern anyway).
+      skillPaths: opts.persona.inheritSkills ? collectInheritedSkillPaths({ cwd: opts.cwd }) : void 0,
+      // v0.12 slice 4 — thread the cascade-collapsed steerable so the
+      // argv shape matches the createRunPipeline `steerable` we pass
+      // below. Both must agree or pi will boot with the wrong stdio.
+      steerable: opts.steerable === true,
+      // Item 12 candidate #3 — thread the per-call inherit_context
+      // override into planSpawnPiArgs so the filter selection (filtered
+      // / filtered_compact / full / none) honors the LLM tool's per-call
+      // arg above the persona's frontmatter. See src/inherit-context.ts.
+      inheritContextOverride: opts.inheritContextOverride,
+      // Item 12 candidate #4 — pass the current registry size so
+      // planSpawnPiArgs can auto-downgrade filtered_compact → none when
+      // the chain is deep. Excludes the run we just registered (it is
+      // already in the registry at this point) to count only siblings.
+      siblingRunCount: opts.registry.list().length - 1
+    });
+    if (plan.seededSessionPath) run.sessionPath = plan.seededSessionPath;
+    const done = createRunPipeline(run, plan.piArgs, {
+      registry: opts.registry,
+      cwd: effectiveCwd,
+      // v0.13: opts.cwd's counterpart in the worktree when one was created
+      timeoutMs: opts.timeoutMs,
+      onUpdate: opts.onUpdate,
+      onComplete: opts.onComplete,
+      // Only let the subprocess discover a session file when we didn't pre-seed
+      // one — in resume mode the path is fixed.
+      sessionDir: plan.seededSessionPath ? void 0 : sessionDir,
+      // v0.12 slice 4 — thread the cascade-collapsed steerable into
+      // createRunPipeline so the subprocess `stdio[0]` branch (`pipe` vs
+      // `ignore`) and the post-spawn `Run.streamingMode` stamp match
+      // the argv shape produced above. Slice 3 hard-coded `false`; the
+      // dead value was a known TODO.
+      steerable: opts.steerable === true,
+      // The transport selector may choose RPC even when steering was not requested.
+      initialPrompt: prompt,
+      // v0.11 on_complete_hook (slice 2): resolve at spawn time from the
+      // current config layers + persona frontmatter. Per-call args land
+      // in slice 3; for slice 2 the per-call layer is always undefined.
+      // Tests inject `resolvedHook` directly via the spawn-options surface.
+      resolvedHook: resolveCloseHook(
+        opts.cwd,
+        opts.persona.name,
+        hookSpecFromOpts(opts.onCompleteHook, opts.onCompleteHookTimeoutSeconds),
+        // per-call (slice 3)
+        hookSpecFromPersona(opts.persona)
+      ),
+      // v0.15 chains: thread the callback from spawnRun opts.
+      onChain: opts.onChain,
+      // v0.18 classified retry: thread the retry callback.
+      onRetry: opts.onRetry,
+      // v0.16-S3: thread the event bus adapter so finalize can emit lifecycle events.
+      events: opts.events
+    });
+    return { run, done };
+  } catch (error) {
+    if (!effort) throw error;
+    const current = opts.registry.get(run.id);
+    return failEffortLaunch(current, opts.registry, `effort isolation failed; no child started: ${error.message}. ${EFFORT_NOTICE}`, opts.onComplete);
   }
-  void writeRecord(run);
-  const prompt = buildSubAgentPrompt(opts.persona, opts.task, {
-    cwd: effectiveCwd,
-    requestedCwd: opts.cwd,
-    worktree: worktreeFence
-  });
-  const sessionDir = join13(dir, "session");
-  mkdirSync8(sessionDir, { recursive: true });
-  const plan = planSpawnPiArgs({
-    persona: opts.persona,
-    parentMessages: opts.parentMessages,
-    sessionDir,
-    // Item 13: prepend read-only enforcer when applicable. Same
-    // assembly used at the Run.systemPrompt capture above so the
-    // initial spawn argv and resume argv stay byte-identical for
-    // a given persona. Doctrine stays keyed on opts.cwd: from a worktree
-    // pi already loads every ancestor AGENTS.md natively.
-    systemPrompt: assemblePersonaSystemPrompt(opts.persona, opts.cwd),
-    prompt,
-    // pi runs a seeded `--session` in its header's cwd, not the process
-    // cwd, so the header must name the worktree for the child to work there.
-    cwd: effectiveCwd,
-    model: opts.model,
-    thinking: opts.thinking,
-    // PRD #15: when `inherit_skills: true`, pass the parent's user +
-    // project skill dirs to the sub-agent via `--skill <path>`. The
-    // flag is consumed at spawn time and not propagated into the
-    // sub-agent's env, so a sub-agent spawning a further sub-agent
-    // does NOT re-inherit (we discourage that pattern anyway).
-    skillPaths: opts.persona.inheritSkills ? collectInheritedSkillPaths({ cwd: opts.cwd }) : void 0,
-    // v0.12 slice 4 — thread the cascade-collapsed steerable so the
-    // argv shape matches the createRunPipeline `steerable` we pass
-    // below. Both must agree or pi will boot with the wrong stdio.
-    steerable: opts.steerable === true,
-    // Item 12 candidate #3 — thread the per-call inherit_context
-    // override into planSpawnPiArgs so the filter selection (filtered
-    // / filtered_compact / full / none) honors the LLM tool's per-call
-    // arg above the persona's frontmatter. See src/inherit-context.ts.
-    inheritContextOverride: opts.inheritContextOverride,
-    // Item 12 candidate #4 — pass the current registry size so
-    // planSpawnPiArgs can auto-downgrade filtered_compact → none when
-    // the chain is deep. Excludes the run we just registered (it is
-    // already in the registry at this point) to count only siblings.
-    siblingRunCount: opts.registry.list().length - 1
-  });
-  if (plan.seededSessionPath) run.sessionPath = plan.seededSessionPath;
-  const done = createRunPipeline(run, plan.piArgs, {
-    registry: opts.registry,
-    cwd: effectiveCwd,
-    // v0.13: opts.cwd's counterpart in the worktree when one was created
-    timeoutMs: opts.timeoutMs,
-    onUpdate: opts.onUpdate,
-    onComplete: opts.onComplete,
-    // Only let the subprocess discover a session file when we didn't pre-seed
-    // one — in resume mode the path is fixed.
-    sessionDir: plan.seededSessionPath ? void 0 : sessionDir,
-    // v0.12 slice 4 — thread the cascade-collapsed steerable into
-    // createRunPipeline so the subprocess `stdio[0]` branch (`pipe` vs
-    // `ignore`) and the post-spawn `Run.streamingMode` stamp match
-    // the argv shape produced above. Slice 3 hard-coded `false`; the
-    // dead value was a known TODO.
-    steerable: opts.steerable === true,
-    // The transport selector may choose RPC even when steering was not requested.
-    initialPrompt: prompt,
-    // v0.11 on_complete_hook (slice 2): resolve at spawn time from the
-    // current config layers + persona frontmatter. Per-call args land
-    // in slice 3; for slice 2 the per-call layer is always undefined.
-    // Tests inject `resolvedHook` directly via the spawn-options surface.
-    resolvedHook: resolveCloseHook(
-      opts.cwd,
-      opts.persona.name,
-      hookSpecFromOpts(opts.onCompleteHook, opts.onCompleteHookTimeoutSeconds),
-      // per-call (slice 3)
-      hookSpecFromPersona(opts.persona)
-    ),
-    // v0.15 chains: thread the callback from spawnRun opts.
-    onChain: opts.onChain,
-    // v0.18 classified retry: thread the retry callback.
-    onRetry: opts.onRetry,
-    // v0.16-S3: thread the event bus adapter so finalize can emit lifecycle events.
-    events: opts.events
+}
+function failEffortLaunch(run, registry, errorMessage, onComplete) {
+  if (!applyCloseHandlerTerminal(run, "failed", void 0)) return { run, done: Promise.resolve(run) };
+  run.waitReason = void 0;
+  run.errorMessage = errorMessage;
+  run.failureClass = "environment";
+  const done = writeRecord(run).then(() => {
+    registry.notify(run);
+    try {
+      onComplete?.(run);
+    } catch {
+    }
+    return run;
   });
   return { run, done };
 }
@@ -10279,14 +10291,8 @@ var SpawnQueue = class {
         } catch (e) {
           if (!placeholder.effort) throw e;
           if (this.pending[i]?.id === next.id) this.pending.splice(i, 1);
-          placeholder.status = "failed";
-          placeholder.waitReason = void 0;
-          placeholder.finishedAt = Date.now();
-          placeholder.errorMessage = `effort launch refused: ${e.message}`;
-          void writeRecord(placeholder).then(() => {
-            this.registry.notify(placeholder);
-            next.spawn.onComplete?.(placeholder);
-          });
+          const current = this.registry.get(next.id);
+          void failEffortLaunch(current, this.registry, `effort launch refused: ${e.message}`, next.spawn.onComplete).done;
         }
       }
     } finally {

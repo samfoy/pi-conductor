@@ -1252,6 +1252,8 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
 
   const run: Run = {
     id,
+    // A queued placeholder may still be writing this same record.
+    recordWrite: opts.registry.get(id)?.recordWrite,
     persona: opts.persona.name,
     task: opts.task,
     model: opts.model,
@@ -1382,157 +1384,170 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
   };
   opts.registry.register(run);
 
-  // v0.16-S2: emit lifecycle events at spawn time.
-  // - Direct spawn (no preAllocatedId): run goes straight to "running" — fire both
-  //   emitCreated and emitStarted.
-  // - Drain path (preAllocatedId set): emitCreated already fired in
-  //   SpawnQueue.enqueueOrSpawn at queue time — only fire emitStarted here to
-  //   signal the queued→running transition.
-  if (!opts.preAllocatedId) {
-    opts.events?.emitCreated({
+  try {
+    // v0.16-S2: emit lifecycle events at spawn time.
+    // - Direct spawn (no preAllocatedId): run goes straight to "running" — fire both
+    //   emitCreated and emitStarted.
+    // - Drain path (preAllocatedId set): emitCreated already fired in
+    //   SpawnQueue.enqueueOrSpawn at queue time — only fire emitStarted here to
+    //   signal the queued→running transition.
+    if (!opts.preAllocatedId) {
+      opts.events?.emitCreated({
+        id: run.id,
+        persona: run.persona,
+        description: run.task,
+        isBackground: run.mode === "background",
+      });
+    }
+    opts.events?.emitStarted({
       id: run.id,
       persona: run.persona,
       description: run.task,
-      isBackground: run.mode === "background",
     });
-  }
-  opts.events?.emitStarted({
-    id: run.id,
-    persona: run.persona,
-    description: run.task,
-  });
 
-  // v0.13 worktree-per-persona: create an isolated git worktree when
-  // opts.worktree is true. resolveWorktreeSpec returns null for non-git
-  // cwds — fall back to shared cwd with a warning rather than failing.
-  let effectiveCwd = opts.cwd;
-  let worktreeFence: SubAgentPromptPlace["worktree"];
-  if (opts.worktree || effort) {
-    const spec = resolveWorktreeSpec(effort?.gitRoot ?? opts.cwd, run.id);
-    if (spec === null) {
-      if (effort) throw new Error("effort repository disappeared; refusing shared cwd fallback");
-      process.stderr.write(
-        `[conductor] worktree: true but ${opts.cwd} is not inside a git repo; ` +
-          `falling back to shared cwd for run ${run.id}\n`,
-      );
-    } else {
-      try {
-        // v0.14: capture the base branch before creating the worktree.
-        // Non-fatal: undefined leaves worktreeBaseBranch unset.
-        const baseBranch = effort?.baseBranch ?? currentBranch(spec.gitRoot);
-        const from = effort ? effortTip(effort) : undefined;
-        createWorktree(spec, { from });
-        if (run.effort) run.effort.spawnBase = from;
-        run.worktreePath = spec.worktreePath;
-        run.worktreeBranch = spec.branch;
-        if (baseBranch) run.worktreeBaseBranch = baseBranch;
-        effectiveCwd = worktreeCwd(effort ? { ...spec, gitRoot: effortRepository(opts.cwd).requestedRoot } : spec, opts.cwd);
-        if (run.effort) run.effort.cwd = effectiveCwd;
-        worktreeFence = { path: spec.worktreePath, branch: spec.branch, gitRoot: spec.gitRoot };
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        process.stderr.write(`[conductor] worktree creation failed for ${run.id}: ${msg}\n`);
-        if (effort) {
-          run.status = "failed";
-          run.errorMessage = `effort isolation failed; no child started: ${msg}. ${EFFORT_NOTICE}`;
-          run.failureClass = "environment";
-          run.finishedAt = Date.now();
-          const done = writeRecord(run).then(() => { opts.registry.notify(run); opts.onComplete?.(run); return run; });
-          return { run, done };
+    // v0.13 worktree-per-persona: create an isolated git worktree when
+    // opts.worktree is true. resolveWorktreeSpec returns null for non-git
+    // cwds — fall back to shared cwd with a warning rather than failing.
+    let effectiveCwd = opts.cwd;
+    let worktreeFence: SubAgentPromptPlace["worktree"];
+    if (opts.worktree || effort) {
+      const spec = resolveWorktreeSpec(effort?.gitRoot ?? opts.cwd, run.id);
+      if (spec === null) {
+        if (effort) throw new Error("effort repository disappeared; refusing shared cwd fallback");
+        process.stderr.write(
+          `[conductor] worktree: true but ${opts.cwd} is not inside a git repo; ` +
+            `falling back to shared cwd for run ${run.id}\n`,
+        );
+      } else {
+        try {
+          // v0.14: capture the base branch before creating the worktree.
+          // Non-fatal: undefined leaves worktreeBaseBranch unset.
+          const baseBranch = effort?.baseBranch ?? currentBranch(spec.gitRoot);
+          const from = effort ? effortTip(effort) : undefined;
+          createWorktree(spec, { from });
+          if (run.effort) run.effort.spawnBase = from;
+          run.worktreePath = spec.worktreePath;
+          run.worktreeBranch = spec.branch;
+          if (baseBranch) run.worktreeBaseBranch = baseBranch;
+          effectiveCwd = worktreeCwd(effort ? { ...spec, gitRoot: effortRepository(opts.cwd).requestedRoot } : spec, opts.cwd);
+          if (run.effort) run.effort.cwd = effectiveCwd;
+          worktreeFence = { path: spec.worktreePath, branch: spec.branch, gitRoot: spec.gitRoot };
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(`[conductor] worktree creation failed for ${run.id}: ${msg}\n`);
+          if (effort) throw err;
+          // Non-fatal: fall back to shared cwd rather than killing the chain.
         }
-        // Non-fatal: fall back to shared cwd rather than killing the chain.
       }
     }
+
+    void writeRecord(run);
+
+    // Construct prompt + args. When the persona has inherit_context=filtered
+    // (or full) and we have a parent-message snapshot, planSpawnPiArgs seeds a
+    // session file with the filtered transcript and we boot resuming it.
+    const prompt = buildSubAgentPrompt(opts.persona, opts.task, {
+      cwd: effectiveCwd,
+      requestedCwd: opts.cwd,
+      worktree: worktreeFence,
+    });
+    const sessionDir = join(dir, "session");
+    mkdirSync(sessionDir, { recursive: true });
+    const plan = planSpawnPiArgs({
+      persona: opts.persona,
+      parentMessages: opts.parentMessages,
+      sessionDir,
+      // Item 13: prepend read-only enforcer when applicable. Same
+      // assembly used at the Run.systemPrompt capture above so the
+      // initial spawn argv and resume argv stay byte-identical for
+      // a given persona. Doctrine stays keyed on opts.cwd: from a worktree
+      // pi already loads every ancestor AGENTS.md natively.
+      systemPrompt: assemblePersonaSystemPrompt(opts.persona, opts.cwd),
+      prompt,
+      // pi runs a seeded `--session` in its header's cwd, not the process
+      // cwd, so the header must name the worktree for the child to work there.
+      cwd: effectiveCwd,
+      model: opts.model,
+      thinking: opts.thinking,
+      // PRD #15: when `inherit_skills: true`, pass the parent's user +
+      // project skill dirs to the sub-agent via `--skill <path>`. The
+      // flag is consumed at spawn time and not propagated into the
+      // sub-agent's env, so a sub-agent spawning a further sub-agent
+      // does NOT re-inherit (we discourage that pattern anyway).
+      skillPaths: opts.persona.inheritSkills
+        ? collectInheritedSkillPaths({ cwd: opts.cwd })
+        : undefined,
+      // v0.12 slice 4 — thread the cascade-collapsed steerable so the
+      // argv shape matches the createRunPipeline `steerable` we pass
+      // below. Both must agree or pi will boot with the wrong stdio.
+      steerable: opts.steerable === true,
+      // Item 12 candidate #3 — thread the per-call inherit_context
+      // override into planSpawnPiArgs so the filter selection (filtered
+      // / filtered_compact / full / none) honors the LLM tool's per-call
+      // arg above the persona's frontmatter. See src/inherit-context.ts.
+      inheritContextOverride: opts.inheritContextOverride,
+      // Item 12 candidate #4 — pass the current registry size so
+      // planSpawnPiArgs can auto-downgrade filtered_compact → none when
+      // the chain is deep. Excludes the run we just registered (it is
+      // already in the registry at this point) to count only siblings.
+      siblingRunCount: opts.registry.list().length - 1,
+    });
+    // When we seeded a session, populate run.sessionPath up-front so callers
+    // (e.g. ensemble_send mid-run) can find it without waiting for finalize().
+    if (plan.seededSessionPath) run.sessionPath = plan.seededSessionPath;
+
+    const done = createRunPipeline(run, plan.piArgs, {
+      registry: opts.registry,
+      cwd: effectiveCwd, // v0.13: opts.cwd's counterpart in the worktree when one was created
+      timeoutMs: opts.timeoutMs,
+      onUpdate: opts.onUpdate,
+      onComplete: opts.onComplete,
+      // Only let the subprocess discover a session file when we didn't pre-seed
+      // one — in resume mode the path is fixed.
+      sessionDir: plan.seededSessionPath ? undefined : sessionDir,
+      // v0.12 slice 4 — thread the cascade-collapsed steerable into
+      // createRunPipeline so the subprocess `stdio[0]` branch (`pipe` vs
+      // `ignore`) and the post-spawn `Run.streamingMode` stamp match
+      // the argv shape produced above. Slice 3 hard-coded `false`; the
+      // dead value was a known TODO.
+      steerable: opts.steerable === true,
+      // The transport selector may choose RPC even when steering was not requested.
+      initialPrompt: prompt,
+      // v0.11 on_complete_hook (slice 2): resolve at spawn time from the
+      // current config layers + persona frontmatter. Per-call args land
+      // in slice 3; for slice 2 the per-call layer is always undefined.
+      // Tests inject `resolvedHook` directly via the spawn-options surface.
+      resolvedHook: resolveCloseHook(
+        opts.cwd,
+        opts.persona.name,
+        hookSpecFromOpts(opts.onCompleteHook, opts.onCompleteHookTimeoutSeconds), // per-call (slice 3)
+        hookSpecFromPersona(opts.persona),
+      ),
+      // v0.15 chains: thread the callback from spawnRun opts.
+      onChain: opts.onChain,
+      // v0.18 classified retry: thread the retry callback.
+      onRetry: opts.onRetry,
+      // v0.16-S3: thread the event bus adapter so finalize can emit lifecycle events.
+      events: opts.events,
+    });
+    return { run, done };
+  } catch (error) {
+    if (!effort) throw error;
+    const current = opts.registry.get(run.id)!;
+    return failEffortLaunch(current, opts.registry, `effort isolation failed; no child started: ${(error as Error).message}. ${EFFORT_NOTICE}`, opts.onComplete);
   }
+}
 
-  void writeRecord(run);
-
-  // Construct prompt + args. When the persona has inherit_context=filtered
-  // (or full) and we have a parent-message snapshot, planSpawnPiArgs seeds a
-  // session file with the filtered transcript and we boot resuming it.
-  const prompt = buildSubAgentPrompt(opts.persona, opts.task, {
-    cwd: effectiveCwd,
-    requestedCwd: opts.cwd,
-    worktree: worktreeFence,
-  });
-  const sessionDir = join(dir, "session");
-  mkdirSync(sessionDir, { recursive: true });
-  const plan = planSpawnPiArgs({
-    persona: opts.persona,
-    parentMessages: opts.parentMessages,
-    sessionDir,
-    // Item 13: prepend read-only enforcer when applicable. Same
-    // assembly used at the Run.systemPrompt capture above so the
-    // initial spawn argv and resume argv stay byte-identical for
-    // a given persona. Doctrine stays keyed on opts.cwd: from a worktree
-    // pi already loads every ancestor AGENTS.md natively.
-    systemPrompt: assemblePersonaSystemPrompt(opts.persona, opts.cwd),
-    prompt,
-    // pi runs a seeded `--session` in its header's cwd, not the process
-    // cwd, so the header must name the worktree for the child to work there.
-    cwd: effectiveCwd,
-    model: opts.model,
-    thinking: opts.thinking,
-    // PRD #15: when `inherit_skills: true`, pass the parent's user +
-    // project skill dirs to the sub-agent via `--skill <path>`. The
-    // flag is consumed at spawn time and not propagated into the
-    // sub-agent's env, so a sub-agent spawning a further sub-agent
-    // does NOT re-inherit (we discourage that pattern anyway).
-    skillPaths: opts.persona.inheritSkills
-      ? collectInheritedSkillPaths({ cwd: opts.cwd })
-      : undefined,
-    // v0.12 slice 4 — thread the cascade-collapsed steerable so the
-    // argv shape matches the createRunPipeline `steerable` we pass
-    // below. Both must agree or pi will boot with the wrong stdio.
-    steerable: opts.steerable === true,
-    // Item 12 candidate #3 — thread the per-call inherit_context
-    // override into planSpawnPiArgs so the filter selection (filtered
-    // / filtered_compact / full / none) honors the LLM tool's per-call
-    // arg above the persona's frontmatter. See src/inherit-context.ts.
-    inheritContextOverride: opts.inheritContextOverride,
-    // Item 12 candidate #4 — pass the current registry size so
-    // planSpawnPiArgs can auto-downgrade filtered_compact → none when
-    // the chain is deep. Excludes the run we just registered (it is
-    // already in the registry at this point) to count only siblings.
-    siblingRunCount: opts.registry.list().length - 1,
-  });
-  // When we seeded a session, populate run.sessionPath up-front so callers
-  // (e.g. ensemble_send mid-run) can find it without waiting for finalize().
-  if (plan.seededSessionPath) run.sessionPath = plan.seededSessionPath;
-
-  const done = createRunPipeline(run, plan.piArgs, {
-    registry: opts.registry,
-    cwd: effectiveCwd, // v0.13: opts.cwd's counterpart in the worktree when one was created
-    timeoutMs: opts.timeoutMs,
-    onUpdate: opts.onUpdate,
-    onComplete: opts.onComplete,
-    // Only let the subprocess discover a session file when we didn't pre-seed
-    // one — in resume mode the path is fixed.
-    sessionDir: plan.seededSessionPath ? undefined : sessionDir,
-    // v0.12 slice 4 — thread the cascade-collapsed steerable into
-    // createRunPipeline so the subprocess `stdio[0]` branch (`pipe` vs
-    // `ignore`) and the post-spawn `Run.streamingMode` stamp match
-    // the argv shape produced above. Slice 3 hard-coded `false`; the
-    // dead value was a known TODO.
-    steerable: opts.steerable === true,
-    // The transport selector may choose RPC even when steering was not requested.
-    initialPrompt: prompt,
-    // v0.11 on_complete_hook (slice 2): resolve at spawn time from the
-    // current config layers + persona frontmatter. Per-call args land
-    // in slice 3; for slice 2 the per-call layer is always undefined.
-    // Tests inject `resolvedHook` directly via the spawn-options surface.
-    resolvedHook: resolveCloseHook(
-      opts.cwd,
-      opts.persona.name,
-      hookSpecFromOpts(opts.onCompleteHook, opts.onCompleteHookTimeoutSeconds), // per-call (slice 3)
-      hookSpecFromPersona(opts.persona),
-    ),
-    // v0.15 chains: thread the callback from spawnRun opts.
-    onChain: opts.onChain,
-    // v0.18 classified retry: thread the retry callback.
-    onRetry: opts.onRetry,
-    // v0.16-S3: thread the event bus adapter so finalize can emit lifecycle events.
-    events: opts.events,
+/** Release an unlaunched effort reservation once, without discarding its workspace or evidence. */
+export function failEffortLaunch(run: Run, registry: RunRegistry, errorMessage: string, onComplete?: (run: Run) => void): { run: Run; done: Promise<Run> } {
+  if (!applyCloseHandlerTerminal(run, "failed", undefined)) return { run, done: Promise.resolve(run) };
+  run.waitReason = undefined;
+  run.errorMessage = errorMessage;
+  run.failureClass = "environment";
+  const done = writeRecord(run).then(() => {
+    registry.notify(run);
+    try { onComplete?.(run); } catch { /* notification errors cannot undo reservation release */ }
+    return run;
   });
   return { run, done };
 }

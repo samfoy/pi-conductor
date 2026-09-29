@@ -11,6 +11,7 @@
 
 import {
   forceTerminate,
+  failEffortLaunch,
   RunRegistry,
   spawnRun,
   prepareSpawnEvidence,
@@ -205,11 +206,8 @@ export class SpawnQueue {
         } catch (e) {
           if (!placeholder.effort) throw e;
           if (this.pending[i]?.id === next.id) this.pending.splice(i, 1);
-          placeholder.status = "failed";
-          placeholder.waitReason = undefined;
-          placeholder.finishedAt = Date.now();
-          placeholder.errorMessage = `effort launch refused: ${(e as Error).message}`;
-          void writeRecord(placeholder).then(() => { this.registry.notify(placeholder); next.spawn.onComplete?.(placeholder); });
+          const current = this.registry.get(next.id)!;
+          void failEffortLaunch(current, this.registry, `effort launch refused: ${(e as Error).message}`, next.spawn.onComplete).done;
         }
       }
     } finally { this.draining = false; }
