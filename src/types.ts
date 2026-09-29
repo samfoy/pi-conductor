@@ -494,13 +494,19 @@ export interface RunEffort {
 }
 
 export interface RunIntegration {
-  state: "queued" | "merging" | "verifying" | "verified" | "paused" | "accepted" | "cancelled";
+  state: "queued" | "merging" | "generating" | "verifying" | "verified" | "paused" | "accepted" | "cancelled";
   enqueuedAt: number;
   branchHead: string;
   expectedTip?: string;
   candidateOid?: string;
   candidateTree?: string;
   candidatePath?: string;
+  /** Original merge output is preserved before generated-only resolution. */
+  mergeTree?: string;
+  conflicts?: string[];
+  mergeEvidencePath?: string;
+  preGenerationTree?: string;
+  generation?: HookResult;
   /** A failed group teardown is not cleared by reload or another shutdown attempt. */
   teardownError?: string;
   logPath?: string;

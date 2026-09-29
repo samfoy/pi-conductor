@@ -7,8 +7,8 @@ export function effortEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return { ...Object.fromEntries(Object.keys(process.env).filter(k => k.startsWith("GIT_") || k.startsWith("HERDR_")).map(k => [k, undefined])), ...extra };
 }
 export function mergeTree(root: string, tip: string, branch: string) {
-  const result = spawnSync("git", ["merge-tree", "--write-tree", "--name-only", tip, branch], { cwd: root, env: gitEnv(), encoding: "utf8", timeout: 30000, maxBuffer: 1024 * 1024 });
-  return parseMergeTree(result.stdout ?? "", result.status, result.error?.message ?? result.stderr);
+  const result = spawnSync("git", ["merge-tree", "--write-tree", "--name-only", "-z", tip, branch], { cwd: root, env: gitEnv(), encoding: "utf8", timeout: 30000, maxBuffer: 1024 * 1024 });
+  return { ...parseMergeTree(result.stdout ?? "", result.status, result.error?.message ?? result.stderr), output: result.stdout ?? "" };
 }
 export function assertCandidate(path: string, oid: string): void {
   if (effortGit(path, "rev-parse", "HEAD") !== oid) throw new Error("candidate HEAD changed after verification setup");

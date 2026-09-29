@@ -9,10 +9,14 @@ export function nextIntegration(result: HookResult, attempts: number, retries: n
   return result.failureKind === "timeout" ? "verify_timeout" : "verify_failed";
 }
 
-export type MergeTreeResult = { kind: "clean"; tree: string } | { kind: "conflict"; conflicts: string[] } | { kind: "error"; error: string };
+export type MergeTreeResult = { kind: "clean"; tree: string } | { kind: "conflict"; tree: string; conflicts: string[] } | { kind: "error"; error: string };
+/** --name-only -z: tree, conflicted paths, empty separator, optional informational records. */
 export function parseMergeTree(stdout: string, exit: number | null, stderr = ""): MergeTreeResult {
-  const [tree, ...lines] = stdout.split("\n");
-  if (exit === 0 && /^[0-9a-f]{40,64}$/.test(tree ?? "")) return { kind: "clean", tree };
-  if (exit === 1 && /^[0-9a-f]{40,64}$/.test(tree ?? "")) return { kind: "conflict", conflicts: lines.slice(0, lines.indexOf("") < 0 ? lines.length : lines.indexOf("")) };
-  return { kind: "error", error: stderr || `merge-tree failed (${exit}): ${stdout}` };
+  const [tree, ...fields] = stdout.split("\0");
+  if (stdout.endsWith("\0") && /^[0-9a-f]{40,64}$/.test(tree ?? "")) {
+    if (exit === 0 && fields[0] === "") return { kind: "clean", tree };
+    const end = fields.indexOf("");
+    if (exit === 1 && end > 0 && end < fields.length - 1) return { kind: "conflict", tree, conflicts: fields.slice(0, end) };
+  }
+  return { kind: "error", error: stderr || `merge-tree failed or malformed output (${exit}): ${stdout}` };
 }

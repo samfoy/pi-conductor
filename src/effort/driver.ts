@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { HookResult, MergeResult, Run, RunStatus } from "../types.ts";
 import { runHook } from "../hook-runner.ts";
@@ -10,6 +10,8 @@ import { effortGit, effortOwner, effortTip } from "./open.ts";
 import { assertEffortOwner, effortDir, readEffort, writeEffort, type EffortOwner, type EffortRecord } from "./store.ts";
 import { assertCandidate, checkedCas, effortEnv, mergeTree, shellQuote } from "./git.ts";
 import { nextIntegration } from "./core.ts";
+import { changedPaths, regenerateCandidate } from "./generated.ts";
+import { isGeneratedPath } from "./policy.ts";
 import { stopOwnedProcessGroup, type OwnedProcessGroup } from "./process-group.ts";
 
 export interface IntegrationOutcome { terminal: RunStatus; mergeResult: MergeResult; landedCommit?: string }
@@ -160,7 +162,10 @@ export class EffortDriver {
         runId: run.id, persona: run.persona, runDir: dirname(run.recordPath), finalPath: run.finalPath,
         transcriptPath: run.transcriptPath, parentCwd: cwd, logPath, tmpDir,
         extraEnv: effortEnv({ CONDUCTOR_EFFORT: run.effort!.name, CONDUCTOR_CANDIDATE: entry.candidateOid, TMPDIR: tmpDir }),
-        onEnd: result => { if (entry.state === "verifying") entry.verify = result; },
+        onEnd: result => {
+          if (entry.state === "verifying") entry.verify = result;
+          if (entry.state === "generating") entry.generation = result;
+        },
         deps: { killGroup: () => { void stop(); } },
         onProc: proc => { if (proc.pid) { group = { pid: proc.pid, startTime: readProcessStartTime(proc.pid) }; entry.process = { ...group }; } void this.persist(job).catch(() => { if (!job.cancelled) { job.suspended = true; run.integrationControl = undefined; } void stop(); }); },
       });
@@ -194,16 +199,51 @@ export class EffortDriver {
     }
     this.fence(job);
     const merged = mergeTree(root, expected, entry.branchHead);
-    if (merged.kind !== "clean") {
-      this.finish(job, { terminal: "merge_conflict", mergeResult: merged.kind === "conflict" ? { success: false, reason: "conflict", conflicts: merged.conflicts } : { success: false, reason: "error", errorMessage: merged.error } }); return;
+    if (merged.kind === "error") {
+      this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: "error", errorMessage: merged.error } }); return;
     }
-    if (merged.tree === effortGit(root, "rev-parse", `${expected}^{tree}`)) {
+    const generated = record.policy.generated;
+    if (generated) {
+      entry.mergeTree = merged.tree;
+      entry.conflicts = merged.kind === "conflict" ? [...merged.conflicts] : [];
+      entry.mergeEvidencePath = join(dir, "merge-tree.z");
+      writeFileSync(entry.mergeEvidencePath, merged.output);
+      this.fence(job); assertCandidate(candidate, expected);
+      effortGit(candidate, "read-tree", "--reset", "-u", merged.tree);
+      copyFileSync(effortGit(candidate, "rev-parse", "--git-path", "index"), join(dir, "merge.index"));
+      await this.persist(job);
+    }
+    if (merged.kind === "conflict" && (!generated || !merged.conflicts.every(path => isGeneratedPath(path, generated)))) {
+      this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: "conflict", conflicts: merged.conflicts } }); return;
+    }
+    if (merged.kind === "clean" && merged.tree === effortGit(root, "rev-parse", `${expected}^{tree}`)) {
       this.fence(job);
       if (effortTip(record) !== expected) throw new Error("integration tip changed before no-op acceptance");
       this.finish(job, { terminal: "completed", mergeResult: { success: true, nothingToCommit: true, verifyDisabled: !entry.verifyIdentity.command } }); return;
     }
-    this.fence(job); assertCandidate(candidate, expected);
-    effortGit(candidate, "read-tree", "--reset", "-u", merged.tree);
+    this.fence(job);
+    if (!generated) {
+      assertCandidate(candidate, expected);
+      effortGit(candidate, "read-tree", "--reset", "-u", merged.tree);
+    }
+    if (generated && (merged.kind === "conflict" || changedPaths(candidate, expected, merged.tree).some(path => isGeneratedPath(path, generated)))) {
+      // Seed conflicted outputs from the current tip (including its deletions), never from marker blobs.
+      // Only the original conflict paths change; the ordinary source merge stays intact.
+      if (merged.kind === "conflict") {
+        const present = new Set([...effortGit(candidate, "ls-files", "-z").split("\0"), ...effortGit(candidate, "ls-tree", "-r", "--name-only", "-z", expected).split("\0")]);
+        const paths = merged.conflicts.filter(path => present.has(path));
+        if (paths.length) effortGit(candidate, "--literal-pathspecs", "restore", `--source=${expected}`, "--staged", "--worktree", "--", ...paths);
+      }
+      entry.preGenerationTree = effortGit(candidate, "write-tree");
+      entry.state = "generating";
+      await this.persist(job);
+      const result = await regenerateCandidate(candidate, expected, generated, join(dir, "generation-before.json"), async () => {
+        entry.generation = await this.command(job, candidate, generated.command, join(dir, "generate.log"));
+        return entry.generation;
+      }, () => { this.fence(job); });
+      if (!result.passed) { this.pause(job, `generated command ${result.failureKind ?? "failed"}: ${result.logPath}: ${result.tailText}`); return; }
+      entry.state = "merging";
+    }
     const message = join(dir, "commit-message");
     writeFileSync(message, `${buildMergeCommitMessage(run.persona, run.id, run.task)}\n\nConductor-Effort: ${record.name}\nConductor-Run: ${run.id}\n`);
     entry.commitHook = await this.command(job, candidate, `git commit -F ${shellQuote(message)}`, join(dir, "commit.log"));

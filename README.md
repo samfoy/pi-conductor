@@ -321,7 +321,7 @@ settlement. Prompt rejection is a failed run, not completion. As with explicit
 RPC, extension dialogs are auto-cancelled; provider extensions remain enabled.
 This does not address independently oversized persona/system-prompt argv.
 
-## Named efforts (M2 — verified serial integration)
+## Named efforts (M3 — verified serial integration and generated artifacts)
 
 `ensemble_effort({action:"open", effort:"feature", verify:"npm test"})` captures
 an attached base branch and commit from the conductor's requested checkout and
@@ -353,7 +353,7 @@ for inspection. No builder retry or automatic merger is attempted.
 `ensemble_status` exposes the integration stage, captured OIDs, reason, bounded
 logs and verification duration; completed cards include the same evidence.
 Kill cancels only the owned integration and waits for its process group before
-settlement. Quit/reload stop active verification and preserve integrating records;
+settlement. Quit/reload stop active generation/verification and preserve integrating records;
 restart restores them for inspection, **not automatic recovery**. A crashed driver
 claim is also retained. Before M5 there is no resume/requeue command: inspect work
 and logs rather than repeatedly spawning into a paused effort.
@@ -401,11 +401,54 @@ the weaker guarantee. Verify and candidate hooks have bounded output and a timeo
 and use private temporary directories. Candidate hooks may stage changes, but the
 resulting post-hook tree must be clean and pass verification. There is no automatic
 dependency installation or base `node_modules` modification: hooks needing a local
-installation pause when it is missing. Generated policy, maxParallel, merger and
-land remain captured-only; M2 does not resolve generated conflicts or relax the
-legacy active-writer cap. Names match `^[a-z][a-z0-9-]{0,39}$`. Scope/generated paths
-are nonempty repo-relative literal, `*` or `**` globs; traversal, absolute paths
-and other glob syntax are rejected. Omitted scope remains undeclared.
+installation pause when it is missing. MaxParallel, merger and land remain
+captured-only; M3 does not relax the legacy active-writer cap. Names match
+`^[a-z][a-z0-9-]{0,39}$`. Scope/generated paths are nonempty repo-relative
+literal (including Unicode letters/numbers), `*` or `**` globs; traversal, absolute
+paths and other glob syntax are rejected. Omitted scope remains undeclared.
+
+**Generated artifacts (optional).** The frozen `generated.paths` and
+`generated.command` policy now runs once when a clean merge changes a declared
+output, or when **every original conflict path** matches the policy. A mixed
+source/output conflict still returns `merge_conflict` with all original paths,
+without invoking the generator. Without generated policy, the M2 route is unchanged.
+The NUL-delimited merge output, original tree OID and exact index copy are retained
+before classification. For generated-only conflicts, conflicting paths start with
+the current integration tip's content (or absence), avoiding marker-filled input;
+nonconflicting merged files, including source, stay unchanged. Rename source paths
+absent from both trees stay absent. The generator must rebuild outputs from source,
+not depend on either builder's artifact bytes. A tree-equal gated no-op still skips
+candidate construction and regeneration.
+
+Generation uses the same bounded runner, private TMPDIR, environment scrubbing and
+owned-group cancellation as verification, with no generator retry. Before staging,
+the driver compares the pre-generation index tree and actual file bytes/modes with
+the result, including ignored/untracked files and both sides of renames/deletions.
+Only concrete matching paths are staged, with literal path handling; declared
+ignored additions are explicitly included. Out-of-policy edits, changed index flags,
+HEAD/ref changes, unsupported file types or generated symlink artifacts pause the
+effort and preserve evidence. Snapshots do not follow symlinks; generated symlinks
+are refused before running or staging. Empty directories are not Git outputs.
+Source, index-only and ignored-file edits cannot silently ride along with generation.
+
+A successful generation is committed **once through normal repository hooks**,
+then the exact post-hook OID/tree goes through independent verification, durable
+WAL and expected-tip/owner CAS. There is no plumbing commit or hook bypass. Hook
+changes are trusted repository policy, not constrained by generated globs, but their
+result is still verified. Generator error/timeout/cancel, boundary rejection, hook
+failure or red verify never authorizes a ref advance. Inspect `generate.log`,
+`generation-before.json`, `merge-tree.z`, `merge.index` and recorded OIDs in the
+retained candidate/evidence directories; no automatic merger or recovery runs.
+
+**Trust limits:** globs classify paths, not file meaning. Declaring `src/**` or `**`
+as generated explicitly authorizes regeneration there, including conflict resolution;
+there is no source-language or semantic detector. Matching uses Node's native
+`path.matchesGlob` (dotfiles require an explicit matching pattern). Generators,
+hooks and verifiers are trusted local commands, **not sandboxed**: snapshots check
+final candidate-local changes, not transient or external filesystem effects, network
+access or escaped processes. Candidate-local ignored dependencies are scanned too,
+which can be expensive; nothing installs dependencies or copies `node_modules`.
+Generated footprint exclusion is not parallel admission; that remains deferred.
 
 Readers, effort auto plans, chains and classified retries are unavailable until
 later slices; none silently escapes into non-effort work. Non-git, detached-base,
@@ -418,7 +461,7 @@ The canonical repository root is the main checkout, even for linked-worktree
 callers; the captured base remains the caller's branch. An exclusive `effort.lock`
 claim and atomic `effort.json` replacements retain owner session/pid/start identity,
 frozen policy and ordered member ids. Existing refs/records/claims fail closed.
-There is no takeover or destructive effort action in M2: even stale claims remain
+There is no takeover or destructive effort action in M3: even stale claims remain
 for review. A failed creation/persistence retains its claim and any created ref;
 rollback never deletes a ref that another actor may have replaced. The claim is
 not evidence of successful open if `effort.json` is absent. Inspect the preserved

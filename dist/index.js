@@ -963,7 +963,8 @@ async function checkSessionResumability(record, result) {
 }
 
 // src/effort/policy.ts
-var EFFORT_NOTICE = "M2: new hook-passed writers integrate serially after baseline/candidate verification and repository hooks. Legacy work remains UNINTEGRATED. Interrupted work pauses for inspection; recovery, generated conflict resolution, parallel admission, merger, landing, readers, auto plans, chains and retries are unavailable.";
+import { matchesGlob } from "node:path";
+var EFFORT_NOTICE = "M3: new hook-passed writers integrate serially after optional generated artifact regeneration, baseline/candidate verification and repository hooks. Legacy work remains UNINTEGRATED. Interrupted work pauses for inspection; recovery, parallel admission, merger, landing, readers, auto plans, chains and retries are unavailable.";
 function effortSummary(run) {
   if (!run.effort) return "";
   const state = run.landedCommit ? `integrated ${run.landedCommit.slice(0, 12)}` : run.mergeResult?.nothingToCommit ? "tree-equal no-op" : run.status === "integrating" ? `integrating (${run.integration?.state ?? "paused"})` : "UNINTEGRATED";
@@ -975,9 +976,12 @@ function validateEffortName(name) {
   }
 }
 function validateTouches(paths) {
-  if (!Array.isArray(paths) || paths.length === 0 || paths.some((p) => typeof p !== "string" || !p || p.startsWith("/") || !/^[A-Za-z0-9_.* /-]+$/.test(p) || p.trim() !== p || p.split("/").some((s) => !s || s === "." || s === ".."))) {
+  if (!Array.isArray(paths) || paths.length === 0 || paths.some((p) => typeof p !== "string" || !p || p.startsWith("/") || !/^[\p{L}\p{N}_.* /-]+$/u.test(p) || p.trim() !== p || p.split("/").some((s) => !s || s === "." || s === ".."))) {
     throw new Error("effort paths must be nonempty repo-relative globs using literals, * or **; no traversal or absolute paths");
   }
+}
+function isGeneratedPath(path, generated) {
+  return !path.startsWith("/") && !path.includes("\0") && !path.split("/").some((p) => !p || p === "." || p === "..") && !!generated?.paths.some((glob) => matchesGlob(path, glob));
 }
 function resolveEffortPolicy(config = {}, overrides = {}) {
   const p = { verifyTimeoutSeconds: 1200, verifyRetries: 1, maxParallel: 2, merger: "auto", mergerMaxAttempts: 1, land: "branch", history: "squash", ...config, ...overrides };
@@ -1087,7 +1091,8 @@ function listEfforts(gitRoot2) {
 
 // src/effort/open.ts
 function effortGit(cwd, ...args) {
-  return execFileSync("git", args, { cwd, env: Object.fromEntries(Object.entries(gitEnv()).filter(([key]) => !key.startsWith("HERDR_"))), encoding: "utf8", stdio: "pipe", timeout: 3e4 }).trim();
+  const output = execFileSync("git", args, { cwd, env: Object.fromEntries(Object.entries(gitEnv()).filter(([key]) => !key.startsWith("HERDR_"))), encoding: "utf8", stdio: "pipe", timeout: 3e4 });
+  return output.endsWith("\0") ? output : output.trim();
 }
 function effortRepository(cwd) {
   try {
@@ -1148,8 +1153,8 @@ function ownedEffort(cwd, name, sessionId) {
 
 // src/commands.ts
 init_types();
-import { existsSync as existsSync13, readdirSync as readdirSync4, readFileSync as readFileSync12, statSync as statSync5 } from "node:fs";
-import { join as join19, dirname as dirname13 } from "node:path";
+import { existsSync as existsSync13, readdirSync as readdirSync5, readFileSync as readFileSync13, statSync as statSync5 } from "node:fs";
+import { join as join20, dirname as dirname13 } from "node:path";
 
 // src/status-glyph.ts
 var STATUS_GLYPH = {
@@ -2606,10 +2611,13 @@ function nextIntegration(result, attempts, retries) {
   return result.failureKind === "timeout" ? "verify_timeout" : "verify_failed";
 }
 function parseMergeTree(stdout, exit, stderr = "") {
-  const [tree, ...lines] = stdout.split("\n");
-  if (exit === 0 && /^[0-9a-f]{40,64}$/.test(tree ?? "")) return { kind: "clean", tree };
-  if (exit === 1 && /^[0-9a-f]{40,64}$/.test(tree ?? "")) return { kind: "conflict", conflicts: lines.slice(0, lines.indexOf("") < 0 ? lines.length : lines.indexOf("")) };
-  return { kind: "error", error: stderr || `merge-tree failed (${exit}): ${stdout}` };
+  const [tree, ...fields] = stdout.split("\0");
+  if (stdout.endsWith("\0") && /^[0-9a-f]{40,64}$/.test(tree ?? "")) {
+    if (exit === 0 && fields[0] === "") return { kind: "clean", tree };
+    const end = fields.indexOf("");
+    if (exit === 1 && end > 0 && end < fields.length - 1) return { kind: "conflict", tree, conflicts: fields.slice(0, end) };
+  }
+  return { kind: "error", error: stderr || `merge-tree failed or malformed output (${exit}): ${stdout}` };
 }
 
 // src/effort/git.ts
@@ -2617,8 +2625,8 @@ function effortEnv(extra = {}) {
   return { ...Object.fromEntries(Object.keys(process.env).filter((k) => k.startsWith("GIT_") || k.startsWith("HERDR_")).map((k) => [k, void 0])), ...extra };
 }
 function mergeTree(root, tip, branch) {
-  const result = spawnSync("git", ["merge-tree", "--write-tree", "--name-only", tip, branch], { cwd: root, env: gitEnv(), encoding: "utf8", timeout: 3e4, maxBuffer: 1024 * 1024 });
-  return parseMergeTree(result.stdout ?? "", result.status, result.error?.message ?? result.stderr);
+  const result = spawnSync("git", ["merge-tree", "--write-tree", "--name-only", "-z", tip, branch], { cwd: root, env: gitEnv(), encoding: "utf8", timeout: 3e4, maxBuffer: 1024 * 1024 });
+  return { ...parseMergeTree(result.stdout ?? "", result.status, result.error?.message ?? result.stderr), output: result.stdout ?? "" };
 }
 function assertCandidate(path, oid) {
   if (effortGit(path, "rev-parse", "HEAD") !== oid) throw new Error("candidate HEAD changed after verification setup");
@@ -2636,8 +2644,8 @@ function shellQuote2(value) {
 
 // src/effort/driver.ts
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { mkdirSync as mkdirSync6, readFileSync as readFileSync8, unlinkSync as unlinkSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import { dirname as dirname7, join as join8 } from "node:path";
+import { copyFileSync, mkdirSync as mkdirSync6, readFileSync as readFileSync9, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname7, join as join9 } from "node:path";
 
 // src/hook-runner.ts
 init_worktree();
@@ -2891,15 +2899,64 @@ function renderTail(lines) {
 // src/effort/driver.ts
 init_worktree();
 
+// src/effort/generated.ts
+import { createHash as createHash3 } from "node:crypto";
+import { lstatSync, readdirSync as readdirSync2, readFileSync as readFileSync7, readlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { join as join8 } from "node:path";
+function changedPaths(cwd, before, after) {
+  return effortGit(cwd, "diff-tree", "-r", "--no-renames", "--name-only", "-z", before, after).split("\0").filter(Boolean);
+}
+function snapshot(cwd, prefix = "") {
+  return Object.fromEntries(readdirSync2(join8(cwd, prefix)).flatMap((name) => {
+    const path = prefix ? `${prefix}/${name}` : name;
+    const file = join8(cwd, path), stat6 = lstatSync(file);
+    if (stat6.isDirectory() && path !== ".git") return Object.entries(snapshot(cwd, path));
+    if (stat6.isSymbolicLink()) return [[path, `link:${readlinkSync(file)}`]];
+    if (!stat6.isFile()) throw new Error(`generated candidate contains unsupported file type: ${JSON.stringify(path)}`);
+    return [[path, `${stat6.mode}:${createHash3("sha256").update(readFileSync7(file)).digest("hex")}`]];
+  }));
+}
+async function regenerateCandidate(cwd, expectedHead, generated, evidencePath, command, fence) {
+  const beforeTree = effortGit(cwd, "write-tree");
+  const before = snapshot(cwd);
+  writeFileSync2(evidencePath, JSON.stringify({ tree: beforeTree, files: before }, null, 2));
+  for (const [path, value] of Object.entries(before)) {
+    if (isGeneratedPath(path, generated) && value.startsWith("link:")) throw new Error(`generated symlink artifacts are unsupported: ${JSON.stringify(path)}`);
+  }
+  const result = await command();
+  if (!result.passed) return result;
+  fence();
+  if (effortGit(cwd, "rev-parse", "HEAD") !== expectedHead || effortGit(cwd, "rev-parse", "--abbrev-ref", "HEAD") !== "HEAD") throw new Error("generated command changed candidate HEAD/ref");
+  const after = snapshot(cwd);
+  const paths = [.../* @__PURE__ */ new Set([
+    ...Object.keys(before),
+    ...Object.keys(after)
+  ])].filter((path) => before[path] !== after[path]);
+  const staged = changedPaths(cwd, beforeTree, effortGit(cwd, "write-tree"));
+  const changed = [.../* @__PURE__ */ new Set([...paths, ...staged])];
+  const outside = changed.filter((path) => path === ".git" || !isGeneratedPath(path, generated));
+  if (outside.length) throw new Error(`generated command edited paths outside generated policy: ${JSON.stringify(outside)}`);
+  if (effortGit(cwd, "ls-files", "-v", "-z").split("\0").filter(Boolean).some((line) => !line.startsWith("H "))) throw new Error("generated command changed index flags; refusing integration");
+  for (const path of changed) {
+    if (after[path]?.startsWith("link:")) throw new Error(`generated symlink artifacts are unsupported: ${JSON.stringify(path)}`);
+  }
+  for (const path of changed) {
+    fence();
+    if (after[path] === void 0) effortGit(cwd, "update-index", "--force-remove", "--", path);
+    else effortGit(cwd, "--literal-pathspecs", "add", "--force", "--", path);
+  }
+  return result;
+}
+
 // src/effort/process-group.ts
-import { readdirSync as readdirSync2, readFileSync as readFileSync7 } from "node:fs";
+import { readdirSync as readdirSync3, readFileSync as readFileSync8 } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 function linuxProcesses() {
   if (process.platform !== "linux") throw new Error("live group teardown requires readable Linux procfs identity evidence");
-  return readdirSync2("/proc").filter((name) => /^\d+$/.test(name)).flatMap((name) => {
+  return readdirSync3("/proc").filter((name) => /^\d+$/.test(name)).flatMap((name) => {
     let raw;
     try {
-      raw = readFileSync7(`/proc/${name}/stat`, "utf8");
+      raw = readFileSync8(`/proc/${name}/stat`, "utf8");
     } catch (error) {
       if (["ENOENT", "ESRCH"].includes(error.code ?? "")) return [];
       throw error;
@@ -3012,7 +3069,7 @@ var EffortDriver = class {
     const record = readEffort(job.run.effort.gitRoot, job.run.effort.name);
     if (!record) throw new Error("effort record missing");
     assertEffortOwner(record, job.owner);
-    if (job.claim && JSON.parse(readFileSync8(job.claim.path, "utf8")).token !== job.claim.token) throw new Error("integration driver claim changed");
+    if (job.claim && JSON.parse(readFileSync9(job.claim.path, "utf8")).token !== job.claim.token) throw new Error("integration driver claim changed");
     return record;
   }
   async persist(job) {
@@ -3061,12 +3118,12 @@ var EffortDriver = class {
     if (this.flights.has(root)) return;
     this.flights.add(root);
     const lockDir = effortDir(root, "integration-driver");
-    const lock = join8(lockDir, "driver.lock");
+    const lock = join9(lockDir, "driver.lock");
     const token = randomUUID2();
     let claimed = false;
     try {
       mkdirSync6(lockDir, { recursive: true });
-      writeFileSync2(lock, JSON.stringify({ token, pid: process.pid, startTime: readProcessStartTime(process.pid) }), { flag: "wx" });
+      writeFileSync3(lock, JSON.stringify({ token, pid: process.pid, startTime: readProcessStartTime(process.pid) }), { flag: "wx" });
       claimed = true;
       for (const job of this.queues.get(root) ?? []) {
         if (job.finished || job.suspended || job.cancelled) continue;
@@ -3097,7 +3154,7 @@ var EffortDriver = class {
       for (const job of this.queues.get(root) ?? []) if (!job.finished) this.pause(job, `integration driver ownership unresolved: ${error.message}`);
     } finally {
       try {
-        if (claimed && JSON.parse(readFileSync8(lock, "utf8")).token === token) unlinkSync2(lock);
+        if (claimed && JSON.parse(readFileSync9(lock, "utf8")).token === token) unlinkSync2(lock);
       } catch {
       }
       this.flights.delete(root);
@@ -3109,7 +3166,7 @@ var EffortDriver = class {
     const run = job.run;
     const entry = run.integration;
     entry.logPath = logPath;
-    const tmpDir = join8(dirname7(logPath), "tmp");
+    const tmpDir = join9(dirname7(logPath), "tmp");
     mkdirSync6(tmpDir, { recursive: true });
     let group;
     let teardown;
@@ -3156,6 +3213,7 @@ var EffortDriver = class {
         extraEnv: effortEnv({ CONDUCTOR_EFFORT: run.effort.name, CONDUCTOR_CANDIDATE: entry.candidateOid, TMPDIR: tmpDir }),
         onEnd: (result2) => {
           if (entry.state === "verifying") entry.verify = result2;
+          if (entry.state === "generating") entry.generation = result2;
         },
         deps: { killGroup: () => {
           void stop();
@@ -3194,14 +3252,14 @@ var EffortDriver = class {
     entry.expectedTip = expected;
     entry.state = "merging";
     await this.persist(job);
-    const dir = join8(effortDir(root, record.name), "verify", `${run.id}-${randomUUID2()}`);
+    const dir = join9(effortDir(root, record.name), "verify", `${run.id}-${randomUUID2()}`);
     mkdirSync6(dir, { recursive: true });
-    const candidate = join8(root, ".worktrees", "conductor-cand", record.name, `${run.id}-${randomUUID2()}`);
+    const candidate = join9(root, ".worktrees", "conductor-cand", record.name, `${run.id}-${randomUUID2()}`);
     entry.candidatePath = candidate;
     this.fence(job);
     effortGit(root, "worktree", "add", "--detach", candidate, expected);
     if (record.gatedTip !== expected) {
-      const result = entry.verifyIdentity.command ? await this.command(job, candidate, entry.verifyIdentity.command, join8(dir, "baseline.log")) : void 0;
+      const result = entry.verifyIdentity.command ? await this.command(job, candidate, entry.verifyIdentity.command, join9(dir, "baseline.log")) : void 0;
       assertCandidate(candidate, expected);
       record = this.fence(job);
       writeEffort({ ...record, baseline: { oid: expected, result, disabled: !result }, ...result?.passed === false ? {} : { gatedTip: expected }, updatedAt: Date.now() });
@@ -3212,26 +3270,65 @@ var EffortDriver = class {
     }
     this.fence(job);
     const merged = mergeTree(root, expected, entry.branchHead);
-    if (merged.kind !== "clean") {
-      this.finish(job, { terminal: "merge_conflict", mergeResult: merged.kind === "conflict" ? { success: false, reason: "conflict", conflicts: merged.conflicts } : { success: false, reason: "error", errorMessage: merged.error } });
+    if (merged.kind === "error") {
+      this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: "error", errorMessage: merged.error } });
       return;
     }
-    if (merged.tree === effortGit(root, "rev-parse", `${expected}^{tree}`)) {
+    const generated = record.policy.generated;
+    if (generated) {
+      entry.mergeTree = merged.tree;
+      entry.conflicts = merged.kind === "conflict" ? [...merged.conflicts] : [];
+      entry.mergeEvidencePath = join9(dir, "merge-tree.z");
+      writeFileSync3(entry.mergeEvidencePath, merged.output);
+      this.fence(job);
+      assertCandidate(candidate, expected);
+      effortGit(candidate, "read-tree", "--reset", "-u", merged.tree);
+      copyFileSync(effortGit(candidate, "rev-parse", "--git-path", "index"), join9(dir, "merge.index"));
+      await this.persist(job);
+    }
+    if (merged.kind === "conflict" && (!generated || !merged.conflicts.every((path) => isGeneratedPath(path, generated)))) {
+      this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: "conflict", conflicts: merged.conflicts } });
+      return;
+    }
+    if (merged.kind === "clean" && merged.tree === effortGit(root, "rev-parse", `${expected}^{tree}`)) {
       this.fence(job);
       if (effortTip(record) !== expected) throw new Error("integration tip changed before no-op acceptance");
       this.finish(job, { terminal: "completed", mergeResult: { success: true, nothingToCommit: true, verifyDisabled: !entry.verifyIdentity.command } });
       return;
     }
     this.fence(job);
-    assertCandidate(candidate, expected);
-    effortGit(candidate, "read-tree", "--reset", "-u", merged.tree);
-    const message = join8(dir, "commit-message");
-    writeFileSync2(message, `${buildMergeCommitMessage(run.persona, run.id, run.task)}
+    if (!generated) {
+      assertCandidate(candidate, expected);
+      effortGit(candidate, "read-tree", "--reset", "-u", merged.tree);
+    }
+    if (generated && (merged.kind === "conflict" || changedPaths(candidate, expected, merged.tree).some((path) => isGeneratedPath(path, generated)))) {
+      if (merged.kind === "conflict") {
+        const present = /* @__PURE__ */ new Set([...effortGit(candidate, "ls-files", "-z").split("\0"), ...effortGit(candidate, "ls-tree", "-r", "--name-only", "-z", expected).split("\0")]);
+        const paths = merged.conflicts.filter((path) => present.has(path));
+        if (paths.length) effortGit(candidate, "--literal-pathspecs", "restore", `--source=${expected}`, "--staged", "--worktree", "--", ...paths);
+      }
+      entry.preGenerationTree = effortGit(candidate, "write-tree");
+      entry.state = "generating";
+      await this.persist(job);
+      const result = await regenerateCandidate(candidate, expected, generated, join9(dir, "generation-before.json"), async () => {
+        entry.generation = await this.command(job, candidate, generated.command, join9(dir, "generate.log"));
+        return entry.generation;
+      }, () => {
+        this.fence(job);
+      });
+      if (!result.passed) {
+        this.pause(job, `generated command ${result.failureKind ?? "failed"}: ${result.logPath}: ${result.tailText}`);
+        return;
+      }
+      entry.state = "merging";
+    }
+    const message = join9(dir, "commit-message");
+    writeFileSync3(message, `${buildMergeCommitMessage(run.persona, run.id, run.task)}
 
 Conductor-Effort: ${record.name}
 Conductor-Run: ${run.id}
 `);
-    entry.commitHook = await this.command(job, candidate, `git commit -F ${shellQuote2(message)}`, join8(dir, "commit.log"));
+    entry.commitHook = await this.command(job, candidate, `git commit -F ${shellQuote2(message)}`, join9(dir, "commit.log"));
     if (!entry.commitHook.passed) {
       this.pause(job, `candidate commit hooks failed: ${entry.commitHook.logPath}: ${entry.commitHook.tailText}`);
       return;
@@ -3247,7 +3344,7 @@ Conductor-Run: ${run.id}
     if (entry.verifyIdentity.command) {
       for (; ; ) {
         entry.attempts++;
-        entry.verify = await this.command(job, candidate, entry.verifyIdentity.command, join8(dir, `verify-${entry.attempts}.log`));
+        entry.verify = await this.command(job, candidate, entry.verifyIdentity.command, join9(dir, `verify-${entry.attempts}.log`));
         assertCandidate(candidate, entry.candidateOid);
         const action = nextIntegration(entry.verify, entry.attempts, entry.verifyIdentity.retries);
         await this.persist(job);
@@ -3276,21 +3373,21 @@ Conductor-Run: ${run.id}
 };
 
 // src/runs.ts
-import { existsSync as existsSync8, mkdirSync as mkdirSync8, readFileSync as readFileSync11, readdirSync as readdirSync3, statSync as statSync3 } from "node:fs";
+import { existsSync as existsSync8, mkdirSync as mkdirSync8, readFileSync as readFileSync12, readdirSync as readdirSync4, statSync as statSync3 } from "node:fs";
 import { mkdir, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir as homedir7 } from "node:os";
 
 // src/file-evidence.ts
-import { closeSync as closeSync2, constants, fstatSync, openSync as openSync2, readFileSync as readFileSync9, readSync, realpathSync as realpathSync4 } from "node:fs";
-import { dirname as dirname8, isAbsolute as isAbsolute2, join as join10 } from "node:path";
+import { closeSync as closeSync2, constants, fstatSync, openSync as openSync2, readFileSync as readFileSync10, readSync, realpathSync as realpathSync4 } from "node:fs";
+import { dirname as dirname8, isAbsolute as isAbsolute2, join as join11 } from "node:path";
 
 // src/conductor-cwd.ts
 import { statSync } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { join as join9, resolve as resolve2 } from "node:path";
+import { join as join10, resolve as resolve2 } from "node:path";
 var CWD_ENTRY_TYPE = "conductor-cwd";
 function resolveLocalPath(raw, base) {
-  const expanded = raw === "~" ? homedir5() : raw.startsWith("~/") ? join9(homedir5(), raw.slice(2)) : raw;
+  const expanded = raw === "~" ? homedir5() : raw.startsWith("~/") ? join10(homedir5(), raw.slice(2)) : raw;
   return resolve2(base, expanded);
 }
 function resolveCwdArg(input, base) {
@@ -3399,12 +3496,12 @@ function sourceRun(id, registry) {
   const live = registry.get(id);
   if (live) return live;
   const root = realpathSync4(runsRoot());
-  const dir = realpathSync4(join10(root, id));
+  const dir = realpathSync4(join11(root, id));
   if (dirname8(dir) !== root) throw new Error(`files: run record outside canonical runs directory: ${id}`);
-  const recordPath = join10(dir, "record.json");
+  const recordPath = join11(dir, "record.json");
   if (realpathSync4(recordPath) !== recordPath) throw new Error(`files: invalid run record path: ${id}`);
-  const r = inspect(recordPath, (fd) => JSON.parse(readFileSync9(fd, "utf8")));
-  if (!r || r.id !== id || typeof r.persona !== "string" || !r.persona || typeof r.cwd !== "string" || !isAbsolute2(r.cwd) || !(isTerminal(r.status) || r.status === "running" || r.status === "paused" || r.status === "queued") || typeof r.finalPath !== "string" || realpathSync4(r.finalPath) !== realpathSync4(join10(dir, "final.md")) || typeof r.recordPath !== "string" || realpathSync4(r.recordPath) !== recordPath || r.sessionPath !== void 0 && typeof r.sessionPath !== "string") {
+  const r = inspect(recordPath, (fd) => JSON.parse(readFileSync10(fd, "utf8")));
+  if (!r || r.id !== id || typeof r.persona !== "string" || !r.persona || typeof r.cwd !== "string" || !isAbsolute2(r.cwd) || !(isTerminal(r.status) || r.status === "running" || r.status === "paused" || r.status === "queued") || typeof r.finalPath !== "string" || realpathSync4(r.finalPath) !== realpathSync4(join11(dir, "final.md")) || typeof r.recordPath !== "string" || realpathSync4(r.recordPath) !== recordPath || r.sessionPath !== void 0 && typeof r.sessionPath !== "string") {
     throw new Error(`files: invalid run record: ${id}`);
   }
   return r;
@@ -3472,7 +3569,7 @@ ${escape(e.provenance + text)}
 }
 
 // src/runs.ts
-import { dirname as dirname11, join as join12, resolve as resolve4, sep as sep3 } from "node:path";
+import { dirname as dirname11, join as join13, resolve as resolve4, sep as sep3 } from "node:path";
 
 // src/gc/id-reuse.ts
 var recentlyDeletedIds = /* @__PURE__ */ new Set();
@@ -3685,7 +3782,7 @@ function resolveInheritContext(perCall, persona) {
 
 // src/session-seed.ts
 import { randomBytes } from "node:crypto";
-import { mkdirSync as mkdirSync7, writeFileSync as writeFileSync3 } from "node:fs";
+import { mkdirSync as mkdirSync7, writeFileSync as writeFileSync4 } from "node:fs";
 import { dirname as dirname9 } from "node:path";
 function newEntryId() {
   return randomBytes(4).toString("hex");
@@ -3720,7 +3817,7 @@ function seedSessionFile(path, messages, cwd) {
     );
     parentId = id;
   }
-  writeFileSync3(path, lines.join("\n") + "\n");
+  writeFileSync4(path, lines.join("\n") + "\n");
 }
 function sessionHeaderCwd(text) {
   try {
@@ -3875,9 +3972,9 @@ ${diag}
 init_worktree();
 
 // src/workspace-doctrine.ts
-import { existsSync as existsSync7, readFileSync as readFileSync10, statSync as statSync2 } from "node:fs";
+import { existsSync as existsSync7, readFileSync as readFileSync11, statSync as statSync2 } from "node:fs";
 import { homedir as homedir6, tmpdir } from "node:os";
-import { dirname as dirname10, join as join11, relative as relative2, resolve as resolve3, sep as sep2 } from "node:path";
+import { dirname as dirname10, join as join12, relative as relative2, resolve as resolve3, sep as sep2 } from "node:path";
 var MAX_WALK_DEPTH = 6;
 var MAX_DOCTRINE_CHARS = 24e3;
 var DOCTRINE_HEADING = "## Workspace doctrine";
@@ -3896,7 +3993,7 @@ function walkDirs(start) {
 }
 function findAgentsMd(start) {
   for (const dir of walkDirs(start)) {
-    const candidate = join11(dir, "AGENTS.md");
+    const candidate = join12(dir, "AGENTS.md");
     try {
       if (statSync2(candidate).isFile()) return candidate;
     } catch {
@@ -3907,7 +4004,7 @@ function findAgentsMd(start) {
 function gitRoot(start) {
   let current = resolve3(start);
   while (true) {
-    if (existsSync7(join11(current, ".git"))) return current;
+    if (existsSync7(join12(current, ".git"))) return current;
     const parent = dirname10(current);
     if (parent === current) return void 0;
     current = parent;
@@ -3922,7 +4019,7 @@ function childNativeAgentsDirs(workdir) {
   const dirs = [root];
   let current = root;
   for (const part of rel.split(sep2).filter(Boolean)) {
-    current = join11(current, part);
+    current = join12(current, part);
     dirs.push(current);
   }
   return dirs;
@@ -3941,7 +4038,7 @@ function loadWorkspaceDoctrine(workdir) {
     const start = resolve3(workdir);
     const path = findAgentsMd(start);
     if (!path || childNativeAgentsDirs(start).includes(dirname10(path))) return "";
-    let text = readFileSync10(path, "utf8").trim();
+    let text = readFileSync11(path, "utf8").trim();
     if (!text) return "";
     if (text.length > MAX_DOCTRINE_CHARS) text = truncateDoctrine(text, path);
     return `${DOCTRINE_HEADING}
@@ -3957,17 +4054,17 @@ ${text}`;
 // src/runs.ts
 init_types();
 function runsRoot() {
-  return join12(homedir7(), ".pi", "agent", "conductor", "runs");
+  return join13(homedir7(), ".pi", "agent", "conductor", "runs");
 }
 function runDir(id) {
-  return join12(runsRoot(), id);
+  return join13(runsRoot(), id);
 }
 function collectInheritedSkillPaths(opts) {
   const home = opts.homeDir ?? homedir7();
   const exists = opts.existsFn ?? existsSync8;
   const candidates = [
-    join12(home, ".pi", "agent", "skills"),
-    join12(opts.cwd, ".pi", "skills")
+    join13(home, ".pi", "agent", "skills"),
+    join13(opts.cwd, ".pi", "skills")
   ];
   return candidates.filter((p) => exists(p));
 }
@@ -3978,7 +4075,7 @@ function resolveTimeoutMs(persona, ov, cfg) {
 function findSessionFile(sessionDir) {
   let entries;
   try {
-    entries = readdirSync3(sessionDir);
+    entries = readdirSync4(sessionDir);
   } catch {
     return void 0;
   }
@@ -3986,7 +4083,7 @@ function findSessionFile(sessionDir) {
   let bestMtime = -Infinity;
   for (const name of entries) {
     if (!name.endsWith(".jsonl")) continue;
-    const full = join12(sessionDir, name);
+    const full = join13(sessionDir, name);
     let st;
     try {
       st = statSync3(full);
@@ -4049,7 +4146,7 @@ var READ_ONLY_PERSONA_ENFORCER = [
 function assemblePersonaSystemPrompt(persona, cwd) {
   const blocks = persona.readOnly === true ? [READ_ONLY_PERSONA_ENFORCER, persona.systemPrompt] : [persona.systemPrompt];
   try {
-    const preamble = readFileSync11(join12(builtinPersonasDir(), "_preamble.md"), "utf8").trim();
+    const preamble = readFileSync12(join13(builtinPersonasDir(), "_preamble.md"), "utf8").trim();
     if (preamble) blocks.push(preamble);
   } catch {
   }
@@ -4222,7 +4319,7 @@ function planSpawnPiArgs(opts) {
     seedMessages = [filteredHistorySentinel(), ...seedMessages];
   }
   if (seedMessages) {
-    const seededSessionPath = join12(sessionDir, "seeded.jsonl");
+    const seededSessionPath = join13(sessionDir, "seeded.jsonl");
     seedSessionFile(seededSessionPath, seedMessages, cwd);
     return {
       mode: "resume",
@@ -4383,9 +4480,9 @@ function spawnRun(opts) {
     messages: [],
     usage: emptyUsage(),
     cwd: opts.cwd,
-    recordPath: join12(dir, "record.json"),
-    transcriptPath: join12(dir, "transcript.jsonl"),
-    finalPath: join12(dir, "final.md"),
+    recordPath: join13(dir, "record.json"),
+    transcriptPath: join13(dir, "transcript.jsonl"),
+    finalPath: join13(dir, "final.md"),
     sessionPath: void 0,
     // Capture the persona body now so future ensemble_send calls can
     // re-pass it on resume. Pi doesn't persist system prompts to disk.
@@ -4532,7 +4629,7 @@ function spawnRun(opts) {
     requestedCwd: opts.cwd,
     worktree: worktreeFence
   });
-  const sessionDir = join12(dir, "session");
+  const sessionDir = join13(dir, "session");
   mkdirSync8(sessionDir, { recursive: true });
   const plan = planSpawnPiArgs({
     persona: opts.persona,
@@ -4629,9 +4726,9 @@ function failBeforeSpawn(opts, errorMessage) {
     messages: [],
     usage: emptyUsage(),
     cwd: opts.cwd,
-    recordPath: join12(dir, "record.json"),
-    transcriptPath: join12(dir, "transcript.jsonl"),
-    finalPath: join12(dir, "final.md"),
+    recordPath: join13(dir, "record.json"),
+    transcriptPath: join13(dir, "transcript.jsonl"),
+    finalPath: join13(dir, "final.md"),
     parentPid: process.pid,
     parentStartTime: readProcessStartTime(process.pid),
     parentSessionId: opts.parentSessionId,
@@ -4840,7 +4937,7 @@ function restoreResumeWorktree(run, readSession) {
     return void 0;
   }
   if (!path || existsSync8(path)) return void 0;
-  const layout = `${sep3}${join12(".worktrees", "conductor-wt", run.id)}`;
+  const layout = `${sep3}${join13(".worktrees", "conductor-wt", run.id)}`;
   const at = `${path}${sep3}`.lastIndexOf(`${layout}${sep3}`);
   if (at < 0) return void 0;
   const gitRoot2 = path.slice(0, at);
@@ -4914,7 +5011,7 @@ function sendToRun(run, message, opts) {
   if (run.effort && (!run.effort.cwd || !run.worktreeBranch || !refExists(run.effort.gitRoot, `refs/heads/${run.worktreeBranch}`))) {
     return { kind: "rejected", reason: "effort assignment branch/cwd is missing; preserve the outstanding question and inspect the effort before recovery" };
   }
-  const worktreeBlocker = restoreResumeWorktree(run, () => readFileSync11(sessionPath, "utf8"));
+  const worktreeBlocker = restoreResumeWorktree(run, () => readFileSync12(sessionPath, "utf8"));
   if (worktreeBlocker) return { kind: "rejected", reason: worktreeBlocker };
   const pendingAsk = run.pendingAsk;
   if (pendingAsk) trimmed = `<owner-answer ask-id=${JSON.stringify(pendingAsk.askId)}>
@@ -4944,7 +5041,7 @@ Continue the original assignment, not a new task.
   opts.registry.notify(run);
   run.model = resumeModel(
     run.model,
-    () => readFileSync11(sessionPath, "utf8"),
+    () => readFileSync12(sessionPath, "utf8"),
     opts.isRegisteredModel,
     opts.currentModelProvider
   );
@@ -5123,7 +5220,7 @@ function applyRetryIfNeeded(run, onRetry) {
 }
 async function applyHookToTerminal(run, resolvedHook, terminal, deps = {}) {
   try {
-    if (run.effort) await writeFile2(join12(dirname11(run.recordPath), "gate-final.md"), getFinalText(run.messages) || "(no output)");
+    if (run.effort) await writeFile2(join13(dirname11(run.recordPath), "gate-final.md"), getFinalText(run.messages) || "(no output)");
     else await writeFinal(run);
   } catch {
   }
@@ -5135,12 +5232,12 @@ async function applyHookToTerminal(run, resolvedHook, terminal, deps = {}) {
       runId: run.id,
       persona: run.persona,
       runDir: dirname11(run.finalPath),
-      finalPath: run.effort ? join12(dirname11(run.recordPath), "gate-final.md") : run.finalPath,
+      finalPath: run.effort ? join13(dirname11(run.recordPath), "gate-final.md") : run.finalPath,
       transcriptPath: run.transcriptPath,
       parentCwd: run.cwd,
       cwd: run.effort?.cwd,
       extraEnv: run.effort ? effortEnv() : void 0,
-      tmpDir: run.effort ? join12(dirname11(run.recordPath), "tmp") : void 0,
+      tmpDir: run.effort ? join13(dirname11(run.recordPath), "tmp") : void 0,
       worktreePath: run.worktreePath,
       onProc: (proc) => {
         run.hookProc = proc;
@@ -5312,7 +5409,7 @@ async function reconcileRecord(run, status, errorMessage, finishedAt) {
   run.errorMessage = errorMessage;
   await writeRecord(run);
 }
-function findRunSessionFile(run, sessionDir = join12(dirname11(run.recordPath), "session")) {
+function findRunSessionFile(run, sessionDir = join13(dirname11(run.recordPath), "session")) {
   return run.sessionPath ?? findSessionFile(sessionDir);
 }
 function discoverContextRetirement(run, sessionDir) {
@@ -5323,12 +5420,12 @@ function discoverContextRetirement(run, sessionDir) {
   }
 }
 function writeRecord(run, durableFence) {
-  const snapshot = toRunRecord(run);
+  const snapshot2 = toRunRecord(run);
   const writing = (run.recordWrite ?? Promise.resolve()).catch(() => {
   }).then(async () => {
     await mkdir(dirname11(run.recordPath), { recursive: true });
-    if (durableFence) writeDurableJson(run.recordPath, snapshot, durableFence);
-    else await writeFile2(run.recordPath, JSON.stringify(snapshot, null, 2));
+    if (durableFence) writeDurableJson(run.recordPath, snapshot2, durableFence);
+    else await writeFile2(run.recordPath, JSON.stringify(snapshot2, null, 2));
   });
   run.recordWrite = writing.catch(() => {
   });
@@ -5380,13 +5477,13 @@ function elapsedStr(start, end) {
 import { existsSync as existsSync11 } from "node:fs";
 import { execSync as execSync2 } from "node:child_process";
 import { homedir as homedir8 } from "node:os";
-import { join as join15 } from "node:path";
+import { join as join16 } from "node:path";
 
 // src/gc/last-gc.ts
-import { existsSync as existsSync9, statSync as statSync4, utimesSync, writeFileSync as writeFileSync4 } from "node:fs";
-import { dirname as dirname12, join as join13 } from "node:path";
+import { existsSync as existsSync9, statSync as statSync4, utimesSync, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname12, join as join14 } from "node:path";
 function lastGcMarkerPath(runsRoot2) {
-  return join13(dirname12(runsRoot2), ".last-gc");
+  return join14(dirname12(runsRoot2), ".last-gc");
 }
 function readLastGcMtime(runsRoot2) {
   const path = lastGcMarkerPath(runsRoot2);
@@ -5400,7 +5497,7 @@ function readLastGcMtime(runsRoot2) {
 function writeLastGcMtime(runsRoot2, now) {
   const path = lastGcMarkerPath(runsRoot2);
   try {
-    if (!existsSync9(path)) writeFileSync4(path, "");
+    if (!existsSync9(path)) writeFileSync5(path, "");
     const t = new Date(now);
     utimesSync(path, t, t);
   } catch {
@@ -5412,7 +5509,7 @@ init_types();
 init_worktree();
 import { readdir as readdir3, readFile as readFile3, stat as stat3 } from "node:fs/promises";
 import { existsSync as existsSync10 } from "node:fs";
-import { join as join14 } from "node:path";
+import { join as join15 } from "node:path";
 async function safeStat(path) {
   try {
     const s = await stat3(path);
@@ -5423,7 +5520,7 @@ async function safeStat(path) {
 }
 async function readRecord(runDir2) {
   try {
-    const text = await readFile3(join14(runDir2, "record.json"), "utf-8");
+    const text = await readFile3(join15(runDir2, "record.json"), "utf-8");
     const parsed = JSON.parse(text);
     if (typeof parsed.id !== "string" || typeof parsed.persona !== "string") {
       return null;
@@ -5434,7 +5531,7 @@ async function readRecord(runDir2) {
   }
 }
 async function detectSessionPath(runDir2) {
-  const sessionDir = join14(runDir2, "session");
+  const sessionDir = join15(runDir2, "session");
   if (!existsSync10(sessionDir)) return false;
   try {
     const entries = await readdir3(sessionDir);
@@ -5453,7 +5550,7 @@ async function walkInventory(runsRoot2, registry) {
   }
   const out = [];
   for (const id of entries) {
-    const runDir2 = join14(runsRoot2, id);
+    const runDir2 = join15(runsRoot2, id);
     let isDir = false;
     try {
       isDir = (await stat3(runDir2)).isDirectory();
@@ -5467,11 +5564,11 @@ async function walkInventory(runsRoot2, registry) {
 }
 async function buildEntry(id, runDir2, registry) {
   const record = await readRecord(runDir2);
-  const transcriptStat = await safeStat(join14(runDir2, "transcript.jsonl"));
-  const recordStat = await safeStat(join14(runDir2, "record.json"));
-  const finalStat = await safeStat(join14(runDir2, "final.md"));
-  const archivedStat = await safeStat(join14(runDir2, ".archived"));
-  const pinned = existsSync10(join14(runDir2, ".pinned"));
+  const transcriptStat = await safeStat(join15(runDir2, "transcript.jsonl"));
+  const recordStat = await safeStat(join15(runDir2, "record.json"));
+  const finalStat = await safeStat(join15(runDir2, "final.md"));
+  const archivedStat = await safeStat(join15(runDir2, ".archived"));
+  const pinned = existsSync10(join15(runDir2, ".pinned"));
   const sessionPathPresent = await detectSessionPath(runDir2);
   const inMemory = registry.get(id);
   const transcriptSizeBytes = transcriptStat?.size ?? 0;
@@ -5758,9 +5855,9 @@ async function buildDoctorReport(opts) {
   lines.push(`  user:    ${existsSync11(userPath) ? "\u2713" : "\xB7"} ${userPath}`);
   lines.push(`  project: ${existsSync11(projectPath) ? "\u2713" : "\xB7"} ${projectPath}`);
   const home = opts.homeDir ?? homedir8();
-  const legacyDir = join15(home, ".pi", "agent", "extensions", "conductor");
-  const legacyJs = join15(legacyDir, "index.js");
-  const legacyTs = join15(legacyDir, "index.ts");
+  const legacyDir = join16(home, ".pi", "agent", "extensions", "conductor");
+  const legacyJs = join16(legacyDir, "index.js");
+  const legacyTs = join16(legacyDir, "index.ts");
   const legacyEntry = existsSync11(legacyJs) ? legacyJs : existsSync11(legacyTs) ? legacyTs : null;
   if (legacyEntry !== null) {
     lines.push("");
@@ -5812,7 +5909,7 @@ async function buildDoctorReport(opts) {
     );
   }
   {
-    const root = opts.runsRoot ?? join15(opts.homeDir ?? homedir8(), ".pi", "agent", "conductor", "runs");
+    const root = opts.runsRoot ?? join16(opts.homeDir ?? homedir8(), ".pi", "agent", "conductor", "runs");
     const lastMs = readLastGcMtime(root);
     const lastStr = lastMs === null ? "never" : new Date(lastMs).toISOString().replace("T", " ").slice(0, 19) + " UTC";
     lines.push(`  gc last run:           ${lastStr} (${lastGcMarkerPath(root)})`);
@@ -5821,7 +5918,7 @@ async function buildDoctorReport(opts) {
   lines.push("## Sub-agent tool exclusions");
   lines.push(...spawnToolLines(opts.loadedToolNames));
   {
-    const runsRoot2 = opts.runsRoot ?? join15(opts.homeDir ?? homedir8(), ".pi", "agent", "conductor", "runs");
+    const runsRoot2 = opts.runsRoot ?? join16(opts.homeDir ?? homedir8(), ".pi", "agent", "conductor", "runs");
     lines.push("");
     lines.push(`## Run records (under ${runsRoot2})`);
     if (!existsSync11(runsRoot2)) {
@@ -6070,10 +6167,10 @@ function collapseWhitespace(s) {
 // src/gc/pinning.ts
 import { existsSync as existsSync12 } from "node:fs";
 import { stat as stat4, unlink, writeFile as writeFile3 } from "node:fs/promises";
-import { join as join16 } from "node:path";
+import { join as join17 } from "node:path";
 var SIDECAR = ".pinned";
 async function pinRun(runsRoot2, agentId) {
-  const dir = join16(runsRoot2, agentId);
+  const dir = join17(runsRoot2, agentId);
   let st;
   try {
     st = await stat4(dir);
@@ -6083,10 +6180,10 @@ async function pinRun(runsRoot2, agentId) {
   if (!st.isDirectory()) {
     throw new Error(`not a directory: ${dir}`);
   }
-  await writeFile3(join16(dir, SIDECAR), "");
+  await writeFile3(join17(dir, SIDECAR), "");
 }
 async function unpinRun(runsRoot2, agentId) {
-  const path = join16(runsRoot2, agentId, SIDECAR);
+  const path = join17(runsRoot2, agentId, SIDECAR);
   try {
     await unlink(path);
   } catch (e) {
@@ -6096,19 +6193,19 @@ async function unpinRun(runsRoot2, agentId) {
   }
 }
 function isPinned(runsRoot2, agentId) {
-  return existsSync12(join16(runsRoot2, agentId, SIDECAR));
+  return existsSync12(join17(runsRoot2, agentId, SIDECAR));
 }
 
 // src/gc/reconcile.ts
 import { readFile as readFile4, writeFile as writeFile4 } from "node:fs/promises";
-import { join as join17 } from "node:path";
+import { join as join18 } from "node:path";
 async function reconcileOrphans(actions, runsRoot2, now) {
   const reconciled = [];
   const failed = [];
   for (const action of actions) {
     if (action.kind !== "reconcile-orphan") continue;
     const agentId = action.id;
-    const recordPath = join17(runsRoot2, agentId, "record.json");
+    const recordPath = join18(runsRoot2, agentId, "record.json");
     let raw;
     try {
       raw = await readFile4(recordPath, "utf-8");
@@ -6150,7 +6247,7 @@ async function reconcileOrphans(actions, runsRoot2, now) {
 init_types();
 init_worktree();
 import { readFile as readFile5, rm, stat as stat5, unlink as unlink2, utimes, writeFile as writeFile5, readdir as readdir4 } from "node:fs/promises";
-import { join as join18 } from "node:path";
+import { join as join19 } from "node:path";
 async function executeReclaim(actions, runsRoot2, registryActive, now) {
   const archived = [];
   const deleted = [];
@@ -6158,7 +6255,7 @@ async function executeReclaim(actions, runsRoot2, registryActive, now) {
   for (const action of actions) {
     if (action.kind !== "cold-archive" && action.kind !== "delete") continue;
     const agentId = action.id;
-    const runDir2 = join18(runsRoot2, agentId);
+    const runDir2 = join19(runsRoot2, agentId);
     const actionKind = action.kind;
     if (registryActive.has(agentId)) {
       failed.push({
@@ -6168,7 +6265,7 @@ async function executeReclaim(actions, runsRoot2, registryActive, now) {
       });
       continue;
     }
-    const recordPath = join18(runDir2, "record.json");
+    const recordPath = join19(runDir2, "record.json");
     let record;
     try {
       const raw = await readFile5(recordPath, "utf-8");
@@ -6233,7 +6330,7 @@ async function executeReclaim(actions, runsRoot2, registryActive, now) {
   return { archived, deleted, failed };
 }
 async function coldArchive(runDir2, now) {
-  const transcriptPath = join18(runDir2, "transcript.jsonl");
+  const transcriptPath = join19(runDir2, "transcript.jsonl");
   let bytes = 0;
   try {
     const s = await stat5(transcriptPath);
@@ -6249,7 +6346,7 @@ async function coldArchive(runDir2, now) {
       bytes = 0;
     }
   }
-  const sidecarPath = join18(runDir2, ".archived");
+  const sidecarPath = join19(runDir2, ".archived");
   await writeFile5(sidecarPath, "");
   const nowSec = now / 1e3;
   await utimes(sidecarPath, nowSec, nowSec);
@@ -6276,7 +6373,7 @@ async function walkSize(path) {
   let total = 0;
   const entries = await readdir4(path, { withFileTypes: true });
   for (const entry of entries) {
-    const child = join18(path, entry.name);
+    const child = join19(path, entry.name);
     if (entry.isDirectory()) {
       total += await walkSize(child);
     } else if (entry.isFile()) {
@@ -7264,30 +7361,30 @@ function runHistory(_opts, ctx, arg) {
     {
       listRunIds: () => {
         try {
-          return readdirSync4(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+          return readdirSync5(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
         } catch {
           return [];
         }
       },
       readRecord: (id) => {
-        const p = join19(runDir(id), "record.json");
+        const p = join20(runDir(id), "record.json");
         try {
-          return JSON.parse(readFileSync12(p, "utf8"));
+          return JSON.parse(readFileSync13(p, "utf8"));
         } catch {
           return void 0;
         }
       },
       readFinalText: (id) => {
-        const p = join19(runDir(id), "final.md");
+        const p = join20(runDir(id), "final.md");
         try {
-          return readFileSync12(p, "utf8");
+          return readFileSync13(p, "utf8");
         } catch {
           return void 0;
         }
       },
       statMtime: (id) => {
         try {
-          return statSync5(join19(runDir(id), "record.json")).mtimeMs;
+          return statSync5(join20(runDir(id), "record.json")).mtimeMs;
         } catch {
           try {
             return statSync5(runDir(id)).mtimeMs;
@@ -7296,8 +7393,8 @@ function runHistory(_opts, ctx, arg) {
           }
         }
       },
-      isPinned: (id) => existsSync13(join19(runDir(id), ".pinned")),
-      isArchived: (id) => existsSync13(join19(runDir(id), ".archived"))
+      isPinned: (id) => existsSync13(join20(runDir(id), ".pinned")),
+      isArchived: (id) => existsSync13(join20(runDir(id), ".archived"))
     },
     { limit }
   );
@@ -7315,7 +7412,7 @@ async function runPin(ctx, arg) {
     return;
   }
   const root = runsRoot();
-  if (!existsSync13(join19(root, id))) {
+  if (!existsSync13(join20(root, id))) {
     ctx.ui.notify(`No such run: ${id}`, "warning");
     return;
   }
@@ -7341,7 +7438,7 @@ async function runUnpin(ctx, arg) {
     return;
   }
   const root = runsRoot();
-  if (!existsSync13(join19(root, id))) {
+  if (!existsSync13(join20(root, id))) {
     ctx.ui.notify(`No such run: ${id}`, "warning");
     return;
   }
@@ -7756,11 +7853,11 @@ Resolve manually in the worktree and run /conductor worktree merge ${runId} agai
 // src/tools.ts
 init_types();
 import { Type as Type2 } from "@sinclair/typebox";
-import { readFileSync as readFileSync14, existsSync as existsSync15 } from "node:fs";
+import { readFileSync as readFileSync15, existsSync as existsSync15 } from "node:fs";
 import { dirname as dirname14 } from "node:path";
 
 // src/chain.ts
-import { readFileSync as readFileSync13, existsSync as existsSync14 } from "node:fs";
+import { readFileSync as readFileSync14, existsSync as existsSync14 } from "node:fs";
 var DEFAULT_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nOriginal task:\n{task}\n\n---\nFinal output:\n{final}";
 var WORKTREE_CHAIN_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nThe work is on branch `{worktreeBranch}` (not yet merged to `{baseBranch}`).\nRun the following to inspect the changes:\n\n```bash\ngit diff {baseBranch}...{worktreeBranch}\n```\n\nOriginal task:\n{task}";
 var FINAL_PLACEHOLDER = "(no final output)";
@@ -7782,7 +7879,7 @@ function buildChainTask(taskTemplate, context) {
   let finalContent = FINAL_PLACEHOLDER;
   if (existsSync14(context.finalPath)) {
     try {
-      finalContent = readFileSync13(context.finalPath, "utf-8");
+      finalContent = readFileSync14(context.finalPath, "utf-8");
     } catch {
     }
   }
@@ -9819,7 +9916,7 @@ function buildOnChainCallback(args) {
       let parentFinal = "";
       if (existsSync15(parentRun.finalPath)) {
         try {
-          parentFinal = readFileSync14(parentRun.finalPath, "utf-8");
+          parentFinal = readFileSync15(parentRun.finalPath, "utf-8");
         } catch {
         }
       }
@@ -9946,7 +10043,7 @@ function buildOnRetryCallback(args) {
 // src/queue.ts
 init_types();
 import { mkdirSync as mkdirSync9 } from "node:fs";
-import { join as join20 } from "node:path";
+import { join as join21 } from "node:path";
 var SpawnQueue = class {
   constructor(registry, maxConcurrent, maxConcurrentWriteCapable = 1, spawn2 = spawnRun) {
     this.registry = registry;
@@ -10015,9 +10112,9 @@ var SpawnQueue = class {
       messages: [],
       usage: emptyUsage(),
       cwd: opts.cwd,
-      recordPath: join20(dir, "record.json"),
-      transcriptPath: join20(dir, "transcript.jsonl"),
-      finalPath: join20(dir, "final.md")
+      recordPath: join21(dir, "record.json"),
+      transcriptPath: join21(dir, "transcript.jsonl"),
+      finalPath: join21(dir, "final.md")
     };
     registry.register(placeholder);
     if (effort) void writeRecord(placeholder);

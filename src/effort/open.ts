@@ -7,7 +7,8 @@ import { resolveEffortPolicy, validateEffortName, type EffortPolicy } from "./po
 import { assertEffortOwner, claimEffort, readEffort, writeEffort, type EffortOwner, type EffortRecord } from "./store.ts";
 
 export function effortGit(cwd: string, ...args: string[]): string {
-  return execFileSync("git", args, { cwd, env: Object.fromEntries(Object.entries(gitEnv()).filter(([key]) => !key.startsWith("HERDR_"))), encoding: "utf8", stdio: "pipe", timeout: 30000 }).trim();
+  const output = execFileSync("git", args, { cwd, env: Object.fromEntries(Object.entries(gitEnv()).filter(([key]) => !key.startsWith("HERDR_"))), encoding: "utf8", stdio: "pipe", timeout: 30000 });
+  return output.endsWith("\0") ? output : output.trim();
 }
 /** Canonical repository identity is the main worktree, not the caller's linked checkout. */
 export function effortRepository(cwd: string): { gitRoot: string; requestedRoot: string } {

@@ -1,3 +1,5 @@
+import { matchesGlob } from "node:path";
+
 export interface EffortPolicy {
   verify: string;
   verifyTimeoutSeconds: number;
@@ -10,7 +12,7 @@ export interface EffortPolicy {
   history: "squash";
 }
 
-export const EFFORT_NOTICE = "M2: new hook-passed writers integrate serially after baseline/candidate verification and repository hooks. Legacy work remains UNINTEGRATED. Interrupted work pauses for inspection; recovery, generated conflict resolution, parallel admission, merger, landing, readers, auto plans, chains and retries are unavailable.";
+export const EFFORT_NOTICE = "M3: new hook-passed writers integrate serially after optional generated artifact regeneration, baseline/candidate verification and repository hooks. Legacy work remains UNINTEGRATED. Interrupted work pauses for inspection; recovery, parallel admission, merger, landing, readers, auto plans, chains and retries are unavailable.";
 
 export function effortSummary(run: import("../types.ts").Run): string {
   if (!run.effort) return "";
@@ -24,14 +26,20 @@ export function validateEffortName(name: string): void {
   }
 }
 
-/** Only the documented literal, * and ** path syntax is supported in M1. */
+/** Only the documented literal, * and ** path syntax is supported. */
 export function validateTouches(paths: unknown): asserts paths is string[] {
   if (!Array.isArray(paths) || paths.length === 0 || paths.some(p =>
     typeof p !== "string" || !p || p.startsWith("/") ||
-    !/^[A-Za-z0-9_.* /-]+$/.test(p) || p.trim() !== p ||
+    !/^[\p{L}\p{N}_.* /-]+$/u.test(p) || p.trim() !== p ||
     p.split("/").some(s => !s || s === "." || s === ".."))) {
     throw new Error("effort paths must be nonempty repo-relative globs using literals, * or **; no traversal or absolute paths");
   }
+}
+
+/** Classify concrete repo paths only; broad declarations are trusted policy, not source recognition. */
+export function isGeneratedPath(path: string, generated: EffortPolicy["generated"]): boolean {
+  return !path.startsWith("/") && !path.includes("\0") && !path.split("/").some(p => !p || p === "." || p === "..") &&
+    !!generated?.paths.some(glob => matchesGlob(path, glob));
 }
 
 export function resolveEffortPolicy(config: Partial<EffortPolicy> = {}, overrides: Partial<EffortPolicy> = {}): EffortPolicy {
