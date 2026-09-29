@@ -213,7 +213,7 @@ test("M1 legacy commands and GC preserve unresolved effort records/worktrees eve
   assert.match(notes.slice(-2).join("\n"), /conductor-int\/one/);
 });
 
-test("M1 custom effort writers retain the legacy write cap until parallel admission ships", { timeout: 15000 }, async t => {
+test("M4 custom effort writers with overlapping touches remain serial", { timeout: 15000 }, async t => {
   const cwd = repo(); const { procs } = fake(t); const registry = new RunRegistry(); const queue = new SpawnQueue(registry, 4, 1);
   const opts = { ...options(cwd, registry), persona: { ...persona, name: "scribe" } };
   const first = queue.enqueueOrSpawn(opts); const second = queue.enqueueOrSpawn(opts);

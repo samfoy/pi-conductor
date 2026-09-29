@@ -388,7 +388,7 @@ export default function (pi: ExtensionAPI): void {
       return { detachSignal, unregister };
     },
     pushCompletionNotification: (run: Run) => {
-      pi.sendMessage(buildCompletionMessage(run, supportsFocus(ctxRef), opts.getSessionId()), buildCompletionSendMessageOptions(run));
+      pi.sendMessage(buildCompletionMessage(run, supportsFocus(ctxRef), opts.getSessionId(), opts.getRegistry()), buildCompletionSendMessageOptions(run));
       // Item 11 dead-man-switch: track this wake. clearOnTurnStart()
       // drops it when the conductor's next turn fires (the wake
       // worked). The 15s tick re-fires if no turn fires within 30s.
@@ -608,7 +608,7 @@ export default function (pi: ExtensionAPI): void {
         // PRD line 257 contract is binary — fire a turn or don't —
         // so a second attempt is appropriate even if the first was a
         // host-side downgrade rather than a missed event.
-        pi.sendMessage(buildCompletionMessage(run, supportsFocus(ctxRef), opts.getSessionId()), buildCompletionSendMessageOptions(run));
+        pi.sendMessage(buildCompletionMessage(run, supportsFocus(ctxRef), opts.getSessionId(), opts.getRegistry()), buildCompletionSendMessageOptions(run));
       }
       for (const runId of result.expired) {
         // Cap hit — surface a warning so a human notices. The conductor

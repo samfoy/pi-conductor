@@ -321,7 +321,7 @@ settlement. Prompt rejection is a failed run, not completion. As with explicit
 RPC, extension dialogs are auto-cancelled; provider extensions remain enabled.
 This does not address independently oversized persona/system-prompt argv.
 
-## Named efforts (M3 — verified serial integration and generated artifacts)
+## Named efforts (M4 — isolated parallel writers, verified serial integration)
 
 `ensemble_effort({action:"open", effort:"feature", verify:"npm test"})` captures
 an attached base branch and commit from the conductor's requested checkout and
@@ -401,11 +401,54 @@ the weaker guarantee. Verify and candidate hooks have bounded output and a timeo
 and use private temporary directories. Candidate hooks may stage changes, but the
 resulting post-hook tree must be clean and pass verification. There is no automatic
 dependency installation or base `node_modules` modification: hooks needing a local
-installation pause when it is missing. MaxParallel, merger and land remain
-captured-only; M3 does not relax the legacy active-writer cap. Names match
+installation pause when it is missing. Merger and land remain captured-only. Names match
 `^[a-z][a-z0-9-]{0,39}$`. Scope/generated paths are nonempty repo-relative
 literal (including Unicode letters/numbers), `*` or `**` globs; traversal, absolute
-paths and other glob syntax are rejected. Omitted scope remains undeclared.
+paths and other glob syntax are rejected. Omitted or empty `touches` means universal
+`**` and runs serially, including beside generated-only writers.
+
+**Parallel admission.** All non-read-only effort personas, including custom names,
+use one admission predicate at immediate spawn, dequeue and blocked-answer resume.
+`maxConcurrent` bounds running/paused children and pre-launch reservations;
+`efforts.maxParallel` additionally bounds executing writers in that effort.
+Validated effort writers alone escape the legacy `maxConcurrentWriteCapable` cap.
+Ordinary non-effort writer admission and sends retain their existing behavior.
+Worktree creation failure never falls back to the shared checkout. Each queued
+launch revalidates ownership/isolation and reads the current integration tip.
+
+Accepted touches are copied per assignment. Literal path segments before the first
+wildcard must diverge to prove disjointness: `src/a/**` and `src/b/**` can run together,
+but `src/*.ts` and `src/*.md` serialize. Earlier queued work reserves scope, not a
+process slot; later independent work can advance. Running, blocked and integrating
+writers retain their footprint until integration succeeds. Integrating and blocked
+writers consume no child slot; an unresolved failed writer conservatively reserves
+all paths. Cancelled, never-launched placeholders reserve nothing. These are
+admission hints, **not a sandbox or dependency scheduler**.
+
+Only fully covered generated regions can be excluded: `dist/**` covers
+`dist/maps/**`, but intersecting `src/**` with generated `src/generated/**` does not
+exclude source. Generated exclusions do not cross effort boundaries. Same-repo
+scopes are compared across locally observed efforts. Foreign effort owners or
+unobserved assignments refuse admission pending ownership/recovery inspection;
+M4 adds no cross-session admission lease or takeover. This can intentionally keep
+work queued until M5 recovery is available, rather than infer shared assets safe.
+
+Before integration releases a slot, a NUL-delimited diff against `spawnBase` and
+`branchHead` records changed paths and touches violations, including both rename
+endpoints, deletions, mode changes and unusual filenames. Violations widen the
+reservation and appear in status/cards; they do not silently reject valuable work.
+Blocked writers are measured too; dirty or unreadable blocked work reserves `**`.
+Already-running writers may still make undeclared overlapping edits: merge-tree,
+exact-tree verification and CAS remain mandatory for every integration. Shared
+external outputs, installs and undeclared dependencies are not isolated by touches.
+
+An A6 answer keeps the original assignment, worktree and footprint. It must acquire
+both global and effort execution capacity without conflicting with another owned
+footprint. It never waits on itself or its queued successors. Busy answers are
+refused before dispatch, leaving the pending ask and record unchanged; retry the
+same answer after capacity frees. A3 status/actions and completion cards expose the
+current admission snapshot; native acceptance/rollback semantics are unchanged.
+Unattended parallel dogfood remains deferred until **M5 recovery acceptance**.
 
 **Generated artifacts (optional).** The frozen `generated.paths` and
 `generated.command` policy now runs once when a clean merge changes a declared
@@ -448,7 +491,7 @@ hooks and verifiers are trusted local commands, **not sandboxed**: snapshots che
 final candidate-local changes, not transient or external filesystem effects, network
 access or escaped processes. Candidate-local ignored dependencies are scanned too,
 which can be expensive; nothing installs dependencies or copies `node_modules`.
-Generated footprint exclusion is not parallel admission; that remains deferred.
+Generated footprint exclusions use conservative containment, described below.
 
 Readers, effort auto plans, chains and classified retries are unavailable until
 later slices; none silently escapes into non-effort work. Non-git, detached-base,
@@ -461,7 +504,7 @@ The canonical repository root is the main checkout, even for linked-worktree
 callers; the captured base remains the caller's branch. An exclusive `effort.lock`
 claim and atomic `effort.json` replacements retain owner session/pid/start identity,
 frozen policy and ordered member ids. Existing refs/records/claims fail closed.
-There is no takeover or destructive effort action in M3: even stale claims remain
+There is no takeover or destructive effort action in M4: even stale claims remain
 for review. A failed creation/persistence retains its claim and any created ref;
 rollback never deletes a ref that another actor may have replaced. The claim is
 not evidence of successful open if `effort.json` is absent. Inspect the preserved

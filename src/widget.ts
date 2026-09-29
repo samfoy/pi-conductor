@@ -142,7 +142,7 @@ export function formatRow(
   const activity =
     r.status === "integrating" ? theme.fg("warning", ` · ${r.effort?.name}: ${r.integration?.state ?? "paused"}${r.integration?.reason ? `: ${r.integration.reason}` : ""}`) :
     r.status === "queued"
-      ? theme.fg("dim", " (queued)")
+      ? theme.fg("dim", ` (queued${r.waitReason ? `: ${r.waitReason}` : ""})`)
       : r.status === "blocked"
         ? theme.fg("warning", " (blocked: awaiting owner)")
       : r.status === "paused"

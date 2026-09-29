@@ -491,9 +491,15 @@ export interface RunEffort {
   /** Actual child cwd, captured after linked-checkout subdirectory mapping. */
   cwd?: string;
   touches?: string[];
+  /** Measured while blocked; dirty or unreadable assignments reserve all paths. */
+  changedPaths?: string[];
+  touchViolations?: string[];
+  footprintUnknown?: boolean;
 }
 
 export interface RunIntegration {
+  changedPaths?: string[];
+  touchViolations?: string[];
   state: "queued" | "merging" | "generating" | "verifying" | "verified" | "paused" | "accepted" | "cancelled";
   enqueuedAt: number;
   branchHead: string;
@@ -519,6 +525,7 @@ export interface RunIntegration {
 }
 
 export interface Run {
+  waitReason?: string;
   /** Owned integration effects; never restored from a saved record. */
   integrationControl?: { cancel(): void; suspend(): Promise<void> };
   integrationSuspended?: boolean;

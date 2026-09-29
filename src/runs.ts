@@ -23,7 +23,8 @@ import { capabilitiesFor, subprocessRuntime } from "./subprocess-runtime.ts";
 import { ownedEffort, effortOwner, effortRepository, effortTip } from "./effort/open.ts";
 import { effortEnv } from "./effort/git.ts";
 import { EffortDriver } from "./effort/driver.ts";
-import { addEffortMember, assertEffortOwner, readEffort, writeDurableJson, type EffortRecord } from "./effort/store.ts";
+import { addEffortMember, assertEffortOwner, readEffort, listEfforts, writeDurableJson, type EffortRecord } from "./effort/store.ts";
+import { admitEffortWriter, consumesSlot, type AdmissionLimits } from "./effort/admit.ts";
 import { EFFORT_NOTICE, effortSummary, validateTouches } from "./effort/policy.ts";
 import type { Signaler } from "./runtime.ts";
 export type { Signaler } from "./runtime.ts";
@@ -900,6 +901,7 @@ export type RunListener = (run: Run) => void;
 export type TerminationReason = "killed" | "timeout" | "stalled" | "aborted";
 
 export class RunRegistry {
+  admissionLimits?: AdmissionLimits;
   readonly integrations = new EffortDriver();
   private runs = new Map<string, Run>();
   private listeners = new Set<RunListener>();
@@ -924,19 +926,19 @@ export class RunRegistry {
   countActive(): number {
     let n = 0;
     for (const r of this.runs.values()) {
-      if (!isSettled(r.status) && r.status !== "queued" && r.status !== "integrating") n++;
+      if (consumesSlot(r)) n++;
     }
     return n;
   }
 
   /**
    * v0.9 Item 2(c): count active runs whose persona name is in the given set.
-   * Used by SpawnQueue to enforce maxConcurrentWriteCapable.
+   * Effort/legacy admission policy is separate from this name-based query.
    */
   countActiveBy(personaNames: ReadonlySet<string>): number {
     let n = 0;
     for (const r of this.runs.values()) {
-      if (!isSettled(r.status) && r.status !== "queued" && r.status !== "integrating" && personaNames.has(r.persona)) {
+      if (consumesSlot(r) && personaNames.has(r.persona)) {
         n++;
       }
     }
@@ -1235,7 +1237,7 @@ export function prepareSpawnEffort(opts: Pick<SpawnOptions, "effort" | "touches"
     return undefined;
   }
   if (opts.persona.readOnly) throw new Error(`effort readers are unsupported. ${EFFORT_NOTICE}`);
-  if (opts.touches !== undefined) validateTouches(opts.touches);
+  if (opts.touches !== undefined && (!Array.isArray(opts.touches) || opts.touches.length > 0)) validateTouches(opts.touches);
   return ownedEffort(opts.cwd, opts.effort, opts.parentSessionId);
 }
 
@@ -1765,6 +1767,17 @@ export type SendToRunResult =
     }
   | { kind: "rejected"; reason: string };
 
+/** Same footprint and slot predicate as spawn; self-resume never waits on its own reservation. */
+export function effortAnswerWaitReason(run: Run, registry: RunRegistry): string | undefined {
+  if (!run.effort || run.status !== "blocked") return;
+  try {
+    const record = readEffort(run.effort.gitRoot, run.effort.name);
+    const limits = registry.admissionLimits ?? loadConfigWithErrors(run.cwd).config;
+    // A queued waiter cannot prevent the owner from answering and resolving its reservation.
+    return admitEffortWriter(run, registry.list(), limits, record, listEfforts(run.effort.gitRoot), new Set(registry.list().filter(r => r.status === "queued").map(r => r.id)));
+  } catch (e) { return `effort answer admission refused: ${(e as Error).message}`; }
+}
+
 /** Canonical tokens: send starts a saved session; resume sends SIGCONT. */
 export const RUN_ACTIONS = ["send", "steer", "follow_up", "pause", "resume", "kill", "focus"] as const;
 export type RunAction = typeof RUN_ACTIONS[number];
@@ -1774,7 +1787,7 @@ export function supportsFocus(ctx?: { mode?: string; hasUI?: boolean } | null): 
 }
 
 /** Read-only I/O boundary. A snapshot is advisory, never authorization. */
-export function observeRunActions(run: Run, canFocus = false, sessionId?: string) {
+export function observeRunActions(run: Run, canFocus = false, sessionId?: string, registry?: RunRegistry) {
   let effortOwnershipError: string | undefined;
   if (run.effort) {
     try {
@@ -1791,6 +1804,7 @@ export function observeRunActions(run: Run, canFocus = false, sessionId?: string
   }
   return {
     effortOwnershipError,
+    effortAdmissionError: registry ? effortAnswerWaitReason(run, registry) : undefined,
     capabilities: capabilitiesFor(run),
     canFocus,
     owned: run.parentPid === undefined || run.parentPid === process.pid,
@@ -1809,6 +1823,7 @@ export function runActionError(run: Run, action: RunAction, observed: ActionObse
   if (action === "focus") return observed.canFocus ? undefined : "Focused stream requires terminal UI (TUI mode).";
   if (action === "send" || action === "steer" || action === "follow_up") {
     if (observed.effortOwnershipError) return observed.effortOwnershipError;
+    if (action === "send" && observed.effortAdmissionError) return observed.effortAdmissionError;
     if ((run.pendingAsk || run.askExecution) && run.status !== "blocked") return `sub-agent ${run.id} is settling an owner question; wait for sub-agent-asked before answering.`;
     if (observed.retirementNotice) return `sub-agent ${run.id}: ${observed.retirementNotice}`;
   }
@@ -1837,8 +1852,8 @@ export function computeAvailableActions(run: Run, observed: ActionObservations):
 }
 
 /** Observes config/session files once; does not discover by mutating the run. */
-export function availableActions(run: Run, canFocus = false, sessionId?: string): RunAction[] {
-  return computeAvailableActions(run, observeRunActions(run, canFocus, sessionId));
+export function availableActions(run: Run, canFocus = false, sessionId?: string, registry?: RunRegistry): RunAction[] {
+  return computeAvailableActions(run, observeRunActions(run, canFocus, sessionId, registry));
 }
 
 /** Re-observe immediately before an action; status snapshots are not permissions. */
@@ -2138,6 +2153,10 @@ export function sendToRun(
   const answer = run.pendingAsk ? { ask: run.pendingAsk, cwd: run.cwd } : undefined;
   if (run.effort && (!run.effort.cwd || !run.worktreeBranch || !refExists(run.effort.gitRoot, `refs/heads/${run.worktreeBranch}`))) {
     return { kind: "rejected", reason: "effort assignment branch/cwd is missing; preserve the outstanding question and inspect the effort before recovery" };
+  }
+  if (run.effort) {
+    const reason = effortAnswerWaitReason(run, opts.registry);
+    if (reason) return { kind: "rejected", reason };
   }
   const worktreeBlocker = restoreResumeWorktree(run, () => readFileSync(sessionPath, "utf8"));
   if (worktreeBlocker) return { kind: "rejected", reason: worktreeBlocker };

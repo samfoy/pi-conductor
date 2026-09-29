@@ -1,4 +1,6 @@
 // Sandbox-only Pi 0.87.1 protocol adapter: native preflight, events, tools and queues.
+import { execFileSync } from "node:child_process";
+import { gitTestEnv } from "./git-env.ts";
 import { dirname, join } from "node:path";
 import { readFileSync, writeFileSync } from "node:fs";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
@@ -25,7 +27,7 @@ const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, noExt
   extensionFactories: [pi => {
     registerTools(pi, { getRegistry: () => new RunRegistry() } as any, process.env);
     pi.on("agent_settled", async () => {
-      if (scenario.includes("H1_RELOAD")) {
+      if (scenario.includes("H1_RELOAD") || scenario.includes("M4_CONTROL")) {
         const keepAlive = setInterval(() => {}, 1000);
         try { await new Promise<void>(resolve => { release = resolve; emit({ type: "probe", point: "before-settle" }); }); }
         finally { clearInterval(keepAlive); }
@@ -66,6 +68,11 @@ async function prompt(message: string, id?: string) {
     ...(answering ? [] : [fauxAssistantMessage(fauxToolCall("ask_owner", { question: "Use A or B?" }, { id: "native-ask" }), { stopReason: "toolUse" })]),
     fauxAssistantMessage("Used B from the owner answer and completed the original assignment with all checks."),
   ]);
+  const file = message.match(/M4_FILE=([a-z]+)/)?.[1];
+  if (file) {
+    writeFileSync(join(cwd, file), `Written by ${process.env.CONDUCTOR_RUN_ID}\n`);
+    for (const args of [["add", "--", file], ["commit", "-m", `test: ${file}`]]) execFileSync("git", args, { cwd, env: gitTestEnv(), timeout: 5000, stdio: "pipe" });
+  }
   let accepted = false;
   try {
     await session.prompt(message, { source: rpc ? "rpc" : "interactive", preflightResult: success => {

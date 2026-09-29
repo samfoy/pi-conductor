@@ -18,14 +18,14 @@ import {
   writeRecord,
   type SpawnOptions,
 } from "./runs.ts";
-import { addEffortMember } from "./effort/store.ts";
+import { addEffortMember, listEfforts, readEffort, type EffortRecord } from "./effort/store.ts";
+import { admitEffortWriter } from "./effort/admit.ts";
 import type { Run, SpawnMode } from "./types.ts";
-import { emptyUsage, isSettled } from "./types.ts";
+import { emptyUsage } from "./types.ts";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { runDir } from "./runs.ts";
 import { allocateRunId } from "./runs.ts";
-import { WRITE_CAPABLE_PERSONAS } from "./personas.ts";
 
 /** Spawn options a queued entry hands to the spawner on drain. */
 export type QueuedSpawnOptions = Omit<SpawnOptions, "registry" | "preAllocatedId">;
@@ -49,6 +49,7 @@ export interface PendingSpawn {
 
 export class SpawnQueue {
   private pending: PendingSpawn[] = [];
+  private draining = false;
 
   constructor(
     private registry: RunRegistry,
@@ -62,16 +63,19 @@ export class SpawnQueue {
     /** Spawner seam; tests inject a spy. */
     private spawn: (opts: SpawnOptions) => { run: Run; done: Promise<Run> } = spawnRun,
   ) {
+    this.registry.admissionLimits = { maxConcurrent, maxConcurrentWriteCapable };
     this.registry.onChange(() => this.drain());
   }
 
   setMaxConcurrent(n: number): void {
     this.maxConcurrent = Math.max(1, Math.floor(n));
+    this.registry.admissionLimits!.maxConcurrent = this.maxConcurrent;
     this.drain();
   }
 
   setMaxConcurrentWriteCapable(n: number): void {
     this.maxConcurrentWriteCapable = Math.max(1, Math.floor(n));
+    this.registry.admissionLimits!.maxConcurrentWriteCapable = this.maxConcurrentWriteCapable;
     this.drain();
   }
 
@@ -98,11 +102,8 @@ export class SpawnQueue {
     if (opts.touches) opts = { ...opts, touches: [...opts.touches] };
     const { registry: callerRegistry, ...spawn } = opts;
     const registry = callerRegistry ?? this.registry;
-    const slotsFree = this.maxConcurrent - registry.countActive();
-    const writeCapable = !!effort || WRITE_CAPABLE_PERSONAS.has(opts.persona.name);
-    const writeSlotsFree =
-      this.maxConcurrentWriteCapable - countWriters(registry);
-    const canSpawnNow = slotsFree > 0 && (!writeCapable || writeSlotsFree > 0);
+    const waitReason = this.waitReason(spawn, registry, effort);
+    const canSpawnNow = waitReason === undefined;
 
     if (canSpawnNow) {
       const result = this.spawn({ ...spawn, registry });
@@ -124,6 +125,7 @@ export class SpawnQueue {
       thinking: opts.thinking,
       mode: "background", // queued runs are always background once they start
       status: "queued",
+      waitReason,
       ...(effort ? { parentPid: effort.owner.pid, parentStartTime: effort.owner.startTime, parentSessionId: effort.owner.sessionId } : {}),
       effort: effort ? { name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches ? [...opts.touches] : undefined } : undefined,
       startTime: Date.now(),
@@ -175,55 +177,43 @@ export class SpawnQueue {
     return true;
   }
 
-  /** Try to start as many queued spawns as possible. Idempotent. */
-  drain(): void {
-    // Walk pending in FIFO order; only spawn those whose caps allow it.
-    // A blocked write-capable entry does NOT block a later read-only entry,
-    // because the two caps are independent.
-    let i = 0;
-    while (i < this.pending.length) {
-      const next = this.pending[i]!;
-      const slotsFree = this.maxConcurrent - this.registry.countActive();
-      if (slotsFree <= 0) return;
-      const writeCapable = next.spawn.effort !== undefined || WRITE_CAPABLE_PERSONAS.has(next.spawn.persona.name);
-      const writeSlotsFree =
-        this.maxConcurrentWriteCapable -
-        countWriters(this.registry);
-      if (writeCapable && writeSlotsFree <= 0) {
-        // This write-capable spawn must wait; try the next pending entry.
-        i++;
-        continue;
-      }
-
-      // Promote: remove from pending and spawn.
-      this.pending.splice(i, 1);
-      const placeholder = this.registry.get(next.id);
-      if (!placeholder || placeholder.status !== "queued") {
-        // It was cancelled while waiting; skip without advancing i (we already spliced).
-        continue;
-      }
-
-      try {
-        this.spawn({
-          ...next.spawn,
-          mode: next.effectiveMode,
-          registry: this.registry,
-          preAllocatedId: next.id,
-        });
-      } catch (e) {
-        if (!placeholder.effort) throw e;
-        placeholder.status = "failed";
-        placeholder.finishedAt = Date.now();
-        placeholder.errorMessage = `effort launch refused: ${(e as Error).message}`;
-        void writeRecord(placeholder).then(() => { this.registry.notify(placeholder); next.spawn.onComplete?.(placeholder); });
-      }
-    }
+  private waitReason(opts: QueuedSpawnOptions, registry: RunRegistry, effort?: EffortRecord, id?: string): string | undefined {
+    // Earlier waiters reserve scope, not slots; independent work may pass them.
+    const preceding = new Set(this.pending.slice(0, id ? this.pending.findIndex(p => p.id === id) : undefined).map(p => p.id));
+    const members = registry.list();
+    const waitingBehind = new Set(members.filter(r => r.status === "queued" && !preceding.has(r.id)).map(r => r.id));
+    return admitEffortWriter({ id, persona: opts.persona.name, effort: effort ? { name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches } : undefined }, members, { maxConcurrent: this.maxConcurrent, maxConcurrentWriteCapable: this.maxConcurrentWriteCapable }, effort, effort ? listEfforts(effort.gitRoot) : [], waitingBehind);
   }
-}
 
-function countWriters(registry: RunRegistry): number {
-  return registry.countActiveBy(WRITE_CAPABLE_PERSONAS) + registry.list().filter(r =>
-    r.effort && !WRITE_CAPABLE_PERSONAS.has(r.persona) && !isSettled(r.status) && r.status !== "queued" && r.status !== "integrating").length;
+  /** Revalidation and synchronous running registration precede any asynchronous launch effects. */
+  drain(): void {
+    if (this.draining) return;
+    this.draining = true;
+    try {
+      let i = 0;
+      while (i < this.pending.length) {
+        const next = this.pending[i]!;
+        const placeholder = this.registry.get(next.id);
+        if (!placeholder || placeholder.status !== "queued") { this.pending.splice(i, 1); continue; }
+        try {
+          const effort = placeholder.effort ? readEffort(placeholder.effort.gitRoot, placeholder.effort.name) : undefined;
+          if (placeholder.effort && !effort) throw new Error("effort record missing");
+          placeholder.waitReason = this.waitReason(next.spawn, this.registry, effort, next.id);
+          if (placeholder.waitReason) { i++; continue; }
+          this.pending.splice(i, 1);
+          this.spawn({ ...next.spawn, mode: next.effectiveMode, registry: this.registry, preAllocatedId: next.id });
+        } catch (e) {
+          if (!placeholder.effort) throw e;
+          if (this.pending[i]?.id === next.id) this.pending.splice(i, 1);
+          placeholder.status = "failed";
+          placeholder.waitReason = undefined;
+          placeholder.finishedAt = Date.now();
+          placeholder.errorMessage = `effort launch refused: ${(e as Error).message}`;
+          void writeRecord(placeholder).then(() => { this.registry.notify(placeholder); next.spawn.onComplete?.(placeholder); });
+        }
+      }
+    } finally { this.draining = false; }
+  }
 }
 
 function mapFromRegistry(r: RunRegistry): Map<string, Run> {

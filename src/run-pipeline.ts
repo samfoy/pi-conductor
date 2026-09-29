@@ -1,3 +1,4 @@
+import { measureEffortFootprint } from "./effort/admit.ts";
 import { effortGit, effortOwner } from "./effort/open.ts";
 import { assertEffortOwner, readEffort } from "./effort/store.ts";
 import { effortSummary, resolveEffortPolicy } from "./effort/policy.ts";
@@ -154,6 +155,13 @@ export function createRunPipeline(
           donePromiseResolve(run);
           return;
         }
+        if (run.effort) {
+          try {
+            const policy = readEffort(run.effort.gitRoot, run.effort.name)!.policy;
+            const measured = measureEffortFootprint(run, effortGit(run.worktreePath!, "rev-parse", "HEAD"), policy);
+            Object.assign(run.effort, measured, { footprintUnknown: !!effortGit(run.worktreePath!, "status", "--porcelain", "--untracked-files=all") });
+          } catch { run.effort.footprintUnknown = true; }
+        }
         run.status = "blocked";
         run.finishedAt = Date.now();
         run.exitCode = exitCode;
@@ -220,8 +228,9 @@ export function createRunPipeline(
         if (!run.worktreePath || !run.worktreeBranch) throw new Error("effort assignment workspace missing");
         if (effortGit(run.worktreePath, "status", "--porcelain", "--untracked-files=all")) throw new Error("writer has uncommitted work; integration refused and workspace preserved");
         const branchHead = effortGit(run.effort.gitRoot, "rev-parse", "--verify", `refs/heads/${run.worktreeBranch}^{commit}`);
+        const measured = measureEffortFootprint(run, branchHead, policy);
         run.status = "integrating";
-        run.integration = { state: "queued", enqueuedAt: Date.now(), branchHead, attempts: 0,
+        run.integration = { ...measured, state: "queued", enqueuedAt: Date.now(), branchHead, attempts: 0,
           verifyIdentity: { command: policy.verify, timeoutSeconds: policy.verifyTimeoutSeconds, retries: policy.verifyRetries } };
         if (run.integrationSuspended) {
           run.integration.state = "paused";

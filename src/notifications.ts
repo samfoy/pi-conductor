@@ -17,7 +17,7 @@ import { effortSummary } from "./effort/policy.ts";
 import { resultRef } from "./file-evidence.ts";
 import { compactEnvelopeBlock } from "./compaction-hook.ts";
 import { contextRetirementNotice } from "./context-retirement.ts";
-import { availableActions, type RunAction, elapsedStr, formatUsage, getFinalText, sendsSinceSpawn } from "./runs.ts";
+import { availableActions, type RunAction, type RunRegistry, elapsedStr, formatUsage, getFinalText, sendsSinceSpawn } from "./runs.ts";
 import { boundStallText, escapeStallEvidence, recentStallEvidence, STALL_GUIDANCE } from "./stall-evidence.ts";
 import type { Run, RunStatus } from "./types.ts";
 
@@ -411,8 +411,8 @@ export function buildCompletionSendMessageOptions(run: Run): {
  * be forgotten on one of them — which is exactly how the raw-XML
  * regression shipped.
  */
-export function buildCompletionMessage(run: Run, canFocus = false, sessionId?: string): NotificationMessage {
-  const actions = availableActions(run, canFocus, sessionId);
+export function buildCompletionMessage(run: Run, canFocus = false, sessionId?: string, registry?: RunRegistry): NotificationMessage {
+  const actions = availableActions(run, canFocus, sessionId, registry);
   const perSend = perSendNumbers(run);
   const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
   const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;

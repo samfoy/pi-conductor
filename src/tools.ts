@@ -33,7 +33,7 @@ import {
 } from "./autonomous.ts";
 import { resolveRetryPolicy } from "./retry.ts";
 import { collapseSteerableCascade } from "./steerable.ts";
-import { prepareSpawnEffort, availableActions, supportsFocus, validateRunAction, elapsedStr, failBeforeSpawn, forceTerminate, formatUsage, getFinalText, keptBranchHint, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendCwd, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
+import { prepareSpawnEffort, availableActions, observeRunActions, computeAvailableActions, supportsFocus, validateRunAction, elapsedStr, failBeforeSpawn, forceTerminate, formatUsage, getFinalText, keptBranchHint, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendCwd, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
 import { registerAskOwner } from "./ask-owner.ts";
 import { isSettled, isTerminal } from "./types.ts";
 import { SpawnQueue } from "./queue.ts";
@@ -326,7 +326,7 @@ function registerStatusTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       const filtered = params?.agent_id ? all.filter((r) => r.id === params.agent_id) : all;
 
       const groups = groupByStatus(filtered);
-      const summaries = new Map(filtered.map(r => [r.id, toStatusSummary(r, supportsFocus(ctx), opts.getSessionId?.())]));
+      const summaries = new Map(filtered.map(r => [r.id, toStatusSummary(r, supportsFocus(ctx), opts.getSessionId?.(), registry)]));
       const summary = (r: Run) => summaries.get(r.id)!;
       const queueList = queue.list().map((p) => ({
         id: p.id,
@@ -950,7 +950,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
             // payload through so the last visible streamed frame matches
             // reality before the tool-call card collapses to the summary.
             throttle.flush();
-            return foregroundFinalResult(outcome.value, supportsFocus(ctx), undefined, opts.getSessionId?.());
+            return foregroundFinalResult(outcome.value, supportsFocus(ctx), undefined, opts.getSessionId?.(), registry);
           } finally {
             detach.unregister();
           }
@@ -1221,7 +1221,7 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
             // Force any pending payload so the last visible streamed frame
             // matches reality before the tool-call card collapses.
             throttle.flush();
-            return foregroundFinalResult(outcome.value, supportsFocus(ctx), answering, opts.getSessionId?.());
+            return foregroundFinalResult(outcome.value, supportsFocus(ctx), answering, opts.getSessionId?.(), registry);
           } finally {
             detach.unregister();
           }
@@ -1595,10 +1595,12 @@ function groupByStatus(runs: Run[]): StatusGroups {
   return g;
 }
 
-function toStatusSummary(r: Run, canFocus: boolean, sessionId?: string) {
+function toStatusSummary(r: Run, canFocus: boolean, sessionId?: string, registry?: RunRegistry) {
+  const observed = observeRunActions(r, canFocus, sessionId, registry);
   return {
     id: r.id,
-    available_actions: availableActions(r, canFocus, sessionId),
+    available_actions: computeAvailableActions(r, observed),
+    wait_reason: r.waitReason ?? observed.effortAdmissionError,
     persona: r.persona,
     status: r.status,
     pending_ask: r.pendingAsk,
@@ -1653,7 +1655,8 @@ function formatStatusForLLM(g: StatusGroups, queueSize: number, summaries: Map<s
       const tokenPart = formatUsage({ turns: 0, input: r.usage.input, output: r.usage.output, cost: r.usage.cost });
       const usageStr = [turnPart, tokenPart].filter(Boolean).join(" ");
       const usagePart = usageStr ? `[${usageStr}]` : "";
-      const hint = (r.lastToolCall ? ` → ${r.lastToolCall}` : "") + (r.effort ? ` effort=${effortSummary(r)}` : "");
+      const waitReason = summaries.get(r.id)!.wait_reason;
+      const hint = (waitReason ? ` ${waitReason}` : "") + (r.lastToolCall ? ` → ${r.lastToolCall}` : "") + (r.effort ? ` effort=${effortSummary(r)}` : "");
       lines.push(
         `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} available_actions=${summaries.get(r.id)!.available_actions.join(",") || "(none)"}`,
       );
@@ -1662,8 +1665,8 @@ function formatStatusForLLM(g: StatusGroups, queueSize: number, summaries: Map<s
   return lines.join("\n");
 }
 
-function foregroundFinalResult(r: Run, canFocus: boolean, answering?: { askId: string; question: string }, sessionId?: string) {
-  const actions = availableActions(r, canFocus, sessionId);
+function foregroundFinalResult(r: Run, canFocus: boolean, answering?: { askId: string; question: string }, sessionId?: string, registry?: RunRegistry) {
+  const actions = availableActions(r, canFocus, sessionId, registry);
   const ref = resultRef(r);
   const answerNotice = answering ? `${r.status === "blocked" && r.errorMessage ? "Answer delivery failed for" : "Answered"} question ${answering.askId}: ${answering.question}\n` : "";
   const summary = answerNotice + renderForegroundSummary(r, actions) + (ref ? `\n  result-ref: ${ref} — pass files: ['${ref}'] for the full evidence.` : "");

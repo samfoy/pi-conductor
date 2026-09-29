@@ -313,8 +313,8 @@ function ensureWorktreeGitignore(gitRoot2) {
     if (content.split("\n").some((line) => line.trim() === pattern.trim())) {
       return;
     }
-    const prefix = content.endsWith("\n") ? "" : "\n";
-    appendFileSync(ignorePath, `${prefix}${pattern}
+    const prefix2 = content.endsWith("\n") ? "" : "\n";
+    appendFileSync(ignorePath, `${prefix2}${pattern}
 `, "utf-8");
   } else {
     appendFileSync(ignorePath, `${pattern}
@@ -344,10 +344,10 @@ function resolveMergeStrategy(opts) {
   return opts.perCall ?? opts.projectOverride ?? opts.userOverride ?? opts.personaFrontmatter ?? (WRITE_CAPABLE_PERSONAS.has(opts.personaName) ? "squash" : "none");
 }
 function buildMergeCommitMessage(persona, runId, task) {
-  const prefix = `${persona}(${runId}): `;
-  const budget = MAX_COMMIT_MSG_LENGTH - prefix.length;
+  const prefix2 = `${persona}(${runId}): `;
+  const budget = MAX_COMMIT_MSG_LENGTH - prefix2.length;
   const body = task.length <= budget ? task : task.slice(0, budget - 1) + "\u2026";
-  return prefix + body;
+  return prefix2 + body;
 }
 async function mergeWorktree(spec, opts) {
   const env = gitEnv();
@@ -964,11 +964,12 @@ async function checkSessionResumability(record, result) {
 
 // src/effort/policy.ts
 import { matchesGlob } from "node:path";
-var EFFORT_NOTICE = "M3: new hook-passed writers integrate serially after optional generated artifact regeneration, baseline/candidate verification and repository hooks. Legacy work remains UNINTEGRATED. Interrupted work pauses for inspection; recovery, parallel admission, merger, landing, readers, auto plans, chains and retries are unavailable.";
+var EFFORT_NOTICE = "M4: disjoint effort writers run in independent worktrees within global/effort limits; integration remains serial after optional generated artifact regeneration, baseline/candidate verification and repository hooks. Legacy work remains UNINTEGRATED. Interrupted work pauses for inspection; recovery, merger, landing, readers, auto plans, chains and retries are unavailable.";
 function effortSummary(run) {
   if (!run.effort) return "";
   const state = run.landedCommit ? `integrated ${run.landedCommit.slice(0, 12)}` : run.mergeResult?.nothingToCommit ? "tree-equal no-op" : run.status === "integrating" ? `integrating (${run.integration?.state ?? "paused"})` : "UNINTEGRATED";
-  return `${run.effort.name}: ${state}${run.mergeResult?.verifyDisabled ? " (effort verify disabled; repository hooks still required)" : ""}${run.integration?.reason ? `: ${run.integration.reason}` : ""}`;
+  const violations = run.integration?.touchViolations ?? run.effort.touchViolations;
+  return `${run.effort.name}: ${state}${run.mergeResult?.verifyDisabled ? " (effort verify disabled; repository hooks still required)" : ""}${run.integration?.reason ? `: ${run.integration.reason}` : ""}${violations?.length ? `; touches violations: ${JSON.stringify(violations)}` : ""}`;
 }
 function validateEffortName(name) {
   if (typeof name !== "string" || !/^[a-z][a-z0-9-]{0,39}$/.test(name)) {
@@ -1494,13 +1495,166 @@ async function resolvePersonas(opts) {
   return { personas, shadowed, errors };
 }
 
+// src/effort/admit.ts
+init_types();
+import { matchesGlob as matchesGlob2 } from "node:path";
+
+// src/effort/generated.ts
+import { createHash as createHash2 } from "node:crypto";
+import { lstatSync, readdirSync as readdirSync2, readFileSync as readFileSync5, readlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { join as join6 } from "node:path";
+
+// src/effort/git.ts
+import { spawnSync } from "node:child_process";
+init_worktree();
+
+// src/effort/core.ts
+function nextIntegration(result, attempts, retries) {
+  if (result.passed) return "accept";
+  if (result.failureKind === "spawn_error" || result.failureKind === "runaway_output" || result.exitCode === 127 || result.exitCode === 126) return "pause";
+  if (attempts <= retries) return "retry";
+  return result.failureKind === "timeout" ? "verify_timeout" : "verify_failed";
+}
+function parseMergeTree(stdout, exit, stderr = "") {
+  const [tree, ...fields] = stdout.split("\0");
+  if (stdout.endsWith("\0") && /^[0-9a-f]{40,64}$/.test(tree ?? "")) {
+    if (exit === 0 && fields[0] === "") return { kind: "clean", tree };
+    const end = fields.indexOf("");
+    if (exit === 1 && end > 0 && end < fields.length - 1) return { kind: "conflict", tree, conflicts: fields.slice(0, end) };
+  }
+  return { kind: "error", error: stderr || `merge-tree failed or malformed output (${exit}): ${stdout}` };
+}
+
+// src/effort/git.ts
+function effortEnv(extra = {}) {
+  return { ...Object.fromEntries(Object.keys(process.env).filter((k) => k.startsWith("GIT_") || k.startsWith("HERDR_")).map((k) => [k, void 0])), ...extra };
+}
+function mergeTree(root, tip, branch) {
+  const result = spawnSync("git", ["merge-tree", "--write-tree", "--name-only", "-z", tip, branch], { cwd: root, env: gitEnv(), encoding: "utf8", timeout: 3e4, maxBuffer: 1024 * 1024 });
+  return { ...parseMergeTree(result.stdout ?? "", result.status, result.error?.message ?? result.stderr), output: result.stdout ?? "" };
+}
+function assertCandidateIndexFlags(path) {
+  const unsafe = effortGit(path, "ls-files", "-v", "-z").split("\0").filter((entry) => entry && !entry.startsWith("H "));
+  if (unsafe.length) throw new Error(`candidate has unsafe index flags: ${JSON.stringify(unsafe)}; refusing integration`);
+}
+function assertCandidate(path, oid) {
+  if (effortGit(path, "rev-parse", "HEAD") !== oid) throw new Error("candidate HEAD changed after verification setup");
+  assertCandidateIndexFlags(path);
+  if (effortGit(path, "status", "--porcelain", "--untracked-files=all")) throw new Error("candidate has unexpected dirty changes; refusing integration");
+  if (effortGit(path, "rev-parse", "--abbrev-ref", "HEAD") !== "HEAD") throw new Error("candidate must stay detached");
+}
+function checkedCas(root, ref, candidate, expected, fence) {
+  if (effortGit(root, "worktree", "list", "--porcelain").split("\n").includes(`branch ${ref}`)) throw new Error("integration ref is checked out; queue paused");
+  fence();
+  effortGit(root, "update-ref", ref, candidate, expected);
+}
+function shellQuote2(value) {
+  return "'" + value.replaceAll("'", `'"'"'`) + "'";
+}
+
+// src/effort/generated.ts
+function changedPaths(cwd, before, after) {
+  return effortGit(cwd, "diff-tree", "-r", "--no-renames", "--name-only", "-z", before, after).split("\0").filter(Boolean);
+}
+function snapshot(cwd, prefix2 = "") {
+  return Object.fromEntries(readdirSync2(join6(cwd, prefix2)).flatMap((name) => {
+    const path = prefix2 ? `${prefix2}/${name}` : name;
+    const file = join6(cwd, path), stat6 = lstatSync(file);
+    if (stat6.isDirectory() && path !== ".git") return Object.entries(snapshot(cwd, path));
+    if (stat6.isSymbolicLink()) return [[path, `link:${readlinkSync(file)}`]];
+    if (!stat6.isFile()) throw new Error(`generated candidate contains unsupported file type: ${JSON.stringify(path)}`);
+    return [[path, `${stat6.mode}:${createHash2("sha256").update(readFileSync5(file)).digest("hex")}`]];
+  }));
+}
+async function regenerateCandidate(cwd, expectedHead, generated, evidencePath, command, fence) {
+  const beforeTree = effortGit(cwd, "write-tree");
+  const before = snapshot(cwd);
+  writeFileSync2(evidencePath, JSON.stringify({ tree: beforeTree, files: before }, null, 2));
+  for (const [path, value] of Object.entries(before)) {
+    if (isGeneratedPath(path, generated) && value.startsWith("link:")) throw new Error(`generated symlink artifacts are unsupported: ${JSON.stringify(path)}`);
+  }
+  const result = await command();
+  if (!result.passed) return result;
+  fence();
+  if (effortGit(cwd, "rev-parse", "HEAD") !== expectedHead || effortGit(cwd, "rev-parse", "--abbrev-ref", "HEAD") !== "HEAD") throw new Error("generated command changed candidate HEAD/ref");
+  const after = snapshot(cwd);
+  const paths = [.../* @__PURE__ */ new Set([
+    ...Object.keys(before),
+    ...Object.keys(after)
+  ])].filter((path) => before[path] !== after[path]);
+  const staged = changedPaths(cwd, beforeTree, effortGit(cwd, "write-tree"));
+  const changed = [.../* @__PURE__ */ new Set([...paths, ...staged])];
+  const outside = changed.filter((path) => path === ".git" || !isGeneratedPath(path, generated));
+  if (outside.length) throw new Error(`generated command edited paths outside generated policy: ${JSON.stringify(outside)}`);
+  assertCandidateIndexFlags(cwd);
+  for (const path of changed) {
+    if (after[path]?.startsWith("link:")) throw new Error(`generated symlink artifacts are unsupported: ${JSON.stringify(path)}`);
+  }
+  for (const path of changed) {
+    fence();
+    if (after[path] === void 0) effortGit(cwd, "update-index", "--force-remove", "--", path);
+    else effortGit(cwd, "--literal-pathspecs", "add", "--force", "--", path);
+  }
+  return result;
+}
+
+// src/effort/admit.ts
+var consumesSlot = (run) => !isSettled(run.status) && run.status !== "queued" && run.status !== "integrating";
+var declared = (touches) => touches?.length ? touches : ["**"];
+var prefix = (glob) => {
+  const parts = glob.split("/");
+  const magic = parts.findIndex((part) => /[*?\[\]{}()!+@\\]/.test(part));
+  return magic < 0 ? parts : parts.slice(0, magic);
+};
+function footprintsOverlap(a, b) {
+  const left = prefix(a), right = prefix(b);
+  return left.slice(0, Math.min(left.length, right.length)).every((part, i) => part === right[i]);
+}
+function covered(glob, generated) {
+  if (!generated || glob === "**") return false;
+  if (!/[*?\[\]{}()!+@\\]/.test(glob)) return isGeneratedPath(glob, generated);
+  return generated.paths.some((g) => g === glob || g.endsWith("/**") && !/[*?\[\]{}()!+@\\]/.test(g.slice(0, -3)) && glob.startsWith(g.slice(0, -2)));
+}
+function holdsFootprint(run) {
+  if (!run.effort || run.mergeResult?.success) return false;
+  return run.status === "queued" || consumesSlot(run) || run.status === "blocked" || run.status === "integrating" || !!run.effort.spawnBase || !!run.worktreeBranch;
+}
+function admitEffortWriter(candidate, members, limits, record, efforts = [], waitingBehind = /* @__PURE__ */ new Set()) {
+  const others = members.filter((r) => r.id !== candidate.id);
+  const active = others.filter(consumesSlot);
+  if (active.length >= limits.maxConcurrent) return `waits for maxConcurrent (${limits.maxConcurrent})`;
+  if (!candidate.effort) {
+    if (WRITE_CAPABLE_PERSONAS2.has(candidate.persona) && active.filter((r) => !r.effort && WRITE_CAPABLE_PERSONAS2.has(r.persona)).length >= limits.maxConcurrentWriteCapable) return `waits for maxConcurrentWriteCapable (${limits.maxConcurrentWriteCapable})`;
+    return;
+  }
+  if (!record || candidate.effort.role !== "writer" || record.gitRoot !== candidate.effort.gitRoot || record.name !== candidate.effort.name) return "effort admission requires a validated isolated writer assignment";
+  if (efforts.some((e) => e.owner.sessionId !== record.owner.sessionId || e.owner.pid !== record.owner.pid || e.owner.startTime !== record.owner.startTime)) return "waits for same-repository effort ownership resolution (foreign effort)";
+  if (efforts.some((e) => e.members.some((id) => id !== candidate.id && !members.some((r) => r.id === id)))) return "waits for unobserved same-repository effort assignments; recovery required";
+  if (active.filter((r) => r.effort?.gitRoot === record.gitRoot && r.effort.name === record.name).length >= record.policy.maxParallel) return `waits for effort maxParallel (${record.policy.maxParallel})`;
+  const touches = [...declared(candidate.effort.touches), ...candidate.effort.changedPaths ?? [], ...candidate.effort.footprintUnknown ? ["**"] : []];
+  for (const run of others) {
+    if (waitingBehind.has(run.id) && run.status === "queued") continue;
+    if (!holdsFootprint(run) || run.effort.gitRoot !== record.gitRoot) continue;
+    const footprint = [...declared(run.effort.touches), ...run.integration?.changedPaths ?? run.effort.changedPaths ?? []];
+    if (run.effort.footprintUnknown || isSettled(run.status) && run.status !== "blocked") footprint.push("**");
+    const generated = run.effort.name === record.name && !touches.includes("**") && !footprint.includes("**") ? record.policy.generated : void 0;
+    if (touches.some((a) => !covered(a, generated) && footprint.some((b) => !covered(b, generated) && footprintsOverlap(a, b)))) return `waits on ${run.id} (touches overlap)`;
+  }
+}
+function measureEffortFootprint(run, branchHead, policy) {
+  if (!run.effort?.spawnBase) throw new Error("missing effort spawn base; footprint unknown");
+  const changedPaths2 = changedPaths(run.effort.gitRoot, run.effort.spawnBase, branchHead);
+  const touchViolations = changedPaths2.filter((path) => !isGeneratedPath(path, policy.generated) && !declared(run.effort.touches).some((glob) => matchesGlob2(path, glob)));
+  return { changedPaths: changedPaths2, touchViolations };
+}
+
 // src/run-pipeline.ts
 import { appendFile } from "node:fs/promises";
 
 // src/subprocess-runtime.ts
 import { spawn } from "node:child_process";
 import { existsSync as existsSync5, mkdirSync as mkdirSync3 } from "node:fs";
-import { dirname as dirname4, join as join6 } from "node:path";
+import { dirname as dirname4, join as join7 } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 // src/rpc-stdin.ts
@@ -1624,7 +1778,7 @@ var RpcStdinQueue = class {
 var SubprocessRuntime = class {
   launch(run, args, cwd, sink, initialPrompt) {
     const invocation = getPiInvocation(args);
-    const tmp = run.effort ? join6(dirname4(run.recordPath), "tmp") : void 0;
+    const tmp = run.effort ? join7(dirname4(run.recordPath), "tmp") : void 0;
     if (tmp) mkdirSync3(tmp, { recursive: true });
     const rpc = args[1] === "rpc";
     const proc = spawn(invocation.command, invocation.args, {
@@ -2109,7 +2263,7 @@ function shouldRetry(cls, attempt, policy) {
 }
 
 // src/context-retirement.ts
-import { readFileSync as readFileSync5 } from "node:fs";
+import { readFileSync as readFileSync6 } from "node:fs";
 var RETIRED_ENTRY = "conductor-context-retired";
 var FINALIZE_INSTRUCTION = "This session is retiring because of context pressure. Start no new objectives. Bring the current coherent operation to a safe stopping point, preserving essential validation. Return a self-contained handoff describing completed work, current state, relevant files, checks performed and their results, unresolved issues, and exact next steps for a fresh child. Retirement is not evidence that the task is complete; distinguish verified work from unfinished work.";
 function hasRetirement(entries, sessionId) {
@@ -2143,7 +2297,7 @@ function installContextRetirement(pi) {
 function savedSessionRetired(sessionPath) {
   if (!sessionPath) return false;
   try {
-    const entries = readFileSync5(sessionPath, "utf8").split("\n").map((line) => {
+    const entries = readFileSync6(sessionPath, "utf8").split("\n").map((line) => {
       try {
         return JSON.parse(line);
       } catch {
@@ -2162,10 +2316,10 @@ function contextRetirementNotice(run) {
 }
 
 // src/memory.ts
-import { existsSync as existsSync6, mkdirSync as mkdirSync4, readFileSync as readFileSync6, appendFileSync as appendFileSync2 } from "node:fs";
+import { existsSync as existsSync6, mkdirSync as mkdirSync4, readFileSync as readFileSync7, appendFileSync as appendFileSync2 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { join as join7, dirname as dirname5 } from "node:path";
-import { createHash as createHash2 } from "node:crypto";
+import { join as join8, dirname as dirname5 } from "node:path";
+import { createHash as createHash3 } from "node:crypto";
 var STOPWORDS = /* @__PURE__ */ new Set([
   "the",
   "a",
@@ -2206,7 +2360,7 @@ function normalizeTaskShape(task, topK = 12) {
   const unique = [...new Set(tokens)].sort();
   const leading = unique.slice(0, topK);
   const basis = leading.join(" ");
-  return createHash2("sha256").update(basis).digest("hex").slice(0, 16);
+  return createHash3("sha256").update(basis).digest("hex").slice(0, 16);
 }
 var HALF_LIFE_MS = 30 * 24 * 60 * 60 * 1e3;
 function scoreOutcomes(records, shape, now) {
@@ -2233,7 +2387,7 @@ function scoreOutcomes(records, shape, now) {
 function memoryPath() {
   const override = process.env.CONDUCTOR_MEMORY_PATH;
   if (override && override.trim()) return override;
-  return join7(homedir4(), ".pi", "agent", "conductor", "memory", "outcomes.jsonl");
+  return join8(homedir4(), ".pi", "agent", "conductor", "memory", "outcomes.jsonl");
 }
 function appendOutcome(rec, path = memoryPath()) {
   try {
@@ -2246,7 +2400,7 @@ function loadOutcomes(path = memoryPath()) {
   if (!existsSync6(path)) return [];
   let raw;
   try {
-    raw = readFileSync6(path, "utf-8");
+    raw = readFileSync7(path, "utf-8");
   } catch {
     return [];
   }
@@ -2396,6 +2550,15 @@ function createRunPipeline(run, piArgs, opts) {
           donePromiseResolve(run);
           return;
         }
+        if (run.effort) {
+          try {
+            const policy = readEffort(run.effort.gitRoot, run.effort.name).policy;
+            const measured = measureEffortFootprint(run, effortGit(run.worktreePath, "rev-parse", "HEAD"), policy);
+            Object.assign(run.effort, measured, { footprintUnknown: !!effortGit(run.worktreePath, "status", "--porcelain", "--untracked-files=all") });
+          } catch {
+            run.effort.footprintUnknown = true;
+          }
+        }
         run.status = "blocked";
         run.finishedAt = Date.now();
         run.exitCode = exitCode;
@@ -2464,8 +2627,10 @@ function createRunPipeline(run, piArgs, opts) {
         if (!run.worktreePath || !run.worktreeBranch) throw new Error("effort assignment workspace missing");
         if (effortGit(run.worktreePath, "status", "--porcelain", "--untracked-files=all")) throw new Error("writer has uncommitted work; integration refused and workspace preserved");
         const branchHead = effortGit(run.effort.gitRoot, "rev-parse", "--verify", `refs/heads/${run.worktreeBranch}^{commit}`);
+        const measured = measureEffortFootprint(run, branchHead, policy);
         run.status = "integrating";
         run.integration = {
+          ...measured,
           state: "queued",
           enqueuedAt: Date.now(),
           branchHead,
@@ -2597,54 +2762,6 @@ function createRunPipeline(run, piArgs, opts) {
     void finalize2("failed", 1);
   };
   return done;
-}
-
-// src/effort/git.ts
-import { spawnSync } from "node:child_process";
-init_worktree();
-
-// src/effort/core.ts
-function nextIntegration(result, attempts, retries) {
-  if (result.passed) return "accept";
-  if (result.failureKind === "spawn_error" || result.failureKind === "runaway_output" || result.exitCode === 127 || result.exitCode === 126) return "pause";
-  if (attempts <= retries) return "retry";
-  return result.failureKind === "timeout" ? "verify_timeout" : "verify_failed";
-}
-function parseMergeTree(stdout, exit, stderr = "") {
-  const [tree, ...fields] = stdout.split("\0");
-  if (stdout.endsWith("\0") && /^[0-9a-f]{40,64}$/.test(tree ?? "")) {
-    if (exit === 0 && fields[0] === "") return { kind: "clean", tree };
-    const end = fields.indexOf("");
-    if (exit === 1 && end > 0 && end < fields.length - 1) return { kind: "conflict", tree, conflicts: fields.slice(0, end) };
-  }
-  return { kind: "error", error: stderr || `merge-tree failed or malformed output (${exit}): ${stdout}` };
-}
-
-// src/effort/git.ts
-function effortEnv(extra = {}) {
-  return { ...Object.fromEntries(Object.keys(process.env).filter((k) => k.startsWith("GIT_") || k.startsWith("HERDR_")).map((k) => [k, void 0])), ...extra };
-}
-function mergeTree(root, tip, branch) {
-  const result = spawnSync("git", ["merge-tree", "--write-tree", "--name-only", "-z", tip, branch], { cwd: root, env: gitEnv(), encoding: "utf8", timeout: 3e4, maxBuffer: 1024 * 1024 });
-  return { ...parseMergeTree(result.stdout ?? "", result.status, result.error?.message ?? result.stderr), output: result.stdout ?? "" };
-}
-function assertCandidateIndexFlags(path) {
-  const unsafe = effortGit(path, "ls-files", "-v", "-z").split("\0").filter((entry) => entry && !entry.startsWith("H "));
-  if (unsafe.length) throw new Error(`candidate has unsafe index flags: ${JSON.stringify(unsafe)}; refusing integration`);
-}
-function assertCandidate(path, oid) {
-  if (effortGit(path, "rev-parse", "HEAD") !== oid) throw new Error("candidate HEAD changed after verification setup");
-  assertCandidateIndexFlags(path);
-  if (effortGit(path, "status", "--porcelain", "--untracked-files=all")) throw new Error("candidate has unexpected dirty changes; refusing integration");
-  if (effortGit(path, "rev-parse", "--abbrev-ref", "HEAD") !== "HEAD") throw new Error("candidate must stay detached");
-}
-function checkedCas(root, ref, candidate, expected, fence) {
-  if (effortGit(root, "worktree", "list", "--porcelain").split("\n").includes(`branch ${ref}`)) throw new Error("integration ref is checked out; queue paused");
-  fence();
-  effortGit(root, "update-ref", ref, candidate, expected);
-}
-function shellQuote2(value) {
-  return "'" + value.replaceAll("'", `'"'"'`) + "'";
 }
 
 // src/effort/driver.ts
@@ -2903,55 +3020,6 @@ function renderTail(lines) {
 
 // src/effort/driver.ts
 init_worktree();
-
-// src/effort/generated.ts
-import { createHash as createHash3 } from "node:crypto";
-import { lstatSync, readdirSync as readdirSync2, readFileSync as readFileSync7, readlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { join as join8 } from "node:path";
-function changedPaths(cwd, before, after) {
-  return effortGit(cwd, "diff-tree", "-r", "--no-renames", "--name-only", "-z", before, after).split("\0").filter(Boolean);
-}
-function snapshot(cwd, prefix = "") {
-  return Object.fromEntries(readdirSync2(join8(cwd, prefix)).flatMap((name) => {
-    const path = prefix ? `${prefix}/${name}` : name;
-    const file = join8(cwd, path), stat6 = lstatSync(file);
-    if (stat6.isDirectory() && path !== ".git") return Object.entries(snapshot(cwd, path));
-    if (stat6.isSymbolicLink()) return [[path, `link:${readlinkSync(file)}`]];
-    if (!stat6.isFile()) throw new Error(`generated candidate contains unsupported file type: ${JSON.stringify(path)}`);
-    return [[path, `${stat6.mode}:${createHash3("sha256").update(readFileSync7(file)).digest("hex")}`]];
-  }));
-}
-async function regenerateCandidate(cwd, expectedHead, generated, evidencePath, command, fence) {
-  const beforeTree = effortGit(cwd, "write-tree");
-  const before = snapshot(cwd);
-  writeFileSync2(evidencePath, JSON.stringify({ tree: beforeTree, files: before }, null, 2));
-  for (const [path, value] of Object.entries(before)) {
-    if (isGeneratedPath(path, generated) && value.startsWith("link:")) throw new Error(`generated symlink artifacts are unsupported: ${JSON.stringify(path)}`);
-  }
-  const result = await command();
-  if (!result.passed) return result;
-  fence();
-  if (effortGit(cwd, "rev-parse", "HEAD") !== expectedHead || effortGit(cwd, "rev-parse", "--abbrev-ref", "HEAD") !== "HEAD") throw new Error("generated command changed candidate HEAD/ref");
-  const after = snapshot(cwd);
-  const paths = [.../* @__PURE__ */ new Set([
-    ...Object.keys(before),
-    ...Object.keys(after)
-  ])].filter((path) => before[path] !== after[path]);
-  const staged = changedPaths(cwd, beforeTree, effortGit(cwd, "write-tree"));
-  const changed = [.../* @__PURE__ */ new Set([...paths, ...staged])];
-  const outside = changed.filter((path) => path === ".git" || !isGeneratedPath(path, generated));
-  if (outside.length) throw new Error(`generated command edited paths outside generated policy: ${JSON.stringify(outside)}`);
-  assertCandidateIndexFlags(cwd);
-  for (const path of changed) {
-    if (after[path]?.startsWith("link:")) throw new Error(`generated symlink artifacts are unsupported: ${JSON.stringify(path)}`);
-  }
-  for (const path of changed) {
-    fence();
-    if (after[path] === void 0) effortGit(cwd, "update-index", "--force-remove", "--", path);
-    else effortGit(cwd, "--literal-pathspecs", "add", "--force", "--", path);
-  }
-  return result;
-}
 
 // src/effort/process-group.ts
 import { readdirSync as readdirSync3, readFileSync as readFileSync8 } from "node:fs";
@@ -4368,6 +4436,7 @@ function planSpawnPiArgs(opts) {
   };
 }
 var RunRegistry = class {
+  admissionLimits;
   integrations = new EffortDriver();
   runs = /* @__PURE__ */ new Map();
   listeners = /* @__PURE__ */ new Set();
@@ -4387,18 +4456,18 @@ var RunRegistry = class {
   countActive() {
     let n = 0;
     for (const r of this.runs.values()) {
-      if (!isSettled(r.status) && r.status !== "queued" && r.status !== "integrating") n++;
+      if (consumesSlot(r)) n++;
     }
     return n;
   }
   /**
    * v0.9 Item 2(c): count active runs whose persona name is in the given set.
-   * Used by SpawnQueue to enforce maxConcurrentWriteCapable.
+   * Effort/legacy admission policy is separate from this name-based query.
    */
   countActiveBy(personaNames) {
     let n = 0;
     for (const r of this.runs.values()) {
-      if (!isSettled(r.status) && r.status !== "queued" && r.status !== "integrating" && personaNames.has(r.persona)) {
+      if (consumesSlot(r) && personaNames.has(r.persona)) {
         n++;
       }
     }
@@ -4461,7 +4530,7 @@ function prepareSpawnEffort(opts) {
     return void 0;
   }
   if (opts.persona.readOnly) throw new Error(`effort readers are unsupported. ${EFFORT_NOTICE}`);
-  if (opts.touches !== void 0) validateTouches(opts.touches);
+  if (opts.touches !== void 0 && (!Array.isArray(opts.touches) || opts.touches.length > 0)) validateTouches(opts.touches);
   return ownedEffort(opts.cwd, opts.effort, opts.parentSessionId);
 }
 function spawnRun(opts) {
@@ -4789,11 +4858,21 @@ function mapFromRegistry(r) {
 function sendCwd(run, conductorCwd) {
   return run.cwd || conductorCwd;
 }
+function effortAnswerWaitReason(run, registry) {
+  if (!run.effort || run.status !== "blocked") return;
+  try {
+    const record = readEffort(run.effort.gitRoot, run.effort.name);
+    const limits = registry.admissionLimits ?? loadConfigWithErrors(run.cwd).config;
+    return admitEffortWriter(run, registry.list(), limits, record, listEfforts(run.effort.gitRoot), new Set(registry.list().filter((r) => r.status === "queued").map((r) => r.id)));
+  } catch (e) {
+    return `effort answer admission refused: ${e.message}`;
+  }
+}
 var RUN_ACTIONS = ["send", "steer", "follow_up", "pause", "resume", "kill", "focus"];
 function supportsFocus(ctx) {
   return ctx?.mode === "tui";
 }
-function observeRunActions(run, canFocus = false, sessionId) {
+function observeRunActions(run, canFocus = false, sessionId, registry) {
   let effortOwnershipError;
   if (run.effort) {
     try {
@@ -4815,6 +4894,7 @@ function observeRunActions(run, canFocus = false, sessionId) {
   }
   return {
     effortOwnershipError,
+    effortAdmissionError: registry ? effortAnswerWaitReason(run, registry) : void 0,
     capabilities: capabilitiesFor(run),
     canFocus,
     owned: run.parentPid === void 0 || run.parentPid === process.pid,
@@ -4829,6 +4909,7 @@ function runActionError(run, action, observed) {
   if (action === "focus") return observed.canFocus ? void 0 : "Focused stream requires terminal UI (TUI mode).";
   if (action === "send" || action === "steer" || action === "follow_up") {
     if (observed.effortOwnershipError) return observed.effortOwnershipError;
+    if (action === "send" && observed.effortAdmissionError) return observed.effortAdmissionError;
     if ((run.pendingAsk || run.askExecution) && run.status !== "blocked") return `sub-agent ${run.id} is settling an owner question; wait for sub-agent-asked before answering.`;
     if (observed.retirementNotice) return `sub-agent ${run.id}: ${observed.retirementNotice}`;
   }
@@ -4853,8 +4934,8 @@ function runActionError(run, action, observed) {
 function computeAvailableActions(run, observed) {
   return RUN_ACTIONS.filter((action) => runActionError(run, action, observed) === void 0);
 }
-function availableActions(run, canFocus = false, sessionId) {
-  return computeAvailableActions(run, observeRunActions(run, canFocus, sessionId));
+function availableActions(run, canFocus = false, sessionId, registry) {
+  return computeAvailableActions(run, observeRunActions(run, canFocus, sessionId, registry));
 }
 function validateRunAction(run, action, canFocus = false, sessionId) {
   return runActionError(run, action, observeRunActions(run, canFocus, sessionId));
@@ -5015,6 +5096,10 @@ function sendToRun(run, message, opts) {
   const answer = run.pendingAsk ? { ask: run.pendingAsk, cwd: run.cwd } : void 0;
   if (run.effort && (!run.effort.cwd || !run.worktreeBranch || !refExists(run.effort.gitRoot, `refs/heads/${run.worktreeBranch}`))) {
     return { kind: "rejected", reason: "effort assignment branch/cwd is missing; preserve the outstanding question and inspect the effort before recovery" };
+  }
+  if (run.effort) {
+    const reason = effortAnswerWaitReason(run, opts.registry);
+    if (reason) return { kind: "rejected", reason };
   }
   const worktreeBlocker = restoreResumeWorktree(run, () => readFileSync12(sessionPath, "utf8"));
   if (worktreeBlocker) return { kind: "rejected", reason: worktreeBlocker };
@@ -6947,9 +7032,9 @@ var SUBCOMMANDS = [
 function registerCommands(pi, opts) {
   pi.registerCommand("conductor", {
     description: "pi-conductor: list, show, doctor, on/off, status, stop/pause/resume/queue, cwd",
-    getArgumentCompletions: (prefix) => {
+    getArgumentCompletions: (prefix2) => {
       const items = SUBCOMMANDS.map((s) => ({ value: s, label: s }));
-      const head = prefix.split(/\s+/)[0] ?? "";
+      const head = prefix2.split(/\s+/)[0] ?? "";
       const filtered = items.filter((i) => i.value.startsWith(head));
       return filtered.length > 0 ? filtered : null;
     },
@@ -8760,7 +8845,7 @@ function registerStatusTool(pi, opts) {
       const all = registry.list();
       const filtered = params?.agent_id ? all.filter((r) => r.id === params.agent_id) : all;
       const groups = groupByStatus(filtered);
-      const summaries = new Map(filtered.map((r) => [r.id, toStatusSummary(r, supportsFocus(ctx), opts.getSessionId?.())]));
+      const summaries = new Map(filtered.map((r) => [r.id, toStatusSummary(r, supportsFocus(ctx), opts.getSessionId?.(), registry)]));
       const summary = (r) => summaries.get(r.id);
       const queueList = queue.list().map((p) => ({
         id: p.id,
@@ -9263,7 +9348,7 @@ persona=${p.persona} queue_position=${result.queuePosition}
               return renderForegroundDetachedResult(result.run);
             }
             throttle.flush();
-            return foregroundFinalResult(outcome.value, supportsFocus(ctx), void 0, opts.getSessionId?.());
+            return foregroundFinalResult(outcome.value, supportsFocus(ctx), void 0, opts.getSessionId?.(), registry);
           } finally {
             detach.unregister();
           }
@@ -9482,7 +9567,7 @@ The sub-agent acknowledged the message at ${new Date(ackResult.deliveredAt).toIS
               return renderForegroundDetachedResult(result.run);
             }
             throttle.flush();
-            return foregroundFinalResult(outcome.value, supportsFocus(ctx), answering, opts.getSessionId?.());
+            return foregroundFinalResult(outcome.value, supportsFocus(ctx), answering, opts.getSessionId?.(), registry);
           } finally {
             detach.unregister();
           }
@@ -9777,10 +9862,12 @@ function groupByStatus(runs) {
   for (const r of runs) g[r.status].push(r);
   return g;
 }
-function toStatusSummary(r, canFocus, sessionId) {
+function toStatusSummary(r, canFocus, sessionId, registry) {
+  const observed = observeRunActions(r, canFocus, sessionId, registry);
   return {
     id: r.id,
-    available_actions: availableActions(r, canFocus, sessionId),
+    available_actions: computeAvailableActions(r, observed),
+    wait_reason: r.waitReason ?? observed.effortAdmissionError,
     persona: r.persona,
     status: r.status,
     pending_ask: r.pendingAsk,
@@ -9828,7 +9915,8 @@ function formatStatusForLLM(g, queueSize, summaries) {
       const tokenPart = formatUsage({ turns: 0, input: r.usage.input, output: r.usage.output, cost: r.usage.cost });
       const usageStr = [turnPart, tokenPart].filter(Boolean).join(" ");
       const usagePart = usageStr ? `[${usageStr}]` : "";
-      const hint = (r.lastToolCall ? ` \u2192 ${r.lastToolCall}` : "") + (r.effort ? ` effort=${effortSummary(r)}` : "");
+      const waitReason = summaries.get(r.id).wait_reason;
+      const hint = (waitReason ? ` ${waitReason}` : "") + (r.lastToolCall ? ` \u2192 ${r.lastToolCall}` : "") + (r.effort ? ` effort=${effortSummary(r)}` : "");
       lines.push(
         `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} available_actions=${summaries.get(r.id).available_actions.join(",") || "(none)"}`
       );
@@ -9836,8 +9924,8 @@ function formatStatusForLLM(g, queueSize, summaries) {
   }
   return lines.join("\n");
 }
-function foregroundFinalResult(r, canFocus, answering, sessionId) {
-  const actions = availableActions(r, canFocus, sessionId);
+function foregroundFinalResult(r, canFocus, answering, sessionId, registry) {
+  const actions = availableActions(r, canFocus, sessionId, registry);
   const ref = resultRef(r);
   const answerNotice = answering ? `${r.status === "blocked" && r.errorMessage ? "Answer delivery failed for" : "Answered"} question ${answering.askId}: ${answering.question}
 ` : "";
@@ -10055,6 +10143,7 @@ var SpawnQueue = class {
     this.maxConcurrent = maxConcurrent;
     this.maxConcurrentWriteCapable = maxConcurrentWriteCapable;
     this.spawn = spawn2;
+    this.registry.admissionLimits = { maxConcurrent, maxConcurrentWriteCapable };
     this.registry.onChange(() => this.drain());
   }
   registry;
@@ -10062,12 +10151,15 @@ var SpawnQueue = class {
   maxConcurrentWriteCapable;
   spawn;
   pending = [];
+  draining = false;
   setMaxConcurrent(n) {
     this.maxConcurrent = Math.max(1, Math.floor(n));
+    this.registry.admissionLimits.maxConcurrent = this.maxConcurrent;
     this.drain();
   }
   setMaxConcurrentWriteCapable(n) {
     this.maxConcurrentWriteCapable = Math.max(1, Math.floor(n));
+    this.registry.admissionLimits.maxConcurrentWriteCapable = this.maxConcurrentWriteCapable;
     this.drain();
   }
   list() {
@@ -10089,10 +10181,8 @@ var SpawnQueue = class {
     if (opts.touches) opts = { ...opts, touches: [...opts.touches] };
     const { registry: callerRegistry, ...spawn2 } = opts;
     const registry = callerRegistry ?? this.registry;
-    const slotsFree = this.maxConcurrent - registry.countActive();
-    const writeCapable = !!effort || WRITE_CAPABLE_PERSONAS2.has(opts.persona.name);
-    const writeSlotsFree = this.maxConcurrentWriteCapable - countWriters(registry);
-    const canSpawnNow = slotsFree > 0 && (!writeCapable || writeSlotsFree > 0);
+    const waitReason = this.waitReason(spawn2, registry, effort);
+    const canSpawnNow = waitReason === void 0;
     if (canSpawnNow) {
       const result = this.spawn({ ...spawn2, registry });
       return { kind: "spawned", run: result.run, done: result.done };
@@ -10110,6 +10200,7 @@ var SpawnQueue = class {
       mode: "background",
       // queued runs are always background once they start
       status: "queued",
+      waitReason,
       ...effort ? { parentPid: effort.owner.pid, parentStartTime: effort.owner.startTime, parentSessionId: effort.owner.sessionId } : {},
       effort: effort ? { name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches ? [...opts.touches] : void 0 } : void 0,
       startTime: Date.now(),
@@ -10156,47 +10247,53 @@ var SpawnQueue = class {
     }
     return true;
   }
-  /** Try to start as many queued spawns as possible. Idempotent. */
+  waitReason(opts, registry, effort, id) {
+    const preceding = new Set(this.pending.slice(0, id ? this.pending.findIndex((p) => p.id === id) : void 0).map((p) => p.id));
+    const members = registry.list();
+    const waitingBehind = new Set(members.filter((r) => r.status === "queued" && !preceding.has(r.id)).map((r) => r.id));
+    return admitEffortWriter({ id, persona: opts.persona.name, effort: effort ? { name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches } : void 0 }, members, { maxConcurrent: this.maxConcurrent, maxConcurrentWriteCapable: this.maxConcurrentWriteCapable }, effort, effort ? listEfforts(effort.gitRoot) : [], waitingBehind);
+  }
+  /** Revalidation and synchronous running registration precede any asynchronous launch effects. */
   drain() {
-    let i = 0;
-    while (i < this.pending.length) {
-      const next = this.pending[i];
-      const slotsFree = this.maxConcurrent - this.registry.countActive();
-      if (slotsFree <= 0) return;
-      const writeCapable = next.spawn.effort !== void 0 || WRITE_CAPABLE_PERSONAS2.has(next.spawn.persona.name);
-      const writeSlotsFree = this.maxConcurrentWriteCapable - countWriters(this.registry);
-      if (writeCapable && writeSlotsFree <= 0) {
-        i++;
-        continue;
+    if (this.draining) return;
+    this.draining = true;
+    try {
+      let i = 0;
+      while (i < this.pending.length) {
+        const next = this.pending[i];
+        const placeholder = this.registry.get(next.id);
+        if (!placeholder || placeholder.status !== "queued") {
+          this.pending.splice(i, 1);
+          continue;
+        }
+        try {
+          const effort = placeholder.effort ? readEffort(placeholder.effort.gitRoot, placeholder.effort.name) : void 0;
+          if (placeholder.effort && !effort) throw new Error("effort record missing");
+          placeholder.waitReason = this.waitReason(next.spawn, this.registry, effort, next.id);
+          if (placeholder.waitReason) {
+            i++;
+            continue;
+          }
+          this.pending.splice(i, 1);
+          this.spawn({ ...next.spawn, mode: next.effectiveMode, registry: this.registry, preAllocatedId: next.id });
+        } catch (e) {
+          if (!placeholder.effort) throw e;
+          if (this.pending[i]?.id === next.id) this.pending.splice(i, 1);
+          placeholder.status = "failed";
+          placeholder.waitReason = void 0;
+          placeholder.finishedAt = Date.now();
+          placeholder.errorMessage = `effort launch refused: ${e.message}`;
+          void writeRecord(placeholder).then(() => {
+            this.registry.notify(placeholder);
+            next.spawn.onComplete?.(placeholder);
+          });
+        }
       }
-      this.pending.splice(i, 1);
-      const placeholder = this.registry.get(next.id);
-      if (!placeholder || placeholder.status !== "queued") {
-        continue;
-      }
-      try {
-        this.spawn({
-          ...next.spawn,
-          mode: next.effectiveMode,
-          registry: this.registry,
-          preAllocatedId: next.id
-        });
-      } catch (e) {
-        if (!placeholder.effort) throw e;
-        placeholder.status = "failed";
-        placeholder.finishedAt = Date.now();
-        placeholder.errorMessage = `effort launch refused: ${e.message}`;
-        void writeRecord(placeholder).then(() => {
-          this.registry.notify(placeholder);
-          next.spawn.onComplete?.(placeholder);
-        });
-      }
+    } finally {
+      this.draining = false;
     }
   }
 };
-function countWriters(registry) {
-  return registry.countActiveBy(WRITE_CAPABLE_PERSONAS2) + registry.list().filter((r) => r.effort && !WRITE_CAPABLE_PERSONAS2.has(r.persona) && !isSettled(r.status) && r.status !== "queued" && r.status !== "integrating").length;
-}
 function mapFromRegistry2(r) {
   const m = /* @__PURE__ */ new Map();
   for (const x of r.list()) m.set(x.id, x);
@@ -10275,7 +10372,7 @@ function formatRow(r, theme, nowMs, wdCfg) {
   const glyph = statusGlyph(r.status, theme);
   const name = theme.fg("accent", r.persona) + theme.fg("dim", `:${r.id.split("-").pop() ?? r.id}`);
   const elapsed = theme.fg("dim", elapsedStr(r.startTime, r.finishedAt));
-  const activity = r.status === "integrating" ? theme.fg("warning", ` \xB7 ${r.effort?.name}: ${r.integration?.state ?? "paused"}${r.integration?.reason ? `: ${r.integration.reason}` : ""}`) : r.status === "queued" ? theme.fg("dim", " (queued)") : r.status === "blocked" ? theme.fg("warning", " (blocked: awaiting owner)") : r.status === "paused" ? theme.fg("warning", " (paused)") : r.hookExecuting ? theme.fg("warning", " \xB7 hook") : r.gracePeriodActive ? theme.fg("warning", " \xB7 \u26A0 wrapping up") : r.lastToolCall ? theme.fg("dim", ` \u2192 ${r.lastToolCall}`) : r.status === "running" ? theme.fg("dim", " starting\u2026") : "";
+  const activity = r.status === "integrating" ? theme.fg("warning", ` \xB7 ${r.effort?.name}: ${r.integration?.state ?? "paused"}${r.integration?.reason ? `: ${r.integration.reason}` : ""}`) : r.status === "queued" ? theme.fg("dim", ` (queued${r.waitReason ? `: ${r.waitReason}` : ""})`) : r.status === "blocked" ? theme.fg("warning", " (blocked: awaiting owner)") : r.status === "paused" ? theme.fg("warning", " (paused)") : r.hookExecuting ? theme.fg("warning", " \xB7 hook") : r.gracePeriodActive ? theme.fg("warning", " \xB7 \u26A0 wrapping up") : r.lastToolCall ? theme.fg("dim", ` \u2192 ${r.lastToolCall}`) : r.status === "running" ? theme.fg("dim", " starting\u2026") : "";
   const turnPart = r.usage.turns > 0 ? r.maxTurns !== void 0 ? `\u27F3${r.usage.turns}/${r.maxTurns}` : `\u27F3${r.usage.turns}` : "";
   const tokenPart = formatUsage({ turns: 0, input: r.usage.input, output: r.usage.output, cost: r.usage.cost });
   const usageStr = [turnPart, tokenPart].filter(Boolean).join(" ");
@@ -10623,8 +10720,8 @@ function buildCompletionSendMessageOptions(run) {
   }
   return { triggerTurn: true, deliverAs: "followUp" };
 }
-function buildCompletionMessage(run, canFocus = false, sessionId) {
-  const actions = availableActions(run, canFocus, sessionId);
+function buildCompletionMessage(run, canFocus = false, sessionId, registry) {
+  const actions = availableActions(run, canFocus, sessionId, registry);
   const perSend = perSendNumbers(run);
   const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
   const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
@@ -12558,7 +12655,7 @@ function index_default(pi) {
       return { detachSignal, unregister };
     },
     pushCompletionNotification: (run) => {
-      pi.sendMessage(buildCompletionMessage(run, supportsFocus(ctxRef), opts.getSessionId()), buildCompletionSendMessageOptions(run));
+      pi.sendMessage(buildCompletionMessage(run, supportsFocus(ctxRef), opts.getSessionId(), opts.getRegistry()), buildCompletionSendMessageOptions(run));
       if (run.status === "blocked") completionWakeTracker.drop(run.id);
       else completionWakeTracker.track(run.id, Date.now());
     }
@@ -12715,7 +12812,7 @@ function index_default(pi) {
           completionWakeTracker.drop(runId);
           continue;
         }
-        pi.sendMessage(buildCompletionMessage(run, supportsFocus(ctxRef), opts.getSessionId()), buildCompletionSendMessageOptions(run));
+        pi.sendMessage(buildCompletionMessage(run, supportsFocus(ctxRef), opts.getSessionId(), opts.getRegistry()), buildCompletionSendMessageOptions(run));
       }
       for (const runId of result.expired) {
         ctxRef?.ui.notify(
