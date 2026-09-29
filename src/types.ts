@@ -542,6 +542,8 @@ export interface Run {
   /** Owned integration effects; never restored from a saved record. */
   integrationControl?: { cancel(): void; suspend(): Promise<void> };
   integrationSuspended?: boolean;
+  /** Shared suspend/drain transition; runtime-only, retained on rejection to fail shutdown closed. */
+  integrationSuspension?: Promise<void>;
   /** Post-integration final files and dispatch state; runtime-only, awaited before reload. */
   integrationSettlement?: Promise<void>;
   recordWrite?: Promise<void>;

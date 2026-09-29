@@ -355,8 +355,10 @@ failures pause the effort rather than overwrite an external ref update. No build
 logs and verification duration; completed cards include the same evidence.
 Kill cancels only the owned integration and waits for its process group before
 settlement. Quit/reload stop active generation/verification and preserve integrating
-records. Reload also awaits an already-started integration settlement's final-file
-and dispatch-state writes before fresh recovery; it does not wait for active
+records. Concurrent shutdown callers first share the in-progress suspension/drain,
+even after integration controls are cleared. Reload then awaits an already-started
+integration settlement's final-file and dispatch-state writes before fresh recovery;
+it does not wait for active
 children to finish. Parent startup restores durable work under an exclusive owner generation;
 children never run recovery. Live owners reject takeover. PID reuse, missing start
 identity, permission ambiguity and incomplete claims fail closed, not by stale TTL.

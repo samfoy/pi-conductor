@@ -3273,15 +3273,24 @@ var EffortDriver = class {
           void job.stop?.();
           if (!job.flight) void this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
         },
-        suspend: async () => {
+        suspend: () => {
+          if (run.integrationSuspension) return run.integrationSuspension;
+          const suspending = Promise.resolve().then(async () => {
+            await job.stop?.();
+            try {
+              await job.flight;
+            } catch {
+              if (job.teardownError) throw job.teardownError;
+            }
+          });
+          run.integrationSuspension = suspending;
+          void suspending.then(() => {
+            if (run.integrationSuspension === suspending) run.integrationSuspension = void 0;
+          }, () => {
+          });
           job.suspended = true;
           run.integrationControl = void 0;
-          await job.stop?.();
-          try {
-            await job.flight;
-          } catch {
-            if (job.teardownError) throw job.teardownError;
-          }
+          return suspending;
         }
       };
       job.ready = this.persist(job).then(() => {
@@ -12836,7 +12845,10 @@ function installSanitizerHook(pi, opts) {
 // src/shutdown.ts
 async function handleSessionShutdown(event, deps) {
   for (const run of deps.runs) if (run.effort) run.integrationSuspended = true;
-  const integrations = deps.runs.flatMap((run) => run.integrationControl ? [run.integrationControl.suspend()] : []);
+  const integrations = deps.runs.flatMap((run) => {
+    const transition = run.integrationSuspension ?? run.integrationControl?.suspend();
+    return transition ? [transition] : [];
+  });
   if (integrations.length) {
     const results = await Promise.allSettled(integrations);
     const failure = results.find((r) => r.status === "rejected");

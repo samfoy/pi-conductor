@@ -89,7 +89,10 @@ export async function handleSessionShutdown(
   deps: ShutdownDeps,
 ): Promise<void> {
   for (const run of deps.runs) if (run.effort) run.integrationSuspended = true;
-  const integrations = deps.runs.flatMap(run => run.integrationControl ? [run.integrationControl.suspend()] : []);
+  const integrations = deps.runs.flatMap(run => {
+    const transition = run.integrationSuspension ?? run.integrationControl?.suspend();
+    return transition ? [transition] : [];
+  });
   if (integrations.length) {
     const results = await Promise.allSettled(integrations);
     const failure = results.find(r => r.status === "rejected");

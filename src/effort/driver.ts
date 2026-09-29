@@ -49,10 +49,17 @@ export class EffortDriver {
           job.cancelled = true; void job.stop?.();
           if (!job.flight) void this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
         },
-        suspend: async () => {
+        suspend: () => {
+          if (run.integrationSuspension) return run.integrationSuspension;
+          const suspending = Promise.resolve().then(async () => {
+            await job.stop?.();
+            try { await job.flight; } catch { if (job.teardownError) throw job.teardownError; }
+          });
+          run.integrationSuspension = suspending;
+          // A rejected transition stays discoverable: later shutdowns must not infer quiescence.
+          void suspending.then(() => { if (run.integrationSuspension === suspending) run.integrationSuspension = undefined; }, () => {});
           job.suspended = true; run.integrationControl = undefined;
-          await job.stop?.();
-          try { await job.flight; } catch { if (job.teardownError) throw job.teardownError; }
+          return suspending;
         },
       };
       job.ready = this.persist(job).then(() => {

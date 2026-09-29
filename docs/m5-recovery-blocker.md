@@ -209,3 +209,77 @@ Waiting is intentional, not a timeout that abandons live settlement I/O. Rejecte
 I/O releases the wait; an operation that never returns still requires its I/O to
 finish. Active child lifetimes are excluded. Opaque callback/receiver semantics
 and the approved potentially-missed-delivery policy remain unchanged.
+
+## critic-sjpp followup: concurrent suspension-to-settlement transition
+
+The re-review found a narrower gap in `6abe33b`: at the accepted run-WAL write,
+the first shutdown cleared `integrationControl` and waited for the driver, while
+a second shutdown saw neither control nor settlement and returned. The retained
+native repro in `/tmp/m5-rereview.hEOiu4/repo/tests/critic-transition-overlap.mts`
+was read and ported; critic evidence was not modified or deleted.
+
+New native cases in `effort-reload-settlement-smoke.test.ts` reproduce the actual
+accepted-WAL boundary, with single-call, concurrent-call and synchronous reentrant
+control-clearing variants. Before the fix, the single-call control passed and both
+overlap variants failed at **2 callbacks != 1**, with two memory outcomes, one Git
+integration, and returned-while-held `[false, true]`. No owner death, synthesized
+ownership or replacement WAL is used in these three cases.
+
+The driver now publishes one runtime-only `integrationSuspension` Promise before
+setting its suspension flag or clearing the control. Suspension still fences the
+job synchronously; process teardown and the existing driver flight drain through
+that shared Promise. Every shutdown caller discovers and awaits it, then awaits
+the existing pre-effect-registered settlement tail. The driver never awaits its
+own suspension or the settlement Promise, so there is no circular self-await.
+Success clears the transition after draining. Rejection remains visible and causes
+concurrent and later shutdowns to reject rather than infer quiescence.
+
+All three native variants now pass: concurrent/reentrant returned-while-held is
+`[false, false]`, followed by one callback, one outcome and one integration across
+two registry/Run objects and two recovery passes. Successful transition and
+settlement Promises clear. An additional real-verifier test injects permission
+ambiguity only for its recorded owned process group: concurrent and subsequent
+shutdowns all reject; cleanup restores the signal function, stops the exact group
+through the production identity helper, and awaits the driver before fixture cleanup.
+
+Targeted mutation: hide `run.integrationSuspension` from the shutdown lookup,
+leaving only `run.integrationControl?.suspend()`. The native concurrent case again
+fails at the callback assertion **`2 !== 1`**, not fixture setup, with two outcomes
+and one integration. A byte snapshot plus SHA-256 check restores the source; the
+same command then passes with one of each:
+
+```bash
+node --test --test-timeout=60000 --test-name-pattern='transition-concurrent:' \
+  --import tsx tests/effort-reload-settlement-smoke.test.ts
+```
+
+The earlier six settlement cases and pre-effect settlement registration remain.
+No receiver protocol, durable schema/generation change, filesystem cancellation,
+active-child lifetime wait or general shutdown coordinator was added. Complexity
+is limited to one runtime Promise on the existing Run and the existing driver's
+suspend path; no new helper module or duplicated finalizer.
+
+Followup verification observed:
+
+- Baseline `npm test`: **2259 passed, 12 skipped**.
+- Focused command (scrubbed child/herdr environment, private TMPDIR/memory):
+  `node --test --test-timeout=90000 --import tsx tests/effort-reload-settlement-smoke.test.ts tests/effort-recovery-smoke.test.ts tests/runtime-reload.test.ts tests/shutdown.test.ts`
+  -> **43 passed**, including the prior six settlement cases, all 19 SIGKILL cases,
+  the live-child reload control and four new transition/error cases.
+- Full `npm test`: **2275 total, 2263 passed, 12 skipped, zero failures**,
+  81.09 seconds.
+- `npm run typecheck`, `npm run build`, `git diff --check`: passed.
+- The hidden-transition mutation failed exactly at **2 != 1**; restored
+  `src/shutdown.ts` SHA-256:
+  `390672feb494d3e2877f337e672e5c422e4e1cdf74f4958a59e2109018e6aa79`.
+
+Rejected suspension is intentionally sticky on that runtime Run: later shutdown
+calls must report the unresolved transition, not silently authorize fresh recovery.
+It is not persisted or treated as a receiver acknowledgement. This followup is
+awaiting focused independent re-review; no merge or rollout is authorized here.
+
+The first followup commit-hook run hit the same unchanged teardown fixture's
+partial PID-JSON readiness read (`effort-teardown-smoke.test.ts:56`, before its
+shutdown call). No source or fixture change was made for that out-of-scope race;
+the unchanged file passed all 10 tests on rerun. The correction is committed only
+with the normal full pre-commit gate passing, never with a bypass.
