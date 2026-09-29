@@ -26,6 +26,7 @@ function child(t: test.TestContext, childEnv = "1") {
   const handlers = new Map<string, Handler[]>();
   const pi = {
     on: (name: string, h: Handler) => handlers.set(name, [...(handlers.get(name) ?? []), h]),
+    registerFlag() {}, getFlag() {},
     registerTool() {}, registerCommand() {}, registerShortcut() {}, registerMessageRenderer() {},
     appendEntry: (customType: string, data: { sessionId: string }) => entries.push({ type: "custom", customType, data }),
   };

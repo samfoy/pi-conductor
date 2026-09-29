@@ -43,6 +43,7 @@ import { buildConductorSystemPrompt } from "./conductor-prompt.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
 import { installContextRetirement } from "./context-retirement.ts";
+import { installChildBridge } from "./child-bridge.ts";
 import { FocusedStreamModel } from "./focused-stream-model.ts";
 import { createFocusedOverlayComponent } from "./focused-overlay-factory.ts";
 import { installFocusedOverlayShortcut } from "./focused-overlay-shortcut.ts";
@@ -67,6 +68,8 @@ import { executePromptAndSend } from "./prompt-and-send.ts";
 import { CWD_ENTRY_TYPE, createCwdController } from "./conductor-cwd.ts";
 
 export default function (pi: ExtensionAPI): void {
+  pi.registerFlag("conductor-launch", { type: "string", description: "Managed child invocation token" });
+  if (process.env.CONDUCTOR_SUBAGENT === "1") installChildBridge(pi);
   installContextRetirement(pi);
   // ── Mutable session-scoped state ─────────────────────────────────────
   let ctxRef: ExtensionContext | null = null;

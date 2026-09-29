@@ -154,6 +154,7 @@ function stubPi(entries: Entry[]) {
     on: (ev: string, h: (event: unknown, ctx: unknown) => unknown) => {
       handlers.set(ev, [...(handlers.get(ev) ?? []), h]);
     },
+    registerFlag() {}, getFlag() {},
     registerTool: (t: { name: string; execute: any }) => void tools.set(t.name, t),
     registerCommand: (_name: string, c: any) => {
       command = c;

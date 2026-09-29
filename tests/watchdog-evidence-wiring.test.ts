@@ -42,6 +42,7 @@ async function harness(t: TestContext) {
   let renderer: typeof notificationRenderer;
   conductor({
     on: (ev: string, h: (event: unknown, ctx: unknown) => unknown) => handlers.set(ev, [...(handlers.get(ev) ?? []), h]),
+    registerFlag() {}, getFlag() {},
     registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand() {}, registerShortcut() {}, appendEntry() {},
     registerMessageRenderer: (_type: string, r: typeof notificationRenderer) => { renderer = r; },
     sendMessage: (m: NotificationMessage, opts: unknown) => { messages.push(m); options.push(opts); },

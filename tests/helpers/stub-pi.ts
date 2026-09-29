@@ -13,6 +13,7 @@ export function loadConductor(): Fire {
   const pi = {
     on: (ev: string, h: (event: unknown, ctx: unknown) => unknown) =>
       void handlers.set(ev, [...(handlers.get(ev) ?? []), h]),
+    registerFlag() {}, getFlag() {},
     registerTool: () => {},
     registerCommand: () => {},
     registerMessageRenderer: () => {},

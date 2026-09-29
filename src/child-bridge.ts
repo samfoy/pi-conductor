@@ -1,0 +1,194 @@
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, writeSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { VERSION, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import packageInfo from "../package.json" with { type: "json" };
+import { isRecord } from "./herdr/cli.ts";
+import type { HerdrBinding, LaunchHello } from "./herdr/identity.ts";
+import { readProcessStartTime } from "./reconcile-startup.ts";
+
+const PROTOCOL = 1;
+const token = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value);
+const text = (value: unknown): value is string => typeof value === "string" && !!value.trim() && !/[\0\r\n]/.test(value);
+const path = (value: unknown): value is string => text(value) && isAbsolute(value) && resolve(value) === value;
+type Hello = LaunchHello & Pick<HerdrBinding, "terminalId">;
+interface BridgeOptions { env?: NodeJS.ProcessEnv; now?: () => number }
+
+function writeAll(fd: number, buffer: Buffer): void {
+  for (let offset = 0; offset < buffer.length;) {
+    const count = writeSync(fd, buffer, offset, buffer.length - offset);
+    if (count <= 0) throw new Error("incomplete transcript write");
+    offset += count;
+  }
+}
+
+function readJson(file: string): unknown {
+  const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    if (!fstatSync(fd).isFile()) throw new Error("invalid identity file");
+    return JSON.parse(readFileSync(fd, "utf8"));
+  } finally { closeSync(fd); }
+}
+
+function sameHello(value: unknown, expected: Hello): boolean {
+  return isRecord(value) && Object.entries(expected).every(([key, v]) => value[key] === v);
+}
+function exclusive(file: string, value: Hello): void {
+  const fd = openSync(file, "wx", 0o600);
+  try { writeAll(fd, Buffer.from(JSON.stringify(value) + "\n")); } finally { closeSync(fd); }
+}
+function statePresent(file: string, expected: Hello): boolean {
+  try {
+    if (!sameHello(readJson(file), expected)) throw new Error("invocation state conflict");
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}) {
+  const env = { ...(options.env ?? process.env) };
+  const now = options.now ?? Date.now;
+  let fd: number | undefined;
+  let hello: Hello | undefined;
+  let pending: unknown;
+  let accepted = false, closing = false;
+  let ctxRef: ExtensionContext | undefined;
+  let statePath = "";
+  const updates = new Map<string, number>();
+  const compactions = new Set<string>();
+  const dispose = () => {
+    try { flush(); } finally {
+      if (fd !== undefined) { const owned = fd; fd = undefined; closeSync(owned); }
+      hello = undefined; pending = undefined; updates.clear(); compactions.clear();
+      ctxRef = undefined; accepted = false; closing = false;
+    }
+  };
+  const write = (record: Record<string, unknown>) => {
+    const buffer = Buffer.from(JSON.stringify({ ...record, _c: { n: hello!.launchNonce } }) + "\n", "utf8");
+    writeAll(fd!, buffer);
+  };
+  function flush() {
+    const message = pending; pending = undefined;
+    if (message !== undefined && fd !== undefined) write({ type: "message_end", message });
+  }
+  function failed(ctx: ExtensionContext, error: unknown) {
+    pending = undefined;
+    dispose();
+    ctx.ui.notify(`conductor child bridge inert: ${(error as Error).message}`, "warning");
+  }
+  function observe(event: Record<string, unknown>, ctx: ExtensionContext) {
+    if (!hello || closing) return;
+    try {
+      flush();
+      const type = event.type;
+      if (type === "message_end") {
+        if (isRecord(event.message) && event.message.role !== "compactionSummary") pending = event.message;
+      } else if (type === "agent_start" || type === "agent_end" || type === "agent_settled") {
+        write({ type });
+        if (type === "agent_settled" && accepted) {
+          exclusive(`${statePath}.closing.json`, hello);
+          closing = true;
+          ctx.shutdown(); // Request only: the parent must separately prove process exit.
+        }
+      } else if (type === "turn_end" || type === "turn_start") write({ type, turnIndex: event.turnIndex });
+      else if (type === "tool_execution_start") write({ type, toolCallId: event.toolCallId, toolName: event.toolName, args: event.args });
+      else if (type === "tool_execution_update" && typeof event.toolCallId === "string") {
+        const at = now(), prior = updates.get(event.toolCallId);
+        if (prior === undefined || at - prior >= 5000) {
+          updates.set(event.toolCallId, at);
+          write({ type, toolCallId: event.toolCallId, toolName: event.toolName });
+        }
+      } else if (type === "tool_execution_end") {
+        let result: unknown;
+        if (event.toolName === "ask_owner" && event.isError === false) {
+          const details = isRecord(event.result) && event.result.details;
+          if (!isRecord(details) || details.askId !== event.toolCallId || typeof details.question !== "string" || !details.question.trim() || typeof details.evidence !== "string" ||
+              Buffer.byteLength(details.evidence) > 4 * 1048576) throw new Error("invalid ask_owner details or evidence cap");
+          result = { details: { askId: details.askId, question: details.question, evidence: details.evidence } };
+          if (Buffer.byteLength(JSON.stringify(result)) > 8 * 1048576) throw new Error("ask_owner details exceed bridge cap; not accepted");
+        }
+        write({ type, toolCallId: event.toolCallId, toolName: event.toolName, isError: event.isError, ...(result ? { result } : {}) });
+        if (typeof event.toolCallId === "string") updates.delete(event.toolCallId);
+      } else if (type === "ui_prompt_start" || type === "ui_prompt_end") {
+        write({ type: "conductor_child", v: 1, event: "ui_prompt", state: type === "ui_prompt_start" ? "start" : "end", kind: event.kind, title: event.title });
+      } else if (type === "session_compact" && isRecord(event.compactionEntry) && typeof event.compactionEntry.id === "string" && !compactions.has(event.compactionEntry.id)) {
+        compactions.add(event.compactionEntry.id);
+        write({ type: "message_end", message: { role: "compactionSummary" } });
+      }
+    } catch (error) { failed(ctx, error); }
+  }
+  // Pi 0.87 adds UI/context boundary events absent from the repo's older dev declarations.
+  const on = pi.on.bind(pi) as unknown as (name: string, handler: (event: Record<string, unknown>, ctx: ExtensionContext) => void) => void;
+  for (const name of ["agent_start", "agent_end", "agent_settled", "agent_before_settle", "turn_start", "turn_end", "message_start", "message_update", "message_end",
+    "tool_execution_start", "tool_execution_update", "tool_execution_end", "tool_call", "tool_result", "ui_prompt_start", "ui_prompt_end",
+    "session_compact", "session_compact_failed", "session_before_compact", "session_before_tree", "session_tree", "session_info_changed", "resources_discover",
+    "context", "context_with_system", "before_agent_start", "before_provider_request", "before_provider_headers", "after_provider_response",
+    "model_select", "thinking_level_select", "cache_warming_decision", "input", "user_bash"]) on(name, observe);
+  pi.on("session_start", (event, ctx) => {
+    dispose();
+    const nonce = pi.getFlag("conductor-launch");
+    if (env.CONDUCTOR_SUBAGENT !== "1" || env.CONDUCTOR_RUNTIME !== "herdr" || nonce === undefined) return;
+    try {
+      const runId = env.CONDUCTOR_RUN_ID, runDir = env.CONDUCTOR_RUN_DIR;
+      const sessionId = ctx.sessionManager.getSessionId(), sessionFile = ctx.sessionManager.getSessionFile();
+      if (!token(nonce) || !token(runId) || !path(runDir) || basename(runDir) !== runId || realpathSync(runDir) !== runDir ||
+          !token(sessionId) || !path(sessionFile) || dirname(sessionFile) !== join(runDir, "session") ||
+          realpathSync(dirname(sessionFile)) !== dirname(sessionFile)) throw new Error("invalid invocation paths or identity");
+      // Parent-persisted H3 binding is authority; inherited pane variables alone cannot claim a run.
+      const record = readJson(join(runDir, "record.json"));
+      const b = isRecord(record) && record.herdr;
+      if (!isRecord(record) || record.id !== runId || record.runtime !== "herdr" || !isRecord(b) ||
+          b.runId !== runId || b.launchNonce !== nonce || b.sessionId !== sessionId || b.sessionFile !== sessionFile ||
+          env.HERDR_ENV !== "1" || !path(b.socketPath) || b.socketPath !== env.HERDR_SOCKET_PATH ||
+          !text(b.paneId) || b.paneId !== env.HERDR_PANE_ID || !text(b.tabId) || b.tabId !== env.HERDR_TAB_ID ||
+          !text(b.workspaceId) || b.workspaceId !== env.HERDR_WORKSPACE_ID || !text(b.terminalId) ||
+          typeof b.createdTab !== "boolean") throw new Error("run binding mismatch");
+      try {
+        const stat = lstatSync(sessionFile);
+        if (!stat.isFile() || stat.nlink !== 1) throw new Error("invalid session file");
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      const pidStartTime = readProcessStartTime(process.pid);
+      if ((b.childPid !== undefined && b.childPid !== process.pid) || (b.childStartTime !== undefined && b.childStartTime !== pidStartTime)) throw new Error("recorded process mismatch");
+      if (process.pid <= 1 || (process.platform === "linux" && !pidStartTime)) throw new Error("missing process identity");
+      const expected: Hello = { v: 1, bridgeProtocol: PROTOCOL, runId, launchNonce: nonce, pid: process.pid, pidStartTime,
+        paneId: b.paneId, terminalId: b.terminalId, sessionId, sessionFile, piVersion: VERSION, conductorVersion: packageInfo.version, at: Date.now() };
+      const launchDir = join(runDir, "launch");
+      mkdirSync(launchDir, { recursive: true });
+      if (realpathSync(launchDir) !== launchDir) throw new Error("invalid launch directory");
+      const claim = join(launchDir, `${nonce}.json`);
+      let reload = false;
+      try { exclusive(claim, expected); } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const prior = readJson(claim);
+        if (event.reason !== "reload" || !isRecord(prior) || !Object.entries(expected).every(([key, value]) => key === "at" || prior[key] === value) ||
+            typeof prior.at !== "number" || !Number.isFinite(prior.at) || prior.at < 0) throw new Error("launch claim conflict");
+        expected.at = prior.at;
+        reload = true;
+      }
+      statePath = join(launchDir, nonce);
+      accepted = statePresent(`${statePath}.accepted.json`, expected);
+      closing = statePresent(`${statePath}.closing.json`, expected);
+      if (closing && !accepted) throw new Error("closing without initial acceptance");
+      hello = expected;
+      ctxRef = ctx;
+      if (closing) return;
+      fd = openSync(join(runDir, "transcript.jsonl"), constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+      if (!fstatSync(fd).isFile() || fstatSync(fd).nlink !== 1) throw new Error("invalid transcript file");
+      if (!reload) write({ type: "conductor_child", event: "launch", ...hello });
+    } catch (error) {
+      failed(ctx, error);
+    }
+  });
+  pi.on("session_before_switch", (event, ctx) => { observe({ ...event }, ctx); return hello ? { cancel: true } : undefined; });
+  pi.on("session_before_fork", (event, ctx) => { observe({ ...event }, ctx); return hello ? { cancel: true } : undefined; });
+  pi.on("session_shutdown", dispose);
+  return { dispose, acceptInitial(nonce: string): boolean {
+    if (!hello || !ctxRef || closing || nonce !== hello.launchNonce) return false;
+    try {
+      if (!accepted) exclusive(`${statePath}.accepted.json`, hello);
+      accepted = true;
+      return true;
+    } catch (error) { failed(ctxRef, error); return false; }
+  } };
+}

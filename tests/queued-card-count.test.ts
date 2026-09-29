@@ -37,6 +37,7 @@ function loadWithTools() {
   conductor({
     on: (ev: string, h: (event: unknown, ctx: unknown) => unknown) =>
       void handlers.set(ev, [...(handlers.get(ev) ?? []), h]),
+    registerFlag() {}, getFlag() {},
     registerTool: (t: any) => void tools.set(t.name, t),
     registerCommand: () => {},
     registerMessageRenderer: () => {},
