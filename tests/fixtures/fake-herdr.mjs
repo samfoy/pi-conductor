@@ -1,0 +1,39 @@
+#!/usr/bin/env node
+import {readFileSync, writeFileSync} from "node:fs";
+const statePath = process.env.FAKE_HERDR_STATE;
+if (!statePath || process.env.HERDR_SOCKET_PATH !== `${statePath}.socket`) process.exit(90);
+const state = JSON.parse(readFileSync(statePath, "utf8"));
+const args = process.argv.slice(2);
+state.calls.push({args, socket: process.env.HERDR_SOCKET_PATH,
+  routingNames: Object.keys(process.env).filter(k => k.startsWith("HERDR_"))});
+const save = () => writeFileSync(statePath, JSON.stringify(state));
+save();
+const output = (result) => console.log(JSON.stringify({id: "fake-request", result}));
+if (state.fault === "hang") { setInterval(() => {}, 1000); }
+else if (state.fault === "invalid") console.log("not json " + args.join(" "));
+else if (state.fault === "overflow") process.stdout.write("x".repeat(200000));
+else if (state.fault === "stderr-overflow") process.stderr.write("x".repeat(200000));
+else if (["nonzero", "stderr-error", "error-success"].includes(state.fault)) {
+  const outputError = state.fault === "stderr-error" ? console.error : console.log;
+  outputError(JSON.stringify({id: "fake-request", error: {code: state.code ?? "agent_pane_busy", message: args.join(" ") + process.env.SENTINEL_SECRET}}));
+  if (state.fault !== "stderr-error") console.error(args.join(" ") + process.env.SENTINEL_SECRET);
+  process.exitCode = state.fault === "error-success" ? 0 : 7;
+} else if (state.fault === "response") console.log(JSON.stringify(state.response));
+else if (args.includes("--help") || args.join(" ") === "integration status") console.log("fake help/status: plain text");
+else if (args[0] === "agent" && args[1] === "read") console.log("fake terminal scrollback");
+else if (args[0] === "tab" && args[1] === "create") {
+  if (state.created) process.exit(91);
+  const flag = name => args[args.indexOf(name) + 1];
+  state.created = true;
+  state.pane = {...state.pane, cwd: flag("--cwd"), workspace_id: flag("--workspace")};
+  state.tab = {tab_id: state.pane.tab_id, workspace_id: state.pane.workspace_id, label: flag("--label"), number: 1, focused: false, pane_count: 1, agent_status: "unknown"};
+  save(); output({type: "tab_created", root_pane: state.pane, tab: state.tab});
+} else if (args[0] === "pane" && args[1] === "get") output({type: "pane_info", pane: state.getPane ?? state.pane});
+else if (args[0] === "agent" && args[1] === "start") {
+  state.pane.agent = "pi";
+  state.pane.agent_session = {kind: "path", value: state.sessionFile, source: "integration", agent: "pi"};
+  save(); output({type: "agent_started", agent: {...state.pane, name: args[2], interactive_ready: true}, argv: args.slice(args.indexOf("--") + 1)});
+} else if (args[0] === "pane" && args[1] === "close") {
+  if (args[2] !== state.pane.pane_id || state.pane.agent !== null) process.exit(92);
+  state.closed = true; save(); output({type: "ok"});
+} else process.exit(93);
