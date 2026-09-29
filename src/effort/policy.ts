@@ -12,7 +12,7 @@ export interface EffortPolicy {
   history: "squash";
 }
 
-export const EFFORT_NOTICE = "M4: disjoint effort writers run in independent worktrees within global/effort limits; integration remains serial after optional generated artifact regeneration, baseline/candidate verification and repository hooks. Legacy work remains UNINTEGRATED. Interrupted work pauses for inspection; recovery, merger, landing, readers, auto plans, chains and retries are unavailable.";
+export const EFFORT_NOTICE = "M5: disjoint effort writers run in independent worktrees within global/effort limits; integration remains serial after optional generated artifact regeneration, baseline/candidate verification and repository hooks. Legacy work remains UNINTEGRATED. Crash recovery uses owner fencing and reachable Git proof; uncertain work pauses for human effort resume/requeue. Delivery-uncertain callbacks are never replayed automatically. Merger, landing, readers, auto plans, chains and retries remain unavailable.";
 
 export function effortSummary(run: import("../types.ts").Run): string {
   if (!run.effort) return "";

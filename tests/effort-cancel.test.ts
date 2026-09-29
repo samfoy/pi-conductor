@@ -43,7 +43,7 @@ test("candidate dirtied by successful verifier is rejected", { timeout: 10000 },
   forceTerminate(f.run, "killed", f.registry); await done;
 });
 
-for (const scenario of ["WAL write failure", "owner change before CAS", "stale CAS", "checked-out intRef"] as const) test(scenario + " prevents acceptance and ref update", { timeout: 10000 }, async t => {
+for (const scenario of ["WAL write failure", "owner change before CAS", "checked-out intRef"] as const) test(scenario + " prevents acceptance and ref update", { timeout: 10000 }, async t => {
   const f = fixture(t, "true");
   const lock = join(effortDir(f.root, "probe"), "effort.lock"); const previous = readFileSync(lock);
   const rename = fs.renameSync; let injected = false;
@@ -52,7 +52,6 @@ for (const scenario of ["WAL write failure", "owner change before CAS", "stale C
       injected = true;
       if (scenario === "WAL write failure") throw new Error("injected WAL failure");
       if (scenario === "owner change before CAS") writeFileSync(lock, JSON.stringify({ ...f.record.owner, sessionId: "new-owner" }));
-      if (scenario === "stale CAS") git(f.root, "update-ref", f.record.intRef, f.head, f.base);
       if (scenario === "checked-out intRef") git(f.root, "worktree", "add", join(f.root, ".worktrees", "int-ref"), "conductor-int/probe");
     }
     rename(src, dst);
@@ -60,7 +59,7 @@ for (const scenario of ["WAL write failure", "owner change before CAS", "stale C
   t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); writeFileSync(lock, previous); });
   const done = f.start(); await until(f.registry, f.run, r => r.integration?.state === "paused" || r.status !== "integrating");
   assert.equal(injected, true);
-  assert.equal(git(f.root, "rev-parse", f.record.intRef), scenario === "stale CAS" ? f.head : f.base, "driver must not overwrite external ref or advance without WAL/owner");
+  assert.equal(git(f.root, "rev-parse", f.record.intRef), f.base, "driver must not overwrite external ref or advance without WAL/owner");
   assert.equal(f.run.status, "integrating"); assert.equal(f.run.landedCommit, undefined, "run must not be accepted");
   t.mock.restoreAll(); syncBuiltinESMExports(); writeFileSync(lock, previous);
   if (scenario !== "owner change before CAS") { forceTerminate(f.run, "killed", f.registry); await done; }

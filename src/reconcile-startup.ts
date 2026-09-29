@@ -77,6 +77,7 @@ export type ClassifyResult =
   | "reclassify-killed"
   | "reclassify-failed-queued"
   | "reclassify-pre-schema"
+  | "restore-effort"
   | "restore-integrating"
   | "restore-blocked"
   | "skip-terminal"
@@ -137,7 +138,7 @@ export function classifyRecord(
   const status = record.status;
 
   // Terminal statuses are the GC's territory.
-  if ((TERMINAL_STATUSES as readonly string[]).includes(status)) {
+  if (!record.effort && (TERMINAL_STATUSES as readonly string[]).includes(status)) {
     return "skip-terminal";
   }
 
@@ -167,6 +168,7 @@ export function classifyRecord(
 
   if (status === "integrating") return "restore-integrating";
   if (status === "blocked") return "restore-blocked";
+  if (record.effort) return "restore-effort";
 
   // A queued run never spawned. Status → failed regardless of any
   // (defensive) pid the record might carry.
@@ -507,11 +509,18 @@ export async function reconcileOrphansAtStartup(
       const dryRun = deps.dryRun === true;
 
       switch (verdict) {
+        case "restore-effort":
+          if (!dryRun) {
+            const run = buildOrphanRun(record, record.status);
+            run.integrationSuspended = true;
+            deps.registry.register(run);
+          }
+          break;
         case "restore-integrating":
           if (!dryRun) {
             const run = buildOrphanRun(record, "integrating");
             run.integrationSuspended = true;
-            if (run.integration) run.integration = { ...run.integration, state: "paused", reason: "interrupted integration preserved; automatic recovery is unavailable before M5" };
+            if (run.integration) run.integration = { ...run.integration, state: "paused", reason: "interrupted integration preserved pending fenced effort recovery" };
             deps.registry.register(run);
           }
           break;
@@ -651,7 +660,7 @@ export async function reconcileOrphansAtStartup(
  * `ensemble_send` resume rebuilds the message stream via
  * `pi --session <path>`.
  */
-function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
+export function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
   return {
     id: record.id,
     persona: record.persona,
@@ -667,7 +676,7 @@ function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
     // Restore ownership identity so downstream ownership checks
     // (e.g. forceTerminate's foreign-run refusal) see the original
     // spawning host/slot rather than treating the orphan as unowned.
-    parentPid: status === "blocked" ? process.pid : record.parentPid,
+    parentPid: status === "blocked" && !record.effort ? process.pid : record.parentPid,
     parentSessionId: record.parentSessionId,
     parentStartTime: record.parentStartTime,
     exitCode: record.exitCode,

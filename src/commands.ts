@@ -21,6 +21,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { effortRepository, effortGit } from "./effort/open.ts";
 import { readEffort, listEfforts } from "./effort/store.ts";
+import { recoverEffort, requeueEffortRun } from "./effort/reconcile.ts";
 import { EFFORT_NOTICE } from "./effort/policy.ts";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -65,6 +66,8 @@ import { isTerminal } from "./types.ts";
 import { formatCwdInfo, type CwdController } from "./conductor-cwd.ts";
 
 interface RegisterCommandsOpts {
+  pushCompletionNotification?: (run: Run) => void;
+  getEvents?: () => import("./conductor-events.ts").ConductorEventEmitter;
   getSessionId?: () => string | undefined;
   getCwd: () => string;
   /** Backs `/conductor cwd`; shared with the `ensemble_cwd` tool. */
@@ -186,7 +189,7 @@ export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): 
           await runSendCmd(opts, ctx, subRest);
           return;
         case "effort":
-          runEffortCmd(opts, ctx, subRest);
+          await runEffortCmd(opts, ctx, subRest);
           return;
         case "worktree":
           await runWorktreeCmd(opts, ctx, subRest);
@@ -1275,15 +1278,37 @@ export function buildWatchdogStatusReport(args: {
   return lines.join("\n");
 }
 
-function runEffortCmd(opts: Pick<RegisterCommandsOpts, "getCwd">, ctx: ExtensionCommandContext, args: string): void {
+export async function runEffortCmd(opts: Pick<RegisterCommandsOpts, "getCwd" | "getRegistry" | "getSessionId" | "pushCompletionNotification" | "getEvents">, ctx: ExtensionCommandContext, args: string): Promise<void> {
   try {
-    const [action = "list", name] = args.trim() ? args.trim().split(/\s+/) : [];
+    const fields = /^(\S+)(?:\s+(\S+))?(?:\s+([\s\S]*))?$/.exec(args.trim());
+    const action = fields?.[1] ?? "list", name = fields?.[2], tail = fields?.[3] ?? "";
     const { gitRoot } = effortRepository(opts.getCwd());
-    if (action !== "list" && action !== "status") throw new Error("Only effort list/status are available");
-    const records = action === "list" ? listEfforts(gitRoot) : [readEffort(gitRoot, name ?? "")];
+    if (action === "resume" || action === "requeue") {
+      if (!ctx.hasUI || process.env.CONDUCTOR_SUBAGENT === "1") throw new Error("effort recovery requires an interactive human command");
+      const sessionId = opts.getSessionId?.();
+      if (!sessionId) throw new Error("current effort owner session is unknown");
+      const recovery = { registry: opts.getRegistry(), sessionId, onComplete: opts.pushCompletionNotification, events: opts.getEvents?.() };
+      if (action === "resume") {
+        const record = readEffort(gitRoot, name!);
+        if (!record || record.status !== "paused") throw new Error("resume requires a paused effort");
+        if (!(await ctx.ui.confirm("Resume effort?", `${record.pausedReason}\nRecheck source/process identity and rerun baseline. Delivery-uncertain callbacks are NOT replayed; manual reposts can duplicate earlier delivery.`))) return;
+        await recoverEffort(record, { ...recovery, resume: true });
+      } else {
+        const run = opts.getRegistry().get(name!);
+        if (!run?.effort || run.effort.gitRoot !== gitRoot) throw new Error("preserved effort run not found in this repository; reconcile first");
+        const parsed = /^(?:--oid=([0-9a-f]{40,64})(?: |$))?(?:--hook ([\s\S]+))?$/.exec(tail);
+        if (!parsed) throw new Error("usage: effort requeue <run-id> [--oid=<oid>] [--hook <replacement command>]");
+        if (!(await ctx.ui.confirm("Requeue preserved work?", parsed[2] ? `Explicit replacement of original hook: ${parsed[2]}\nRequired repository hooks and effort verification remain active.` : "Rerun the original resolved hook on a fresh private source checkout, then recheck baseline and verified integration. A pause caused by this member is retried; unrelated/unknown pauses are retained."))) return;
+        await requeueEffortRun(run, recovery, parsed[2], parsed[1]);
+      }
+      ctx.ui.notify("Recovery checked; inspect effort status for queue, pause cause and delivery uncertainty.", "info");
+      return;
+    }
+    if (action !== "list" && action !== "status") throw new Error("Use effort list/status/resume/requeue");
+    const records = action === "list" ? listEfforts(gitRoot) : [readEffort(gitRoot, name!)];
     if (records.some(r => !r)) throw new Error("effort not found");
-    ctx.ui.notify(`${EFFORT_NOTICE}\n${JSON.stringify(records.map(effort => ({ effort, tip: effortGit(effort!.gitRoot, "rev-parse", "--verify", `${effort!.intRef}^{commit}`) })), null, 2)}`, "info");
-  } catch (e) { ctx.ui.notify(`${(e as Error).message}. ${EFFORT_NOTICE}`, "error"); }
+    ctx.ui.notify(`${EFFORT_NOTICE}\n${JSON.stringify(records.map(effort => ({ effort, tip: effortGit(effort!.gitRoot, "rev-parse", "--verify", `${effort!.intRef}^{commit}`), members: opts.getRegistry().list().filter(r => r.effort?.gitRoot === gitRoot && r.effort.name === effort!.name).map(r => ({ id: r.id, status: r.status, integration: r.integration, error: r.errorMessage })) })), null, 2)}`, "info");
+  } catch (error) { ctx.ui.notify((error as Error).message, "error"); }
 }
 
 // ── /conductor worktree ─────────────────────────────────────────────────────

@@ -1,5 +1,8 @@
 // Diagnostic checkpoint, not an M5 recovery implementation or an acceptance test.
 import test from "node:test";
+import fs from "node:fs";
+import cp from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
@@ -25,19 +28,49 @@ const persona: Persona = {
 
 if (process.argv[2] === "--child") {
   const [cwd, phase, deliveryPath] = process.argv.slice(3) as [string, string, string];
-  const effort = openEffort(cwd, "receipt", "probe-owner", { verify: "test -f base" });
-  spawnRun({
+  const counter = join(cwd, ".git", "recovery-counter"), release = join(cwd, ".git", "recovery-release");
+  const verify = `echo verify >> '${counter}'; ${phase === "verifying" ? `if test -f a && ! test -f '${release}'; then sleep 60; fi; ` : ""}test -f base`;
+  const effort = openEffort(cwd, "receipt", "probe-owner", { verify,
+    ...(phase === "generating" ? { generated: { paths: ["a"], command: `echo generate >> '${counter}'; if ! test -f '${release}'; then sleep 60; fi; echo built > a` } } : {}),
+  });
+  let run: import("../src/types.ts").Run;
+  const barrier = () => {
+    process.send!({ id: run.id, recordPath: run.recordPath, intRef: effort.intRef });
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+  };
+  const crashState = (phase === "queued-order" || phase === "resolving") ? "queued" : phase === "changed-source" || phase === "dirty-candidate" || phase === "checked-out" ? "verified" : phase;
+  const rename = fs.renameSync;
+  fs.renameSync = (from, to) => {
+    const text = readFileSync(from, "utf8");
+    const isRun = run && String(to) === run.recordPath;
+    const entry = isRun ? JSON.parse(text).integration : undefined;
+    if (phase === "before-intent" && entry?.delivery === "intent") barrier();
+    if (phase === "record-write" && entry?.state === "merging") barrier();
+    if (phase === "queue-write" && String(to).endsWith("effort.json") && JSON.parse(text).queue?.includes(run?.id)) barrier();
+    rename(from, to);
+    if ((["queued", "merging", "verified"].includes(crashState) && entry?.state === crashState) ||
+        (["generating", "verifying"].includes(phase) && entry?.state === phase && entry?.process && entry.commandPending) ||
+        (phase === "unknown-process" && entry?.commandPending && !entry.process) ||
+        ((phase === "attempted" || phase === "legacy") && entry?.delivery === "attempted")) barrier();
+  };
+  const exec = cp.execFileSync;
+  cp.execFileSync = ((command: string, args: string[], options: cp.ExecFileSyncOptions) => {
+    const result = exec(command, args, options);
+    if (phase === "after-cas" && command === "git" && args[0] === "update-ref" && args[1] === effort.intRef && args[3]) barrier();
+    return result;
+  }) as typeof cp.execFileSync;
+  syncBuiltinESMExports();
+  const spawned = spawnRun({
     registry: new RunRegistry(), persona, cwd, effort: effort.name,
     parentSessionId: "probe-owner", mode: "background", timeoutMs: 20000,
     task: "CONTROL M4_FILE=a Complete and commit this native faux-provider assignment.",
-    onComplete: run => {
-      if (run.status !== "completed") { console.error(run.errorMessage ?? run.status); process.exit(2); }
-      if (phase === "after") appendFileSync(deliveryPath, run.id + "\n");
-      // Hold this exact callback boundary; the fixture parent kills only this owned handle.
-      process.send!({ id: run.id, recordPath: run.recordPath, intRef: effort.intRef });
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
+    onComplete: completed => {
+      if (completed.status !== "completed") { console.error(completed.errorMessage ?? completed.status); process.exit(2); }
+      if (phase === "after" || phase === "attempted" || phase === "legacy") appendFileSync(deliveryPath, completed.id + "\n");
+      if (phase === "before" || phase === "after") barrier();
     },
   });
+  run = spawned.run;
 } else {
   const { piBin } = sandboxPi();
   writeFileSync(piBin, `import { register } from ${JSON.stringify(import.meta.resolve("tsx/esm/api"))}; register(); await import(${JSON.stringify(new URL("../tests/helpers/native-owner-child.ts", import.meta.url).href)});\n`);

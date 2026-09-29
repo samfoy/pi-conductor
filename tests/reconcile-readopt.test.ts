@@ -125,7 +125,7 @@ for (const [label, status, alive, expected] of [
       });
 
       const run = registry.get("builder-full");
-      assert.equal(run?.status, expected);
+      assert.equal(run?.status, status, "effort mutations wait for fenced effort recovery, never generic orphan classification");
       const restored = toRunRecord(run!);
       for (const key of Object.keys(record) as Array<keyof RunRecord>) {
         if (expected !== "running" && REWRITTEN_ON_RECLASSIFY.has(key)) continue;

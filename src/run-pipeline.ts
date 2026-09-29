@@ -1,6 +1,6 @@
 import { measureEffortFootprint } from "./effort/admit.ts";
-import { effortGit, effortOwner } from "./effort/open.ts";
-import { assertEffortOwner, readEffort } from "./effort/store.ts";
+import { effortGit } from "./effort/open.ts";
+import { assertRunEffortOwner, readEffort } from "./effort/store.ts";
 import { effortSummary, resolveEffortPolicy } from "./effort/policy.ts";
 import { appendFile } from "node:fs/promises";
 import type { RunRuntime, RunTransport } from "./runtime.ts";
@@ -15,7 +15,7 @@ import {
   type RunRegistry, attachSpawnedProc, stampSpawnStreamingMode, forceTerminate,
   discoverSessionPathIfMissing, discoverContextRetirement, applyHookToTerminal,
   applyCloseHandlerTerminal, emitFinalizeEvent, applyRetryIfNeeded, applySubstanceCheck,
-  settleWorktree, writeRecord, writeFinal, applyChainIfPresent, applyCompactionLine, checkTurnLimit,
+  settleWorktree, writeRecord, writeFinal, getFinalText, applyChainIfPresent, applyCompactionLine, checkTurnLimit,
 } from "./runs.ts";
 
 export interface RunPipelineOpts {
@@ -49,6 +49,8 @@ export function createRunPipeline(
   // The argv builder owns transport selection; steering remains an independent opt-in.
   const rpc = piArgs[1] === "rpc";
   run.onComplete = opts.onComplete;
+  const recoveredAnswer = !!opts.answer && !!run.reconciledAtStartup && !!run.effort && run.effort.gate !== undefined;
+  if (run.effort && (!run.reconciledAtStartup || run.effort.gate !== undefined)) run.effort.gate = opts.resolvedHook ?? null;
 
   let awaitingAnswer = opts.answer !== undefined;
   let answerRecord = Promise.resolve();
@@ -223,23 +225,23 @@ export function createRunPipeline(
       try {
         const record = readEffort(run.effort.gitRoot, run.effort.name);
         if (!record) throw new Error("effort record missing; integration refused");
-        assertEffortOwner(record, effortOwner(run.parentSessionId));
+        assertRunEffortOwner(run);
         const policy = resolveEffortPolicy(record.policy);
         if (!run.worktreePath || !run.worktreeBranch) throw new Error("effort assignment workspace missing");
         if (effortGit(run.worktreePath, "status", "--porcelain", "--untracked-files=all")) throw new Error("writer has uncommitted work; integration refused and workspace preserved");
         const branchHead = effortGit(run.effort.gitRoot, "rev-parse", "--verify", `refs/heads/${run.worktreeBranch}^{commit}`);
         const measured = measureEffortFootprint(run, branchHead, policy);
         run.status = "integrating";
-        run.integration = { ...measured, state: "queued", enqueuedAt: Date.now(), branchHead, attempts: 0,
+        run.integration = { ...measured, resultText: getFinalText(run.messages), state: "queued", enqueuedAt: Date.now(), branchHead, attempts: 0,
           verifyIdentity: { command: policy.verify, timeoutSeconds: policy.verifyTimeoutSeconds, retries: policy.verifyRetries } };
         if (run.integrationSuspended) {
           run.integration.state = "paused";
-          run.integration.reason = "owner runtime shut down; work preserved until recovery is available";
-          await writeRecord(run, () => assertEffortOwner(record, effortOwner(run.parentSessionId)));
+          run.integration.reason = "owner runtime shut down; work preserved for fenced recovery";
+          await writeRecord(run, () => assertRunEffortOwner(run));
           opts.registry.notify(run);
           return;
         }
-        const outcome = await opts.registry.integrations.enqueue(run, () => opts.registry.notify(run));
+        const outcome = await opts.registry.integrations.enqueue(run, () => opts.registry.notify(run), recoveredAnswer);
         terminal = outcome.terminal;
         run.mergeResult = outcome.mergeResult;
         run.landedCommit = outcome.landedCommit;
@@ -250,89 +252,20 @@ export function createRunPipeline(
         run.mergeResult = { success: false, reason: "error", errorMessage: run.errorMessage };
       }
     }
-    await settleRun(terminal, exitCode);
+    await settle(terminal, exitCode);
   };
 
   let settled = false;
-  const settleRun = async (terminal: RunStatus, exitCode?: number) => {
+  const settle = async (terminal: RunStatus, exitCode?: number) => {
     if (settled) return;
     settled = true;
-    // Forced termination already published its state; retain discovery without notifying twice.
-    if (!applyCloseHandlerTerminal(run, terminal, exitCode)) {
-      discoverSessionPathIfMissing(run, opts.sessionDir);
-      await writeRecord(run);
-      run.proc = undefined;
-      try {
-        transport.stop();
-      } catch {
-        // already dead
-      }
-      // v0.16-S3: emit lifecycle event for force-terminated runs (run.status
-      // already set by forceTerminate; emit before resolving done).
-      emitFinalizeEvent(run, opts.events);
-      // v0.18 classified retry: forceTerminate-settled runs (stall/timeout/
-      // abort) never reach the normal `.finally` below, so dispatch retry
-      // here. failureClass was stamped by forceTerminate; retryPolicy at
-      // spawn. shouldRetry gates non-retryable classes (e.g. user kill).
-      applyRetryIfNeeded(run, opts.onRetry);
-      // v0.18 memory: record the (forceTerminate) outcome too.
-      recordRunOutcome(run);
-      donePromiseResolve(run);
-      return;
+    try { await settleRun(run, terminal, exitCode, opts, transport, donePromiseResolve); }
+    catch (error) {
+      if (!run.integration) throw error;
+      run.status = "integrating"; run.integration.state = "paused";
+      run.integration.reason = `terminal persistence uncertain: ${(error as Error).message}`;
+      opts.registry.notify(run);
     }
-    if (terminal === "failed" && !run.errorMessage) {
-      run.errorMessage = transport.stderr.trim() || `pi subprocess exited with code ${exitCode}`;
-    }
-    applySubstanceCheck(run, terminal);
-    discoverSessionPathIfMissing(run, opts.sessionDir);
-    run.proc = undefined;
-    if (!run.effort) terminal = await settleWorktree(run, terminal);
-    else run.worktreeKept = `${effortSummary(run)}. Branch ${run.worktreeBranch} and worktree ${run.worktreePath} preserved.`;
-    // Re-apply the terminal to the run record now that merge may have flipped it.
-    if (terminal === "merge_conflict") run.status = terminal;
-    if (terminal !== "completed") {
-      // hook_failed diagnostics live in run.hookResult.tailText, not the
-      // subprocess stderr (the subprocess exited 0 before the hook ran).
-      const tail =
-        terminal === "hook_failed" ? run.hookResult?.tailText ?? transport.stderr : transport.stderr;
-      run.failureClass = classifyFailure({
-        terminal,
-        exitCode,
-        stderrTail: tail,
-        errorMessage: run.errorMessage,
-      });
-    }
-    if (run.mergeResult?.reason === "verify_timeout") run.failureClass = "timeout";
-    opts.registry.notify(run);
-    try {
-      transport.stop();
-    } catch {
-      // already dead
-    }
-    // Persist record + final BEFORE resolving done so callers awaiting
-    // result.done can read both files immediately.
-    Promise.all([writeRecord(run), writeFinal(run)])
-      .catch(() => {})
-      .finally(() => {
-        if (opts.onComplete) {
-          try {
-            opts.onComplete(run);
-          } catch {
-            // never crash the spawner on listener errors
-          }
-        }
-        // v0.15 chains: fire after writeFinal so {final} template can read finalPath.
-        applyChainIfPresent(run, run.status as RunStatus, opts.onChain);
-        // v0.18 classified retry: fire on retryable non-completed terminals.
-        // Mutually exclusive with the chain above (chain is completed-only).
-        applyRetryIfNeeded(run, opts.onRetry);
-        // v0.18 memory: record the outcome (success AND failure) for
-        // cross-session persona scoring. Best-effort; never throws.
-        recordRunOutcome(run);
-        // v0.16-S3: emit completed/failed lifecycle event.
-        emitFinalizeEvent(run, opts.events);
-        donePromiseResolve(run);
-      });
   };
 
   const processLine = (line: string) => {
@@ -394,4 +327,90 @@ export function createRunPipeline(
     void finalize("failed", 1);
   };
   return done;
+}
+
+/** Shared terminal effects for live pipelines and Git-proven recovery, never a second finalizer. */
+export async function settleRun(
+  run: Run, terminal: RunStatus, exitCode: number | undefined,
+  opts: Pick<RunPipelineOpts, "registry" | "onComplete" | "onChain" | "onRetry" | "events" | "sessionDir">,
+  transport: Pick<RunTransport, "stderr" | "stop"> = { stderr: "", stop() {} },
+  donePromiseResolve: (run: Run) => void = () => {},
+): Promise<void> {
+    // Forced termination already published its state; retain discovery without notifying twice.
+    if (!applyCloseHandlerTerminal(run, terminal, exitCode)) {
+      discoverSessionPathIfMissing(run, opts.sessionDir);
+      await writeRecord(run);
+      run.proc = undefined;
+      try {
+        transport.stop();
+      } catch {
+        // already dead
+      }
+      // v0.16-S3: emit lifecycle event for force-terminated runs (run.status
+      // already set by forceTerminate; emit before resolving done).
+      emitFinalizeEvent(run, opts.events);
+      // v0.18 classified retry: forceTerminate-settled runs (stall/timeout/
+      // abort) never reach the normal `.finally` below, so dispatch retry
+      // here. failureClass was stamped by forceTerminate; retryPolicy at
+      // spawn. shouldRetry gates non-retryable classes (e.g. user kill).
+      applyRetryIfNeeded(run, opts.onRetry);
+      // v0.18 memory: record the (forceTerminate) outcome too.
+      recordRunOutcome(run);
+      donePromiseResolve(run);
+      return;
+    }
+    if (terminal === "failed" && !run.errorMessage) {
+      run.errorMessage = transport.stderr.trim() || `pi subprocess exited with code ${exitCode}`;
+    }
+    if (!run.reconciledAtStartup) applySubstanceCheck(run, terminal);
+    discoverSessionPathIfMissing(run, opts.sessionDir);
+    run.proc = undefined;
+    if (!run.effort) terminal = await settleWorktree(run, terminal);
+    else run.worktreeKept = `${effortSummary(run)}. Branch ${run.worktreeBranch} and worktree ${run.worktreePath} preserved.`;
+    // Re-apply the terminal to the run record now that merge may have flipped it.
+    if (terminal === "merge_conflict") run.status = terminal;
+    if (terminal !== "completed") {
+      // hook_failed diagnostics live in run.hookResult.tailText, not the
+      // subprocess stderr (the subprocess exited 0 before the hook ran).
+      const tail =
+        terminal === "hook_failed" ? run.hookResult?.tailText ?? transport.stderr : transport.stderr;
+      run.failureClass = classifyFailure({
+        terminal,
+        exitCode,
+        stderrTail: tail,
+        errorMessage: run.errorMessage,
+      });
+    }
+    if (run.mergeResult?.reason === "verify_timeout") run.failureClass = "timeout";
+    opts.registry.notify(run);
+    try {
+      transport.stop();
+    } catch {
+      // already dead
+    }
+    const dispatch = () => {
+      try { opts.onComplete?.(run); } catch { /* local dispatch attempted, not receiver acknowledgement */ }
+      applyChainIfPresent(run, run.status as RunStatus, opts.onChain);
+      applyRetryIfNeeded(run, opts.onRetry);
+      recordRunOutcome(run);
+      emitFinalizeEvent(run, opts.events);
+    };
+    if (run.effort && run.integration) {
+      const persist = () => writeRecord(run, () => assertRunEffortOwner(run));
+      await persist();
+      await writeFinal(run, true);
+      if (!run.integration.delivery) {
+        run.integration.delivery = "intent";
+        await persist();
+        assertRunEffortOwner(run);
+        dispatch();
+        run.integration.delivery = "attempted";
+        await persist();
+      }
+      donePromiseResolve(run);
+    } else {
+      await Promise.all([writeRecord(run), writeFinal(run)]).catch(() => {}).finally(() => {
+        dispatch(); donePromiseResolve(run);
+      });
+    }
 }

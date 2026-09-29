@@ -23,7 +23,7 @@ import { capabilitiesFor, subprocessRuntime } from "./subprocess-runtime.ts";
 import { ownedEffort, effortOwner, effortRepository, effortTip } from "./effort/open.ts";
 import { effortEnv } from "./effort/git.ts";
 import { EffortDriver } from "./effort/driver.ts";
-import { addEffortMember, assertEffortOwner, readEffort, listEfforts, writeDurableJson, type EffortRecord } from "./effort/store.ts";
+import { addEffortMember, assertEffortOwner, assertRunEffortOwner, readEffort, listEfforts, writeDurableJson, writeDurableFile, type EffortRecord } from "./effort/store.ts";
 import { admitEffortWriter, consumesSlot, type AdmissionLimits } from "./effort/admit.ts";
 import { EFFORT_NOTICE, effortSummary, validateTouches } from "./effort/policy.ts";
 import type { Signaler } from "./runtime.ts";
@@ -1259,7 +1259,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     model: opts.model,
     thinking: opts.thinking,
     mode: effort ? "background" : opts.mode,
-    effort: effort ? { name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches ? [...opts.touches] : undefined } : undefined,
+    effort: effort ? { owner: effort.owner, name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches ? [...opts.touches] : undefined } : undefined,
     status: "running",
     startTime: Date.now(),
     lastEventAt: Date.now(),
@@ -1808,7 +1808,7 @@ export function observeRunActions(run: Run, canFocus = false, sessionId?: string
     try {
       const effort = readEffort(run.effort.gitRoot, run.effort.name);
       if (!effort) throw new Error("effort record missing; ownership unresolved");
-      assertEffortOwner(effort, effortOwner(sessionId));
+      assertEffortOwner(effort, { ...effortOwner(sessionId), generation: run.effort.owner?.generation });
     } catch (e) { effortOwnershipError = `cannot send to effort ${run.effort.name}: ${(e as Error).message}`; }
   }
   const sessionPath = findRunSessionFile(run);
@@ -1845,7 +1845,7 @@ export function runActionError(run: Run, action: RunAction, observed: ActionObse
   if (action !== "send" && !observed.owned) {
     return `sub-agent ${run.id} is owned by another conductor (foreign run).`;
   }
-  if (action === "kill" && run.status === "integrating" && !run.integrationControl) return "integration is preserved without a live driver; inspection only until recovery is available";
+  if (action === "kill" && run.status === "integrating" && !run.integrationControl) return "integration is preserved without a live driver; inspect effort status and use human effort resume/requeue";
   if (action === "kill") return isTerminal(run.status) ? `sub-agent ${run.id} is already ${run.status}.` : undefined;
   if (action === "pause" || action === "resume") {
     const required = action === "pause" ? "running" : "paused";
@@ -2238,12 +2238,14 @@ export function sendToRun(
     // honored (§4.6: each terminal is a fresh gate). Per-call layer
     // (slice 3) reads from `Run.onCompleteHook` — stamped at spawn time
     // by `spawnRun` and replaceable by per-send overrides above.
-    resolvedHook: resolveCloseHook(
-      run.cwd,
-      run.persona,
-      hookSpecFromOpts(run.onCompleteHook, run.onCompleteHookTimeoutSeconds),
-      opts.persona ? hookSpecFromPersona(opts.persona) : undefined,
-    ),
+    resolvedHook: run.reconciledAtStartup && run.effort
+      ? run.effort.gate ?? undefined
+      : resolveCloseHook(
+        run.cwd,
+        run.persona,
+        hookSpecFromOpts(run.onCompleteHook, run.onCompleteHookTimeoutSeconds),
+        opts.persona ? hookSpecFromPersona(opts.persona) : undefined,
+      ),
     // v0.16-S3: thread event bus so finalize on the resumed run can emit.
     events: opts.events,
   });
@@ -2951,17 +2953,25 @@ export function discoverContextRetirement(run: Run, sessionDir?: string): void {
 }
 
 export function writeRecord(run: Run, durableFence?: () => void): Promise<void> {
-  const snapshot = toRunRecord(run);
+  const snapshot = structuredClone(toRunRecord(run));
   const writing = (run.recordWrite ?? Promise.resolve()).catch(() => {}).then(async () => {
     await mkdir(dirname(run.recordPath), { recursive: true });
-    if (durableFence) writeDurableJson(run.recordPath, snapshot, durableFence);
+    if (durableFence || snapshot.effort) writeDurableJson(run.recordPath, snapshot, () => {
+      assertRunEffortOwner(snapshot);
+      durableFence?.();
+    });
     else await writeFile(run.recordPath, JSON.stringify(snapshot, null, 2));
   });
   run.recordWrite = writing.catch(() => {});
   return durableFence ? writing : run.recordWrite;
 }
 
-export async function writeFinal(run: Run): Promise<void> {
+export async function writeFinal(run: Run, durable = false): Promise<void> {
+  if (durable) {
+    await mkdir(dirname(run.finalPath), { recursive: true });
+    writeDurableFile(run.finalPath, getFinalText(run.messages) || run.integration?.resultText || "(no output)", () => assertRunEffortOwner(run));
+    return;
+  }
   try {
     await mkdir(dirname(run.finalPath), { recursive: true });
     await writeFile(run.finalPath, getFinalText(run.messages) || "(no output)");

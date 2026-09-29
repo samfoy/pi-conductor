@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { copyFileSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { HookResult, MergeResult, Run, RunStatus } from "../types.ts";
 import { runHook } from "../hook-runner.ts";
@@ -7,8 +7,8 @@ import { buildMergeCommitMessage } from "../worktree.ts";
 import { readProcessStartTime } from "../reconcile-startup.ts";
 import { writeRecord } from "../runs.ts";
 import { effortGit, effortOwner, effortTip } from "./open.ts";
-import { assertEffortOwner, effortDir, readEffort, writeEffort, type EffortOwner, type EffortRecord } from "./store.ts";
-import { assertCandidate, checkedCas, effortEnv, mergeTree, shellQuote } from "./git.ts";
+import { assertEffortOwner, acquireClaim, assertClaim, releaseClaim, effortDir, readEffort, writeEffort, type EffortOwner, type EffortRecord } from "./store.ts";
+import { assertCandidate, checkedCas, StaleTipError, effortEnv, mergeTree, shellQuote } from "./git.ts";
 import { nextIntegration } from "./core.ts";
 import { changedPaths, regenerateCandidate } from "./generated.ts";
 import { isGeneratedPath } from "./policy.ts";
@@ -20,27 +20,34 @@ interface Job {
   cancelled: boolean; suspended: boolean; finished: boolean;
   stop?: () => Promise<void>; flight?: Promise<void>; ready?: Promise<void>;
   teardownError?: Error;
-  claim?: { path: string; token: string };
+  claim?: { path: string; owner: EffortOwner };
+  result?: Promise<IntegrationOutcome>;
 }
 
 /** One FIFO per canonical root; an exclusive disk claim also fences other registries/sessions. */
 export class EffortDriver {
   private queues = new Map<string, Job[]>();
-  private flights = new Set<string>();
+  private flights = new Map<string, Promise<void>>();
 
-  enqueue(run: Run, notify: () => void): Promise<IntegrationOutcome> {
-    const owner = effortOwner(run.parentSessionId);
+  whenIdle(root: string): Promise<void> { return this.flights.get(root) ?? Promise.resolve(); }
+
+  enqueue(run: Run, notify: () => void, recovered = false): Promise<IntegrationOutcome> {
+    const owner = run.effort!.owner ?? effortOwner(run.parentSessionId);
     const record = readEffort(run.effort!.gitRoot, run.effort!.name)!;
     assertEffortOwner(record, owner);
-    if (run.status !== "integrating" || !run.integration || run.pendingAsk || run.reconciledAtStartup) throw new Error("only observed hook-passed completions may enter integration");
-    return new Promise(resolve => {
-      const job: Job = { run, owner, notify, resolve, cancelled: false, suspended: !!run.integrationSuspended, finished: false };
+    if (run.status !== "integrating" || !run.integration || run.pendingAsk || (run.reconciledAtStartup && !recovered)) throw new Error("only observed hook-passed completions may enter integration");
+    run.integration.deliveryProtocol = 1;
+    const prior = this.queues.get(record.gitRoot)?.find(job => job.run.id === run.id && !job.finished && !job.suspended);
+    if (prior) return prior.result!;
+    let job!: Job;
+    const result = new Promise<IntegrationOutcome>(resolve => {
+      job = { run, owner, notify, resolve, cancelled: false, suspended: !!run.integrationSuspended, finished: false };
       run.integrationControl = {
         cancel: () => {
           if (job.cancelled || job.finished) return;
           this.fence(job);
           job.cancelled = true; void job.stop?.();
-          if (!job.flight) this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
+          if (!job.flight) void this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
         },
         suspend: async () => {
           job.suspended = true; run.integrationControl = undefined;
@@ -48,14 +55,20 @@ export class EffortDriver {
           try { await job.flight; } catch { if (job.teardownError) throw job.teardownError; }
         },
       };
-      writeEffort({ ...record, queue: [...new Set([...(record.queue ?? []), run.id])], updatedAt: Date.now() });
-      job.ready = this.persist(job);
+      job.ready = this.persist(job).then(() => {
+        const current = this.fence(job);
+        writeEffort({ ...current, queue: [...new Set([...(current.queue ?? []), run.id])], updatedAt: Date.now() });
+      });
       void job.ready.catch(() => {});
       const root = record.gitRoot;
       const queue = this.queues.get(root) ?? [];
       queue.push(job); this.queues.set(root, queue);
-      void this.drain(root);
+      if (!this.flights.has(root)) {
+        this.flights.set(root, Promise.resolve().then(() => this.drain(root)));
+      }
     });
+    job.result = result;
+    return result;
   }
 
   private fence(job: Job): EffortRecord {
@@ -63,24 +76,27 @@ export class EffortDriver {
     const record = readEffort(job.run.effort!.gitRoot, job.run.effort!.name);
     if (!record) throw new Error("effort record missing");
     assertEffortOwner(record, job.owner);
-    if (job.claim && JSON.parse(readFileSync(job.claim.path, "utf8")).token !== job.claim.token) throw new Error("integration driver claim changed");
+    if (job.claim) assertClaim(job.claim.path, job.claim.owner);
     return record;
   }
   private async persist(job: Job): Promise<void> {
     await writeRecord(job.run, () => { this.fence(job); });
     job.notify();
   }
-  private finish(job: Job, outcome: IntegrationOutcome): void {
+  private async finish(job: Job, outcome: IntegrationOutcome): Promise<void> {
     if (job.finished || job.suspended) return;
-    job.finished = true;
-    try {
-      const record = readEffort(job.run.effort!.gitRoot, job.run.effort!.name)!;
-      assertEffortOwner(record, job.owner);
-      writeEffort({ ...record, queue: (record.queue ?? []).filter(id => id !== job.run.id), updatedAt: Date.now() });
-    } catch { /* terminal evidence survives; unresolved queue metadata is retained for inspection */ }
     job.run.integration!.state = outcome.terminal === "completed" ? "accepted" : "paused";
     if (!outcome.mergeResult.success) job.run.integration!.reason = outcome.mergeResult.reason;
     if (outcome.terminal === "killed") { job.run.integration!.state = "cancelled"; job.run.integration!.reason = "killed; work preserved"; }
+    await writeRecord(job.run, () => {
+      const record = readEffort(job.run.effort!.gitRoot, job.run.effort!.name)!;
+      assertEffortOwner(record, job.owner);
+      if (job.claim) assertClaim(job.claim.path, job.claim.owner);
+    });
+    const record = readEffort(job.run.effort!.gitRoot, job.run.effort!.name)!;
+    assertEffortOwner(record, job.owner);
+    writeEffort({ ...record, queue: (record.queue ?? []).filter(id => id !== job.run.id), updatedAt: Date.now() });
+    job.finished = true;
     job.run.integrationControl = undefined;
     job.resolve(outcome);
   }
@@ -88,7 +104,7 @@ export class EffortDriver {
     job.run.integration!.state = "paused"; job.run.integration!.reason = reason;
     try {
       const record = this.fence(job);
-      writeEffort({ ...record, status: "paused", pausedReason: reason, updatedAt: Date.now() });
+      writeEffort({ ...record, status: "paused", pausedReason: reason, pausedRun: job.run.id, updatedAt: Date.now() });
       void this.persist(job).catch(() => {});
     } catch {
       try { assertEffortOwner(readEffort(job.run.effort!.gitRoot, job.run.effort!.name)!, job.owner); }
@@ -97,34 +113,44 @@ export class EffortDriver {
     job.notify();
   }
   private async drain(root: string): Promise<void> {
-    if (this.flights.has(root)) return;
-    this.flights.add(root);
     const lockDir = effortDir(root, "integration-driver");
-    const lock = join(lockDir, "driver.lock"); const token = randomUUID();
+    const lock = join(lockDir, "driver.lock");
+    let claim: EffortOwner | undefined;
     let claimed = false;
     try {
       mkdirSync(lockDir, { recursive: true });
-      writeFileSync(lock, JSON.stringify({ token, pid: process.pid, startTime: readProcessStartTime(process.pid) }), { flag: "wx" });
+      claim = acquireClaim(lock, effortOwner(randomUUID()));
       claimed = true;
       for (const job of this.queues.get(root) ?? []) {
         if (job.finished || job.suspended || job.cancelled) continue;
         try {
           await job.ready;
-          job.claim = { path: lock, token };
+          job.claim = { path: lock, owner: claim };
           const record = this.fence(job);
           if (record.status === "paused") { this.pause(job, record.pausedReason ?? "effort paused"); continue; }
-          job.flight = this.integrate(job);
+          job.flight = (async () => {
+            for (;;) {
+              try { await this.integrate(job); return; }
+              catch (error) {
+                if (!(error instanceof StaleTipError)) throw error;
+                job.run.integration!.casFailures = (job.run.integration!.casFailures ?? 0) + 1;
+                await this.persist(job);
+                if (job.run.integration!.casFailures >= 3) throw new Error("integration ref moved outside the queue: three CAS failures; resume requires inspection");
+              }
+            }
+          })();
           await job.flight;
+          if (job.cancelled) await this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
         } catch (error) {
           if (job.teardownError) { claimed = false; this.pause(job, job.teardownError.message); break; }
-          if (job.cancelled) this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
+          if (job.cancelled) await this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
           else this.pause(job, (error as Error).message);
         } finally { job.flight = undefined; job.claim = undefined; }
       }
     } catch (error) {
       for (const job of this.queues.get(root) ?? []) if (!job.finished) this.pause(job, `integration driver ownership unresolved: ${(error as Error).message}`);
     } finally {
-      try { if (claimed && JSON.parse(readFileSync(lock, "utf8")).token === token) unlinkSync(lock); } catch { /* uncertain ownership: preserve claim */ }
+      try { if (claimed && claim) releaseClaim(lock, claim); } catch { /* uncertain ownership: preserve claim */ }
       this.flights.delete(root);
       this.queues.set(root, (this.queues.get(root) ?? []).filter(job => !job.finished));
     }
@@ -135,6 +161,8 @@ export class EffortDriver {
     const run = job.run; const entry = run.integration!;
     entry.logPath = logPath;
     const tmpDir = join(dirname(logPath), "tmp"); mkdirSync(tmpDir, { recursive: true });
+    entry.commandPending = true; entry.process = undefined;
+    await this.persist(job);
     let group: OwnedProcessGroup | undefined;
     let teardown: Promise<void> | undefined;
     const stop = (): Promise<void> => {
@@ -175,6 +203,9 @@ export class EffortDriver {
       finally { job.stop = undefined; }
     }
     this.fence(job);
+    if (group) await stop();
+    entry.commandPending = false; entry.process = undefined;
+    await this.persist(job);
     return result;
   }
 
@@ -184,11 +215,15 @@ export class EffortDriver {
     const root = record.gitRoot;
     const expected = effortTip(record);
     entry.expectedTip = expected; entry.state = "merging";
+    entry.candidateOid = undefined; entry.candidateTree = undefined; entry.verifiedOid = undefined;
+    entry.noopTip = undefined; entry.attempts = 0; entry.verify = undefined;
     await this.persist(job);
     const dir = join(effortDir(root, record.name), "verify", `${run.id}-${randomUUID()}`);
     mkdirSync(dir, { recursive: true });
     const candidate = join(root, ".worktrees", "conductor-cand", record.name, `${run.id}-${randomUUID()}`);
     entry.candidatePath = candidate;
+    entry.candidates = [...new Set([...(entry.candidates ?? []), candidate])];
+    await this.persist(job);
     this.fence(job); effortGit(root, "worktree", "add", "--detach", candidate, expected);
     if (record.gatedTip !== expected) {
       const result = entry.verifyIdentity.command ? await this.command(job, candidate, entry.verifyIdentity.command, join(dir, "baseline.log")) : undefined;
@@ -200,7 +235,7 @@ export class EffortDriver {
     this.fence(job);
     const merged = mergeTree(root, expected, entry.branchHead);
     if (merged.kind === "error") {
-      this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: "error", errorMessage: merged.error } }); return;
+      await this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: "error", errorMessage: merged.error } }); return;
     }
     const generated = record.policy.generated;
     if (generated) {
@@ -214,12 +249,14 @@ export class EffortDriver {
       await this.persist(job);
     }
     if (merged.kind === "conflict" && (!generated || !merged.conflicts.every(path => isGeneratedPath(path, generated)))) {
-      this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: "conflict", conflicts: merged.conflicts } }); return;
+      await this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: "conflict", conflicts: merged.conflicts } }); return;
     }
     if (merged.kind === "clean" && merged.tree === effortGit(root, "rev-parse", `${expected}^{tree}`)) {
       this.fence(job);
       if (effortTip(record) !== expected) throw new Error("integration tip changed before no-op acceptance");
-      this.finish(job, { terminal: "completed", mergeResult: { success: true, nothingToCommit: true, verifyDisabled: !entry.verifyIdentity.command } }); return;
+      entry.noopTip = expected;
+      await this.persist(job);
+      await this.finish(job, { terminal: "completed", mergeResult: { success: true, nothingToCommit: true, verifyDisabled: !entry.verifyIdentity.command } }); return;
     }
     this.fence(job);
     if (!generated) {
@@ -266,10 +303,10 @@ export class EffortDriver {
         if (action === "accept") break;
         if (action === "retry") continue;
         if (action === "pause") { this.pause(job, `verify cannot run: ${entry.verify.logPath}: ${entry.verify.tailText}`); return; }
-        this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: action, verify: entry.verify } }); return;
+        await this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: action, verify: entry.verify } }); return;
       }
     }
-    entry.state = "verified";
+    entry.state = "verified"; entry.verifiedOid = entry.candidateOid;
     // This must acknowledge durable WAL before any reference update. No best-effort writes here.
     await this.persist(job);
     this.fence(job);
@@ -278,6 +315,6 @@ export class EffortDriver {
     entry.state = "accepted";
     record = this.fence(job);
     writeEffort({ ...record, gatedTip: entry.candidateOid, queue: (record.queue ?? []).filter(id => id !== run.id), updatedAt: Date.now() });
-    this.finish(job, { terminal: "completed", landedCommit: entry.candidateOid, mergeResult: { success: true, verify: entry.verify, flakyVerify: entry.attempts > 1, verifyDisabled: !entry.verifyIdentity.command } });
+    await this.finish(job, { terminal: "completed", landedCommit: entry.candidateOid, mergeResult: { success: true, verify: entry.verify, flakyVerify: entry.attempts > 1, verifyDisabled: !entry.verifyIdentity.command } });
   }
 }

@@ -1,3 +1,6 @@
+import { recoverEffort } from "./effort/reconcile.ts";
+import { listEfforts } from "./effort/store.ts";
+import { effortRepository } from "./effort/open.ts";
 /**
  * pi-conductor — Extension entry point.
  *
@@ -482,8 +485,18 @@ export default function (pi: ExtensionAPI): void {
               now: Date.now(),
             }),
           )
-          .then((result) => {
+          .then(async (result) => {
             lastReconcile = result;
+            if (!selfSessionId) return;
+            const roots = new Set(registry.list().flatMap(run => run.effort ? [run.effort.gitRoot] : []));
+            try { roots.add(effortRepository(cwd()).gitRoot); } catch { /* non-git session */ }
+            for (const root of [...roots].sort()) for (const effort of listEfforts(root).sort((a, b) => a.name.localeCompare(b.name))) {
+              try {
+                const recovery = await recoverEffort(effort, { registry, sessionId: selfSessionId, onComplete: opts.pushCompletionNotification, events: conductorEvents });
+                void recovery.done.catch(error => console.error(`effort recovery: ${error.message}`));
+                await registry.integrations.whenIdle(root);
+              } catch (error) { console.error(`effort ${effort.name} preserved: ${(error as Error).message}`); }
+            }
           })
           .catch((err: unknown) => {
             // Best-effort: never let reconcile break session bootstrap.

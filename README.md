@@ -321,7 +321,7 @@ settlement. Prompt rejection is a failed run, not completion. As with explicit
 RPC, extension dialogs are auto-cancelled; provider extensions remain enabled.
 This does not address independently oversized persona/system-prompt argv.
 
-## Named efforts (M4 — isolated parallel writers, verified serial integration)
+## Named efforts (M5 — fenced crash recovery, verified integration)
 
 `ensemble_effort({action:"open", effort:"feature", verify:"npm test"})` captures
 an attached base branch and commit from the conductor's requested checkout and
@@ -347,16 +347,18 @@ A no-op requires tree equality to this gated tip. Candidate verification retries
 a red result once on the same commit (`verifyRetries: 0` disables that retry);
 two reds settle `merge_conflict` with `verify_failed` or `verify_timeout`.
 Command launch/output failures, required-hook failures, missing prerequisites,
-unexpected dirty changes, ownership uncertainty, WAL failures and stale CAS pause
-for inspection. No builder retry or automatic merger is attempted.
+unexpected dirty changes, ownership uncertainty and WAL failures pause for
+inspection. A stale CAS rebuilds and reverifies against the actual tip; three
+failures pause the effort rather than overwrite an external ref update. No builder retry or automatic merger is attempted.
 
 `ensemble_status` exposes the integration stage, captured OIDs, reason, bounded
 logs and verification duration; completed cards include the same evidence.
 Kill cancels only the owned integration and waits for its process group before
-settlement. Quit/reload stop active generation/verification and preserve integrating records;
-restart restores them for inspection, **not automatic recovery**. A crashed driver
-claim is also retained. Before M5 there is no resume/requeue command: inspect work
-and logs rather than repeatedly spawning into a paused effort.
+settlement. Quit/reload stop active generation/verification and preserve integrating
+records. Parent startup restores durable work under an exclusive owner generation;
+children never run recovery. Live owners reject takeover. PID reuse, missing start
+identity, permission ambiguity and incomplete claims fail closed, not by stale TTL.
+A stopped old owner cannot write a new generation's records or CAS its ref.
 
 Integration teardown is independent of shell exit: TERM-resistant descendants
 with closed stdio still get SIGKILL after the two-second TERM grace. Linux procfs
@@ -370,13 +372,15 @@ rejects, including repeat attempts, rather than claiming teardown succeeded.
 Live-group confirmation currently requires Linux and readable procfs; elsewhere
 only an already-gone group (ESRCH) can be acknowledged. POSIX signalling remains
 check-then-signal, not an atomic PID/start binding. Processes that escape the owned
-session/group are not supervised. Normal successful commands incur no teardown
-scan or grace wait. Ordinary persona-hook behavior is unchanged.
+session/group are not supervised. Successful effort commands also confirm group
+termination before clearing their process WAL. Ordinary persona-hook behavior is unchanged.
 
-Writer branches, candidate worktrees and evidence are retained even on success
-in this interim slice. Dirty work is never discarded, and legacy worktree
-merge/clean and GC skip effort assets. This favors recoverability over disk reuse;
-there is no automatic landing or destructive cleanup.
+Writer branches and evidence remain preserved, including changed source heads.
+Recovery removes only known, unreferenced, clean detached candidates whose HEAD
+is an ancestor of the integration tip, after owned processes are stopped. Dirty,
+unreachable/unmerged, ignored-file and ambiguous workspaces stay. Legacy
+worktree merge/clean and GC still skip effort assets. No effort TTL purge,
+abandon, landing or source-branch deletion is introduced.
 
 Spawn with `effort:"feature"` and optional `touches:["src/**"]`. The first spawn
 can open the effort using config. Every effort writer gets its own worktree,
@@ -429,9 +433,9 @@ Only fully covered generated regions can be excluded: `dist/**` covers
 `dist/maps/**`, but intersecting `src/**` with generated `src/generated/**` does not
 exclude source. Generated exclusions do not cross effort boundaries. Same-repo
 scopes are compared across locally observed efforts. Foreign effort owners or
-unobserved assignments refuse admission pending ownership/recovery inspection;
-M4 adds no cross-session admission lease or takeover. This can intentionally keep
-work queued until M5 recovery is available, rather than infer shared assets safe.
+unobserved assignments refuse admission pending fenced recovery. Missing durable
+members remain visible and pause the queue; recovery never treats an unknown
+assignment as a free execution slot or validated source.
 
 Before integration releases a slot, a NUL-delimited diff against `spawnBase` and
 `branchHead` records changed paths and touches violations, including both rename
@@ -481,7 +485,8 @@ changes are trusted repository policy, not constrained by generated globs, but t
 result is still verified. Generator error/timeout/cancel, boundary rejection, hook
 failure or red verify never authorizes a ref advance. Inspect `generate.log`,
 `generation-before.json`, `merge-tree.z`, `merge.index` and recorded OIDs in the
-retained candidate/evidence directories; no automatic merger or recovery runs.
+retained candidate/evidence directories. Interrupted generation is rebuilt through
+the same normal-hook/verification route; no automatic merger runs.
 
 **Trust limits:** globs classify paths, not file meaning. Declaring `src/**` or `**`
 as generated explicitly authorizes regeneration there, including conflict resolution;
@@ -504,11 +509,67 @@ The canonical repository root is the main checkout, even for linked-worktree
 callers; the captured base remains the caller's branch. An exclusive `effort.lock`
 claim and atomic `effort.json` replacements retain owner session/pid/start identity,
 frozen policy and ordered member ids. Existing refs/records/claims fail closed.
-There is no takeover or destructive effort action in M4: even stale claims remain
-for review. A failed creation/persistence retains its claim and any created ref;
-rollback never deletes a ref that another actor may have replaced. The claim is
-not evidence of successful open if `effort.json` is absent. Inspect the preserved
-files and refs before any manual recovery; automated recovery is deferred.
+Claims use append-only generations published create-only from fsynced bytes;
+competing dead-owner claimants cannot replace each other's generation. Atomic
+run/effort writes acknowledge file and directory persistence before CAS. A failed
+creation/persistence retains its claim and any created ref; rollback never deletes
+a ref that another actor may have replaced. A claim without `effort.json` is not
+proof of a successful open and needs inspection.
+
+
+### Recovery guarantees and human controls
+
+Before CAS, recovery rebuilds the candidate and reruns regeneration, required
+repository commit hooks and effort verification. An interrupted verification is
+not trusted. After CAS, acceptance requires the WAL's exact candidate/tree,
+expected parent, frozen verify identity, exact effort/run trailers **and** candidate
+reachability from the current tip. A later descendant tip still proves inclusion;
+an unrelated trailer, unreachable candidate or completed JSON status does not.
+Durable per-effort queue order wins; WAL-only integrating members are appended in
+stable enqueue-time/id order. Missing/conflicting records pause instead of vanishing.
+
+**Automatic callback dispatch is at most once, not exactly-once delivery.** The
+shared settlement path repairs/persists result files, then writes dispatch intent
+before notification callbacks, lifecycle events and the local memory append.
+On restart, an unfinished intent becomes `integration.delivery: "uncertain"`:
+Legacy integrated records without the dispatch protocol are also uncertain.
+Git-proven integration stays completed, result files remain usable, and callbacks
+are **not replayed**. A card, event or memory outcome can be missed in that window.
+`"attempted"` means local dispatch returned, not that a receiver acknowledged it.
+Local memory remains best-effort and shares that at-most-once dispatch scope;
+recovery never repeatedly appends it. There is no receiver acknowledgement protocol.
+Inspect `/conductor effort status <name>` or `ensemble_status` for uncertainty.
+Manually reading/reposting a result is possible, but may duplicate an earlier
+notification. Never reintegrate work just to recreate delivery.
+
+Human-only, interactive commands (confirmation required; no LLM requeue tool):
+
+```text
+/conductor effort resume <name>
+/conductor effort requeue <run-id> [--oid=<current-source-oid>] [--hook <replacement command>]
+```
+
+`resume` requires a paused effort, establishes current ownership, validates the
+pause's source/process evidence and reruns baseline validation through the normal
+candidate route. `requeue` requires preserved stopped work and a clean exact source
+OID; a changed head needs explicit `--oid` confirmation. It runs the saved original
+resolved hook in a fresh private source checkout before integration. A legacy or
+unreconstructable per-call hook **requires an explicit human replacement** via
+`--hook`; it is never assumed to have passed. Requeue can retry its own member's
+pause, but unrelated/unknown pauses require inspection/resume. Required repository
+hooks and effort verification remain active even with a replacement hook.
+
+Lost running writers are never automatically enqueued. A blocked A6 question stays
+blocked; only explicit successful effort-owner adoption establishes the new answer
+owner, after which ordinary A6 capacity and acceptance checks still apply. An old
+ask with an unrecorded hook can be answered, but its output stays unintegrated
+until human requeue establishes that gate; recovery never invents a passed hook. Merger
+states are preserved, not recovered. A command launch interrupted before its PID/
+start WAL is durable, unreadable/ambiguous ownership, missing records or unsafe
+process-group identity can require manual investigation rather than automatic
+progress. Takeover currently requires the Linux identity evidence above. These
+limits favor retaining work over guessing, killing unrelated processes or purging
+assets. Unattended rollout still requires independent M5 acceptance.
 
 ## Owner questions (A6)
 

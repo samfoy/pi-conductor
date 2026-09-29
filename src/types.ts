@@ -483,6 +483,9 @@ export function emptyUsage(): Usage {
  * status change; transcript.jsonl is appended per stream event.
  */
 export interface RunEffort {
+  owner?: import("./effort/store.ts").EffortOwner;
+  /** undefined is an unreconstructable legacy gate; null proves no configured hook. */
+  gate?: ResolvedHook | null;
   name: string;
   gitRoot: string;
   role: "writer";
@@ -498,6 +501,16 @@ export interface RunEffort {
 }
 
 export interface RunIntegration {
+  resultText?: string;
+  verifiedOid?: string;
+  noopTip?: string;
+  casFailures?: number;
+  candidates?: string[];
+  commandPending?: boolean;
+  /** attempted means local callbacks returned, not receiver acknowledgement. */
+  delivery?: "intent" | "attempted" | "uncertain";
+  /** Only this protocol proves that absent intent precedes all automatic callbacks. */
+  deliveryProtocol?: 1;
   changedPaths?: string[];
   touchViolations?: string[];
   state: "queued" | "merging" | "generating" | "verifying" | "verified" | "paused" | "accepted" | "cancelled";

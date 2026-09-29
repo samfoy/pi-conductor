@@ -77,7 +77,7 @@ test("B1 separate dead owner: reconcile cannot authorize an effort answer in a n
   const registry = new RunRegistry();
   await reconcileOrphansAtStartup({ registry, runsRoot: dirname(dirname(owner.recordPath)), now: Date.now(), isAlive: () => assert.fail("blocked must not probe child liveness"), selfSessionId: "new-session" });
   const run = registry.get(owner.id)!;
-  assert.equal(run.status, "blocked"); assert.equal(run.parentPid, process.pid, "reconcile reassigns process bookkeeping, not the effort claim");
+  assert.equal(run.status, "blocked"); assert.equal(run.parentPid, owner.ownerPid, "generic reconcile cannot establish a new effort answer owner");
   assert.notEqual(owner.ownerPid, process.pid);
   t.after(() => { if (run.status === "running") forceTerminate(run, "killed", registry); });
   const before = snapshot(run);
@@ -90,6 +90,22 @@ test("B1 separate dead owner: reconcile cannot authorize an effort answer in a n
     assert.equal(sendToRun(run, "Use A", { registry, timeoutMs: 5000, sessionId }).kind, "rejected");
   }
   assert.deepEqual(snapshot(run), before, "refusal leaves all assignment and durable bytes untouched");
+  const { recoverEffort } = await import("../src/effort/reconcile.ts");
+  const { readEffort } = await import("../src/effort/store.ts");
+  const ask = structuredClone(run.pendingAsk);
+  const recovery = await recoverEffort(readEffort(cwd, "one")!, { registry, sessionId: "new-session" });
+  await recovery.done;
+  const adopted = registry.get(owner.id)!;
+  assert.equal(adopted.status, "blocked"); assert.deepEqual(adopted.pendingAsk, ask);
+  assert.equal(adopted.effort!.owner!.generation, 1);
+  assert.equal(availableActions(adopted, false, "new-session", registry).includes("send"), true);
+  const answer = sendToRun(adopted, "Use A", { registry, timeoutMs: 5000, sessionId: "new-session" });
+  assert.equal(answer.kind, "started"); if (answer.kind !== "started") return;
+  await answer.done;
+  assert.equal(adopted.status, "completed", "a safely adopted ask must still pass its original gate and integrate after native answer acceptance");
+  assert.equal(adopted.pendingAsk, undefined);
+  assert.ok(adopted.landedCommit);
+
 });
 
 test("B1 same-owner linked-checkout answer works; changed claim invalidates an earlier action snapshot", { timeout: 15000 }, async t => {

@@ -128,7 +128,7 @@ export class SpawnQueue {
       status: "queued",
       waitReason,
       ...(effort ? { parentPid: effort.owner.pid, parentStartTime: effort.owner.startTime, parentSessionId: effort.owner.sessionId } : {}),
-      effort: effort ? { name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches ? [...opts.touches] : undefined } : undefined,
+      effort: effort ? { owner: effort.owner, name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches ? [...opts.touches] : undefined } : undefined,
       startTime: Date.now(),
       lastEventAt: Date.now(),
       messages: [],
@@ -183,7 +183,7 @@ export class SpawnQueue {
     const preceding = new Set(this.pending.slice(0, id ? this.pending.findIndex(p => p.id === id) : undefined).map(p => p.id));
     const members = registry.list();
     const waitingBehind = new Set(members.filter(r => r.status === "queued" && !preceding.has(r.id)).map(r => r.id));
-    return admitEffortWriter({ id, persona: opts.persona.name, effort: effort ? { name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches } : undefined }, members, { maxConcurrent: this.maxConcurrent, maxConcurrentWriteCapable: this.maxConcurrentWriteCapable }, effort, effort ? listEfforts(effort.gitRoot) : [], waitingBehind);
+    return admitEffortWriter({ id, persona: opts.persona.name, effort: effort ? { owner: effort.owner, name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches } : undefined }, members, { maxConcurrent: this.maxConcurrent, maxConcurrentWriteCapable: this.maxConcurrentWriteCapable }, effort, effort ? listEfforts(effort.gitRoot) : [], waitingBehind);
   }
 
   /** Revalidation and synchronous running registration precede any asynchronous launch effects. */

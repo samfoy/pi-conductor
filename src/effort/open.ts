@@ -60,7 +60,8 @@ export function ownedEffort(cwd: string, name: string, sessionId: string | undef
   const { gitRoot } = checkEffortRepository(cwd);
   const existing = readEffort(gitRoot, name);
   if (!existing) return openEffort(cwd, name, sessionId);
-  assertEffortOwner(existing, effortOwner(sessionId));
+  const identity = effortOwner(sessionId);
+  assertEffortOwner(existing, { ...identity, generation: existing.owner.generation });
   effortTip(existing);
   return existing;
 }

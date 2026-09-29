@@ -5,7 +5,7 @@ export interface GroupProcess { pid: number; pgid: number; sid: number; startTim
 export interface OwnedProcessGroup { pid: number; startTime?: number }
 
 /** Unlike kill(0), procfs distinguishes zombies from tasks still capable of executing. */
-function linuxProcesses(): GroupProcess[] {
+export function linuxProcesses(): GroupProcess[] {
   if (process.platform !== "linux") throw new Error("live group teardown requires readable Linux procfs identity evidence");
   return readdirSync("/proc").filter(name => /^\d+$/.test(name)).flatMap(name => {
     let raw: string;
@@ -17,7 +17,12 @@ function linuxProcesses(): GroupProcess[] {
     const fields = raw.slice(raw.lastIndexOf(")") + 2).trim().split(/\s+/);
     const member = { pid: Number(name), pgid: Number(fields[2]), sid: Number(fields[3]), startTime: Number(fields[19]), state: fields[0]! };
     if (raw.lastIndexOf(")") < 0 || !/^[A-Za-z]$/.test(member.state) ||
-        ![member.pid, member.pgid, member.sid, member.startTime].every(n => Number.isSafeInteger(n) && n >= 0)) throw new Error(`unreadable process identity: ${name}`);
+        ![member.pid, member.pgid, member.sid, member.startTime].every(n => Number.isSafeInteger(n) && n >= 0)) {
+      // procfs can return empty bytes during exit; only proven disappearance permits skipping.
+      try { readFileSync(`/proc/${name}/stat`, "utf8"); }
+      catch (error) { if (["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")) return []; }
+      throw new Error(`unreadable process identity: ${name}`);
+    }
     return [member];
   });
 }
@@ -82,4 +87,19 @@ export async function stopOwnedProcessGroup(group: OwnedProcessGroup, deps: {
     if (now() >= deadline) throw new Error(`group ${group.pid} teardown unconfirmed after TERM/KILL deadline`);
     await wait(25);
   }
+}
+
+/** Permission errors, unreadable identity and PID reuse are not proof of a dead owner. */
+export function processIdentityState(owner: OwnedProcessGroup, deps: {
+  signal?: (pid: number, signal: 0) => unknown;
+  processes?: () => GroupProcess[];
+} = {}): "live" | "dead" | "unknown" {
+  if (!Number.isSafeInteger(owner.pid) || owner.pid <= 1 || !Number.isSafeInteger(owner.startTime) || owner.startTime! <= 0) return "unknown";
+  try { (deps.signal ?? process.kill)(owner.pid, 0); }
+  catch (e) { return (e as NodeJS.ErrnoException).code === "ESRCH" ? "dead" : "unknown"; }
+  try {
+    const observed = (deps.processes ?? linuxProcesses)().find(p => p.pid === owner.pid);
+    if (!observed || observed.startTime !== owner.startTime) return "unknown";
+    return observed.state === "Z" || observed.state === "X" ? "dead" : "live";
+  } catch { return "unknown"; }
 }

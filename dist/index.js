@@ -193,9 +193,9 @@ __export(worktree_exports, {
   worktreeSpecFromRun: () => worktreeSpecFromRun
 });
 import { execSync } from "node:child_process";
-import { existsSync as existsSync2, appendFileSync, readFileSync as readFileSync2, realpathSync } from "node:fs";
+import { existsSync as existsSync3, appendFileSync, readFileSync as readFileSync3, realpathSync as realpathSync2 } from "node:fs";
 import { mkdirSync } from "node:fs";
-import { join as join2, dirname, isAbsolute, relative, sep } from "node:path";
+import { join as join4, dirname as dirname2, isAbsolute, relative, sep } from "node:path";
 function gitEnv() {
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
@@ -220,24 +220,24 @@ function resolveWorktreeSpec(cwd, runId) {
   if (rawRoot === null) return null;
   let gitRoot2;
   try {
-    gitRoot2 = realpathSync(rawRoot);
+    gitRoot2 = realpathSync2(rawRoot);
   } catch {
     gitRoot2 = rawRoot;
   }
   const branch = `conductor-wt/${runId}`;
-  const worktreePath = join2(gitRoot2, ".worktrees", "conductor-wt", runId);
+  const worktreePath = join4(gitRoot2, ".worktrees", "conductor-wt", runId);
   return { gitRoot: gitRoot2, worktreePath, branch };
 }
 function worktreeCwd(spec, cwd) {
   let real = cwd;
   try {
-    real = realpathSync(cwd);
+    real = realpathSync2(cwd);
   } catch {
   }
   const rel = relative(spec.gitRoot, real);
   if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return spec.worktreePath;
-  const mapped = join2(spec.worktreePath, rel);
-  return existsSync2(mapped) ? mapped : spec.worktreePath;
+  const mapped = join4(spec.worktreePath, rel);
+  return existsSync3(mapped) ? mapped : spec.worktreePath;
 }
 function createWorktree(spec, opts = {}) {
   if (!opts.skipGitignore) {
@@ -255,7 +255,7 @@ function refExists(gitRoot2, ref) {
   return tryGitExec(`git rev-parse --verify --quiet ${JSON.stringify(`${ref}^{commit}`)}`, gitRoot2) !== null;
 }
 function addWorktree(spec, target) {
-  mkdirSync(dirname(spec.worktreePath), { recursive: true });
+  mkdirSync(dirname2(spec.worktreePath), { recursive: true });
   try {
     execSync(
       `git worktree add ${JSON.stringify(spec.worktreePath)} ${target}`,
@@ -297,19 +297,19 @@ function branchHasUnmergedCommits(gitRoot2, baseBranch, branch) {
   return count === null || Number(count) > 0;
 }
 function holdsKeptWorktree(record) {
-  if (record.worktreePath !== void 0) return existsSync2(record.worktreePath);
+  if (record.worktreePath !== void 0) return existsSync3(record.worktreePath);
   return record.worktreeBranch !== void 0 && record.status !== "completed";
 }
 function worktreeHasUncommittedChanges(worktreePath) {
-  if (!existsSync2(worktreePath)) return false;
+  if (!existsSync3(worktreePath)) return false;
   const status = tryGitExec("git status --porcelain", worktreePath);
   return status === null || status !== "";
 }
 function ensureWorktreeGitignore(gitRoot2) {
-  const ignorePath = join2(gitRoot2, ".gitignore");
+  const ignorePath = join4(gitRoot2, ".gitignore");
   const pattern = ".worktrees/";
-  if (existsSync2(ignorePath)) {
-    const content = readFileSync2(ignorePath, "utf-8");
+  if (existsSync3(ignorePath)) {
+    const content = readFileSync3(ignorePath, "utf-8");
     if (content.split("\n").some((line) => line.trim() === pattern.trim())) {
       return;
     }
@@ -324,8 +324,8 @@ function ensureWorktreeGitignore(gitRoot2) {
 function detectBrazilWorkspaceRoot(cwd) {
   let dir = cwd;
   for (let i = 0; i < 32; i++) {
-    if (existsSync2(join2(dir, ".brazil"))) return dir;
-    const parent = dirname(dir);
+    if (existsSync3(join4(dir, ".brazil"))) return dir;
+    const parent = dirname2(dir);
     if (parent === dir) return null;
     dir = parent;
   }
@@ -333,7 +333,7 @@ function detectBrazilWorkspaceRoot(cwd) {
 }
 function worktreeSpecFromRun(record) {
   if (!record.worktreePath || !record.worktreeBranch) return void 0;
-  const gitRoot2 = dirname(dirname(dirname(record.worktreePath)));
+  const gitRoot2 = dirname2(dirname2(dirname2(record.worktreePath)));
   return {
     gitRoot: gitRoot2,
     worktreePath: record.worktreePath,
@@ -464,191 +464,19 @@ var init_worktree = __esm({
   }
 });
 
-// src/index.ts
-import { buildSessionContext } from "@earendil-works/pi-coding-agent";
-import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
-
-// src/effort/open.ts
-import { execFileSync } from "node:child_process";
-import { realpathSync as realpathSync2 } from "node:fs";
-
-// src/config.ts
-init_types();
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-function userConfigPath() {
-  return join(homedir(), ".pi", "agent", "extensions", "conductor", "config.json");
-}
-function projectConfigPath(cwd) {
-  return join(cwd, ".pi", "conductor.json");
-}
-function safeReadJson(path) {
-  if (!existsSync(path)) return { value: null };
-  try {
-    return { value: JSON.parse(readFileSync(path, "utf-8")) };
-  } catch (e) {
-    return {
-      value: null,
-      error: { path, reason: e.message }
-    };
-  }
-}
-function mergeConfig(base, raw) {
-  if (!raw || typeof raw !== "object") return base;
-  const r = raw;
-  const out = { ...base };
-  if (r.efforts !== void 0) {
-    out.efforts = r.efforts && typeof r.efforts === "object" && !Array.isArray(r.efforts) ? { ...out.efforts, ...r.efforts } : { verify: void 0 };
-  }
-  if (typeof r.defaultTimeoutMinutes === "number" && r.defaultTimeoutMinutes > 0) {
-    out.defaultTimeoutMinutes = r.defaultTimeoutMinutes;
-  }
-  if (typeof r.maxConcurrent === "number" && r.maxConcurrent >= 1) {
-    out.maxConcurrent = Math.floor(r.maxConcurrent);
-  }
-  if (r.worktreeMode === "conductor" || r.worktreeMode === "external") {
-    out.worktreeMode = r.worktreeMode;
-  }
-  if (typeof r.maxConcurrentWriteCapable === "number" && r.maxConcurrentWriteCapable >= 1) {
-    out.maxConcurrentWriteCapable = Math.floor(r.maxConcurrentWriteCapable);
-  }
-  if (typeof r.queueOnConcurrencyCap === "boolean") {
-    out.queueOnConcurrencyCap = r.queueOnConcurrencyCap;
-  }
-  if (typeof r.autoOpenFocusOnSpawn === "boolean") {
-    out.autoOpenFocusOnSpawn = r.autoOpenFocusOnSpawn;
-  }
-  if (r.defaultSpawnMode === "foreground" || r.defaultSpawnMode === "background") {
-    out.defaultSpawnMode = r.defaultSpawnMode;
-  }
-  if (r.defaultMode === "on" || r.defaultMode === "off") {
-    out.defaultMode = r.defaultMode;
-  }
-  if (typeof r.contextRetirement === "boolean") out.contextRetirement = r.contextRetirement;
-  if (typeof r.inlineAttachmentLimitBytes === "number" && Number.isInteger(r.inlineAttachmentLimitBytes) && r.inlineAttachmentLimitBytes >= 1024 && r.inlineAttachmentLimitBytes <= 1048576) {
-    out.inlineAttachmentLimitBytes = r.inlineAttachmentLimitBytes;
-  }
-  if (typeof r.defaultSteerable === "boolean") {
-    out.defaultSteerable = r.defaultSteerable;
-  }
-  if (r.personaOverrides && typeof r.personaOverrides === "object") {
-    const incoming = r.personaOverrides;
-    const merged = { ...out.personaOverrides };
-    for (const [name, fields] of Object.entries(incoming)) {
-      if (!fields || typeof fields !== "object") continue;
-      merged[name] = { ...merged[name] ?? {}, ...fields };
-    }
-    out.personaOverrides = merged;
-  }
-  if (typeof r.conductorPromptPath === "string") {
-    out.conductorPromptPath = r.conductorPromptPath;
-  }
-  if (r.gc && typeof r.gc === "object") {
-    out.gc = mergeGcConfig(out.gc, r.gc);
-  }
-  if (r.chains && typeof r.chains === "object" && !Array.isArray(r.chains)) {
-    const incoming = r.chains;
-    const merged = { ...out.chains ?? {} };
-    for (const [key, val] of Object.entries(incoming)) {
-      if (val && typeof val === "object") {
-        merged[key] = val;
-      }
-    }
-    out.chains = merged;
-  }
-  if (r.retry && typeof r.retry === "object") {
-    const inc = r.retry;
-    const merged = { ...out.retry };
-    if (typeof inc.maxAttempts === "number" && inc.maxAttempts >= 1) {
-      merged.maxAttempts = Math.floor(inc.maxAttempts);
-    }
-    const VALID_CLASSES = /* @__PURE__ */ new Set([
-      "syntax",
-      "logic",
-      "test",
-      "environment",
-      "permission",
-      "timeout",
-      "stall",
-      "turns",
-      "unknown"
-    ]);
-    if (Array.isArray(inc.retryableClasses) && inc.retryableClasses.every((c) => typeof c === "string" && VALID_CLASSES.has(c))) {
-      merged.retryableClasses = inc.retryableClasses;
-    }
-    out.retry = merged;
-  }
-  return out;
-}
-function mergeGcConfig(base, raw) {
-  const out = { ...base };
-  if (typeof raw.enabled === "boolean") out.enabled = raw.enabled;
-  if (typeof raw.completedTtlDays === "number" && raw.completedTtlDays > 0) {
-    out.completedTtlDays = Math.floor(raw.completedTtlDays);
-  }
-  if (typeof raw.failedTtlDays === "number" && raw.failedTtlDays > 0) {
-    out.failedTtlDays = Math.floor(raw.failedTtlDays);
-  }
-  if (typeof raw.totalSizeBudgetBytes === "number" && raw.totalSizeBudgetBytes >= 0) {
-    out.totalSizeBudgetBytes = Math.floor(raw.totalSizeBudgetBytes);
-  }
-  if (typeof raw.transcriptSizeCapBytes === "number" && raw.transcriptSizeCapBytes >= 0) {
-    out.transcriptSizeCapBytes = Math.floor(raw.transcriptSizeCapBytes);
-  }
-  if (typeof raw.orphanReconcileAfterHours === "number" && raw.orphanReconcileAfterHours > 0) {
-    out.orphanReconcileAfterHours = raw.orphanReconcileAfterHours;
-  }
-  if (typeof raw.autoOnSessionStart === "boolean") {
-    out.autoOnSessionStart = raw.autoOnSessionStart;
-  }
-  if (typeof raw.autoDebounceHours === "number" && raw.autoDebounceHours >= 0) {
-    out.autoDebounceHours = raw.autoDebounceHours;
-  }
-  if (raw.perPersonaTtlDays && typeof raw.perPersonaTtlDays === "object") {
-    const incoming = raw.perPersonaTtlDays;
-    const merged = { ...out.perPersonaTtlDays };
-    for (const [name, days] of Object.entries(incoming)) {
-      if (typeof days === "number" && days > 0) {
-        merged[name] = Math.floor(days);
-      }
-    }
-    out.perPersonaTtlDays = merged;
-  }
-  return out;
-}
-function loadConfigWithErrors(cwd) {
-  const errors = [];
-  const u = safeReadJson(userConfigPath());
-  if (u.error) errors.push(u.error);
-  const userCfg = mergeConfig({ ...DEFAULT_CONFIG }, u.value);
-  const p = safeReadJson(projectConfigPath(cwd));
-  if (p.error) errors.push(p.error);
-  const projectCfg = mergeConfig({ ...DEFAULT_CONFIG }, p.value);
-  let merged = mergeConfig({ ...DEFAULT_CONFIG }, u.value);
-  merged = mergeConfig(merged, p.value);
-  return { config: merged, user: userCfg, project: projectCfg, errors };
-}
-function loadConfig(cwd) {
-  const config = loadConfigWithErrors(cwd).config;
-  const envMode = process.env.PI_CONDUCTOR_WORKTREE_MODE;
-  if (envMode === "conductor" || envMode === "external") {
-    return { ...config, worktreeMode: envMode };
-  }
-  return config;
-}
-
-// src/effort/open.ts
-init_worktree();
+// src/effort/reconcile.ts
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { existsSync as existsSync9, mkdirSync as mkdirSync9, readFileSync as readFileSync12, readdirSync as readdirSync5, realpathSync as realpathSync5 } from "node:fs";
+import { dirname as dirname12, join as join14, relative as relative3 } from "node:path";
 
 // src/reconcile-startup.ts
 init_types();
 import { readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { readFileSync as readFileSync3 } from "node:fs";
-import { join as join3 } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 function classifyRecord(record, isAlive, _now, selfPid = process.pid, isParentAlive = (pid, startTime) => defaultParentLivenessProbe(pid, startTime), selfSessionId = void 0) {
   const status = record.status;
-  if (TERMINAL_STATUSES.includes(status)) {
+  if (!record.effort && TERMINAL_STATUSES.includes(status)) {
     return "skip-terminal";
   }
   const parentAlive = record.parentPid !== void 0 && isParentAlive(record.parentPid, record.parentStartTime);
@@ -659,6 +487,7 @@ function classifyRecord(record, isAlive, _now, selfPid = process.pid, isParentAl
   }
   if (status === "integrating") return "restore-integrating";
   if (status === "blocked") return "restore-blocked";
+  if (record.effort) return "restore-effort";
   if (status === "queued") {
     return "reclassify-failed-queued";
   }
@@ -690,7 +519,7 @@ function defaultLivenessProbe(pid) {
 function readProcessStartTime(pid) {
   if (process.platform !== "linux") return void 0;
   try {
-    const raw = readFileSync3(`/proc/${pid}/stat`, "utf-8");
+    const raw = readFileSync(`/proc/${pid}/stat`, "utf-8");
     const closeParen = raw.lastIndexOf(")");
     if (closeParen < 0) return void 0;
     const fields = raw.slice(closeParen + 2).split(" ");
@@ -732,7 +561,7 @@ async function reconcileOrphansAtStartup(deps) {
     return result;
   }
   for (const id of entries) {
-    const recordPath = join3(deps.runsRoot, id, "record.json");
+    const recordPath = join(deps.runsRoot, id, "record.json");
     try {
       let raw;
       try {
@@ -768,11 +597,18 @@ async function reconcileOrphansAtStartup(deps) {
       );
       const dryRun = deps.dryRun === true;
       switch (verdict) {
+        case "restore-effort":
+          if (!dryRun) {
+            const run = buildOrphanRun(record, record.status);
+            run.integrationSuspended = true;
+            deps.registry.register(run);
+          }
+          break;
         case "restore-integrating":
           if (!dryRun) {
             const run = buildOrphanRun(record, "integrating");
             run.integrationSuspended = true;
-            if (run.integration) run.integration = { ...run.integration, state: "paused", reason: "interrupted integration preserved; automatic recovery is unavailable before M5" };
+            if (run.integration) run.integration = { ...run.integration, state: "paused", reason: "interrupted integration preserved pending fenced effort recovery" };
             deps.registry.register(run);
           }
           break;
@@ -888,7 +724,7 @@ function buildOrphanRun(record, status) {
     // Restore ownership identity so downstream ownership checks
     // (e.g. forceTerminate's foreign-run refusal) see the original
     // spawning host/slot rather than treating the orphan as unowned.
-    parentPid: status === "blocked" ? process.pid : record.parentPid,
+    parentPid: status === "blocked" && !record.effort ? process.pid : record.parentPid,
     parentSessionId: record.parentSessionId,
     parentStartTime: record.parentStartTime,
     exitCode: record.exitCode,
@@ -962,225 +798,16 @@ async function checkSessionResumability(record, result) {
   }
 }
 
-// src/effort/policy.ts
-import { matchesGlob } from "node:path";
-var EFFORT_NOTICE = "M4: disjoint effort writers run in independent worktrees within global/effort limits; integration remains serial after optional generated artifact regeneration, baseline/candidate verification and repository hooks. Legacy work remains UNINTEGRATED. Interrupted work pauses for inspection; recovery, merger, landing, readers, auto plans, chains and retries are unavailable.";
-function effortSummary(run) {
-  if (!run.effort) return "";
-  const state = run.landedCommit ? `integrated ${run.landedCommit.slice(0, 12)}` : run.mergeResult?.nothingToCommit ? "tree-equal no-op" : run.status === "integrating" ? `integrating (${run.integration?.state ?? "paused"})` : "UNINTEGRATED";
-  const violations = run.integration?.touchViolations ?? run.effort.touchViolations;
-  return `${run.effort.name}: ${state}${run.mergeResult?.verifyDisabled ? " (effort verify disabled; repository hooks still required)" : ""}${run.integration?.reason ? `: ${run.integration.reason}` : ""}${violations?.length ? `; touches violations: ${JSON.stringify(violations)}` : ""}`;
-}
-function validateEffortName(name) {
-  if (typeof name !== "string" || !/^[a-z][a-z0-9-]{0,39}$/.test(name)) {
-    throw new Error("effort name must match /^[a-z][a-z0-9-]{0,39}$/");
-  }
-}
-function validateTouches(paths) {
-  if (!Array.isArray(paths) || paths.length === 0 || paths.some((p) => typeof p !== "string" || !p || p.startsWith("/") || !/^[\p{L}\p{N}_.* /-]+$/u.test(p) || p.trim() !== p || p.split("/").some((s) => !s || s === "." || s === ".."))) {
-    throw new Error("effort paths must be nonempty repo-relative globs using literals, * or **; no traversal or absolute paths");
-  }
-}
-function isGeneratedPath(path, generated) {
-  return !path.startsWith("/") && !path.includes("\0") && !path.split("/").some((p) => !p || p === "." || p === "..") && !!generated?.paths.some((glob) => matchesGlob(path, glob));
-}
-function resolveEffortPolicy(config = {}, overrides = {}) {
-  const p = { verifyTimeoutSeconds: 1200, verifyRetries: 1, maxParallel: 2, merger: "auto", mergerMaxAttempts: 1, land: "branch", history: "squash", ...config, ...overrides };
-  if (typeof p.verify !== "string") throw new Error('no verify command: set efforts.verify or explicitly pass verify:"" (verification disabled)');
-  if (!Number.isInteger(p.verifyTimeoutSeconds) || p.verifyTimeoutSeconds < 1) throw new Error("efforts.verifyTimeoutSeconds must be a positive integer");
-  if (!Number.isInteger(p.verifyRetries) || p.verifyRetries < 0 || p.verifyRetries > 1) throw new Error("efforts.verifyRetries must be 0 or 1");
-  if (p.verify.includes("\0")) throw new Error("efforts.verify must not contain NUL");
-  if (!Number.isInteger(p.maxParallel) || p.maxParallel < 1) throw new Error("efforts.maxParallel must be a positive integer");
-  if (!["auto", "ask", "off"].includes(p.merger)) throw new Error("efforts.merger must be auto, ask or off");
-  if (p.mergerMaxAttempts !== 1) throw new Error("efforts.mergerMaxAttempts must be 1");
-  if (!["branch", "base"].includes(p.land)) throw new Error("efforts.land must be branch or base");
-  if (p.history !== "squash") throw new Error("efforts.history must be squash");
-  if (p.generated !== void 0) {
-    validateTouches(p.generated?.paths);
-    if (typeof p.generated.command !== "string" || !p.generated.command.trim() || p.generated.command.includes("\0")) throw new Error("efforts.generated.command must be nonempty");
-  }
-  return {
-    verify: p.verify,
-    verifyTimeoutSeconds: p.verifyTimeoutSeconds,
-    verifyRetries: p.verifyRetries,
-    maxParallel: p.maxParallel,
-    merger: p.merger,
-    mergerMaxAttempts: 1,
-    land: p.land,
-    history: "squash",
-    ...p.generated ? { generated: { paths: [...p.generated.paths], command: p.generated.command } } : {}
-  };
-}
-
-// src/effort/store.ts
-import { createHash, randomUUID } from "node:crypto";
-import { closeSync, existsSync as existsSync3, fsyncSync, mkdirSync as mkdirSync2, openSync, readFileSync as readFileSync4, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { dirname as dirname2, join as join4 } from "node:path";
-function effortsRoot() {
-  return join4(homedir2(), ".pi", "agent", "conductor", "efforts");
-}
-function effortDir(gitRoot2, name) {
-  validateEffortName(name);
-  return join4(effortsRoot(), `${name}-${createHash("sha256").update(gitRoot2).digest("hex")}`);
-}
-function readEffort(gitRoot2, name) {
-  const path = join4(effortDir(gitRoot2, name), "effort.json");
-  if (!existsSync3(path)) return void 0;
-  const r = JSON.parse(readFileSync4(path, "utf8"));
-  if (r.schema !== 1 || r.gitRoot !== gitRoot2 || r.name !== name || r.intRef !== `refs/heads/conductor-int/${name}` || !Array.isArray(r.members)) {
-    throw new Error("conflicting effort record identity; ownership unresolved");
-  }
-  return r;
-}
-function assertEffortOwner(record, owner) {
-  const lock = JSON.parse(readFileSync4(join4(effortDir(record.gitRoot, record.name), "effort.lock"), "utf8"));
-  for (const key of ["sessionId", "pid", "startTime"]) {
-    if (record.owner[key] !== owner[key] || lock[key] !== owner[key]) throw new Error(`effort owned by another session or unresolved owner; takeover is unavailable in M1`);
-  }
-}
-function claimEffort(gitRoot2, name, owner) {
-  const dir = effortDir(gitRoot2, name);
-  mkdirSync2(dir, { recursive: true });
-  try {
-    writeFileSync(join4(dir, "effort.lock"), JSON.stringify(owner), { flag: "wx" });
-  } catch {
-    throw new Error(`effort "${name}" already claimed; ownership unresolved (no M1 takeover)`);
-  }
-}
-function writeDurableJson(path, value, fence) {
-  const temp = `${path}-${randomUUID()}.tmp`;
-  let fd;
-  try {
-    fence();
-    fd = openSync(temp, "wx");
-    writeFileSync(fd, JSON.stringify(value, null, 2));
-    fsyncSync(fd);
-    closeSync(fd);
-    fd = void 0;
-    fence();
-    renameSync(temp, path);
-    fd = openSync(dirname2(path), "r");
-    fsyncSync(fd);
-    closeSync(fd);
-    fd = void 0;
-  } finally {
-    if (fd !== void 0) closeSync(fd);
-    if (existsSync3(temp)) unlinkSync(temp);
-  }
-}
-function writeEffort(record) {
-  writeDurableJson(join4(effortDir(record.gitRoot, record.name), "effort.json"), record, () => assertEffortOwner(record, record.owner));
-}
-function addEffortMember(record, id) {
-  const current = readEffort(record.gitRoot, record.name);
-  if (!current) throw new Error("effort record missing; refusing spawn");
-  assertEffortOwner(current, record.owner);
-  if (!current.members.includes(id)) writeEffort({ ...current, members: [...current.members, id], updatedAt: Date.now() });
-}
-function listEfforts(gitRoot2) {
-  if (!existsSync3(effortsRoot())) return [];
-  const result = [];
-  for (const dir of readdirSync(effortsRoot())) {
-    const path = join4(effortsRoot(), dir, "effort.json");
-    if (!existsSync3(path)) continue;
-    const r = JSON.parse(readFileSync4(path, "utf8"));
-    if (r.gitRoot === gitRoot2) result.push(readEffort(gitRoot2, r.name));
-  }
-  return result;
-}
-
-// src/effort/open.ts
-function effortGit(cwd, ...args) {
-  const output = execFileSync("git", args, { cwd, env: Object.fromEntries(Object.entries(gitEnv()).filter(([key]) => !key.startsWith("HERDR_"))), encoding: "utf8", stdio: "pipe", timeout: 3e4 });
-  return output.endsWith("\0") ? output : output.trim();
-}
-function effortRepository(cwd) {
-  try {
-    const requestedRoot = realpathSync2(effortGit(cwd, "rev-parse", "--show-toplevel"));
-    const first = effortGit(cwd, "worktree", "list", "--porcelain", "-z").split("\0")[0];
-    if (!first.startsWith("worktree ")) throw new Error("missing main worktree");
-    return { gitRoot: realpathSync2(first.slice(9)), requestedRoot };
-  } catch {
-    throw new Error("efforts require a non-bare git repository");
-  }
-}
-function effortOwner(sessionId) {
-  const startTime = readProcessStartTime(process.pid) ?? performance.timeOrigin;
-  if (!sessionId) throw new Error("effort requires a session id");
-  return { sessionId, pid: process.pid, startTime };
-}
-function checkEffortRepository(cwd) {
-  const repo = effortRepository(cwd);
-  if (loadConfig(cwd).worktreeMode === "external") throw new Error("efforts do not support external worktree mode");
-  if (detectBrazilWorkspaceRoot(repo.gitRoot) || detectBrazilWorkspaceRoot(repo.requestedRoot)) throw new Error("efforts are not supported in Brazil workspaces");
-  return repo;
-}
-function effortTip(record) {
-  if (effortGit(record.gitRoot, "worktree", "list", "--porcelain").split("\n").includes(`branch ${record.intRef}`)) throw new Error("effort integration ref is checked out; refusing spawn");
-  return effortGit(record.gitRoot, "rev-parse", "--verify", `${record.intRef}^{commit}`);
-}
-function openEffort(cwd, name, sessionId, overrides = {}) {
-  validateEffortName(name);
-  const { gitRoot: gitRoot2, requestedRoot } = checkEffortRepository(cwd);
-  const policy = resolveEffortPolicy(loadConfig(cwd).efforts, overrides);
-  const owner = effortOwner(sessionId);
-  let baseRef;
-  try {
-    baseRef = effortGit(requestedRoot, "symbolic-ref", "HEAD");
-  } catch {
-    throw new Error("effort base must be an attached local branch, not detached HEAD");
-  }
-  if (!baseRef.startsWith("refs/heads/") || baseRef.startsWith("refs/heads/conductor-int/")) throw new Error("invalid effort base branch");
-  const baseOid = effortGit(requestedRoot, "rev-parse", "--verify", `${baseRef}^{commit}`);
-  if (baseOid !== effortGit(requestedRoot, "rev-parse", "HEAD")) throw new Error("effort base changed while opening");
-  if (readEffort(gitRoot2, name)) throw new Error(`effort "${name}" already exists`);
-  claimEffort(gitRoot2, name, owner);
-  const now = Date.now();
-  const record = { schema: 1, name, gitRoot: gitRoot2, intRef: `refs/heads/conductor-int/${name}`, baseBranch: baseRef.slice(11), baseOid, owner, policy, members: [], queue: [], status: "open", createdAt: now, updatedAt: now };
-  effortGit(gitRoot2, "update-ref", record.intRef, baseOid, "");
-  writeEffort(record);
-  return record;
-}
-function ownedEffort(cwd, name, sessionId) {
-  validateEffortName(name);
-  const { gitRoot: gitRoot2 } = checkEffortRepository(cwd);
-  const existing = readEffort(gitRoot2, name);
-  if (!existing) return openEffort(cwd, name, sessionId);
-  assertEffortOwner(existing, effortOwner(sessionId));
-  effortTip(existing);
-  return existing;
-}
-
-// src/commands.ts
+// src/effort/admit.ts
 init_types();
-import { existsSync as existsSync13, readdirSync as readdirSync5, readFileSync as readFileSync13, statSync as statSync5 } from "node:fs";
-import { join as join20, dirname as dirname13 } from "node:path";
-
-// src/status-glyph.ts
-var STATUS_GLYPH = {
-  integrating: "\u21E2",
-  blocked: "?",
-  queued: "\u25CC",
-  running: "\u25CF",
-  paused: "\u23F8",
-  completed: "\u2713",
-  failed: "\u2717",
-  killed: "\u25A0",
-  timeout: "\u23F1",
-  hook_failed: "\u2297",
-  merge_conflict: "\u2298",
-  // v0.14: post-success conflict — ⊘ distinct from ⊗ (hook_failed)
-  aborted: "\u23F9"
-  // v0.17: turn-limit termination — ⏹ (stop button) distinct from ■ (killed)
-};
+import { matchesGlob as matchesGlob2 } from "node:path";
 
 // src/personas.ts
 init_types();
 import { readdir as readdir2, readFile as readFile2, stat as stat2 } from "node:fs/promises";
-import { existsSync as existsSync4, realpathSync as realpathSync3 } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { dirname as dirname3, join as join5, resolve } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join as join2, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 var WRITE_CAPABLE_PERSONAS2 = /* @__PURE__ */ new Set([
   "builder",
@@ -1190,17 +817,17 @@ function isWriteCapable(personaName) {
   return WRITE_CAPABLE_PERSONAS2.has(personaName);
 }
 function resolveBuiltinPersonasDir(metaUrl) {
-  const here = realpathSync3(fileURLToPath(metaUrl));
-  return resolve(dirname3(here), "..", "personas");
+  const here = realpathSync(fileURLToPath(metaUrl));
+  return resolve(dirname(here), "..", "personas");
 }
 function builtinPersonasDir() {
   return resolveBuiltinPersonasDir(import.meta.url);
 }
 function userPersonasDir() {
-  return join5(homedir3(), ".pi", "agent", "conductor", "personas");
+  return join2(homedir(), ".pi", "agent", "conductor", "personas");
 }
 function projectPersonasDir(cwd) {
-  return join5(cwd, ".pi", "conductor", "personas");
+  return join2(cwd, ".pi", "conductor", "personas");
 }
 var FRONTMATTER_FENCE = "---";
 function parseFrontmatter(text) {
@@ -1423,7 +1050,7 @@ function optionalNonNegativeInteger(fm, key) {
 async function loadPersonasFromDir(dir, source) {
   const personas = [];
   const errors = [];
-  if (!existsSync4(dir)) return { personas, errors };
+  if (!existsSync(dir)) return { personas, errors };
   let entries;
   try {
     entries = await readdir2(dir);
@@ -1433,7 +1060,7 @@ async function loadPersonasFromDir(dir, source) {
   }
   for (const entry of entries) {
     if (!entry.endsWith(".md") || entry.startsWith("_")) continue;
-    const filePath = join5(dir, entry);
+    const filePath = join2(dir, entry);
     try {
       const st = await stat2(filePath);
       if (!st.isFile()) continue;
@@ -1495,14 +1122,553 @@ async function resolvePersonas(opts) {
   return { personas, shadowed, errors };
 }
 
-// src/effort/admit.ts
-init_types();
-import { matchesGlob as matchesGlob2 } from "node:path";
-
 // src/effort/generated.ts
 import { createHash as createHash2 } from "node:crypto";
-import { lstatSync, readdirSync as readdirSync2, readFileSync as readFileSync5, readlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { lstatSync, readdirSync as readdirSync3, readFileSync as readFileSync6, readlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { join as join6 } from "node:path";
+
+// src/effort/open.ts
+import { execFileSync } from "node:child_process";
+import { realpathSync as realpathSync3 } from "node:fs";
+
+// src/config.ts
+init_types();
+import { existsSync as existsSync2, readFileSync as readFileSync2 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { join as join3 } from "node:path";
+function userConfigPath() {
+  return join3(homedir2(), ".pi", "agent", "extensions", "conductor", "config.json");
+}
+function projectConfigPath(cwd) {
+  return join3(cwd, ".pi", "conductor.json");
+}
+function safeReadJson(path) {
+  if (!existsSync2(path)) return { value: null };
+  try {
+    return { value: JSON.parse(readFileSync2(path, "utf-8")) };
+  } catch (e) {
+    return {
+      value: null,
+      error: { path, reason: e.message }
+    };
+  }
+}
+function mergeConfig(base, raw) {
+  if (!raw || typeof raw !== "object") return base;
+  const r = raw;
+  const out = { ...base };
+  if (r.efforts !== void 0) {
+    out.efforts = r.efforts && typeof r.efforts === "object" && !Array.isArray(r.efforts) ? { ...out.efforts, ...r.efforts } : { verify: void 0 };
+  }
+  if (typeof r.defaultTimeoutMinutes === "number" && r.defaultTimeoutMinutes > 0) {
+    out.defaultTimeoutMinutes = r.defaultTimeoutMinutes;
+  }
+  if (typeof r.maxConcurrent === "number" && r.maxConcurrent >= 1) {
+    out.maxConcurrent = Math.floor(r.maxConcurrent);
+  }
+  if (r.worktreeMode === "conductor" || r.worktreeMode === "external") {
+    out.worktreeMode = r.worktreeMode;
+  }
+  if (typeof r.maxConcurrentWriteCapable === "number" && r.maxConcurrentWriteCapable >= 1) {
+    out.maxConcurrentWriteCapable = Math.floor(r.maxConcurrentWriteCapable);
+  }
+  if (typeof r.queueOnConcurrencyCap === "boolean") {
+    out.queueOnConcurrencyCap = r.queueOnConcurrencyCap;
+  }
+  if (typeof r.autoOpenFocusOnSpawn === "boolean") {
+    out.autoOpenFocusOnSpawn = r.autoOpenFocusOnSpawn;
+  }
+  if (r.defaultSpawnMode === "foreground" || r.defaultSpawnMode === "background") {
+    out.defaultSpawnMode = r.defaultSpawnMode;
+  }
+  if (r.defaultMode === "on" || r.defaultMode === "off") {
+    out.defaultMode = r.defaultMode;
+  }
+  if (typeof r.contextRetirement === "boolean") out.contextRetirement = r.contextRetirement;
+  if (typeof r.inlineAttachmentLimitBytes === "number" && Number.isInteger(r.inlineAttachmentLimitBytes) && r.inlineAttachmentLimitBytes >= 1024 && r.inlineAttachmentLimitBytes <= 1048576) {
+    out.inlineAttachmentLimitBytes = r.inlineAttachmentLimitBytes;
+  }
+  if (typeof r.defaultSteerable === "boolean") {
+    out.defaultSteerable = r.defaultSteerable;
+  }
+  if (r.personaOverrides && typeof r.personaOverrides === "object") {
+    const incoming = r.personaOverrides;
+    const merged = { ...out.personaOverrides };
+    for (const [name, fields] of Object.entries(incoming)) {
+      if (!fields || typeof fields !== "object") continue;
+      merged[name] = { ...merged[name] ?? {}, ...fields };
+    }
+    out.personaOverrides = merged;
+  }
+  if (typeof r.conductorPromptPath === "string") {
+    out.conductorPromptPath = r.conductorPromptPath;
+  }
+  if (r.gc && typeof r.gc === "object") {
+    out.gc = mergeGcConfig(out.gc, r.gc);
+  }
+  if (r.chains && typeof r.chains === "object" && !Array.isArray(r.chains)) {
+    const incoming = r.chains;
+    const merged = { ...out.chains ?? {} };
+    for (const [key, val] of Object.entries(incoming)) {
+      if (val && typeof val === "object") {
+        merged[key] = val;
+      }
+    }
+    out.chains = merged;
+  }
+  if (r.retry && typeof r.retry === "object") {
+    const inc = r.retry;
+    const merged = { ...out.retry };
+    if (typeof inc.maxAttempts === "number" && inc.maxAttempts >= 1) {
+      merged.maxAttempts = Math.floor(inc.maxAttempts);
+    }
+    const VALID_CLASSES = /* @__PURE__ */ new Set([
+      "syntax",
+      "logic",
+      "test",
+      "environment",
+      "permission",
+      "timeout",
+      "stall",
+      "turns",
+      "unknown"
+    ]);
+    if (Array.isArray(inc.retryableClasses) && inc.retryableClasses.every((c) => typeof c === "string" && VALID_CLASSES.has(c))) {
+      merged.retryableClasses = inc.retryableClasses;
+    }
+    out.retry = merged;
+  }
+  return out;
+}
+function mergeGcConfig(base, raw) {
+  const out = { ...base };
+  if (typeof raw.enabled === "boolean") out.enabled = raw.enabled;
+  if (typeof raw.completedTtlDays === "number" && raw.completedTtlDays > 0) {
+    out.completedTtlDays = Math.floor(raw.completedTtlDays);
+  }
+  if (typeof raw.failedTtlDays === "number" && raw.failedTtlDays > 0) {
+    out.failedTtlDays = Math.floor(raw.failedTtlDays);
+  }
+  if (typeof raw.totalSizeBudgetBytes === "number" && raw.totalSizeBudgetBytes >= 0) {
+    out.totalSizeBudgetBytes = Math.floor(raw.totalSizeBudgetBytes);
+  }
+  if (typeof raw.transcriptSizeCapBytes === "number" && raw.transcriptSizeCapBytes >= 0) {
+    out.transcriptSizeCapBytes = Math.floor(raw.transcriptSizeCapBytes);
+  }
+  if (typeof raw.orphanReconcileAfterHours === "number" && raw.orphanReconcileAfterHours > 0) {
+    out.orphanReconcileAfterHours = raw.orphanReconcileAfterHours;
+  }
+  if (typeof raw.autoOnSessionStart === "boolean") {
+    out.autoOnSessionStart = raw.autoOnSessionStart;
+  }
+  if (typeof raw.autoDebounceHours === "number" && raw.autoDebounceHours >= 0) {
+    out.autoDebounceHours = raw.autoDebounceHours;
+  }
+  if (raw.perPersonaTtlDays && typeof raw.perPersonaTtlDays === "object") {
+    const incoming = raw.perPersonaTtlDays;
+    const merged = { ...out.perPersonaTtlDays };
+    for (const [name, days] of Object.entries(incoming)) {
+      if (typeof days === "number" && days > 0) {
+        merged[name] = Math.floor(days);
+      }
+    }
+    out.perPersonaTtlDays = merged;
+  }
+  return out;
+}
+function loadConfigWithErrors(cwd) {
+  const errors = [];
+  const u = safeReadJson(userConfigPath());
+  if (u.error) errors.push(u.error);
+  const userCfg = mergeConfig({ ...DEFAULT_CONFIG }, u.value);
+  const p = safeReadJson(projectConfigPath(cwd));
+  if (p.error) errors.push(p.error);
+  const projectCfg = mergeConfig({ ...DEFAULT_CONFIG }, p.value);
+  let merged = mergeConfig({ ...DEFAULT_CONFIG }, u.value);
+  merged = mergeConfig(merged, p.value);
+  return { config: merged, user: userCfg, project: projectCfg, errors };
+}
+function loadConfig(cwd) {
+  const config = loadConfigWithErrors(cwd).config;
+  const envMode = process.env.PI_CONDUCTOR_WORKTREE_MODE;
+  if (envMode === "conductor" || envMode === "external") {
+    return { ...config, worktreeMode: envMode };
+  }
+  return config;
+}
+
+// src/effort/open.ts
+init_worktree();
+
+// src/effort/policy.ts
+import { matchesGlob } from "node:path";
+var EFFORT_NOTICE = "M5: disjoint effort writers run in independent worktrees within global/effort limits; integration remains serial after optional generated artifact regeneration, baseline/candidate verification and repository hooks. Legacy work remains UNINTEGRATED. Crash recovery uses owner fencing and reachable Git proof; uncertain work pauses for human effort resume/requeue. Delivery-uncertain callbacks are never replayed automatically. Merger, landing, readers, auto plans, chains and retries remain unavailable.";
+function effortSummary(run) {
+  if (!run.effort) return "";
+  const state = run.landedCommit ? `integrated ${run.landedCommit.slice(0, 12)}` : run.mergeResult?.nothingToCommit ? "tree-equal no-op" : run.status === "integrating" ? `integrating (${run.integration?.state ?? "paused"})` : "UNINTEGRATED";
+  const violations = run.integration?.touchViolations ?? run.effort.touchViolations;
+  return `${run.effort.name}: ${state}${run.mergeResult?.verifyDisabled ? " (effort verify disabled; repository hooks still required)" : ""}${run.integration?.reason ? `: ${run.integration.reason}` : ""}${violations?.length ? `; touches violations: ${JSON.stringify(violations)}` : ""}`;
+}
+function validateEffortName(name) {
+  if (typeof name !== "string" || !/^[a-z][a-z0-9-]{0,39}$/.test(name)) {
+    throw new Error("effort name must match /^[a-z][a-z0-9-]{0,39}$/");
+  }
+}
+function validateTouches(paths) {
+  if (!Array.isArray(paths) || paths.length === 0 || paths.some((p) => typeof p !== "string" || !p || p.startsWith("/") || !/^[\p{L}\p{N}_.* /-]+$/u.test(p) || p.trim() !== p || p.split("/").some((s) => !s || s === "." || s === ".."))) {
+    throw new Error("effort paths must be nonempty repo-relative globs using literals, * or **; no traversal or absolute paths");
+  }
+}
+function isGeneratedPath(path, generated) {
+  return !path.startsWith("/") && !path.includes("\0") && !path.split("/").some((p) => !p || p === "." || p === "..") && !!generated?.paths.some((glob) => matchesGlob(path, glob));
+}
+function resolveEffortPolicy(config = {}, overrides = {}) {
+  const p = { verifyTimeoutSeconds: 1200, verifyRetries: 1, maxParallel: 2, merger: "auto", mergerMaxAttempts: 1, land: "branch", history: "squash", ...config, ...overrides };
+  if (typeof p.verify !== "string") throw new Error('no verify command: set efforts.verify or explicitly pass verify:"" (verification disabled)');
+  if (!Number.isInteger(p.verifyTimeoutSeconds) || p.verifyTimeoutSeconds < 1) throw new Error("efforts.verifyTimeoutSeconds must be a positive integer");
+  if (!Number.isInteger(p.verifyRetries) || p.verifyRetries < 0 || p.verifyRetries > 1) throw new Error("efforts.verifyRetries must be 0 or 1");
+  if (p.verify.includes("\0")) throw new Error("efforts.verify must not contain NUL");
+  if (!Number.isInteger(p.maxParallel) || p.maxParallel < 1) throw new Error("efforts.maxParallel must be a positive integer");
+  if (!["auto", "ask", "off"].includes(p.merger)) throw new Error("efforts.merger must be auto, ask or off");
+  if (p.mergerMaxAttempts !== 1) throw new Error("efforts.mergerMaxAttempts must be 1");
+  if (!["branch", "base"].includes(p.land)) throw new Error("efforts.land must be branch or base");
+  if (p.history !== "squash") throw new Error("efforts.history must be squash");
+  if (p.generated !== void 0) {
+    validateTouches(p.generated?.paths);
+    if (typeof p.generated.command !== "string" || !p.generated.command.trim() || p.generated.command.includes("\0")) throw new Error("efforts.generated.command must be nonempty");
+  }
+  return {
+    verify: p.verify,
+    verifyTimeoutSeconds: p.verifyTimeoutSeconds,
+    verifyRetries: p.verifyRetries,
+    maxParallel: p.maxParallel,
+    merger: p.merger,
+    mergerMaxAttempts: 1,
+    land: p.land,
+    history: "squash",
+    ...p.generated ? { generated: { paths: [...p.generated.paths], command: p.generated.command } } : {}
+  };
+}
+
+// src/effort/store.ts
+import { createHash, randomUUID } from "node:crypto";
+import { closeSync, existsSync as existsSync4, fsyncSync, linkSync, mkdirSync as mkdirSync2, openSync, readFileSync as readFileSync5, readdirSync as readdirSync2, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { dirname as dirname3, join as join5 } from "node:path";
+
+// src/effort/process-group.ts
+import { readdirSync, readFileSync as readFileSync4 } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
+function linuxProcesses() {
+  if (process.platform !== "linux") throw new Error("live group teardown requires readable Linux procfs identity evidence");
+  return readdirSync("/proc").filter((name) => /^\d+$/.test(name)).flatMap((name) => {
+    let raw;
+    try {
+      raw = readFileSync4(`/proc/${name}/stat`, "utf8");
+    } catch (error) {
+      if (["ENOENT", "ESRCH"].includes(error.code ?? "")) return [];
+      throw error;
+    }
+    const fields = raw.slice(raw.lastIndexOf(")") + 2).trim().split(/\s+/);
+    const member = { pid: Number(name), pgid: Number(fields[2]), sid: Number(fields[3]), startTime: Number(fields[19]), state: fields[0] };
+    if (raw.lastIndexOf(")") < 0 || !/^[A-Za-z]$/.test(member.state) || ![member.pid, member.pgid, member.sid, member.startTime].every((n) => Number.isSafeInteger(n) && n >= 0)) {
+      try {
+        readFileSync4(`/proc/${name}/stat`, "utf8");
+      } catch (error) {
+        if (["ENOENT", "ESRCH"].includes(error.code ?? "")) return [];
+      }
+      throw new Error(`unreadable process identity: ${name}`);
+    }
+    return [member];
+  });
+}
+async function stopOwnedProcessGroup(group, deps = {}) {
+  if (!Number.isSafeInteger(group.pid) || group.pid <= 1) throw new Error("invalid owned process group");
+  const signal = deps.signal ?? process.kill;
+  const processes = deps.processes ?? linuxProcesses;
+  const now = deps.now ?? (() => performance.now());
+  const wait = deps.wait ?? delay;
+  const known = /* @__PURE__ */ new Map();
+  if (group.startTime !== void 0) known.set(group.pid, group.startTime);
+  const send = (sig) => {
+    try {
+      signal(-group.pid, sig);
+      return true;
+    } catch (error) {
+      if (error.code === "ESRCH") return false;
+      throw new Error(`group ${group.pid} signal ${sig} unconfirmed: ${error.message}`);
+    }
+  };
+  const observe = () => {
+    if (!send(0)) return [];
+    if (!Number.isSafeInteger(group.startTime) || group.startTime <= 0) throw new Error("missing owned group start identity");
+    const members = processes().filter((p) => p.pgid === group.pid);
+    if (!members.length) {
+      if (!send(0)) return [];
+      throw new Error(`group ${group.pid} exists but membership is unknown`);
+    }
+    if (members.some((p) => p.sid !== group.pid || p.pid === group.pid && p.startTime !== group.startTime) || !members.some((p) => known.get(p.pid) === p.startTime)) throw new Error(`group ${group.pid} identity continuity lost; refusing signal`);
+    for (const p of members) known.set(p.pid, p.startTime);
+    return members;
+  };
+  const active = (members) => members.some((p) => p.state !== "Z" && p.state !== "X");
+  const initial = observe();
+  if (!initial.length) return;
+  if (active(initial) && !send("SIGTERM")) return;
+  const escalationAt = now() + 2e3;
+  const deadline = escalationAt + 1e3;
+  let escalated = false;
+  let zombies;
+  for (; ; ) {
+    const members = observe();
+    if (!members.length) return;
+    if (!active(members)) {
+      const identities = members.map((p) => `${p.pid}:${p.startTime}`).sort().join(",");
+      if (identities === zombies) return;
+      zombies = identities;
+    } else {
+      zombies = void 0;
+      if (!escalated && now() >= escalationAt) {
+        if (!send("SIGKILL")) return;
+        escalated = true;
+      }
+    }
+    if (now() >= deadline) throw new Error(`group ${group.pid} teardown unconfirmed after TERM/KILL deadline`);
+    await wait(25);
+  }
+}
+function processIdentityState(owner, deps = {}) {
+  if (!Number.isSafeInteger(owner.pid) || owner.pid <= 1 || !Number.isSafeInteger(owner.startTime) || owner.startTime <= 0) return "unknown";
+  try {
+    (deps.signal ?? process.kill)(owner.pid, 0);
+  } catch (e) {
+    return e.code === "ESRCH" ? "dead" : "unknown";
+  }
+  try {
+    const observed = (deps.processes ?? linuxProcesses)().find((p) => p.pid === owner.pid);
+    if (!observed || observed.startTime !== owner.startTime) return "unknown";
+    return observed.state === "Z" || observed.state === "X" ? "dead" : "live";
+  } catch {
+    return "unknown";
+  }
+}
+
+// src/effort/store.ts
+function effortsRoot() {
+  return join5(homedir3(), ".pi", "agent", "conductor", "efforts");
+}
+function effortDir(gitRoot2, name) {
+  validateEffortName(name);
+  return join5(effortsRoot(), `${name}-${createHash("sha256").update(gitRoot2).digest("hex")}`);
+}
+function readEffort(gitRoot2, name) {
+  const path = join5(effortDir(gitRoot2, name), "effort.json");
+  if (!existsSync4(path)) return void 0;
+  const r = JSON.parse(readFileSync5(path, "utf8"));
+  if (r.schema !== 1 || r.gitRoot !== gitRoot2 || r.name !== name || r.intRef !== `refs/heads/conductor-int/${name}` || !Array.isArray(r.members)) {
+    throw new Error("conflicting effort record identity; ownership unresolved");
+  }
+  return r;
+}
+function sameOwner(a, b) {
+  return a.sessionId === b.sessionId && a.pid === b.pid && a.startTime === b.startTime && (a.generation ?? 0) === (b.generation ?? 0);
+}
+var claimPath = (root, name) => join5(effortDir(root, name), "effort.lock");
+var generationPath = (path, generation) => generation ? `${path}.${generation}` : path;
+function readClaim(path) {
+  let owner;
+  for (let n = 0; ; n++) {
+    let raw;
+    try {
+      raw = readFileSync5(generationPath(path, n), "utf8");
+    } catch (e) {
+      if (e.code === "ENOENT") return owner;
+      throw e;
+    }
+    const parsed = JSON.parse(raw);
+    owner = { ...parsed, sessionId: parsed.sessionId ?? parsed.token };
+    if ((owner.generation ?? 0) !== n || !owner.sessionId || !Number.isInteger(owner.pid) || !Number.isFinite(owner.startTime)) throw new Error("invalid ownership claim; preserve for inspection");
+  }
+}
+function assertClaim(path, owner) {
+  const current = readClaim(path);
+  if (!current || !sameOwner(current, owner) || existsSync4(`${generationPath(path, owner.generation ?? 0)}.released`)) throw new Error("owner generation fenced; work preserved");
+}
+function acquireClaim(path, identity, reuse = false) {
+  const previous = readClaim(path);
+  const released = previous && existsSync4(`${generationPath(path, previous.generation ?? 0)}.released`);
+  if (previous && !released) {
+    if (reuse && sameOwner({ ...identity, generation: previous.generation }, previous)) return previous;
+    const state = processIdentityState(previous);
+    if (state !== "dead") throw new Error(`owner ${state}; takeover refused`);
+  }
+  const owner = { ...identity, generation: previous ? (previous.generation ?? 0) + 1 : 0 };
+  publishJson(generationPath(path, owner.generation), owner, () => {
+    const current = readClaim(path);
+    if (previous ? !current || !sameOwner(current, previous) : current !== void 0) throw new Error("owner claim changed");
+  });
+  return owner;
+}
+function releaseClaim(path, owner) {
+  publishJson(`${generationPath(path, owner.generation ?? 0)}.released`, {}, () => assertClaim(path, owner));
+}
+function assertEffortOwner(record, owner) {
+  if (!sameOwner(record.owner, owner)) throw new Error("effort owned by another session or generation");
+  assertClaim(claimPath(record.gitRoot, record.name), owner);
+}
+function claimEffort(gitRoot2, name, owner) {
+  const path = claimPath(gitRoot2, name);
+  if (readClaim(path)) throw new Error(`effort "${name}" already claimed; ownership unresolved`);
+  publishJson(path, owner, () => {
+    if (readClaim(path)) throw new Error("effort already claimed");
+  });
+}
+function adoptEffort(record, identity) {
+  const owner = acquireClaim(claimPath(record.gitRoot, record.name), identity, true);
+  const current = readEffort(record.gitRoot, record.name);
+  if (!current) throw new Error("effort record missing; preserve claim");
+  const updated = { ...current, owner, updatedAt: Date.now() };
+  writeEffort(updated);
+  return updated;
+}
+function publishJson(path, value, fence) {
+  mkdirSync2(dirname3(path), { recursive: true });
+  const temp = `${path}-${randomUUID()}.claim`;
+  try {
+    fence();
+    const file = openSync(temp, "wx");
+    try {
+      writeFileSync(file, JSON.stringify(value));
+      fsyncSync(file);
+    } finally {
+      closeSync(file);
+    }
+    fence();
+    linkSync(temp, path);
+    const fd = openSync(dirname3(path), "r");
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  } finally {
+    if (existsSync4(temp)) unlinkSync(temp);
+  }
+}
+function writeDurableJson(path, value, fence) {
+  writeDurableFile(path, JSON.stringify(value, null, 2), fence);
+}
+function writeDurableFile(path, contents, fence) {
+  const temp = `${path}-${randomUUID()}.tmp`;
+  let fd;
+  try {
+    fence();
+    fd = openSync(temp, "wx");
+    writeFileSync(fd, contents);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = void 0;
+    fence();
+    renameSync(temp, path);
+    fd = openSync(dirname3(path), "r");
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = void 0;
+  } finally {
+    if (fd !== void 0) closeSync(fd);
+    if (existsSync4(temp)) unlinkSync(temp);
+  }
+}
+function writeEffort(record) {
+  writeDurableJson(join5(effortDir(record.gitRoot, record.name), "effort.json"), record, () => assertEffortOwner(record, record.owner));
+}
+function addEffortMember(record, id) {
+  const current = readEffort(record.gitRoot, record.name);
+  if (!current) throw new Error("effort record missing; refusing spawn");
+  assertEffortOwner(current, record.owner);
+  if (!current.members.includes(id)) writeEffort({ ...current, members: [...current.members, id], updatedAt: Date.now() });
+}
+function listEfforts(gitRoot2) {
+  if (!existsSync4(effortsRoot())) return [];
+  const result = [];
+  for (const dir of readdirSync2(effortsRoot())) {
+    const path = join5(effortsRoot(), dir, "effort.json");
+    if (!existsSync4(path)) continue;
+    const r = JSON.parse(readFileSync5(path, "utf8"));
+    if (r.gitRoot === gitRoot2) result.push(readEffort(gitRoot2, r.name));
+  }
+  return result;
+}
+function assertRunEffortOwner(run) {
+  if (!run.effort) return;
+  const record = readEffort(run.effort.gitRoot, run.effort.name);
+  if (!record) throw new Error("effort record missing");
+  const owner = run.effort.owner ?? { sessionId: run.parentSessionId, pid: run.parentPid, startTime: run.parentStartTime };
+  assertEffortOwner(record, owner);
+}
+
+// src/effort/open.ts
+function effortGit(cwd, ...args) {
+  const output = execFileSync("git", args, { cwd, env: Object.fromEntries(Object.entries(gitEnv()).filter(([key]) => !key.startsWith("HERDR_"))), encoding: "utf8", stdio: "pipe", timeout: 3e4 });
+  return output.endsWith("\0") ? output : output.trim();
+}
+function effortRepository(cwd) {
+  try {
+    const requestedRoot = realpathSync3(effortGit(cwd, "rev-parse", "--show-toplevel"));
+    const first = effortGit(cwd, "worktree", "list", "--porcelain", "-z").split("\0")[0];
+    if (!first.startsWith("worktree ")) throw new Error("missing main worktree");
+    return { gitRoot: realpathSync3(first.slice(9)), requestedRoot };
+  } catch {
+    throw new Error("efforts require a non-bare git repository");
+  }
+}
+function effortOwner(sessionId) {
+  const startTime = readProcessStartTime(process.pid) ?? performance.timeOrigin;
+  if (!sessionId) throw new Error("effort requires a session id");
+  return { sessionId, pid: process.pid, startTime };
+}
+function checkEffortRepository(cwd) {
+  const repo = effortRepository(cwd);
+  if (loadConfig(cwd).worktreeMode === "external") throw new Error("efforts do not support external worktree mode");
+  if (detectBrazilWorkspaceRoot(repo.gitRoot) || detectBrazilWorkspaceRoot(repo.requestedRoot)) throw new Error("efforts are not supported in Brazil workspaces");
+  return repo;
+}
+function effortTip(record) {
+  if (effortGit(record.gitRoot, "worktree", "list", "--porcelain").split("\n").includes(`branch ${record.intRef}`)) throw new Error("effort integration ref is checked out; refusing spawn");
+  return effortGit(record.gitRoot, "rev-parse", "--verify", `${record.intRef}^{commit}`);
+}
+function openEffort(cwd, name, sessionId, overrides = {}) {
+  validateEffortName(name);
+  const { gitRoot: gitRoot2, requestedRoot } = checkEffortRepository(cwd);
+  const policy = resolveEffortPolicy(loadConfig(cwd).efforts, overrides);
+  const owner = effortOwner(sessionId);
+  let baseRef;
+  try {
+    baseRef = effortGit(requestedRoot, "symbolic-ref", "HEAD");
+  } catch {
+    throw new Error("effort base must be an attached local branch, not detached HEAD");
+  }
+  if (!baseRef.startsWith("refs/heads/") || baseRef.startsWith("refs/heads/conductor-int/")) throw new Error("invalid effort base branch");
+  const baseOid = effortGit(requestedRoot, "rev-parse", "--verify", `${baseRef}^{commit}`);
+  if (baseOid !== effortGit(requestedRoot, "rev-parse", "HEAD")) throw new Error("effort base changed while opening");
+  if (readEffort(gitRoot2, name)) throw new Error(`effort "${name}" already exists`);
+  claimEffort(gitRoot2, name, owner);
+  const now = Date.now();
+  const record = { schema: 1, name, gitRoot: gitRoot2, intRef: `refs/heads/conductor-int/${name}`, baseBranch: baseRef.slice(11), baseOid, owner, policy, members: [], queue: [], status: "open", createdAt: now, updatedAt: now };
+  effortGit(gitRoot2, "update-ref", record.intRef, baseOid, "");
+  writeEffort(record);
+  return record;
+}
+function ownedEffort(cwd, name, sessionId) {
+  validateEffortName(name);
+  const { gitRoot: gitRoot2 } = checkEffortRepository(cwd);
+  const existing = readEffort(gitRoot2, name);
+  if (!existing) return openEffort(cwd, name, sessionId);
+  const identity = effortOwner(sessionId);
+  assertEffortOwner(existing, { ...identity, generation: existing.owner.generation });
+  effortTip(existing);
+  return existing;
+}
 
 // src/effort/git.ts
 import { spawnSync } from "node:child_process";
@@ -1543,13 +1709,31 @@ function assertCandidate(path, oid) {
   if (effortGit(path, "status", "--porcelain", "--untracked-files=all")) throw new Error("candidate has unexpected dirty changes; refusing integration");
   if (effortGit(path, "rev-parse", "--abbrev-ref", "HEAD") !== "HEAD") throw new Error("candidate must stay detached");
 }
+var StaleTipError = class extends Error {
+};
 function checkedCas(root, ref, candidate, expected, fence) {
   if (effortGit(root, "worktree", "list", "--porcelain").split("\n").includes(`branch ${ref}`)) throw new Error("integration ref is checked out; queue paused");
   fence();
-  effortGit(root, "update-ref", ref, candidate, expected);
+  try {
+    effortGit(root, "update-ref", ref, candidate, expected);
+  } catch (error) {
+    if (effortGit(root, "rev-parse", "--verify", ref) !== expected) throw new StaleTipError("integration tip changed; recompute");
+    throw error;
+  }
 }
 function shellQuote2(value) {
   return "'" + value.replaceAll("'", `'"'"'`) + "'";
+}
+function integratedCandidate(record, run) {
+  const e = run.integration;
+  if (!e?.candidateOid || !e.expectedTip || !e.candidateTree || e.verifiedOid !== e.candidateOid && e.state !== "verified" && e.state !== "accepted" || e.verifyIdentity.command !== record.policy.verify || e.verifyIdentity.timeoutSeconds !== record.policy.verifyTimeoutSeconds || e.verifyIdentity.retries !== record.policy.verifyRetries || e.verifyIdentity.command && (!e.verify?.passed || e.verify.command !== e.verifyIdentity.command)) return;
+  const root = record.gitRoot;
+  const body = effortGit(root, "show", "-s", "--format=%B", e.candidateOid).split("\n");
+  if ([`Conductor-Effort: ${record.name}`, `Conductor-Run: ${run.id}`].some((trailer) => body.filter((line) => line === trailer).length !== 1)) return;
+  if (effortGit(root, "show", "-s", "--format=%P", e.candidateOid) !== e.expectedTip || effortGit(root, "rev-parse", `${e.candidateOid}^{tree}`) !== e.candidateTree) return;
+  const result = spawnSync("git", ["merge-base", "--is-ancestor", e.candidateOid, record.intRef], { cwd: root, env: gitEnv(), timeout: 3e4 });
+  if (result.status === 0) return e.candidateOid;
+  if (result.status !== 1) throw new Error("candidate reachability unknown; preserve integration");
 }
 
 // src/effort/generated.ts
@@ -1557,13 +1741,13 @@ function changedPaths(cwd, before, after) {
   return effortGit(cwd, "diff-tree", "-r", "--no-renames", "--name-only", "-z", before, after).split("\0").filter(Boolean);
 }
 function snapshot(cwd, prefix2 = "") {
-  return Object.fromEntries(readdirSync2(join6(cwd, prefix2)).flatMap((name) => {
+  return Object.fromEntries(readdirSync3(join6(cwd, prefix2)).flatMap((name) => {
     const path = prefix2 ? `${prefix2}/${name}` : name;
     const file = join6(cwd, path), stat6 = lstatSync(file);
     if (stat6.isDirectory() && path !== ".git") return Object.entries(snapshot(cwd, path));
     if (stat6.isSymbolicLink()) return [[path, `link:${readlinkSync(file)}`]];
     if (!stat6.isFile()) throw new Error(`generated candidate contains unsupported file type: ${JSON.stringify(path)}`);
-    return [[path, `${stat6.mode}:${createHash2("sha256").update(readFileSync5(file)).digest("hex")}`]];
+    return [[path, `${stat6.mode}:${createHash2("sha256").update(readFileSync6(file)).digest("hex")}`]];
   }));
 }
 async function regenerateCandidate(cwd, expectedHead, generated, evidencePath, command, fence) {
@@ -2263,7 +2447,7 @@ function shouldRetry(cls, attempt, policy) {
 }
 
 // src/context-retirement.ts
-import { readFileSync as readFileSync6 } from "node:fs";
+import { readFileSync as readFileSync7 } from "node:fs";
 var RETIRED_ENTRY = "conductor-context-retired";
 var FINALIZE_INSTRUCTION = "This session is retiring because of context pressure. Start no new objectives. Bring the current coherent operation to a safe stopping point, preserving essential validation. Return a self-contained handoff describing completed work, current state, relevant files, checks performed and their results, unresolved issues, and exact next steps for a fresh child. Retirement is not evidence that the task is complete; distinguish verified work from unfinished work.";
 function hasRetirement(entries, sessionId) {
@@ -2297,7 +2481,7 @@ function installContextRetirement(pi) {
 function savedSessionRetired(sessionPath) {
   if (!sessionPath) return false;
   try {
-    const entries = readFileSync6(sessionPath, "utf8").split("\n").map((line) => {
+    const entries = readFileSync7(sessionPath, "utf8").split("\n").map((line) => {
       try {
         return JSON.parse(line);
       } catch {
@@ -2316,7 +2500,7 @@ function contextRetirementNotice(run) {
 }
 
 // src/memory.ts
-import { existsSync as existsSync6, mkdirSync as mkdirSync4, readFileSync as readFileSync7, appendFileSync as appendFileSync2 } from "node:fs";
+import { existsSync as existsSync6, mkdirSync as mkdirSync4, readFileSync as readFileSync8, appendFileSync as appendFileSync2 } from "node:fs";
 import { homedir as homedir4 } from "node:os";
 import { join as join8, dirname as dirname5 } from "node:path";
 import { createHash as createHash3 } from "node:crypto";
@@ -2363,9 +2547,9 @@ function normalizeTaskShape(task, topK = 12) {
   return createHash3("sha256").update(basis).digest("hex").slice(0, 16);
 }
 var HALF_LIFE_MS = 30 * 24 * 60 * 60 * 1e3;
-function scoreOutcomes(records, shape, now) {
+function scoreOutcomes(records2, shape, now) {
   const byPersona = /* @__PURE__ */ new Map();
-  for (const r of records) {
+  for (const r of records2) {
     if (r.taskShape !== shape) continue;
     const age = Math.max(0, now - r.ts);
     const w = Math.pow(2, -(age / HALF_LIFE_MS));
@@ -2400,7 +2584,7 @@ function loadOutcomes(path = memoryPath()) {
   if (!existsSync6(path)) return [];
   let raw;
   try {
-    raw = readFileSync7(path, "utf-8");
+    raw = readFileSync8(path, "utf-8");
   } catch {
     return [];
   }
@@ -2440,6 +2624,8 @@ function createRunPipeline(run, piArgs, opts) {
   const runtime = opts.runtime ?? subprocessRuntime;
   const rpc = piArgs[1] === "rpc";
   run.onComplete = opts.onComplete;
+  const recoveredAnswer = !!opts.answer && !!run.reconciledAtStartup && !!run.effort && run.effort.gate !== void 0;
+  if (run.effort && (!run.reconciledAtStartup || run.effort.gate !== void 0)) run.effort.gate = opts.resolvedHook ?? null;
   let awaitingAnswer = opts.answer !== void 0;
   let answerRecord = Promise.resolve();
   const restoreAnswer = async (reason) => {
@@ -2622,7 +2808,7 @@ function createRunPipeline(run, piArgs, opts) {
       try {
         const record = readEffort(run.effort.gitRoot, run.effort.name);
         if (!record) throw new Error("effort record missing; integration refused");
-        assertEffortOwner(record, effortOwner(run.parentSessionId));
+        assertRunEffortOwner(run);
         const policy = resolveEffortPolicy(record.policy);
         if (!run.worktreePath || !run.worktreeBranch) throw new Error("effort assignment workspace missing");
         if (effortGit(run.worktreePath, "status", "--porcelain", "--untracked-files=all")) throw new Error("writer has uncommitted work; integration refused and workspace preserved");
@@ -2631,6 +2817,7 @@ function createRunPipeline(run, piArgs, opts) {
         run.status = "integrating";
         run.integration = {
           ...measured,
+          resultText: getFinalText(run.messages),
           state: "queued",
           enqueuedAt: Date.now(),
           branchHead,
@@ -2639,12 +2826,12 @@ function createRunPipeline(run, piArgs, opts) {
         };
         if (run.integrationSuspended) {
           run.integration.state = "paused";
-          run.integration.reason = "owner runtime shut down; work preserved until recovery is available";
-          await writeRecord(run, () => assertEffortOwner(record, effortOwner(run.parentSessionId)));
+          run.integration.reason = "owner runtime shut down; work preserved for fenced recovery";
+          await writeRecord(run, () => assertRunEffortOwner(run));
           opts.registry.notify(run);
           return;
         }
-        const outcome = await opts.registry.integrations.enqueue(run, () => opts.registry.notify(run));
+        const outcome = await opts.registry.integrations.enqueue(run, () => opts.registry.notify(run), recoveredAnswer);
         terminal = outcome.terminal;
         run.mergeResult = outcome.mergeResult;
         run.landedCommit = outcome.landedCommit;
@@ -2655,64 +2842,21 @@ function createRunPipeline(run, piArgs, opts) {
         run.mergeResult = { success: false, reason: "error", errorMessage: run.errorMessage };
       }
     }
-    await settleRun(terminal, exitCode);
+    await settle(terminal, exitCode);
   };
   let settled = false;
-  const settleRun = async (terminal, exitCode) => {
+  const settle = async (terminal, exitCode) => {
     if (settled) return;
     settled = true;
-    if (!applyCloseHandlerTerminal(run, terminal, exitCode)) {
-      discoverSessionPathIfMissing(run, opts.sessionDir);
-      await writeRecord(run);
-      run.proc = void 0;
-      try {
-        transport.stop();
-      } catch {
-      }
-      emitFinalizeEvent(run, opts.events);
-      applyRetryIfNeeded(run, opts.onRetry);
-      recordRunOutcome(run);
-      donePromiseResolve(run);
-      return;
-    }
-    if (terminal === "failed" && !run.errorMessage) {
-      run.errorMessage = transport.stderr.trim() || `pi subprocess exited with code ${exitCode}`;
-    }
-    applySubstanceCheck(run, terminal);
-    discoverSessionPathIfMissing(run, opts.sessionDir);
-    run.proc = void 0;
-    if (!run.effort) terminal = await settleWorktree(run, terminal);
-    else run.worktreeKept = `${effortSummary(run)}. Branch ${run.worktreeBranch} and worktree ${run.worktreePath} preserved.`;
-    if (terminal === "merge_conflict") run.status = terminal;
-    if (terminal !== "completed") {
-      const tail = terminal === "hook_failed" ? run.hookResult?.tailText ?? transport.stderr : transport.stderr;
-      run.failureClass = classifyFailure({
-        terminal,
-        exitCode,
-        stderrTail: tail,
-        errorMessage: run.errorMessage
-      });
-    }
-    if (run.mergeResult?.reason === "verify_timeout") run.failureClass = "timeout";
-    opts.registry.notify(run);
     try {
-      transport.stop();
-    } catch {
+      await settleRun(run, terminal, exitCode, opts, transport, donePromiseResolve);
+    } catch (error) {
+      if (!run.integration) throw error;
+      run.status = "integrating";
+      run.integration.state = "paused";
+      run.integration.reason = `terminal persistence uncertain: ${error.message}`;
+      opts.registry.notify(run);
     }
-    Promise.all([writeRecord(run), writeFinal(run)]).catch(() => {
-    }).finally(() => {
-      if (opts.onComplete) {
-        try {
-          opts.onComplete(run);
-        } catch {
-        }
-      }
-      applyChainIfPresent(run, run.status, opts.onChain);
-      applyRetryIfNeeded(run, opts.onRetry);
-      recordRunOutcome(run);
-      emitFinalizeEvent(run, opts.events);
-      donePromiseResolve(run);
-    });
   };
   const processLine = (line) => {
     const trimmed = line.trim();
@@ -2763,10 +2907,82 @@ function createRunPipeline(run, piArgs, opts) {
   };
   return done;
 }
+async function settleRun(run, terminal, exitCode, opts, transport = { stderr: "", stop() {
+} }, donePromiseResolve = () => {
+}) {
+  if (!applyCloseHandlerTerminal(run, terminal, exitCode)) {
+    discoverSessionPathIfMissing(run, opts.sessionDir);
+    await writeRecord(run);
+    run.proc = void 0;
+    try {
+      transport.stop();
+    } catch {
+    }
+    emitFinalizeEvent(run, opts.events);
+    applyRetryIfNeeded(run, opts.onRetry);
+    recordRunOutcome(run);
+    donePromiseResolve(run);
+    return;
+  }
+  if (terminal === "failed" && !run.errorMessage) {
+    run.errorMessage = transport.stderr.trim() || `pi subprocess exited with code ${exitCode}`;
+  }
+  if (!run.reconciledAtStartup) applySubstanceCheck(run, terminal);
+  discoverSessionPathIfMissing(run, opts.sessionDir);
+  run.proc = void 0;
+  if (!run.effort) terminal = await settleWorktree(run, terminal);
+  else run.worktreeKept = `${effortSummary(run)}. Branch ${run.worktreeBranch} and worktree ${run.worktreePath} preserved.`;
+  if (terminal === "merge_conflict") run.status = terminal;
+  if (terminal !== "completed") {
+    const tail = terminal === "hook_failed" ? run.hookResult?.tailText ?? transport.stderr : transport.stderr;
+    run.failureClass = classifyFailure({
+      terminal,
+      exitCode,
+      stderrTail: tail,
+      errorMessage: run.errorMessage
+    });
+  }
+  if (run.mergeResult?.reason === "verify_timeout") run.failureClass = "timeout";
+  opts.registry.notify(run);
+  try {
+    transport.stop();
+  } catch {
+  }
+  const dispatch = () => {
+    try {
+      opts.onComplete?.(run);
+    } catch {
+    }
+    applyChainIfPresent(run, run.status, opts.onChain);
+    applyRetryIfNeeded(run, opts.onRetry);
+    recordRunOutcome(run);
+    emitFinalizeEvent(run, opts.events);
+  };
+  if (run.effort && run.integration) {
+    const persist = () => writeRecord(run, () => assertRunEffortOwner(run));
+    await persist();
+    await writeFinal(run, true);
+    if (!run.integration.delivery) {
+      run.integration.delivery = "intent";
+      await persist();
+      assertRunEffortOwner(run);
+      dispatch();
+      run.integration.delivery = "attempted";
+      await persist();
+    }
+    donePromiseResolve(run);
+  } else {
+    await Promise.all([writeRecord(run), writeFinal(run)]).catch(() => {
+    }).finally(() => {
+      dispatch();
+      donePromiseResolve(run);
+    });
+  }
+}
 
 // src/effort/driver.ts
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { copyFileSync, mkdirSync as mkdirSync6, readFileSync as readFileSync9, unlinkSync as unlinkSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { copyFileSync, mkdirSync as mkdirSync6, writeFileSync as writeFileSync3 } from "node:fs";
 import { dirname as dirname7, join as join9 } from "node:path";
 
 // src/hook-runner.ts
@@ -3020,100 +3236,30 @@ function renderTail(lines) {
 
 // src/effort/driver.ts
 init_worktree();
-
-// src/effort/process-group.ts
-import { readdirSync as readdirSync3, readFileSync as readFileSync8 } from "node:fs";
-import { setTimeout as delay } from "node:timers/promises";
-function linuxProcesses() {
-  if (process.platform !== "linux") throw new Error("live group teardown requires readable Linux procfs identity evidence");
-  return readdirSync3("/proc").filter((name) => /^\d+$/.test(name)).flatMap((name) => {
-    let raw;
-    try {
-      raw = readFileSync8(`/proc/${name}/stat`, "utf8");
-    } catch (error) {
-      if (["ENOENT", "ESRCH"].includes(error.code ?? "")) return [];
-      throw error;
-    }
-    const fields = raw.slice(raw.lastIndexOf(")") + 2).trim().split(/\s+/);
-    const member = { pid: Number(name), pgid: Number(fields[2]), sid: Number(fields[3]), startTime: Number(fields[19]), state: fields[0] };
-    if (raw.lastIndexOf(")") < 0 || !/^[A-Za-z]$/.test(member.state) || ![member.pid, member.pgid, member.sid, member.startTime].every((n) => Number.isSafeInteger(n) && n >= 0)) throw new Error(`unreadable process identity: ${name}`);
-    return [member];
-  });
-}
-async function stopOwnedProcessGroup(group, deps = {}) {
-  if (!Number.isSafeInteger(group.pid) || group.pid <= 1) throw new Error("invalid owned process group");
-  const signal = deps.signal ?? process.kill;
-  const processes = deps.processes ?? linuxProcesses;
-  const now = deps.now ?? (() => performance.now());
-  const wait = deps.wait ?? delay;
-  const known = /* @__PURE__ */ new Map();
-  if (group.startTime !== void 0) known.set(group.pid, group.startTime);
-  const send = (sig) => {
-    try {
-      signal(-group.pid, sig);
-      return true;
-    } catch (error) {
-      if (error.code === "ESRCH") return false;
-      throw new Error(`group ${group.pid} signal ${sig} unconfirmed: ${error.message}`);
-    }
-  };
-  const observe = () => {
-    if (!send(0)) return [];
-    if (!Number.isSafeInteger(group.startTime) || group.startTime <= 0) throw new Error("missing owned group start identity");
-    const members = processes().filter((p) => p.pgid === group.pid);
-    if (!members.length) {
-      if (!send(0)) return [];
-      throw new Error(`group ${group.pid} exists but membership is unknown`);
-    }
-    if (members.some((p) => p.sid !== group.pid || p.pid === group.pid && p.startTime !== group.startTime) || !members.some((p) => known.get(p.pid) === p.startTime)) throw new Error(`group ${group.pid} identity continuity lost; refusing signal`);
-    for (const p of members) known.set(p.pid, p.startTime);
-    return members;
-  };
-  const active = (members) => members.some((p) => p.state !== "Z" && p.state !== "X");
-  const initial = observe();
-  if (!initial.length) return;
-  if (active(initial) && !send("SIGTERM")) return;
-  const escalationAt = now() + 2e3;
-  const deadline = escalationAt + 1e3;
-  let escalated = false;
-  let zombies;
-  for (; ; ) {
-    const members = observe();
-    if (!members.length) return;
-    if (!active(members)) {
-      const identities = members.map((p) => `${p.pid}:${p.startTime}`).sort().join(",");
-      if (identities === zombies) return;
-      zombies = identities;
-    } else {
-      zombies = void 0;
-      if (!escalated && now() >= escalationAt) {
-        if (!send("SIGKILL")) return;
-        escalated = true;
-      }
-    }
-    if (now() >= deadline) throw new Error(`group ${group.pid} teardown unconfirmed after TERM/KILL deadline`);
-    await wait(25);
-  }
-}
-
-// src/effort/driver.ts
 var EffortDriver = class {
   queues = /* @__PURE__ */ new Map();
-  flights = /* @__PURE__ */ new Set();
-  enqueue(run, notify) {
-    const owner = effortOwner(run.parentSessionId);
+  flights = /* @__PURE__ */ new Map();
+  whenIdle(root) {
+    return this.flights.get(root) ?? Promise.resolve();
+  }
+  enqueue(run, notify, recovered = false) {
+    const owner = run.effort.owner ?? effortOwner(run.parentSessionId);
     const record = readEffort(run.effort.gitRoot, run.effort.name);
     assertEffortOwner(record, owner);
-    if (run.status !== "integrating" || !run.integration || run.pendingAsk || run.reconciledAtStartup) throw new Error("only observed hook-passed completions may enter integration");
-    return new Promise((resolve5) => {
-      const job = { run, owner, notify, resolve: resolve5, cancelled: false, suspended: !!run.integrationSuspended, finished: false };
+    if (run.status !== "integrating" || !run.integration || run.pendingAsk || run.reconciledAtStartup && !recovered) throw new Error("only observed hook-passed completions may enter integration");
+    run.integration.deliveryProtocol = 1;
+    const prior = this.queues.get(record.gitRoot)?.find((job2) => job2.run.id === run.id && !job2.finished && !job2.suspended);
+    if (prior) return prior.result;
+    let job;
+    const result = new Promise((resolve5) => {
+      job = { run, owner, notify, resolve: resolve5, cancelled: false, suspended: !!run.integrationSuspended, finished: false };
       run.integrationControl = {
         cancel: () => {
           if (job.cancelled || job.finished) return;
           this.fence(job);
           job.cancelled = true;
           void job.stop?.();
-          if (!job.flight) this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
+          if (!job.flight) void this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
         },
         suspend: async () => {
           job.suspended = true;
@@ -3126,23 +3272,29 @@ var EffortDriver = class {
           }
         }
       };
-      writeEffort({ ...record, queue: [.../* @__PURE__ */ new Set([...record.queue ?? [], run.id])], updatedAt: Date.now() });
-      job.ready = this.persist(job);
+      job.ready = this.persist(job).then(() => {
+        const current = this.fence(job);
+        writeEffort({ ...current, queue: [.../* @__PURE__ */ new Set([...current.queue ?? [], run.id])], updatedAt: Date.now() });
+      });
       void job.ready.catch(() => {
       });
       const root = record.gitRoot;
       const queue = this.queues.get(root) ?? [];
       queue.push(job);
       this.queues.set(root, queue);
-      void this.drain(root);
+      if (!this.flights.has(root)) {
+        this.flights.set(root, Promise.resolve().then(() => this.drain(root)));
+      }
     });
+    job.result = result;
+    return result;
   }
   fence(job) {
     if (job.cancelled || job.suspended) throw new Error("integration cancelled or suspended; work preserved");
     const record = readEffort(job.run.effort.gitRoot, job.run.effort.name);
     if (!record) throw new Error("effort record missing");
     assertEffortOwner(record, job.owner);
-    if (job.claim && JSON.parse(readFileSync9(job.claim.path, "utf8")).token !== job.claim.token) throw new Error("integration driver claim changed");
+    if (job.claim) assertClaim(job.claim.path, job.claim.owner);
     return record;
   }
   async persist(job) {
@@ -3151,21 +3303,23 @@ var EffortDriver = class {
     });
     job.notify();
   }
-  finish(job, outcome) {
+  async finish(job, outcome) {
     if (job.finished || job.suspended) return;
-    job.finished = true;
-    try {
-      const record = readEffort(job.run.effort.gitRoot, job.run.effort.name);
-      assertEffortOwner(record, job.owner);
-      writeEffort({ ...record, queue: (record.queue ?? []).filter((id) => id !== job.run.id), updatedAt: Date.now() });
-    } catch {
-    }
     job.run.integration.state = outcome.terminal === "completed" ? "accepted" : "paused";
     if (!outcome.mergeResult.success) job.run.integration.reason = outcome.mergeResult.reason;
     if (outcome.terminal === "killed") {
       job.run.integration.state = "cancelled";
       job.run.integration.reason = "killed; work preserved";
     }
+    await writeRecord(job.run, () => {
+      const record2 = readEffort(job.run.effort.gitRoot, job.run.effort.name);
+      assertEffortOwner(record2, job.owner);
+      if (job.claim) assertClaim(job.claim.path, job.claim.owner);
+    });
+    const record = readEffort(job.run.effort.gitRoot, job.run.effort.name);
+    assertEffortOwner(record, job.owner);
+    writeEffort({ ...record, queue: (record.queue ?? []).filter((id) => id !== job.run.id), updatedAt: Date.now() });
+    job.finished = true;
     job.run.integrationControl = void 0;
     job.resolve(outcome);
   }
@@ -3174,7 +3328,7 @@ var EffortDriver = class {
     job.run.integration.reason = reason;
     try {
       const record = this.fence(job);
-      writeEffort({ ...record, status: "paused", pausedReason: reason, updatedAt: Date.now() });
+      writeEffort({ ...record, status: "paused", pausedReason: reason, pausedRun: job.run.id, updatedAt: Date.now() });
       void this.persist(job).catch(() => {
       });
     } catch {
@@ -3188,35 +3342,46 @@ var EffortDriver = class {
     job.notify();
   }
   async drain(root) {
-    if (this.flights.has(root)) return;
-    this.flights.add(root);
     const lockDir = effortDir(root, "integration-driver");
     const lock = join9(lockDir, "driver.lock");
-    const token = randomUUID2();
+    let claim;
     let claimed = false;
     try {
       mkdirSync6(lockDir, { recursive: true });
-      writeFileSync3(lock, JSON.stringify({ token, pid: process.pid, startTime: readProcessStartTime(process.pid) }), { flag: "wx" });
+      claim = acquireClaim(lock, effortOwner(randomUUID2()));
       claimed = true;
       for (const job of this.queues.get(root) ?? []) {
         if (job.finished || job.suspended || job.cancelled) continue;
         try {
           await job.ready;
-          job.claim = { path: lock, token };
+          job.claim = { path: lock, owner: claim };
           const record = this.fence(job);
           if (record.status === "paused") {
             this.pause(job, record.pausedReason ?? "effort paused");
             continue;
           }
-          job.flight = this.integrate(job);
+          job.flight = (async () => {
+            for (; ; ) {
+              try {
+                await this.integrate(job);
+                return;
+              } catch (error) {
+                if (!(error instanceof StaleTipError)) throw error;
+                job.run.integration.casFailures = (job.run.integration.casFailures ?? 0) + 1;
+                await this.persist(job);
+                if (job.run.integration.casFailures >= 3) throw new Error("integration ref moved outside the queue: three CAS failures; resume requires inspection");
+              }
+            }
+          })();
           await job.flight;
+          if (job.cancelled) await this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
         } catch (error) {
           if (job.teardownError) {
             claimed = false;
             this.pause(job, job.teardownError.message);
             break;
           }
-          if (job.cancelled) this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
+          if (job.cancelled) await this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
           else this.pause(job, error.message);
         } finally {
           job.flight = void 0;
@@ -3227,7 +3392,7 @@ var EffortDriver = class {
       for (const job of this.queues.get(root) ?? []) if (!job.finished) this.pause(job, `integration driver ownership unresolved: ${error.message}`);
     } finally {
       try {
-        if (claimed && JSON.parse(readFileSync9(lock, "utf8")).token === token) unlinkSync2(lock);
+        if (claimed && claim) releaseClaim(lock, claim);
       } catch {
       }
       this.flights.delete(root);
@@ -3241,6 +3406,9 @@ var EffortDriver = class {
     entry.logPath = logPath;
     const tmpDir = join9(dirname7(logPath), "tmp");
     mkdirSync6(tmpDir, { recursive: true });
+    entry.commandPending = true;
+    entry.process = void 0;
+    await this.persist(job);
     let group;
     let teardown;
     const stop = () => {
@@ -3314,6 +3482,10 @@ var EffortDriver = class {
       }
     }
     this.fence(job);
+    if (group) await stop();
+    entry.commandPending = false;
+    entry.process = void 0;
+    await this.persist(job);
     return result;
   }
   async integrate(job) {
@@ -3324,11 +3496,19 @@ var EffortDriver = class {
     const expected = effortTip(record);
     entry.expectedTip = expected;
     entry.state = "merging";
+    entry.candidateOid = void 0;
+    entry.candidateTree = void 0;
+    entry.verifiedOid = void 0;
+    entry.noopTip = void 0;
+    entry.attempts = 0;
+    entry.verify = void 0;
     await this.persist(job);
     const dir = join9(effortDir(root, record.name), "verify", `${run.id}-${randomUUID2()}`);
     mkdirSync6(dir, { recursive: true });
     const candidate = join9(root, ".worktrees", "conductor-cand", record.name, `${run.id}-${randomUUID2()}`);
     entry.candidatePath = candidate;
+    entry.candidates = [.../* @__PURE__ */ new Set([...entry.candidates ?? [], candidate])];
+    await this.persist(job);
     this.fence(job);
     effortGit(root, "worktree", "add", "--detach", candidate, expected);
     if (record.gatedTip !== expected) {
@@ -3344,7 +3524,7 @@ var EffortDriver = class {
     this.fence(job);
     const merged = mergeTree(root, expected, entry.branchHead);
     if (merged.kind === "error") {
-      this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: "error", errorMessage: merged.error } });
+      await this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: "error", errorMessage: merged.error } });
       return;
     }
     const generated = record.policy.generated;
@@ -3360,13 +3540,15 @@ var EffortDriver = class {
       await this.persist(job);
     }
     if (merged.kind === "conflict" && (!generated || !merged.conflicts.every((path) => isGeneratedPath(path, generated)))) {
-      this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: "conflict", conflicts: merged.conflicts } });
+      await this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: "conflict", conflicts: merged.conflicts } });
       return;
     }
     if (merged.kind === "clean" && merged.tree === effortGit(root, "rev-parse", `${expected}^{tree}`)) {
       this.fence(job);
       if (effortTip(record) !== expected) throw new Error("integration tip changed before no-op acceptance");
-      this.finish(job, { terminal: "completed", mergeResult: { success: true, nothingToCommit: true, verifyDisabled: !entry.verifyIdentity.command } });
+      entry.noopTip = expected;
+      await this.persist(job);
+      await this.finish(job, { terminal: "completed", mergeResult: { success: true, nothingToCommit: true, verifyDisabled: !entry.verifyIdentity.command } });
       return;
     }
     this.fence(job);
@@ -3427,11 +3609,12 @@ Conductor-Run: ${run.id}
           this.pause(job, `verify cannot run: ${entry.verify.logPath}: ${entry.verify.tailText}`);
           return;
         }
-        this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: action, verify: entry.verify } });
+        await this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: action, verify: entry.verify } });
         return;
       }
     }
     entry.state = "verified";
+    entry.verifiedOid = entry.candidateOid;
     await this.persist(job);
     this.fence(job);
     assertCandidate(candidate, entry.candidateOid);
@@ -3441,17 +3624,17 @@ Conductor-Run: ${run.id}
     entry.state = "accepted";
     record = this.fence(job);
     writeEffort({ ...record, gatedTip: entry.candidateOid, queue: (record.queue ?? []).filter((id) => id !== run.id), updatedAt: Date.now() });
-    this.finish(job, { terminal: "completed", landedCommit: entry.candidateOid, mergeResult: { success: true, verify: entry.verify, flakyVerify: entry.attempts > 1, verifyDisabled: !entry.verifyIdentity.command } });
+    await this.finish(job, { terminal: "completed", landedCommit: entry.candidateOid, mergeResult: { success: true, verify: entry.verify, flakyVerify: entry.attempts > 1, verifyDisabled: !entry.verifyIdentity.command } });
   }
 };
 
 // src/runs.ts
-import { existsSync as existsSync8, mkdirSync as mkdirSync8, readFileSync as readFileSync12, readdirSync as readdirSync4, statSync as statSync3 } from "node:fs";
+import { existsSync as existsSync8, mkdirSync as mkdirSync8, readFileSync as readFileSync11, readdirSync as readdirSync4, statSync as statSync3 } from "node:fs";
 import { mkdir, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir as homedir7 } from "node:os";
 
 // src/file-evidence.ts
-import { closeSync as closeSync2, constants, fstatSync, openSync as openSync2, readFileSync as readFileSync10, readSync, realpathSync as realpathSync4 } from "node:fs";
+import { closeSync as closeSync2, constants, fstatSync, openSync as openSync2, readFileSync as readFileSync9, readSync, realpathSync as realpathSync4 } from "node:fs";
 import { dirname as dirname8, isAbsolute as isAbsolute2, join as join11 } from "node:path";
 
 // src/conductor-cwd.ts
@@ -3573,7 +3756,7 @@ function sourceRun(id, registry) {
   if (dirname8(dir) !== root) throw new Error(`files: run record outside canonical runs directory: ${id}`);
   const recordPath = join11(dir, "record.json");
   if (realpathSync4(recordPath) !== recordPath) throw new Error(`files: invalid run record path: ${id}`);
-  const r = inspect(recordPath, (fd) => JSON.parse(readFileSync10(fd, "utf8")));
+  const r = inspect(recordPath, (fd) => JSON.parse(readFileSync9(fd, "utf8")));
   if (!r || r.id !== id || typeof r.persona !== "string" || !r.persona || typeof r.cwd !== "string" || !isAbsolute2(r.cwd) || !(isTerminal(r.status) || r.status === "running" || r.status === "paused" || r.status === "queued") || typeof r.finalPath !== "string" || realpathSync4(r.finalPath) !== realpathSync4(join11(dir, "final.md")) || typeof r.recordPath !== "string" || realpathSync4(r.recordPath) !== recordPath || r.sessionPath !== void 0 && typeof r.sessionPath !== "string") {
     throw new Error(`files: invalid run record: ${id}`);
   }
@@ -4045,7 +4228,7 @@ ${diag}
 init_worktree();
 
 // src/workspace-doctrine.ts
-import { existsSync as existsSync7, readFileSync as readFileSync11, statSync as statSync2 } from "node:fs";
+import { existsSync as existsSync7, readFileSync as readFileSync10, statSync as statSync2 } from "node:fs";
 import { homedir as homedir6, tmpdir } from "node:os";
 import { dirname as dirname10, join as join12, relative as relative2, resolve as resolve3, sep as sep2 } from "node:path";
 var MAX_WALK_DEPTH = 6;
@@ -4111,7 +4294,7 @@ function loadWorkspaceDoctrine(workdir) {
     const start = resolve3(workdir);
     const path = findAgentsMd(start);
     if (!path || childNativeAgentsDirs(start).includes(dirname10(path))) return "";
-    let text = readFileSync11(path, "utf8").trim();
+    let text = readFileSync10(path, "utf8").trim();
     if (!text) return "";
     if (text.length > MAX_DOCTRINE_CHARS) text = truncateDoctrine(text, path);
     return `${DOCTRINE_HEADING}
@@ -4219,7 +4402,7 @@ var READ_ONLY_PERSONA_ENFORCER = [
 function assemblePersonaSystemPrompt(persona, cwd) {
   const blocks = persona.readOnly === true ? [READ_ONLY_PERSONA_ENFORCER, persona.systemPrompt] : [persona.systemPrompt];
   try {
-    const preamble = readFileSync12(join13(builtinPersonasDir(), "_preamble.md"), "utf8").trim();
+    const preamble = readFileSync11(join13(builtinPersonasDir(), "_preamble.md"), "utf8").trim();
     if (preamble) blocks.push(preamble);
   } catch {
   }
@@ -4549,7 +4732,7 @@ function spawnRun(opts) {
     model: opts.model,
     thinking: opts.thinking,
     mode: effort ? "background" : opts.mode,
-    effort: effort ? { name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches ? [...opts.touches] : void 0 } : void 0,
+    effort: effort ? { owner: effort.owner, name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches ? [...opts.touches] : void 0 } : void 0,
     status: "running",
     startTime: Date.now(),
     lastEventAt: Date.now(),
@@ -4890,7 +5073,7 @@ function observeRunActions(run, canFocus = false, sessionId, registry) {
     try {
       const effort = readEffort(run.effort.gitRoot, run.effort.name);
       if (!effort) throw new Error("effort record missing; ownership unresolved");
-      assertEffortOwner(effort, effortOwner(sessionId));
+      assertEffortOwner(effort, { ...effortOwner(sessionId), generation: run.effort.owner?.generation });
     } catch (e) {
       effortOwnershipError = `cannot send to effort ${run.effort.name}: ${e.message}`;
     }
@@ -4928,7 +5111,7 @@ function runActionError(run, action, observed) {
   if (action !== "send" && !observed.owned) {
     return `sub-agent ${run.id} is owned by another conductor (foreign run).`;
   }
-  if (action === "kill" && run.status === "integrating" && !run.integrationControl) return "integration is preserved without a live driver; inspection only until recovery is available";
+  if (action === "kill" && run.status === "integrating" && !run.integrationControl) return "integration is preserved without a live driver; inspect effort status and use human effort resume/requeue";
   if (action === "kill") return isTerminal(run.status) ? `sub-agent ${run.id} is already ${run.status}.` : void 0;
   if (action === "pause" || action === "resume") {
     const required = action === "pause" ? "running" : "paused";
@@ -5113,7 +5296,7 @@ function sendToRun(run, message, opts) {
     const reason = effortAnswerWaitReason(run, opts.registry);
     if (reason) return { kind: "rejected", reason };
   }
-  const worktreeBlocker = restoreResumeWorktree(run, () => readFileSync12(sessionPath, "utf8"));
+  const worktreeBlocker = restoreResumeWorktree(run, () => readFileSync11(sessionPath, "utf8"));
   if (worktreeBlocker) return { kind: "rejected", reason: worktreeBlocker };
   const pendingAsk = run.pendingAsk;
   if (pendingAsk) trimmed = `<owner-answer ask-id=${JSON.stringify(pendingAsk.askId)}>
@@ -5143,7 +5326,7 @@ Continue the original assignment, not a new task.
   opts.registry.notify(run);
   run.model = resumeModel(
     run.model,
-    () => readFileSync12(sessionPath, "utf8"),
+    () => readFileSync11(sessionPath, "utf8"),
     opts.isRegisteredModel,
     opts.currentModelProvider
   );
@@ -5166,7 +5349,7 @@ Continue the original assignment, not a new task.
     // honored (§4.6: each terminal is a fresh gate). Per-call layer
     // (slice 3) reads from `Run.onCompleteHook` — stamped at spawn time
     // by `spawnRun` and replaceable by per-send overrides above.
-    resolvedHook: resolveCloseHook(
+    resolvedHook: run.reconciledAtStartup && run.effort ? run.effort.gate ?? void 0 : resolveCloseHook(
       run.cwd,
       run.persona,
       hookSpecFromOpts(run.onCompleteHook, run.onCompleteHookTimeoutSeconds),
@@ -5522,18 +5705,26 @@ function discoverContextRetirement(run, sessionDir) {
   }
 }
 function writeRecord(run, durableFence) {
-  const snapshot2 = toRunRecord(run);
+  const snapshot2 = structuredClone(toRunRecord(run));
   const writing = (run.recordWrite ?? Promise.resolve()).catch(() => {
   }).then(async () => {
     await mkdir(dirname11(run.recordPath), { recursive: true });
-    if (durableFence) writeDurableJson(run.recordPath, snapshot2, durableFence);
+    if (durableFence || snapshot2.effort) writeDurableJson(run.recordPath, snapshot2, () => {
+      assertRunEffortOwner(snapshot2);
+      durableFence?.();
+    });
     else await writeFile2(run.recordPath, JSON.stringify(snapshot2, null, 2));
   });
   run.recordWrite = writing.catch(() => {
   });
   return durableFence ? writing : run.recordWrite;
 }
-async function writeFinal(run) {
+async function writeFinal(run, durable = false) {
+  if (durable) {
+    await mkdir(dirname11(run.finalPath), { recursive: true });
+    writeDurableFile(run.finalPath, getFinalText(run.messages) || run.integration?.resultText || "(no output)", () => assertRunEffortOwner(run));
+    return;
+  }
   try {
     await mkdir(dirname11(run.finalPath), { recursive: true });
     await writeFile2(run.finalPath, getFinalText(run.messages) || "(no output)");
@@ -5575,21 +5766,356 @@ function elapsedStr(start, end) {
   return `${(m / 60).toFixed(1)}h`;
 }
 
+// src/effort/reconcile.ts
+function validateSource(run) {
+  if (!run.effort || !run.worktreeBranch) throw new Error("preserved source branch missing");
+  const oid = effortGit(run.effort.gitRoot, "rev-parse", "--verify", `refs/heads/${run.worktreeBranch}^{commit}`);
+  if (run.worktreePath && existsSync9(run.worktreePath)) {
+    assertCandidateIndexFlags(run.worktreePath);
+    if (effortGit(run.worktreePath, "rev-parse", "HEAD") !== oid || effortGit(run.worktreePath, "status", "--porcelain", "--untracked-files=all")) throw new Error("source changed or dirty; preserve and inspect before requeue");
+  }
+  return oid;
+}
+function records(record) {
+  if (!existsSync9(runsRoot())) return [];
+  return readdirSync5(runsRoot()).sort().flatMap((id) => {
+    const path = join14(runsRoot(), id, "record.json");
+    if (!existsSync9(path)) return [];
+    const r = JSON.parse(readFileSync12(path, "utf8"));
+    if (r.effort?.gitRoot !== record.gitRoot || r.effort.name !== record.name) return [];
+    if (r.id !== id || r.recordPath !== path || r.finalPath !== join14(runsRoot(), id, "final.md") || r.transcriptPath !== join14(runsRoot(), id, "transcript.jsonl")) throw new Error(`noncanonical effort run record: ${id}`);
+    return [r];
+  });
+}
+function provenNoop(record, run) {
+  if (!run.integration?.noopTip) return false;
+  const tip = effortTip(record);
+  if (record.gatedTip !== tip) return false;
+  const merged = mergeTree(record.gitRoot, tip, run.integration.branchHead);
+  return merged.kind === "clean" && merged.tree === effortGit(record.gitRoot, "rev-parse", `${tip}^{tree}`);
+}
+async function cleanupCandidates(record, run) {
+  const e = run.integration;
+  if (!e || e.commandPending || e.process || !run.mergeResult?.success) return;
+  const others = records(record).filter((r) => r.id !== run.id && (r.status === "integrating" || r.status === "running" || r.status === "paused"));
+  const prefix2 = join14(record.gitRoot, ".worktrees", "conductor-cand", record.name) + "/";
+  const removed = /* @__PURE__ */ new Set();
+  for (const path of e.candidates ?? []) {
+    if (!path.startsWith(prefix2) || !existsSync9(path) || others.some((r) => r.integration?.candidatePath === path || r.integration?.candidates?.includes(path) || r.worktreePath === path)) continue;
+    try {
+      if (realpathSync5(path) !== path) continue;
+      const oid = effortGit(path, "rev-parse", "HEAD");
+      assertCandidate(path, oid);
+      if (effortGit(path, "status", "--porcelain", "--ignored", "--untracked-files=all")) continue;
+      effortGit(record.gitRoot, "merge-base", "--is-ancestor", oid, record.intRef);
+      assertRunEffortOwner(run);
+      effortGit(record.gitRoot, "worktree", "remove", path);
+      removed.add(path);
+    } catch {
+    }
+  }
+  if (removed.size) {
+    e.candidates = (e.candidates ?? []).filter((path) => !removed.has(path));
+    if (e.candidatePath && removed.has(e.candidatePath)) e.candidatePath = void 0;
+    await writeRecord(run, () => assertRunEffortOwner(run));
+  }
+}
+function uncertainDelivery(run) {
+  run.integration.delivery = "uncertain";
+  run.integration.reason = "delivery uncertain after crash or legacy dispatch; automatic callbacks suppressed (notification/events/memory may be missing)";
+}
+async function recoverEffort(original, opts) {
+  if (process.env.CONDUCTOR_SUBAGENT === "1") return { runs: [], done: Promise.resolve() };
+  let record = adoptEffort(original, effortOwner(opts.sessionId));
+  const active = opts.registry.list().filter((r) => r.effort?.gitRoot === original.gitRoot && r.effort.name === original.name && r.integrationControl);
+  if (active.length) {
+    if (!opts.resume) return { runs: active, done: Promise.resolve() };
+    if (original.status !== "paused") throw new Error("resume requires a paused effort, not an active integration");
+    for (const run of active) {
+      assertRunEffortOwner(run);
+      await run.integrationControl.suspend();
+    }
+    await opts.registry.integrations.whenIdle(original.gitRoot);
+  }
+  const lock = join14(effortDir(original.gitRoot, "integration-driver"), "driver.lock");
+  const claim = acquireClaim(lock, effortOwner(randomUUID3()));
+  const runnable = [], restored = [];
+  try {
+    const saved = records(record);
+    const order = [.../* @__PURE__ */ new Set([...record.queue ?? [], ...saved.filter((r) => r.status === "integrating").sort((a, b) => (a.integration?.enqueuedAt ?? a.startTime) - (b.integration?.enqueuedAt ?? b.startTime) || a.id.localeCompare(b.id)).map((r) => r.id)])];
+    const missing = [.../* @__PURE__ */ new Set([...record.members, ...order])].filter((id) => !saved.some((r) => r.id === id));
+    record = {
+      ...record,
+      members: [.../* @__PURE__ */ new Set([...record.members, ...saved.map((r) => r.id)])],
+      queue: order,
+      ...opts.resume ? { status: "open", pausedReason: void 0, pausedRun: void 0, gatedTip: void 0 } : {},
+      ...missing.length ? { status: "paused", pausedReason: `missing durable member records: ${missing.join(", ")}; preserve pending order` } : {}
+    };
+    writeEffort(record);
+    const ordered = [...saved].sort((a, b) => {
+      const ai = order.indexOf(a.id), bi = order.indexOf(b.id);
+      return (ai < 0 ? order.length : ai) - (bi < 0 ? order.length : bi) || a.id.localeCompare(b.id);
+    });
+    for (const savedRun of ordered) {
+      const previous = opts.registry.get(savedRun.id);
+      if (previous?.proc || previous?.integrationControl) continue;
+      const run = buildOrphanRun(savedRun, savedRun.status);
+      run.recordWrite = previous?.recordWrite;
+      run.effort = { ...run.effort, owner: record.owner };
+      run.parentSessionId = record.owner.sessionId;
+      run.parentPid = record.owner.pid;
+      run.parentStartTime = record.owner.startTime;
+      run.integrationSuspended = false;
+      if (run.integration?.delivery === "intent") uncertainDelivery(run);
+      opts.registry.register(run);
+      restored.push(run);
+      try {
+        const candidate = run.integration && integratedCandidate(record, run);
+        if (candidate || provenNoop({ ...record, gatedTip: original.gatedTip }, run)) {
+          if (run.integration.deliveryProtocol !== 1) uncertainDelivery(run);
+          if (run.integration?.process) await stopOwnedProcessGroup(run.integration.process);
+          run.status = "integrating";
+          run.landedCommit = candidate || void 0;
+          run.integration.state = "accepted";
+          run.mergeResult = { success: true, verify: run.integration.verify, verifyDisabled: !record.policy.verify, ...candidate ? {} : { nothingToCommit: true } };
+          if (run.integration) {
+            run.integration.process = void 0;
+            run.integration.commandPending = false;
+          }
+          await settleRun(run, "completed", run.exitCode, opts);
+          await cleanupCandidates(record, run);
+          record = readEffort(record.gitRoot, record.name);
+          record = { ...record, queue: (record.queue ?? []).filter((id) => id !== run.id) };
+          writeEffort(record);
+          continue;
+        }
+        if (run.status === "blocked") {
+          await writeRecord(run, () => assertRunEffortOwner(run));
+          continue;
+        }
+        if (run.status !== "integrating") {
+          if (run.status === "running" || run.status === "paused" || run.status === "queued") {
+            let liveOrUnknown = !!run.pid;
+            if (run.pid) {
+              try {
+                process.kill(run.pid, 0);
+              } catch (error) {
+                if (error.code === "ESRCH") liveOrUnknown = false;
+              }
+            }
+            if (liveOrUnknown) {
+              run.status = "paused";
+              run.errorMessage = "lost writer process identity unresolved; no automatic gate or requeue";
+            } else {
+              run.status = "killed";
+              run.errorMessage = "lost writer; explicit human requeue requires source and original hook validation";
+            }
+          }
+          if (run.status === "completed") {
+            run.status = "merge_conflict";
+            run.mergeResult = { success: false, reason: "error" };
+            run.errorMessage = "completed JSON has no reachable correlated integration proof; work preserved";
+          }
+          if (run.effort) run.effort.footprintUnknown = !run.mergeResult?.success;
+          await writeRecord(run, () => assertRunEffortOwner(run));
+          if (order.includes(run.id)) throw new Error("queue/WAL disagreement: no durable hook-passed integrating record");
+          continue;
+        }
+        const e = run.integration;
+        if (!e || !e.branchHead || !Number.isFinite(e.enqueuedAt) || e.verifyIdentity.command !== record.policy.verify || e.verifyIdentity.timeoutSeconds !== record.policy.verifyTimeoutSeconds || e.verifyIdentity.retries !== record.policy.verifyRetries) throw new Error("integration WAL or frozen verification policy missing/mismatched");
+        if (!["queued", "merging", "generating", "verifying", "verified", "paused", "cancelled"].includes(e.state)) throw new Error(`unsupported recovery state ${e.state}; preserve for human inspection`);
+        if (e.commandPending && !e.process) throw new Error("interrupted command launch has unknown process identity; preserve work");
+        if (e.process) await stopOwnedProcessGroup(e.process);
+        e.process = void 0;
+        e.commandPending = false;
+        e.teardownError = void 0;
+        if (validateSource(run) !== e.branchHead) throw new Error("source branch head changed; original OID and work retained");
+        if (record.status === "paused" || e.state === "paused" && !opts.resume || e.state === "cancelled") throw new Error(record.pausedReason ?? e.reason ?? "paused entry requires explicit human resume");
+        e.state = "queued";
+        e.reason = void 0;
+        if (opts.resume) e.casFailures = 0;
+        await writeRecord(run, () => assertRunEffortOwner(run));
+        runnable.push(run);
+      } catch (error) {
+        if (run.integration) {
+          run.integration.state = "paused";
+          run.integration.reason = error.message;
+        }
+        run.integrationSuspended = true;
+        record = { ...readEffort(record.gitRoot, record.name), status: "paused", pausedReason: error.message, pausedRun: run.id };
+        writeEffort(record);
+        await writeRecord(run, () => assertRunEffortOwner(run));
+      }
+      opts.registry.notify(run);
+    }
+  } finally {
+    releaseClaim(lock, claim);
+  }
+  const done = Promise.all(runnable.map(async (run) => {
+    const outcome = await opts.registry.integrations.enqueue(run, () => opts.registry.notify(run), true);
+    run.mergeResult = outcome.mergeResult;
+    run.landedCommit = outcome.landedCommit;
+    await settleRun(run, outcome.terminal, run.exitCode, opts);
+    await cleanupCandidates(readEffort(run.effort.gitRoot, run.effort.name), run);
+  })).then(() => {
+  });
+  void done.catch(() => {
+  });
+  return { runs: restored, done };
+}
+async function requeueEffortRun(run, opts, replacement, expectedOid) {
+  if (!run.effort || run.status === "blocked" || run.status === "running" || run.status === "paused" || run.status === "integrating" && (!run.integrationSuspended || run.integrationControl || run.integration?.state !== "paused")) throw new Error("requeue requires a stopped preserved writer, never a blocked ask or live assignment");
+  let record = adoptEffort(readEffort(run.effort.gitRoot, run.effort.name), effortOwner(opts.sessionId));
+  const lock = join14(effortDir(record.gitRoot, "integration-driver"), "driver.lock");
+  const claim = acquireClaim(lock, effortOwner(randomUUID3()));
+  try {
+    if (record.status === "paused" && record.pausedRun !== run.id) throw new Error(`effort paused: ${record.pausedReason}; use human effort resume first`);
+    if (integratedCandidate(record, run) || provenNoop(record, run)) throw new Error("work is already integrated; never requeue to recreate delivery (manual repost may duplicate a notification)");
+    const gate = replacement === void 0 ? run.effort.gate : { command: replacement, source: "per-call", timeoutSeconds: run.effort.gate?.timeoutSeconds ?? 300 };
+    if (gate === void 0) throw new Error("original hook is unknown/unreconstructable; provide an explicit human replacement with --hook <command>");
+    const head = validateSource(run);
+    if (head !== (run.integration?.branchHead ?? head) && expectedOid !== head) throw new Error(`source branch head changed; inspect and confirm exact OID with --oid=${head}`);
+    if (expectedOid && expectedOid !== head) throw new Error("source OID no longer matches human confirmation");
+    if (run.integration?.commandPending && !run.integration.process) throw new Error("previous gate launch identity unknown; preserve and inspect");
+    if (run.integration?.process) await stopOwnedProcessGroup(run.integration.process);
+    run.effort = { ...run.effort, owner: record.owner, gate };
+    run.parentPid = record.owner.pid;
+    run.parentSessionId = record.owner.sessionId;
+    run.parentStartTime = record.owner.startTime;
+    const path = join14(record.gitRoot, ".worktrees", "conductor-cand", record.name, `${run.id}-regate-${randomUUID3()}`);
+    const prior = run.integration;
+    run.integration = {
+      state: "paused",
+      branchHead: head,
+      enqueuedAt: Date.now(),
+      attempts: 0,
+      verifyIdentity: { command: record.policy.verify, timeoutSeconds: record.policy.verifyTimeoutSeconds, retries: record.policy.verifyRetries },
+      resultText: prior?.resultText || getFinalText(run.messages) || (existsSync9(run.finalPath) ? readFileSync12(run.finalPath, "utf8") : "(no saved result)"),
+      candidates: [...prior?.candidates ?? [], path],
+      candidatePath: path,
+      commandPending: !!gate
+    };
+    await writeRecord(run, () => assertRunEffortOwner(run));
+    effortGit(record.gitRoot, "worktree", "add", "--detach", path, head);
+    if (gate) {
+      const subdir = run.worktreePath && run.effort.cwd ? relative3(run.worktreePath, run.effort.cwd) : "";
+      if (subdir.startsWith("..")) throw new Error("original hook cwd cannot be reconstructed safely");
+      const cwd = join14(path, subdir);
+      const dir = join14(effortDir(record.gitRoot, record.name), "verify", `${run.id}-regate-${randomUUID3()}`);
+      mkdirSync9(dir, { recursive: true });
+      let recording = Promise.resolve();
+      let teardown;
+      const stop = () => {
+        if (!run.integration.process) return Promise.resolve();
+        teardown ??= stopOwnedProcessGroup(run.integration.process);
+        void teardown.catch(() => {
+        });
+        return teardown;
+      };
+      const finalPath = join14(dirname12(run.recordPath), "gate-final.md");
+      writeDurableFile(finalPath, run.integration.resultText, () => assertRunEffortOwner(run));
+      const result = await runHook({
+        resolved: gate,
+        runId: run.id,
+        persona: run.persona,
+        runDir: dirname12(run.recordPath),
+        finalPath,
+        transcriptPath: run.transcriptPath,
+        parentCwd: run.cwd,
+        cwd,
+        worktreePath: path,
+        logPath: join14(dir, "gate.log"),
+        tmpDir: join14(dir, "tmp"),
+        extraEnv: effortEnv(),
+        deps: { killGroup: () => {
+          void stop();
+        } },
+        onProc: (proc) => {
+          if (proc.pid) {
+            run.integration.process = { pid: proc.pid, startTime: readProcessStartTime(proc.pid) };
+            recording = writeRecord(run, () => assertRunEffortOwner(run));
+            void recording.catch(() => {
+              void stop();
+            });
+          }
+        }
+      });
+      await stop();
+      await recording;
+      run.hookResult = result;
+      run.integration.commandPending = false;
+      run.integration.process = void 0;
+      await writeRecord(run, () => assertRunEffortOwner(run));
+      if (!result.passed) throw new Error(`original hook rejected requeue: ${result.logPath}`);
+    }
+    assertRunEffortOwner(run);
+    assertCandidate(path, head);
+    if (validateSource(run) !== head) throw new Error("source changed while its gate ran; preserve both checkouts");
+    run.integration.commandPending = false;
+    Object.assign(run.integration, measureEffortFootprint(run, head, record.policy), { state: "queued" });
+    run.status = "integrating";
+    run.integrationSuspended = false;
+    run.mergeResult = void 0;
+    run.errorMessage = void 0;
+    await writeRecord(run, () => assertRunEffortOwner(run));
+    record = readEffort(record.gitRoot, record.name);
+    writeEffort({ ...record, status: "open", pausedReason: void 0, pausedRun: void 0, gatedTip: void 0, members: [.../* @__PURE__ */ new Set([...record.members, run.id])], queue: [.../* @__PURE__ */ new Set([...record.queue ?? [], run.id])] });
+  } finally {
+    releaseClaim(lock, claim);
+  }
+  const done = opts.registry.integrations.enqueue(run, () => opts.registry.notify(run), true).then(async (outcome) => {
+    run.mergeResult = outcome.mergeResult;
+    run.landedCommit = outcome.landedCommit;
+    await settleRun(run, outcome.terminal, run.exitCode, opts);
+    await cleanupCandidates(readEffort(run.effort.gitRoot, run.effort.name), run);
+  });
+  void done.catch(() => {
+  });
+  return { done };
+}
+
+// src/index.ts
+import { buildSessionContext } from "@earendil-works/pi-coding-agent";
+import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
+
+// src/commands.ts
+init_types();
+import { existsSync as existsSync14, readdirSync as readdirSync6, readFileSync as readFileSync13, statSync as statSync5 } from "node:fs";
+import { join as join21, dirname as dirname14 } from "node:path";
+
+// src/status-glyph.ts
+var STATUS_GLYPH = {
+  integrating: "\u21E2",
+  blocked: "?",
+  queued: "\u25CC",
+  running: "\u25CF",
+  paused: "\u23F8",
+  completed: "\u2713",
+  failed: "\u2717",
+  killed: "\u25A0",
+  timeout: "\u23F1",
+  hook_failed: "\u2297",
+  merge_conflict: "\u2298",
+  // v0.14: post-success conflict — ⊘ distinct from ⊗ (hook_failed)
+  aborted: "\u23F9"
+  // v0.17: turn-limit termination — ⏹ (stop button) distinct from ■ (killed)
+};
+
 // src/doctor.ts
-import { existsSync as existsSync11 } from "node:fs";
+import { existsSync as existsSync12 } from "node:fs";
 import { execSync as execSync2 } from "node:child_process";
 import { homedir as homedir8 } from "node:os";
-import { join as join16 } from "node:path";
+import { join as join17 } from "node:path";
 
 // src/gc/last-gc.ts
-import { existsSync as existsSync9, statSync as statSync4, utimesSync, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname12, join as join14 } from "node:path";
+import { existsSync as existsSync10, statSync as statSync4, utimesSync, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname13, join as join15 } from "node:path";
 function lastGcMarkerPath(runsRoot2) {
-  return join14(dirname12(runsRoot2), ".last-gc");
+  return join15(dirname13(runsRoot2), ".last-gc");
 }
 function readLastGcMtime(runsRoot2) {
   const path = lastGcMarkerPath(runsRoot2);
-  if (!existsSync9(path)) return null;
+  if (!existsSync10(path)) return null;
   try {
     return statSync4(path).mtimeMs;
   } catch {
@@ -5599,7 +6125,7 @@ function readLastGcMtime(runsRoot2) {
 function writeLastGcMtime(runsRoot2, now) {
   const path = lastGcMarkerPath(runsRoot2);
   try {
-    if (!existsSync9(path)) writeFileSync5(path, "");
+    if (!existsSync10(path)) writeFileSync5(path, "");
     const t = new Date(now);
     utimesSync(path, t, t);
   } catch {
@@ -5610,8 +6136,8 @@ function writeLastGcMtime(runsRoot2, now) {
 init_types();
 init_worktree();
 import { readdir as readdir3, readFile as readFile3, stat as stat3 } from "node:fs/promises";
-import { existsSync as existsSync10 } from "node:fs";
-import { join as join15 } from "node:path";
+import { existsSync as existsSync11 } from "node:fs";
+import { join as join16 } from "node:path";
 async function safeStat(path) {
   try {
     const s = await stat3(path);
@@ -5622,7 +6148,7 @@ async function safeStat(path) {
 }
 async function readRecord(runDir2) {
   try {
-    const text = await readFile3(join15(runDir2, "record.json"), "utf-8");
+    const text = await readFile3(join16(runDir2, "record.json"), "utf-8");
     const parsed = JSON.parse(text);
     if (typeof parsed.id !== "string" || typeof parsed.persona !== "string") {
       return null;
@@ -5633,8 +6159,8 @@ async function readRecord(runDir2) {
   }
 }
 async function detectSessionPath(runDir2) {
-  const sessionDir = join15(runDir2, "session");
-  if (!existsSync10(sessionDir)) return false;
+  const sessionDir = join16(runDir2, "session");
+  if (!existsSync11(sessionDir)) return false;
   try {
     const entries = await readdir3(sessionDir);
     return entries.some((e) => e.endsWith(".jsonl"));
@@ -5643,7 +6169,7 @@ async function detectSessionPath(runDir2) {
   }
 }
 async function walkInventory(runsRoot2, registry) {
-  if (!existsSync10(runsRoot2)) return [];
+  if (!existsSync11(runsRoot2)) return [];
   let entries;
   try {
     entries = await readdir3(runsRoot2);
@@ -5652,7 +6178,7 @@ async function walkInventory(runsRoot2, registry) {
   }
   const out = [];
   for (const id of entries) {
-    const runDir2 = join15(runsRoot2, id);
+    const runDir2 = join16(runsRoot2, id);
     let isDir = false;
     try {
       isDir = (await stat3(runDir2)).isDirectory();
@@ -5666,11 +6192,11 @@ async function walkInventory(runsRoot2, registry) {
 }
 async function buildEntry(id, runDir2, registry) {
   const record = await readRecord(runDir2);
-  const transcriptStat = await safeStat(join15(runDir2, "transcript.jsonl"));
-  const recordStat = await safeStat(join15(runDir2, "record.json"));
-  const finalStat = await safeStat(join15(runDir2, "final.md"));
-  const archivedStat = await safeStat(join15(runDir2, ".archived"));
-  const pinned = existsSync10(join15(runDir2, ".pinned"));
+  const transcriptStat = await safeStat(join16(runDir2, "transcript.jsonl"));
+  const recordStat = await safeStat(join16(runDir2, "record.json"));
+  const finalStat = await safeStat(join16(runDir2, "final.md"));
+  const archivedStat = await safeStat(join16(runDir2, ".archived"));
+  const pinned = existsSync11(join16(runDir2, ".pinned"));
   const sessionPathPresent = await detectSessionPath(runDir2);
   const inMemory = registry.get(id);
   const transcriptSizeBytes = transcriptStat?.size ?? 0;
@@ -5954,13 +6480,13 @@ async function buildDoctorReport(opts) {
   lines.push("## Config files");
   const userPath = userConfigPath();
   const projectPath = projectConfigPath(opts.cwd);
-  lines.push(`  user:    ${existsSync11(userPath) ? "\u2713" : "\xB7"} ${userPath}`);
-  lines.push(`  project: ${existsSync11(projectPath) ? "\u2713" : "\xB7"} ${projectPath}`);
+  lines.push(`  user:    ${existsSync12(userPath) ? "\u2713" : "\xB7"} ${userPath}`);
+  lines.push(`  project: ${existsSync12(projectPath) ? "\u2713" : "\xB7"} ${projectPath}`);
   const home = opts.homeDir ?? homedir8();
-  const legacyDir = join16(home, ".pi", "agent", "extensions", "conductor");
-  const legacyJs = join16(legacyDir, "index.js");
-  const legacyTs = join16(legacyDir, "index.ts");
-  const legacyEntry = existsSync11(legacyJs) ? legacyJs : existsSync11(legacyTs) ? legacyTs : null;
+  const legacyDir = join17(home, ".pi", "agent", "extensions", "conductor");
+  const legacyJs = join17(legacyDir, "index.js");
+  const legacyTs = join17(legacyDir, "index.ts");
+  const legacyEntry = existsSync12(legacyJs) ? legacyJs : existsSync12(legacyTs) ? legacyTs : null;
   if (legacyEntry !== null) {
     lines.push("");
     lines.push("## Legacy install path detected");
@@ -6011,7 +6537,7 @@ async function buildDoctorReport(opts) {
     );
   }
   {
-    const root = opts.runsRoot ?? join16(opts.homeDir ?? homedir8(), ".pi", "agent", "conductor", "runs");
+    const root = opts.runsRoot ?? join17(opts.homeDir ?? homedir8(), ".pi", "agent", "conductor", "runs");
     const lastMs = readLastGcMtime(root);
     const lastStr = lastMs === null ? "never" : new Date(lastMs).toISOString().replace("T", " ").slice(0, 19) + " UTC";
     lines.push(`  gc last run:           ${lastStr} (${lastGcMarkerPath(root)})`);
@@ -6020,10 +6546,10 @@ async function buildDoctorReport(opts) {
   lines.push("## Sub-agent tool exclusions");
   lines.push(...spawnToolLines(opts.loadedToolNames));
   {
-    const runsRoot2 = opts.runsRoot ?? join16(opts.homeDir ?? homedir8(), ".pi", "agent", "conductor", "runs");
+    const runsRoot2 = opts.runsRoot ?? join17(opts.homeDir ?? homedir8(), ".pi", "agent", "conductor", "runs");
     lines.push("");
     lines.push(`## Run records (under ${runsRoot2})`);
-    if (!existsSync11(runsRoot2)) {
+    if (!existsSync12(runsRoot2)) {
       lines.push("  (no run records)");
     } else {
       let inventory;
@@ -6267,12 +6793,12 @@ function collapseWhitespace(s) {
 }
 
 // src/gc/pinning.ts
-import { existsSync as existsSync12 } from "node:fs";
+import { existsSync as existsSync13 } from "node:fs";
 import { stat as stat4, unlink, writeFile as writeFile3 } from "node:fs/promises";
-import { join as join17 } from "node:path";
+import { join as join18 } from "node:path";
 var SIDECAR = ".pinned";
 async function pinRun(runsRoot2, agentId) {
-  const dir = join17(runsRoot2, agentId);
+  const dir = join18(runsRoot2, agentId);
   let st;
   try {
     st = await stat4(dir);
@@ -6282,10 +6808,10 @@ async function pinRun(runsRoot2, agentId) {
   if (!st.isDirectory()) {
     throw new Error(`not a directory: ${dir}`);
   }
-  await writeFile3(join17(dir, SIDECAR), "");
+  await writeFile3(join18(dir, SIDECAR), "");
 }
 async function unpinRun(runsRoot2, agentId) {
-  const path = join17(runsRoot2, agentId, SIDECAR);
+  const path = join18(runsRoot2, agentId, SIDECAR);
   try {
     await unlink(path);
   } catch (e) {
@@ -6295,19 +6821,19 @@ async function unpinRun(runsRoot2, agentId) {
   }
 }
 function isPinned(runsRoot2, agentId) {
-  return existsSync12(join17(runsRoot2, agentId, SIDECAR));
+  return existsSync13(join18(runsRoot2, agentId, SIDECAR));
 }
 
 // src/gc/reconcile.ts
 import { readFile as readFile4, writeFile as writeFile4 } from "node:fs/promises";
-import { join as join18 } from "node:path";
+import { join as join19 } from "node:path";
 async function reconcileOrphans(actions, runsRoot2, now) {
   const reconciled = [];
   const failed = [];
   for (const action of actions) {
     if (action.kind !== "reconcile-orphan") continue;
     const agentId = action.id;
-    const recordPath = join18(runsRoot2, agentId, "record.json");
+    const recordPath = join19(runsRoot2, agentId, "record.json");
     let raw;
     try {
       raw = await readFile4(recordPath, "utf-8");
@@ -6349,7 +6875,7 @@ async function reconcileOrphans(actions, runsRoot2, now) {
 init_types();
 init_worktree();
 import { readFile as readFile5, rm, stat as stat5, unlink as unlink2, utimes, writeFile as writeFile5, readdir as readdir4 } from "node:fs/promises";
-import { join as join19 } from "node:path";
+import { join as join20 } from "node:path";
 async function executeReclaim(actions, runsRoot2, registryActive, now) {
   const archived = [];
   const deleted = [];
@@ -6357,7 +6883,7 @@ async function executeReclaim(actions, runsRoot2, registryActive, now) {
   for (const action of actions) {
     if (action.kind !== "cold-archive" && action.kind !== "delete") continue;
     const agentId = action.id;
-    const runDir2 = join19(runsRoot2, agentId);
+    const runDir2 = join20(runsRoot2, agentId);
     const actionKind = action.kind;
     if (registryActive.has(agentId)) {
       failed.push({
@@ -6367,7 +6893,7 @@ async function executeReclaim(actions, runsRoot2, registryActive, now) {
       });
       continue;
     }
-    const recordPath = join19(runDir2, "record.json");
+    const recordPath = join20(runDir2, "record.json");
     let record;
     try {
       const raw = await readFile5(recordPath, "utf-8");
@@ -6432,7 +6958,7 @@ async function executeReclaim(actions, runsRoot2, registryActive, now) {
   return { archived, deleted, failed };
 }
 async function coldArchive(runDir2, now) {
-  const transcriptPath = join19(runDir2, "transcript.jsonl");
+  const transcriptPath = join20(runDir2, "transcript.jsonl");
   let bytes = 0;
   try {
     const s = await stat5(transcriptPath);
@@ -6448,7 +6974,7 @@ async function coldArchive(runDir2, now) {
       bytes = 0;
     }
   }
-  const sidecarPath = join19(runDir2, ".archived");
+  const sidecarPath = join20(runDir2, ".archived");
   await writeFile5(sidecarPath, "");
   const nowSec = now / 1e3;
   await utimes(sidecarPath, nowSec, nowSec);
@@ -6475,7 +7001,7 @@ async function walkSize(path) {
   let total = 0;
   const entries = await readdir4(path, { withFileTypes: true });
   for (const entry of entries) {
-    const child = join19(path, entry.name);
+    const child = join20(path, entry.name);
     if (entry.isDirectory()) {
       total += await walkSize(child);
     } else if (entry.isFile()) {
@@ -7116,7 +7642,7 @@ function registerCommands(pi, opts) {
           await runSendCmd(opts, ctx, subRest);
           return;
         case "effort":
-          runEffortCmd(opts, ctx, subRest);
+          await runEffortCmd(opts, ctx, subRest);
           return;
         case "worktree":
           await runWorktreeCmd(opts, ctx, subRest);
@@ -7450,7 +7976,7 @@ function formatRunRow(r, livenessProbe = defaultLivenessProbe) {
 }
 function runHistory(_opts, ctx, arg) {
   const root = runsRoot();
-  if (!existsSync13(root)) {
+  if (!existsSync14(root)) {
     ctx.ui.notify(
       "no run history yet. Spawn a sub-agent and it'll show up here.",
       "info"
@@ -7463,13 +7989,13 @@ function runHistory(_opts, ctx, arg) {
     {
       listRunIds: () => {
         try {
-          return readdirSync5(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+          return readdirSync6(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
         } catch {
           return [];
         }
       },
       readRecord: (id) => {
-        const p = join20(runDir(id), "record.json");
+        const p = join21(runDir(id), "record.json");
         try {
           return JSON.parse(readFileSync13(p, "utf8"));
         } catch {
@@ -7477,7 +8003,7 @@ function runHistory(_opts, ctx, arg) {
         }
       },
       readFinalText: (id) => {
-        const p = join20(runDir(id), "final.md");
+        const p = join21(runDir(id), "final.md");
         try {
           return readFileSync13(p, "utf8");
         } catch {
@@ -7486,7 +8012,7 @@ function runHistory(_opts, ctx, arg) {
       },
       statMtime: (id) => {
         try {
-          return statSync5(join20(runDir(id), "record.json")).mtimeMs;
+          return statSync5(join21(runDir(id), "record.json")).mtimeMs;
         } catch {
           try {
             return statSync5(runDir(id)).mtimeMs;
@@ -7495,8 +8021,8 @@ function runHistory(_opts, ctx, arg) {
           }
         }
       },
-      isPinned: (id) => existsSync13(join20(runDir(id), ".pinned")),
-      isArchived: (id) => existsSync13(join20(runDir(id), ".archived"))
+      isPinned: (id) => existsSync14(join21(runDir(id), ".pinned")),
+      isArchived: (id) => existsSync14(join21(runDir(id), ".archived"))
     },
     { limit }
   );
@@ -7514,7 +8040,7 @@ async function runPin(ctx, arg) {
     return;
   }
   const root = runsRoot();
-  if (!existsSync13(join20(root, id))) {
+  if (!existsSync14(join21(root, id))) {
     ctx.ui.notify(`No such run: ${id}`, "warning");
     return;
   }
@@ -7540,7 +8066,7 @@ async function runUnpin(ctx, arg) {
     return;
   }
   const root = runsRoot();
-  if (!existsSync13(join20(root, id))) {
+  if (!existsSync14(join21(root, id))) {
     ctx.ui.notify(`No such run: ${id}`, "warning");
     return;
   }
@@ -7810,17 +8336,41 @@ function buildWatchdogStatusReport(args) {
   }
   return lines.join("\n");
 }
-function runEffortCmd(opts, ctx, args) {
+async function runEffortCmd(opts, ctx, args) {
   try {
-    const [action = "list", name] = args.trim() ? args.trim().split(/\s+/) : [];
+    const fields = /^(\S+)(?:\s+(\S+))?(?:\s+([\s\S]*))?$/.exec(args.trim());
+    const action = fields?.[1] ?? "list", name = fields?.[2], tail = fields?.[3] ?? "";
     const { gitRoot: gitRoot2 } = effortRepository(opts.getCwd());
-    if (action !== "list" && action !== "status") throw new Error("Only effort list/status are available");
-    const records = action === "list" ? listEfforts(gitRoot2) : [readEffort(gitRoot2, name ?? "")];
-    if (records.some((r) => !r)) throw new Error("effort not found");
+    if (action === "resume" || action === "requeue") {
+      if (!ctx.hasUI || process.env.CONDUCTOR_SUBAGENT === "1") throw new Error("effort recovery requires an interactive human command");
+      const sessionId = opts.getSessionId?.();
+      if (!sessionId) throw new Error("current effort owner session is unknown");
+      const recovery = { registry: opts.getRegistry(), sessionId, onComplete: opts.pushCompletionNotification, events: opts.getEvents?.() };
+      if (action === "resume") {
+        const record = readEffort(gitRoot2, name);
+        if (!record || record.status !== "paused") throw new Error("resume requires a paused effort");
+        if (!await ctx.ui.confirm("Resume effort?", `${record.pausedReason}
+Recheck source/process identity and rerun baseline. Delivery-uncertain callbacks are NOT replayed; manual reposts can duplicate earlier delivery.`)) return;
+        await recoverEffort(record, { ...recovery, resume: true });
+      } else {
+        const run = opts.getRegistry().get(name);
+        if (!run?.effort || run.effort.gitRoot !== gitRoot2) throw new Error("preserved effort run not found in this repository; reconcile first");
+        const parsed = /^(?:--oid=([0-9a-f]{40,64})(?: |$))?(?:--hook ([\s\S]+))?$/.exec(tail);
+        if (!parsed) throw new Error("usage: effort requeue <run-id> [--oid=<oid>] [--hook <replacement command>]");
+        if (!await ctx.ui.confirm("Requeue preserved work?", parsed[2] ? `Explicit replacement of original hook: ${parsed[2]}
+Required repository hooks and effort verification remain active.` : "Rerun the original resolved hook on a fresh private source checkout, then recheck baseline and verified integration. A pause caused by this member is retried; unrelated/unknown pauses are retained.")) return;
+        await requeueEffortRun(run, recovery, parsed[2], parsed[1]);
+      }
+      ctx.ui.notify("Recovery checked; inspect effort status for queue, pause cause and delivery uncertainty.", "info");
+      return;
+    }
+    if (action !== "list" && action !== "status") throw new Error("Use effort list/status/resume/requeue");
+    const records2 = action === "list" ? listEfforts(gitRoot2) : [readEffort(gitRoot2, name)];
+    if (records2.some((r) => !r)) throw new Error("effort not found");
     ctx.ui.notify(`${EFFORT_NOTICE}
-${JSON.stringify(records.map((effort) => ({ effort, tip: effortGit(effort.gitRoot, "rev-parse", "--verify", `${effort.intRef}^{commit}`) })), null, 2)}`, "info");
-  } catch (e) {
-    ctx.ui.notify(`${e.message}. ${EFFORT_NOTICE}`, "error");
+${JSON.stringify(records2.map((effort) => ({ effort, tip: effortGit(effort.gitRoot, "rev-parse", "--verify", `${effort.intRef}^{commit}`), members: opts.getRegistry().list().filter((r) => r.effort?.gitRoot === gitRoot2 && r.effort.name === effort.name).map((r) => ({ id: r.id, status: r.status, integration: r.integration, error: r.errorMessage })) })), null, 2)}`, "info");
+  } catch (error) {
+    ctx.ui.notify(error.message, "error");
   }
 }
 async function runWorktreeCmd(opts, ctx, subRest) {
@@ -7877,7 +8427,7 @@ async function runWorktreeCmd(opts, ctx, subRest) {
         );
         return;
       }
-      const gitRoot2 = dirname13(dirname13(dirname13(run.worktreePath)));
+      const gitRoot2 = dirname14(dirname14(dirname14(run.worktreePath)));
       const baseBranch = run.worktreeBaseBranch ?? "master";
       const strategy = run.mergeStrategy && run.mergeStrategy !== "none" ? run.mergeStrategy : "squash";
       const commitMessage = buildMergeCommitMessage(run.persona, run.id, run.task);
@@ -7955,11 +8505,11 @@ Resolve manually in the worktree and run /conductor worktree merge ${runId} agai
 // src/tools.ts
 init_types();
 import { Type as Type2 } from "@sinclair/typebox";
-import { readFileSync as readFileSync15, existsSync as existsSync15 } from "node:fs";
-import { dirname as dirname14 } from "node:path";
+import { readFileSync as readFileSync15, existsSync as existsSync16 } from "node:fs";
+import { dirname as dirname15 } from "node:path";
 
 // src/chain.ts
-import { readFileSync as readFileSync14, existsSync as existsSync14 } from "node:fs";
+import { readFileSync as readFileSync14, existsSync as existsSync15 } from "node:fs";
 var DEFAULT_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nOriginal task:\n{task}\n\n---\nFinal output:\n{final}";
 var WORKTREE_CHAIN_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nThe work is on branch `{worktreeBranch}` (not yet merged to `{baseBranch}`).\nRun the following to inspect the changes:\n\n```bash\ngit diff {baseBranch}...{worktreeBranch}\n```\n\nOriginal task:\n{task}";
 var FINAL_PLACEHOLDER = "(no final output)";
@@ -7979,7 +8529,7 @@ function buildChainTask(taskTemplate, context) {
     template = DEFAULT_TEMPLATE;
   }
   let finalContent = FINAL_PLACEHOLDER;
-  if (existsSync14(context.finalPath)) {
+  if (existsSync15(context.finalPath)) {
     try {
       finalContent = readFileSync14(context.finalPath, "utf-8");
     } catch {
@@ -10019,7 +10569,7 @@ function buildOnChainCallback(args) {
     let overrideTask;
     if (step.reevaluate) {
       let parentFinal = "";
-      if (existsSync15(parentRun.finalPath)) {
+      if (existsSync16(parentRun.finalPath)) {
         try {
           parentFinal = readFileSync15(parentRun.finalPath, "utf-8");
         } catch {
@@ -10103,7 +10653,7 @@ function keptParentRefusal(parent, successor) {
   const branch = parent.worktreeBranch;
   if (!branch || parent.mergeResult?.success === true) return void 0;
   const base = parent.worktreeBaseBranch ?? "its base branch";
-  const gitRoot2 = parent.worktreePath ? dirname14(dirname14(dirname14(parent.worktreePath))) : resolveWorktreeSpec(parent.cwd, parent.id)?.gitRoot ?? parent.cwd;
+  const gitRoot2 = parent.worktreePath ? dirname15(dirname15(dirname15(parent.worktreePath))) : resolveWorktreeSpec(parent.cwd, parent.id)?.gitRoot ?? parent.cwd;
   const hint = parent.worktreeKept ?? keptBranchHint(gitRoot2, branch);
   return `chain: ${successor} not started after ${parent.id}: its work is on the kept branch ${branch}, not merged into ${base}, and a ${successor} branched from ${base} would lack it. ${hint}; then spawn ${successor} again.`;
 }
@@ -10147,8 +10697,8 @@ function buildOnRetryCallback(args) {
 
 // src/queue.ts
 init_types();
-import { mkdirSync as mkdirSync9 } from "node:fs";
-import { join as join21 } from "node:path";
+import { mkdirSync as mkdirSync10 } from "node:fs";
+import { join as join22 } from "node:path";
 var SpawnQueue = class {
   constructor(registry, maxConcurrent, maxConcurrentWriteCapable = 1, spawn2 = spawnRun) {
     this.registry = registry;
@@ -10202,7 +10752,7 @@ var SpawnQueue = class {
     const id = allocateRunId(opts.persona.name, mapFromRegistry2(registry));
     if (effort) addEffortMember(effort, id);
     const dir = runDir(id);
-    mkdirSync9(dir, { recursive: true });
+    mkdirSync10(dir, { recursive: true });
     const placeholder = {
       id,
       persona: opts.persona.name,
@@ -10214,15 +10764,15 @@ var SpawnQueue = class {
       status: "queued",
       waitReason,
       ...effort ? { parentPid: effort.owner.pid, parentStartTime: effort.owner.startTime, parentSessionId: effort.owner.sessionId } : {},
-      effort: effort ? { name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches ? [...opts.touches] : void 0 } : void 0,
+      effort: effort ? { owner: effort.owner, name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches ? [...opts.touches] : void 0 } : void 0,
       startTime: Date.now(),
       lastEventAt: Date.now(),
       messages: [],
       usage: emptyUsage(),
       cwd: opts.cwd,
-      recordPath: join21(dir, "record.json"),
-      transcriptPath: join21(dir, "transcript.jsonl"),
-      finalPath: join21(dir, "final.md")
+      recordPath: join22(dir, "record.json"),
+      transcriptPath: join22(dir, "transcript.jsonl"),
+      finalPath: join22(dir, "final.md")
     };
     registry.register(placeholder);
     if (effort) void writeRecord(placeholder);
@@ -10263,7 +10813,7 @@ var SpawnQueue = class {
     const preceding = new Set(this.pending.slice(0, id ? this.pending.findIndex((p) => p.id === id) : void 0).map((p) => p.id));
     const members = registry.list();
     const waitingBehind = new Set(members.filter((r) => r.status === "queued" && !preceding.has(r.id)).map((r) => r.id));
-    return admitEffortWriter({ id, persona: opts.persona.name, effort: effort ? { name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches } : void 0 }, members, { maxConcurrent: this.maxConcurrent, maxConcurrentWriteCapable: this.maxConcurrentWriteCapable }, effort, effort ? listEfforts(effort.gitRoot) : [], waitingBehind);
+    return admitEffortWriter({ id, persona: opts.persona.name, effort: effort ? { owner: effort.owner, name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches } : void 0 }, members, { maxConcurrent: this.maxConcurrent, maxConcurrentWriteCapable: this.maxConcurrentWriteCapable }, effort, effort ? listEfforts(effort.gitRoot) : [], waitingBehind);
   }
   /** Revalidation and synchronous running registration precede any asynchronous launch effects. */
   drain() {
@@ -12354,7 +12904,7 @@ var ConductorEventEmitter = class {
 };
 
 // src/rpc-detach.ts
-import { existsSync as existsSync16, unlinkSync as unlinkSync3 } from "node:fs";
+import { existsSync as existsSync17, unlinkSync as unlinkSync2 } from "node:fs";
 function createRpcDetach(filePath, intervalMs = 200) {
   let resolveDetach = () => {
   };
@@ -12362,9 +12912,9 @@ function createRpcDetach(filePath, intervalMs = 200) {
     resolveDetach = res;
   });
   const pollTimer = setInterval(() => {
-    if (existsSync16(filePath)) {
+    if (existsSync17(filePath)) {
       try {
-        unlinkSync3(filePath);
+        unlinkSync2(filePath);
       } catch {
       }
       resolveDetach();
@@ -12374,7 +12924,7 @@ function createRpcDetach(filePath, intervalMs = 200) {
   const unregister = () => {
     clearInterval(pollTimer);
     try {
-      if (existsSync16(filePath)) unlinkSync3(filePath);
+      if (existsSync17(filePath)) unlinkSync2(filePath);
     } catch {
     }
   };
@@ -12731,8 +13281,23 @@ function index_default(pi) {
               selfSessionId,
               now: Date.now()
             })
-          ).then((result) => {
+          ).then(async (result) => {
             lastReconcile = result;
+            if (!selfSessionId) return;
+            const roots = new Set(registry.list().flatMap((run) => run.effort ? [run.effort.gitRoot] : []));
+            try {
+              roots.add(effortRepository(cwd()).gitRoot);
+            } catch {
+            }
+            for (const root of [...roots].sort()) for (const effort of listEfforts(root).sort((a, b) => a.name.localeCompare(b.name))) {
+              try {
+                const recovery = await recoverEffort(effort, { registry, sessionId: selfSessionId, onComplete: opts.pushCompletionNotification, events: conductorEvents });
+                void recovery.done.catch((error) => console.error(`effort recovery: ${error.message}`));
+                await registry.integrations.whenIdle(root);
+              } catch (error) {
+                console.error(`effort ${effort.name} preserved: ${error.message}`);
+              }
+            }
           }).catch((err) => {
             console.error(
               `reconcile-startup: failed: ${err?.message ?? String(err)}`
