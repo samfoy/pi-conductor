@@ -843,7 +843,7 @@ init_types();
 import { readdir as readdir2, readFile as readFile2, stat as stat2 } from "node:fs/promises";
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join as join2, resolve } from "node:path";
+import { basename, dirname, join as join2, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 var WRITE_CAPABLE_PERSONAS2 = /* @__PURE__ */ new Set([
   "builder",
@@ -1124,13 +1124,17 @@ async function resolvePersonas(opts) {
   const personas = /* @__PURE__ */ new Map();
   const shadowed = /* @__PURE__ */ new Map();
   for (const layer of [builtin, user, project]) {
+    for (const name of layer.blockedNames) {
+      for (const p of personas.values()) {
+        if (p.name === name || basename(p.sourcePath, ".md") === name) personas.delete(p.name);
+      }
+    }
     for (const p of layer.personas) {
       const list = shadowed.get(p.name) ?? [];
       list.push(p);
       shadowed.set(p.name, list);
       personas.set(p.name, p);
     }
-    for (const name of layer.blockedNames) personas.delete(name);
   }
   for (const [name, ov] of Object.entries(overrides)) {
     if (ov.disabled) {

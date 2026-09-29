@@ -416,3 +416,43 @@ test("H2 B2 status and doctor never present null as a supported or automatic bac
   const report = await buildDoctorReport({ cwd: opts.cwd, registry: opts.registry, queue, conductorMode: false, env: {} });
   assert.match(report, /configured: null/); assert.match(report, /saved=null/);
 });
+
+
+for (const malformedName of ["team-reader", "oracle"]) test(`H2 source identity: invalid custom-reader file cannot launch its validated lower persona (${malformedName})`, async t => {
+  const child = fakeChild(t); const opts = options(); const queue = new SpawnQueue(opts.registry, 1);
+  t.after(() => { child.proc.emit("close", 1); for (const r of opts.registry.list()) clearTimeout(r.timeoutTimer); });
+  mkdirSync(userPersonasDir(), { recursive: true }); mkdirSync(projectPersonasDir(opts.cwd), { recursive: true });
+  const userPath = join(userPersonasDir(), "custom-reader.md");
+  writeFileSync(userPath, "---\nname: team-reader\ndescription: valid user\nruntime: subprocess\n---\nUser reader.");
+  t.after(() => rmSync(userPath));
+  writeFileSync(join(projectPersonasDir(opts.cwd), "custom-reader.md"), `---\nname: ${malformedName}\ndescription: invalid project\nruntime: rpc\n---\nMust not substitute a user reader.`);
+  const before = existsSync(runsRoot()) ? readdirSync(runsRoot()).sort() : [];
+  const registered = tools(opts.cwd, {}, queue, opts.registry);
+  const response = await registered.get("ensemble_spawn").execute("invalid-custom", { persona: "team-reader", task: "must not fall back", foreground: false });
+  assert.equal(child.launches(), 0, "invalid source filename must not launch its validated lower-priority persona");
+  assert.match(response.content[0].text, /not found|runtime/);
+  assert.deepEqual(opts.registry.list(), []); assert.equal(queue.size(), 0);
+  assert.deepEqual(existsSync(runsRoot()) ? readdirSync(runsRoot()).sort() : [], before);
+  const resolved = await resolvePersonas({ cwd: opts.cwd });
+  assert.equal(resolved.personas.has("team-reader"), false);
+  assert.equal(resolved.personas.has("oracle"), true, "malformed metadata never masks an unrelated persona");
+  assert.ok(resolved.errors.some(e => e.path.endsWith("custom-reader.md") && /runtime/.test(e.reason)));
+});
+
+for (const projectFile of ["custom-reader.md", "replacement-reader.md"]) test(`H2 source identity: valid project ${projectFile} keeps differing declared name selectable`, async t => {
+  const child = fakeChild(t); const opts = options(); const queue = new SpawnQueue(opts.registry, 1);
+  t.after(() => { child.proc.emit("close", 1); for (const r of opts.registry.list()) clearTimeout(r.timeoutTimer); });
+  mkdirSync(userPersonasDir(), { recursive: true }); mkdirSync(projectPersonasDir(opts.cwd), { recursive: true });
+  const userPath = join(userPersonasDir(), "custom-reader.md");
+  writeFileSync(userPath, "---\nname: team-reader\ndescription: valid user\nruntime: subprocess\n---\nUser reader.");
+  t.after(() => rmSync(userPath));
+  writeFileSync(join(projectPersonasDir(opts.cwd), "custom-reader.md"), "---\nname: oracle\ndescription: invalid project\nruntime: rpc\n---\nInvalid.");
+  writeFileSync(join(projectPersonasDir(opts.cwd), projectFile), "---\nname: team-reader\ndescription: valid project\nruntime: subprocess\n---\nValidated project reader.");
+  const registered = tools(opts.cwd, herdr, queue, opts.registry);
+  await registered.get("ensemble_spawn").execute("valid-custom", { persona: "team-reader", task: "probe", foreground: false });
+  assert.equal(child.launches(), 1); assert.equal(opts.registry.list()[0]!.runtime, "subprocess");
+  assert.match(opts.registry.list()[0]!.systemPrompt!, /Validated project reader/);
+  const resolved = await resolvePersonas({ cwd: opts.cwd });
+  assert.equal(resolved.personas.get("team-reader")?.sourcePath, join(projectPersonasDir(opts.cwd), projectFile));
+  assert.equal(resolved.personas.has("oracle"), true);
+});

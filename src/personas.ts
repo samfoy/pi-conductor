@@ -13,7 +13,7 @@ import { parseRuntimeChoice } from "./runtime.ts";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CONDUCTOR_LLM_TOOL_NAMES,
@@ -482,13 +482,19 @@ export async function resolvePersonas(opts: {
   const shadowed = new Map<string, Persona[]>();
 
   for (const layer of [builtin, user, project]) {
+    // Only validated lower-layer sources can supply a differing declared name.
+    // Mask before adding this layer's valid replacements, so higher priority still wins.
+    for (const name of layer.blockedNames) {
+      for (const p of personas.values()) {
+        if (p.name === name || basename(p.sourcePath, ".md") === name) personas.delete(p.name);
+      }
+    }
     for (const p of layer.personas) {
       const list = shadowed.get(p.name) ?? [];
       list.push(p);
       shadowed.set(p.name, list);
       personas.set(p.name, p);
     }
-    for (const name of layer.blockedNames) personas.delete(name);
   }
 
   // Apply overrides (model/thinking/timeout/disabled).
