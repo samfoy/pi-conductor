@@ -329,8 +329,20 @@ export function createRunPipeline(
   return done;
 }
 
+/** Track the terminal I/O tail, never the lifetime of a still-running child or verifier. */
+export function settleRun(...args: Parameters<typeof settleRunEffects>): Promise<void> {
+  const run = args[0];
+  if (!run.effort || !run.integration) return settleRunEffects(...args);
+  if (run.integrationSettlement) return run.integrationSettlement;
+  const settling = Promise.resolve().then(() => settleRunEffects(...args));
+  run.integrationSettlement = settling;
+  const clear = () => { if (run.integrationSettlement === settling) run.integrationSettlement = undefined; };
+  void settling.then(clear, clear);
+  return settling;
+}
+
 /** Shared terminal effects for live pipelines and Git-proven recovery, never a second finalizer. */
-export async function settleRun(
+async function settleRunEffects(
   run: Run, terminal: RunStatus, exitCode: number | undefined,
   opts: Pick<RunPipelineOpts, "registry" | "onComplete" | "onChain" | "onRetry" | "events" | "sessionDir">,
   transport: Pick<RunTransport, "stderr" | "stop"> = { stderr: "", stop() {} },

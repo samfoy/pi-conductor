@@ -76,7 +76,8 @@ export interface ShutdownDeps {
 /**
  * Apply the side effects of a `session_shutdown` event.
  *
- * On reload: no-op. Caller is still responsible for releasing
+ * On reload: preserve live children and await post-integration settlement.
+ * Caller is still responsible for releasing
  * runtime-scoped UI handles (widget, terminal-input listeners) — those
  * are tied to the OLD `ctx` whether we reload or quit.
  *
@@ -94,6 +95,9 @@ export async function handleSessionShutdown(
     const failure = results.find(r => r.status === "rejected");
     if (failure?.status === "rejected") throw failure.reason;
   }
+  // A failed final write is quiescent too: recovery inspects its WAL, without a surviving finalizer.
+  const settlements = deps.runs.flatMap(run => run.integrationSettlement ? [run.integrationSettlement] : []);
+  if (settlements.length) await Promise.allSettled(settlements);
   const uncertain = deps.runs.find(run => run.status === "integrating" && run.integration?.teardownError);
   if (uncertain) throw new Error(uncertain.integration!.teardownError);
   if (event.reason === "reload") return;

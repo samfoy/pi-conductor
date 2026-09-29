@@ -151,3 +151,61 @@ settlement tail. Removed the parallel settlement possibility, duplicate in-memor
 flight tracking and unnecessary rename of a temporary claim; no dependency,
 provider wrapper, background daemon or extra finalizer was introduced. This is
 implementation evidence, not independent approval or permission to roll out.
+
+## critic-sjpp correction: surviving settlement across reload
+
+The critic's same-session/PID overlap reproduced on `daa4d6b`: one Git
+integration, but callbacks `["recovered", "original"]` and two memory outcomes.
+The no-reload control had one of each. Critic evidence under
+`/tmp/m5-critic.ZPa9r3/` was read/reused without edits or deletion.
+
+The correction tracks only the post-integration settlement Promise on the Run,
+before terminal effects start. The shared entry point covers live pipelines,
+recovery and human requeue without duplicating their finalizer. Shutdown awaits
+that tail through final-file persistence and dispatch-state handling, including
+quiescence after rejected persistence. It does not await a running child's done
+Promise or change ordinary active-subprocess reload behavior. Fresh recovery then
+reads the authoritative durable delivery state; the old Run cannot dispatch later.
+No new durable claim, generation rule, receiver acknowledgement or replay policy.
+
+`tests/effort-reload-settlement-smoke.test.ts` ports the native faux-provider/real
+Git reproduction with externally released I/O barriers (no circular wait inside
+mkdir). Six cases cover no reload, held final write, shutdown after intent fsync
+before callback with held attempted-record write, failed final write, throwing
+callback, and failed attempted-record write. All assert one integration, one
+callback/outcome across separate registry/Run objects with unchanged owner PID,
+session and generation. Reload stays pending while I/O is held. Failure before
+intent lets recovery dispatch once; failure after intent preserves uncertainty.
+
+Observed focused command: new smoke file + `shutdown.test.ts` +
+`runtime-reload.test.ts` -> **20 passed**. The native live-child reload control
+still passes. Typecheck passes. Full-suite/final gates are recorded below.
+
+Mutation: replace `if (settlements.length) await Promise.allSettled(settlements)`
+with fire-and-forget `void` in `src/shutdown.ts`. Running the new smoke test with
+`--test-name-pattern='reload-final:'` exits 1 at the intended callback assertion,
+**`2 !== 1`**, with two memory outcomes and one Git integration. Restoring the
+source byte snapshot returns the same test to green (one callback/outcome/commit).
+No fixture/setup failure or weaker timing assertion is used as the witness.
+
+Complexity pass: one runtime-only Promise, one shared settlement wrapper, and one
+conditional shutdown wait. Existing settlement effects and durable intent ordering
+are unchanged; no second finalizer, store, dependency or broad recovery redesign.
+
+Final correction gates observed:
+
+- `node --test --test-timeout=90000 --import tsx tests/effort-reload-settlement-smoke.test.ts tests/effort-recovery-smoke.test.ts tests/runtime-reload.test.ts tests/shutdown.test.ts`
+  (same scrubbed environment as above): **39 passed**, including the prior 19
+  SIGKILL crash cases and the live-child reload control.
+- `npm test`: **2271 total, 2259 passed, 12 skipped, zero failures**, 77.96 seconds.
+- `npm run typecheck`, `npm run build`, `git diff --check`: passed.
+- One earlier full run encountered `Unexpected end of JSON input` in unchanged
+  `effort-teardown-smoke.test.ts:56`, whose readiness check reads a PID file between
+  creation and completion of its write. The unchanged file passed all 10 cases
+  on rerun, followed by the successful full suite above. No adjacent fixture or
+  process-group code was changed for this correction.
+
+Waiting is intentional, not a timeout that abandons live settlement I/O. Rejected
+I/O releases the wait; an operation that never returns still requires its I/O to
+finish. Active child lifetimes are excluded. Opaque callback/receiver semantics
+and the approved potentially-missed-delivery policy remain unchanged.

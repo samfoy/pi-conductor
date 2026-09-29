@@ -2907,7 +2907,19 @@ function createRunPipeline(run, piArgs, opts) {
   };
   return done;
 }
-async function settleRun(run, terminal, exitCode, opts, transport = { stderr: "", stop() {
+function settleRun(...args) {
+  const run = args[0];
+  if (!run.effort || !run.integration) return settleRunEffects(...args);
+  if (run.integrationSettlement) return run.integrationSettlement;
+  const settling = Promise.resolve().then(() => settleRunEffects(...args));
+  run.integrationSettlement = settling;
+  const clear = () => {
+    if (run.integrationSettlement === settling) run.integrationSettlement = void 0;
+  };
+  void settling.then(clear, clear);
+  return settling;
+}
+async function settleRunEffects(run, terminal, exitCode, opts, transport = { stderr: "", stop() {
 } }, donePromiseResolve = () => {
 }) {
   if (!applyCloseHandlerTerminal(run, terminal, exitCode)) {
@@ -12830,6 +12842,8 @@ async function handleSessionShutdown(event, deps) {
     const failure = results.find((r) => r.status === "rejected");
     if (failure?.status === "rejected") throw failure.reason;
   }
+  const settlements = deps.runs.flatMap((run) => run.integrationSettlement ? [run.integrationSettlement] : []);
+  if (settlements.length) await Promise.allSettled(settlements);
   const uncertain = deps.runs.find((run) => run.status === "integrating" && run.integration?.teardownError);
   if (uncertain) throw new Error(uncertain.integration.teardownError);
   if (event.reason === "reload") return;
