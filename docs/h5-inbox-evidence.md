@@ -143,10 +143,10 @@ API choice, checked against installed 0.87.1 source:
   **and between-turn automatic compaction**, so signal presence alone is unsafe.
 - `turn_end` precedes `_compactBeforeNextAssistantResponse` in native
   `prepareNextTurn`; `turn_start` follows it (`agent-session.js:295–423`). The
-  bridge records only this observed turn interval in a weak set of native
-  signals. Signal identity survives same-process reload; weak keys avoid a new
-  invocation ledger or retained session objects. The existing late-event gate
-  remains in place. Production never patches native compaction internals.
+  bridge records only this observed turn interval. The first correction used a
+  weak set of native signals; the boundary-time reload correction below replaces
+  it with an invocation-fenced phase handoff. The existing late-event gate remains
+  in place. Production never patches native compaction internals.
 
 Nine added native compaction scenarios hold `_getSummarizationRequestAuth` in
 the **test harness only**: manual success/auth-failure/cancel, pre-prompt A2
@@ -155,7 +155,7 @@ auth-failure, cancellation and reload. Each proves unchanged request bytes,
 `dispatched:false`, no ack and zero `sendUserMessage` calls before releasing
 auth; the later tick accepts the exact text once. Four positive streaming
 controls prove both steer and follow-up still enqueue during a held provider
-call, with and without native reload. The harness now runs 26 scenarios.
+call, with and without native reload. That correction expanded the harness to 26 scenarios.
 
 Correction mutations both fail the intended native undispatched assertion:
 1. Remove the new pre-rename native-state guard: fails during manual held auth.
@@ -167,6 +167,47 @@ Both use snapshot restoration with SHA256 verification. Run the existing
 `tests/child-inbox-native.test.ts` command above to execute these new scenarios
 and all earlier ack, ask, compaction and fault controls. No replay or acceptance
 semantics were weakened; no H6/public-runtime code was changed.
+
+## Snapshotted-boundary reload correction (critic-5gnj)
+
+The next native ordering witness registers an async handler **before** the bridge
+and holds native `turn_start` or `turn_end`, reloads externally, then releases it.
+The original two no-reload controls passed, while both reload cases failed:
+missing start membership blocked healthy steer; stale end membership permitted
+dispatch during automatic compaction. Native `ExtensionRunner.emit` and
+`emitBoundary` snapshot handlers before dispatch (`runner.js:662–735`). New
+handlers do not receive an already-started dispatch.
+
+`createContext()` uses guarded getters, including `signal` (`runner.js:545–620`).
+`AgentSession.reload()` emits shutdown before invalidating the old runner and
+loading the new runtime (`agent-session.js:2603–2627`). The new tests assert that
+reading the saved boundary context after reload actually throws; the bridge does
+not attempt to use that stale context.
+
+The WeakSet is replaced, not supplemented, by a small per-run phase slot:
+H4 invocation identity, native signal, active-turn bit and current attachment
+identity. Reload shutdown captures the native signal **while the context is still
+valid**. An old disposed callback may then update only the matching phase bit.
+It cannot reopen the fd, project its late event, send input, pump, or inspect its
+stale context. A changed run/nonce/signal, replaced phase slot, or H4 fault
+fences it out. Attachment identity prevents old cleanup from deleting a new
+attachment's slot. Quit, closing and faults remove the owned slot; the handoff
+contains no extension context, transcript writer or durable delivery ledger.
+
+The native tests include both reload failures and matched no-reload controls,
+plus zero-byte and 17-byte tee faults during boundary-time reload. Poisoned
+invocations remain unacked with unchanged damaged transcript and no shutdown
+success after another reload. Three deterministic tests genuinely re-evaluate
+the bridge module and verify that late start/end callbacks with a throwing stale
+context cannot authorize or revoke a different nonce, native signal or run.
+The harness now reports **32 named native subtests** (the original 26 plus six
+boundary cases), rather than hiding scenarios inside one aggregate test.
+
+Mutation: removing the disposed callback's `observePhase(event.type,
+reloadSignal)` handoff fails exactly the two native boundary assertions above
+(and their parent test); both no-reload and zero/partial-fault controls remain
+green. The source is restored from a snapshot with SHA256 verification. No
+request-replay or ack/execution semantics changed.
 
 ## Complexity pass
 

@@ -5,7 +5,7 @@ import { syncBuiltinESMExports } from "node:module";
 import type { TestContext } from "node:test";
 import { join } from "node:path";
 import { Type, fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { VERSION, createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { type ExtensionContext, VERSION, createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { installChildBridge } from "../../src/child-bridge.ts";
 import { installContextRetirement } from "../../src/context-retirement.ts";
 import { registerTools } from "../../src/tools.ts";
@@ -26,7 +26,7 @@ export async function nativeWitness(root: string, scenario: string, t: TestConte
     HERDR_ENV: "1", HERDR_SOCKET_PATH: binding.socketPath, HERDR_PANE_ID: binding.paneId, HERDR_TAB_ID: binding.tabId, HERDR_WORKSPACE_ID: binding.workspaceId };
   const faux = fauxProvider({ tokensPerSecond: Infinity, models: [{ id: "offline", contextWindow: 8192, maxTokens: 1024 }] });
   const runtime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: null, modelsStorePath: join(agentDir, "models.json"), refreshOnCreate: false, allowModelNetwork: false });
-  const settings = { compaction: { enabled: false, keepRecentTokens: 0, reserveTokens: (scenario.includes("threshold") || scenario.startsWith("early-between-turn")) ? 8191 : 0 }, retry: { enabled: false }, cacheWarming: "off" };
+  const settings = { compaction: { enabled: false, keepRecentTokens: 0, reserveTokens: (scenario.includes("threshold") || (scenario.startsWith("early-between-turn") || scenario.startsWith("boundary-end"))) ? 8191 : 0 }, retry: { enabled: false }, cacheWarming: "off" };
   const settingsManager = SettingsManager.inMemory(settings);
   let bridge!: ReturnType<typeof installChildBridge>, session: any, nativeCtx: any, sequence = 0, shutdowns = 0, starts = 0;
   const modelInputs: string[][] = [];
@@ -35,6 +35,9 @@ export async function nativeWitness(root: string, scenario: string, t: TestConte
   let late: InboxRequest | undefined, compactionMode = scenario;
   const held = deferred(), entered = deferred();
   let holdPreflight = scenario === "inflight";
+  const boundaryEntered = deferred(), releaseBoundary = deferred();
+  let boundaryHeld = false, boundaryContext: any;
+
   const put = (kind: InboxRequest["kind"] = "initial", text = "Prepared task", askId?: string) => {
     const r: InboxRequest = { v: 1, launchNonce: binding.launchNonce, requestId: `request-${++sequence}`, sequence, kind, text, ...(askId ? { askId } : {}) };
     writeInboxRequest(runDir, r); return r;
@@ -55,10 +58,15 @@ export async function nativeWitness(root: string, scenario: string, t: TestConte
         pi.on("agent_settled", () => {
           if (scenario === "settle-race" && !settling) { settling = true; late = put("steer", "Too late"); t.mock.timers.tick(250); }
         });
+        const holdBoundary = async (_e: unknown, ctx: ExtensionContext) => {
+          if (!boundaryHeld) { boundaryHeld = true; boundaryContext = ctx; boundaryEntered.resolve(); await releaseBoundary.promise; }
+        };
+        if (scenario.startsWith("boundary-start")) pi.on("turn_start", holdBoundary);
+        if (scenario.startsWith("boundary-end")) pi.on("turn_end", holdBoundary);
         bridge = installChildBridge(pi, { env });
         installContextRetirement(pi);
         registerTools(pi, { getRegistry: () => new RunRegistry() } as never, env);
-        if (scenario.startsWith("early-between-turn")) pi.registerTool({ name: "native_continue", label: "Continue", description: "Offline next-turn compaction fixture", parameters: Type.Object({}),
+        if ((scenario.startsWith("early-between-turn") || scenario.startsWith("boundary-end"))) pi.registerTool({ name: "native_continue", label: "Continue", description: "Offline next-turn compaction fixture", parameters: Type.Object({}),
           async execute() { settingsManager.setCompactionEnabled(true); return { content: [{ type: "text", text: "Continue" }], details: {} }; } });
       }, pi => {
         pi.on("session_start", (_e, ctx) => { nativeCtx = ctx; });
@@ -80,7 +88,7 @@ export async function nativeWitness(root: string, scenario: string, t: TestConte
       }],
     });
     await loader.reload(); loader.getExtensions().runtime.flagValues.set("conductor-launch", binding.launchNonce);
-    ({ session } = await createAgentSession({ cwd: runDir, agentDir, modelRuntime: runtime, model: faux.getModel(), resourceLoader: loader, settingsManager, sessionManager: sm, tools: ["ask_owner", ...(scenario.startsWith("early-between-turn") ? ["native_continue"] : [])] }));
+    ({ session } = await createAgentSession({ cwd: runDir, agentDir, modelRuntime: runtime, model: faux.getModel(), resourceLoader: loader, settingsManager, sessionManager: sm, tools: ["ask_owner", ...((scenario.startsWith("early-between-turn") || scenario.startsWith("boundary-end")) ? ["native_continue"] : [])] }));
     await session.bindExtensions({ mode: "tui", onError: (e: any) => errors.push(e), shutdownHandler: () => { shutdowns++; } });
     assert.equal(JSON.parse(readFileSync(join(runDir, "launch", `${binding.launchNonce}.json`), "utf8")).piVersion, "0.87.1");
   }
@@ -93,7 +101,68 @@ export async function nativeWitness(root: string, scenario: string, t: TestConte
   process.env.CONDUCTOR_SUBAGENT = "1";
   try {
     await open();
-    if (scenario.startsWith("early-")) {
+    if (scenario.startsWith("boundary-")) {
+      const faultBytes = scenario.includes("-fault-") ? Number(scenario.split("-").at(-1)) : undefined;
+      const ending = scenario.startsWith("boundary-end"), reload = scenario.endsWith("reload") || faultBytes !== undefined;
+      const phaseEntered = deferred(), releasePhase = deferred();
+      const nativeAuth = session._getSummarizationRequestAuth;
+      const auth = ending ? t.mock.method(session, "_getSummarizationRequestAuth", async (...args: any[]) => {
+        phaseEntered.resolve(); await releasePhase.promise; return nativeAuth.apply(session, args);
+      }) : undefined;
+      faux.setResponses(ending ? [fauxAssistantMessage([fauxToolCall("native_continue", {}, { id: "continue-1" })], { stopReason: "toolUse" }), response("Next turn")]
+        : [async () => { phaseEntered.resolve(); await releasePhase.promise; return fauxAssistantMessage("Held stream"); }, response()]);
+      const operation = session.prompt("Boundary seed");
+      const send = t.mock.method(session, "sendUserMessage");
+      let r: InboxRequest;
+      try {
+        await boundaryEntered.promise;
+        const signal = boundaryContext.signal;
+        assert.ok(signal && !signal.aborted);
+        if (reload) {
+          const originalWrite = fs.writeSync;
+          let remaining = faultBytes ?? 0;
+          const write = faultBytes === undefined ? undefined : t.mock.method(fs, "writeSync", (fd: number, buffer: Buffer, offset: number, length: number) => {
+            if (!buffer.includes('"type":"message_end"') || !buffer.includes('"_c"')) return originalWrite(fd, buffer, offset, length);
+            if (remaining === 0) throw new Error("boundary reload tee full disk");
+            const n = originalWrite(fd, buffer, offset, Math.min(length, remaining)); remaining -= n; return n;
+          });
+          syncBuiltinESMExports();
+          try { await session.reload(); } finally { write?.mock.restore(); syncBuiltinESMExports(); }
+          if (faultBytes !== undefined) assert.equal(remaining, 0, "zero/partial tee failure must occur during boundary-time reload");
+          assert.throws(() => boundaryContext.signal, /no longer active|invalid|reload/i, "old runner context is invalidated");
+          assert.equal(nativeCtx.signal, signal);
+        }
+        const beforeLateEvent = readFileSync(join(runDir, "transcript.jsonl"));
+        releaseBoundary.resolve(); await phaseEntered.promise;
+        if (reload) assert.ok(readFileSync(join(runDir, "transcript.jsonl")).subarray(beforeLateEvent.length).toString("utf8").split("\n").filter(Boolean)
+          .every(line => JSON.parse(line).type !== (ending ? "turn_end" : "turn_start")), "disposed boundary callback must not project its late event");
+        r = put("steer", "  Boundary control\r\n漢🙂  ");
+        assert.equal(nativeCtx.isIdle(), false); assert.ok(nativeCtx.signal && !nativeCtx.signal.aborted);
+        await tick();
+        if (ending) {
+          assert.equal(session.isCompacting, true);
+          assert.deepEqual(readInbox(runDir, r.launchNonce), [{ request: r, dispatched: false }], "boundary-time reload must retain turn_end bookkeeping before native compaction");
+          assert.equal(send.mock.callCount(), 0); assert.equal(ack(r), undefined);
+        } else {
+          assert.equal(ack(r)?.accepted, true, "boundary-time reload must retain turn_start bookkeeping for healthy streaming steer");
+          assert.equal(send.mock.callCount(), 1);
+        }
+      } finally { releaseBoundary.resolve(); releasePhase.resolve(); await operation; auth?.mock.restore(); send.mock.restore(); }
+      if (faultBytes !== undefined) {
+        const damaged = readFileSync(join(runDir, "transcript.jsonl"));
+        await session.reload(); await tick();
+        assert.equal(ack(r!), undefined); assert.equal(shutdowns, 0);
+        assert.deepEqual(readFileSync(join(runDir, "transcript.jsonl")), damaged, "late boundary cannot resurrect the poisoned writer");
+        assert.equal(errors.length, 1); assert.match(errors[0].error, /boundary reload tee full disk/);
+        return { version: VERSION, scenario, faultBytes, shutdowns, ack: false };
+      }
+      if (ending) {
+        settingsManager.setCompactionEnabled(false);
+        faux.setResponses([response()]); const done = settle(); await tick(); await done;
+      }
+      assert.equal(ack(r!)?.accepted, true); assert.ok(modelInputs.at(-1)?.includes(r!.text));
+      assert.equal(inputs.filter(text => text === r!.text).length, 1); assert.equal(shutdowns, 0);
+    } else if (scenario.startsWith("early-")) {
       faux.setResponses([response("Unaccepted seed history")]); await session.prompt("Human seed");
       const r = put("initial", "  Held-auth task\r\n漢🙂  ");
       const requestPath = join(runDir, "inbox", r.launchNonce, `${String(r.sequence).padStart(6, "0")}-${r.requestId}.json`);
@@ -106,7 +175,7 @@ export async function nativeWitness(root: string, scenario: string, t: TestConte
         return nativeAuth.apply(session, args);
       });
       const send = t.mock.method(session, "sendUserMessage");
-      const manual = scenario.startsWith("early-manual"), betweenTurns = scenario.startsWith("early-between-turn");
+      const manual = scenario.startsWith("early-manual"), betweenTurns = (scenario.startsWith("early-between-turn") || scenario.startsWith("boundary-end"));
       if (!manual) {
         settingsManager.setCompactionEnabled(!betweenTurns);
         faux.setResponses(betweenTurns ? [fauxAssistantMessage([fauxToolCall("native_continue", {}, { id: "continue-1" })], { stopReason: "toolUse" }), response("Next turn")]

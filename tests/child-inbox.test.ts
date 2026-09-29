@@ -38,7 +38,7 @@ function fixture() {
   const input = (r: InboxRequest) => fire("input", { text: inboxMarker(r), source: "extension" }).at(-1);
   let bridge = installChildBridge(pi as never, { env });
   const reload = () => { bridge.dispose(); handlers.clear(); bridge = installChildBridge(pi as never, { env }); fire("session_start", { reason: "reload" }); };
-  return { runDir, binding, env, pi, ctx, sent, diagnostics, fire, put, input, request, reload, start: () => fire("session_start", { reason: "startup" }),
+  return { runDir, binding, env, pi, ctx, handlers, sent, diagnostics, fire, put, input, request, reload, start: () => fire("session_start", { reason: "startup" }),
     dispose: () => bridge.dispose(), accept: () => bridge.acceptInitial(binding.launchNonce), shutdowns: () => shutdowns,
     state: (values: { branch?: any[]; idle?: boolean; queued?: boolean }) => { branch = values.branch ?? branch; idle = values.idle ?? idle; queued = values.queued ?? queued; } };
 }
@@ -305,4 +305,31 @@ test("H5 nonidle without an observed live turn is not dispatch permission", t =>
     assert.deepEqual(readInbox(f.runDir, r.launchNonce), [{ request: r, dispatched: false }]);
     f.state({ idle: true }); t.mock.timers.tick(250); assert.equal(f.sent.length, 1);
   } finally { f.dispose(); }
+});
+
+for (const change of ["nonce", "signal", "run"] as const) test(`H5 late disposed phase event is fenced from a different ${change}`, async t => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const old = fixture(), current = change === "run" ? fixture() : old;
+  let replacement: ReturnType<typeof installChildBridge> | undefined;
+  try {
+    old.ctx.signal = new AbortController().signal; old.state({ idle: false }); old.start(); old.fire("turn_start");
+    const lateStart = old.handlers.get("turn_start")![0], lateEnd = old.handlers.get("turn_end")![0];
+    old.fire("session_shutdown", { reason: "reload" });
+    const staleCtx = new Proxy({}, { get() { throw new Error("stale native context accessed"); } });
+    current.handlers.clear(); current.state({ idle: false });
+    current.ctx.signal = change === "signal" ? new AbortController().signal : old.ctx.signal;
+    if (change === "nonce") current.binding.launchNonce = "new-invocation";
+    writeFileSync(join(current.runDir, "record.json"), JSON.stringify({ id: current.binding.runId, runtime: "herdr", herdr: current.binding }));
+    const freshModule = await import(`${new URL("../src/child-bridge.ts", import.meta.url).href}?boundary=${encodeURIComponent(current.runDir)}-${change}`);
+    assert.notEqual(freshModule.installChildBridge, installChildBridge, "module must actually be re-evaluated");
+    replacement = freshModule.installChildBridge(current.pi as never, { env: current.env });
+    current.fire("session_start", { reason: change === "signal" ? "reload" : "startup" });
+    const r = current.put(current.request(1, "steer"));
+    assert.doesNotThrow(() => lateStart({ type: "turn_start" }, staleCtx));
+    t.mock.timers.tick(250); assert.equal(current.sent.length, 0, "late foreign start cannot authorize dispatch");
+    current.fire("turn_start");
+    assert.doesNotThrow(() => lateEnd({ type: "turn_end" }, staleCtx));
+    t.mock.timers.tick(250); assert.equal(current.sent.length, 1, "late foreign end cannot revoke current turn eligibility");
+    assert.equal((current.input(r) as any).action, "transform");
+  } finally { replacement?.dispose(); current.dispose(); old.dispose(); }
 });

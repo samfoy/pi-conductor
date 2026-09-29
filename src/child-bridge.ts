@@ -18,10 +18,11 @@ interface BridgeOptions { env?: NodeJS.ProcessEnv; now?: () => number }
 // A full disk cannot reliably store a failure marker. Keep faults for this process's
 // lifetime, across module reload; disposal must never erase an incomplete invocation.
 const faultKey = Symbol.for("pi-conductor.child-bridge.tee-faults.v1");
-// Native run signals survive reload but span between-turn compaction too. Remember
-// only observed turn intervals, weakly, so reload preserves live-control eligibility.
-const turnKey = Symbol.for("pi-conductor.child-bridge.active-turns.v1");
-const processState = globalThis as typeof globalThis & { [faultKey]?: Set<string>; [turnKey]?: WeakSet<AbortSignal> };
+// Keep phase handoffs, not native contexts: a snapshotted handler may run after
+// reload invalidates its context. Only the matching invocation/signal may update it.
+interface TurnPhase { identity: string; owner: object; signal?: AbortSignal; active: boolean }
+const turnKey = Symbol.for("pi-conductor.child-bridge.turn-phases.v2");
+const processState = globalThis as typeof globalThis & { [faultKey]?: Set<string>; [turnKey]?: Map<string, TurnPhase> };
 const faultIdentity = (h: Hello): string => JSON.stringify([h.runId, h.launchNonce, h.sessionId, h.sessionFile, h.pid, h.pidStartTime]);
 
 function writeAll(fd: number, buffer: Buffer): void {
@@ -73,10 +74,21 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
   const runDir = env.CONDUCTOR_RUN_DIR ?? "";
   const updates = new Map<string, number>();
   const compactions = new Set<string>();
-  const dispose = () => {
+  const phaseOwner = {};
+  let phase: TurnPhase | undefined, reloadSignal: AbortSignal | undefined;
+  function forgetPhase() {
+    if (phase?.owner === phaseOwner && processState[turnKey]?.get(runDir) === phase) processState[turnKey]?.delete(runDir);
+  }
+  function observePhase(type: unknown, signal: AbortSignal | undefined) {
+    if (!phase || !signal || phase.signal !== signal || processState[turnKey]?.get(runDir) !== phase || processState[faultKey]?.has(phase.identity)) return;
+    if (type === "turn_start") phase.active = true;
+    if (type === "turn_end" || type === "agent_end") phase.active = false;
+  }
+  const dispose = (preservePhase = false) => {
     if (timer) clearInterval(timer);
     timer = undefined; compacting = false; compactionFinished = false; inFlight = undefined; executingAsks.clear();
     try { flush(); } finally {
+      if (!preservePhase || (phase && processState[faultKey]?.has(phase.identity))) { reloadSignal = undefined; forgetPhase(); }
       if (fd !== undefined) { const owned = fd; fd = undefined; closeSync(owned); }
       hello = undefined; pending = undefined; updates.clear(); compactions.clear();
       ctxRef = undefined; accepted = false; closing = false;
@@ -101,13 +113,14 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
     ctx.ui.notify(`conductor child bridge inert: ${(error as Error).message}`, "warning");
   }
   function observe(event: Record<string, unknown>, ctx: ExtensionContext) {
-    if (!hello || closing) return;
+    if (!hello) { observePhase(event.type, reloadSignal); return; }
+    if (closing) return;
     try {
       flush();
       const type = event.type;
       const signal = ctx.signal;
-      if (signal && type === "turn_start") (processState[turnKey] ??= new WeakSet()).add(signal);
-      if (signal && (type === "turn_end" || type === "agent_end")) processState[turnKey]?.delete(signal);
+      if (phase && (type === "agent_start" || type === "turn_start") && phase.signal !== signal) { phase.signal = signal; phase.active = false; }
+      observePhase(type, signal);
       if (type === "session_before_compact") { compacting = true; compactionFinished = false; }
       if (type === "session_compact" || type === "session_compact_failed") compactionFinished = true;
       if (compactionFinished && (type === "turn_start" || type === "before_agent_start" || type === "agent_before_settle")) compacting = false;
@@ -122,6 +135,7 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
         if (type === "agent_settled" && accepted) {
           exclusive(`${statePath}.closing.json`, hello);
           closing = true;
+          forgetPhase();
           ctx.shutdown(); // Request only: the parent must separately prove process exit.
         }
       } else if (type === "turn_end" || type === "turn_start") write({ type, turnIndex: event.turnIndex });
@@ -208,6 +222,12 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
       hello = expected;
       ctxRef = ctx;
       if (closing) return;
+      const phases = processState[turnKey] ??= new Map<string, TurnPhase>();
+      const priorPhase = phases.get(runDir), identity = faultIdentity(expected), signal = ctx.signal;
+      phase = reload && priorPhase && priorPhase.identity === identity ? priorPhase : { identity, owner: phaseOwner, active: false };
+      if (phase.signal !== signal) phase.active = false;
+      phase.signal = signal; phase.owner = phaseOwner;
+      phases.set(runDir, phase);
       fd = openSync(join(runDir, "transcript.jsonl"), constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
       if (!fstatSync(fd).isFile() || fstatSync(fd).nlink !== 1) throw new Error("invalid transcript file");
       if (!reload) write({ type: "conductor_child", event: "launch", ...hello });
@@ -243,7 +263,7 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
       // isIdle includes native compaction before session_before_compact. A live
       // signal permits controls only inside a turn, not during between-turn auth.
       const signal = ctxRef.signal;
-      if (!ctxRef.isIdle() && (!signal || signal.aborted || !processState[turnKey]?.has(signal))) return;
+      if (!ctxRef.isIdle() && (!signal || signal.aborted || phase?.signal !== signal || !phase.active)) return;
       dispatchInboxRequest(runDir, next.request);
       inFlight = {};
       pi.sendUserMessage(inboxMarker(next.request), { deliverAs: next.request.kind === "steer" || next.request.kind === "grace" ? "steer" : "followUp" });
@@ -276,7 +296,15 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
   });
   pi.on("session_before_switch", (event, ctx) => { observe({ ...event }, ctx); return hello ? { cancel: true } : undefined; });
   pi.on("session_before_fork", (event, ctx) => { observe({ ...event }, ctx); return hello ? { cancel: true } : undefined; });
-  pi.on("session_shutdown", dispose);
+  pi.on("session_shutdown", (event, ctx) => {
+    const reload = event.reason === "reload" && !!hello && !closing;
+    if (reload && phase) {
+      reloadSignal = ctx.signal;
+      if (phase.signal !== reloadSignal) phase.active = false;
+      phase.signal = reloadSignal;
+    }
+    dispose(reload);
+  });
   return { dispose, acceptInitial(nonce: string): boolean {
     if (!hello || !ctxRef || closing || nonce !== hello.launchNonce) return false;
     try {

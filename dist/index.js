@@ -12180,7 +12180,7 @@ var token2 = (value) => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{
 var text = (value) => typeof value === "string" && !!value.trim() && !/[\0\r\n]/.test(value);
 var path = (value) => text(value) && isAbsolute4(value) && resolve6(value) === value;
 var faultKey = /* @__PURE__ */ Symbol.for("pi-conductor.child-bridge.tee-faults.v1");
-var turnKey = /* @__PURE__ */ Symbol.for("pi-conductor.child-bridge.active-turns.v1");
+var turnKey = /* @__PURE__ */ Symbol.for("pi-conductor.child-bridge.turn-phases.v2");
 var processState = globalThis;
 var faultIdentity = (h) => JSON.stringify([h.runId, h.launchNonce, h.sessionId, h.sessionFile, h.pid, h.pidStartTime]);
 function writeAll(fd, buffer) {
@@ -12235,7 +12235,17 @@ function installChildBridge(pi, options = {}) {
   const runDir2 = env.CONDUCTOR_RUN_DIR ?? "";
   const updates = /* @__PURE__ */ new Map();
   const compactions = /* @__PURE__ */ new Set();
-  const dispose = () => {
+  const phaseOwner = {};
+  let phase, reloadSignal;
+  function forgetPhase() {
+    if (phase?.owner === phaseOwner && processState[turnKey]?.get(runDir2) === phase) processState[turnKey]?.delete(runDir2);
+  }
+  function observePhase(type, signal) {
+    if (!phase || !signal || phase.signal !== signal || processState[turnKey]?.get(runDir2) !== phase || processState[faultKey]?.has(phase.identity)) return;
+    if (type === "turn_start") phase.active = true;
+    if (type === "turn_end" || type === "agent_end") phase.active = false;
+  }
+  const dispose = (preservePhase = false) => {
     if (timer) clearInterval(timer);
     timer = void 0;
     compacting = false;
@@ -12245,6 +12255,10 @@ function installChildBridge(pi, options = {}) {
     try {
       flush();
     } finally {
+      if (!preservePhase || phase && processState[faultKey]?.has(phase.identity)) {
+        reloadSignal = void 0;
+        forgetPhase();
+      }
       if (fd !== void 0) {
         const owned = fd;
         fd = void 0;
@@ -12279,13 +12293,20 @@ function installChildBridge(pi, options = {}) {
     ctx.ui.notify(`conductor child bridge inert: ${error.message}`, "warning");
   }
   function observe(event, ctx) {
-    if (!hello || closing) return;
+    if (!hello) {
+      observePhase(event.type, reloadSignal);
+      return;
+    }
+    if (closing) return;
     try {
       flush();
       const type = event.type;
       const signal = ctx.signal;
-      if (signal && type === "turn_start") (processState[turnKey] ??= /* @__PURE__ */ new WeakSet()).add(signal);
-      if (signal && (type === "turn_end" || type === "agent_end")) processState[turnKey]?.delete(signal);
+      if (phase && (type === "agent_start" || type === "turn_start") && phase.signal !== signal) {
+        phase.signal = signal;
+        phase.active = false;
+      }
+      observePhase(type, signal);
       if (type === "session_before_compact") {
         compacting = true;
         compactionFinished = false;
@@ -12302,6 +12323,7 @@ function installChildBridge(pi, options = {}) {
         if (type === "agent_settled" && accepted) {
           exclusive(`${statePath}.closing.json`, hello);
           closing = true;
+          forgetPhase();
           ctx.shutdown();
         }
       } else if (type === "turn_end" || type === "turn_start") write({ type, turnIndex: event.turnIndex });
@@ -12426,6 +12448,13 @@ function installChildBridge(pi, options = {}) {
       hello = expected;
       ctxRef = ctx;
       if (closing) return;
+      const phases = processState[turnKey] ??= /* @__PURE__ */ new Map();
+      const priorPhase = phases.get(runDir3), identity = faultIdentity(expected), signal = ctx.signal;
+      phase = reload && priorPhase && priorPhase.identity === identity ? priorPhase : { identity, owner: phaseOwner, active: false };
+      if (phase.signal !== signal) phase.active = false;
+      phase.signal = signal;
+      phase.owner = phaseOwner;
+      phases.set(runDir3, phase);
       fd = openSync4(join24(runDir3, "transcript.jsonl"), constants4.O_APPEND | constants4.O_CREAT | constants4.O_WRONLY | constants4.O_NOFOLLOW, 384);
       if (!fstatSync3(fd).isFile() || fstatSync3(fd).nlink !== 1) throw new Error("invalid transcript file");
       if (!reload) write({ type: "conductor_child", event: "launch", ...hello });
@@ -12455,7 +12484,7 @@ function installChildBridge(pi, options = {}) {
       const next = unacked[0];
       if (!next) return;
       const signal = ctxRef.signal;
-      if (!ctxRef.isIdle() && (!signal || signal.aborted || !processState[turnKey]?.has(signal))) return;
+      if (!ctxRef.isIdle() && (!signal || signal.aborted || phase?.signal !== signal || !phase.active)) return;
       dispatchInboxRequest(runDir2, next.request);
       inFlight = {};
       pi.sendUserMessage(inboxMarker(next.request), { deliverAs: next.request.kind === "steer" || next.request.kind === "grace" ? "steer" : "followUp" });
@@ -12500,7 +12529,15 @@ function installChildBridge(pi, options = {}) {
     observe({ ...event }, ctx);
     return hello ? { cancel: true } : void 0;
   });
-  pi.on("session_shutdown", dispose);
+  pi.on("session_shutdown", (event, ctx) => {
+    const reload = event.reason === "reload" && !!hello && !closing;
+    if (reload && phase) {
+      reloadSignal = ctx.signal;
+      if (phase.signal !== reloadSignal) phase.active = false;
+      phase.signal = reloadSignal;
+    }
+    dispose(reload);
+  });
   return { dispose, acceptInitial(nonce) {
     if (!hello || !ctxRef || closing || nonce !== hello.launchNonce) return false;
     try {
