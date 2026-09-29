@@ -541,8 +541,10 @@ export interface RunIntegration {
 }
 
 export interface Run {
+  transport?: import("./runtime.ts").RunTransport;
   /** Concrete backend, fixed at acceptance. Missing legacy tags mean subprocess. */
   readonly runtime?: import("./runtime.ts").RuntimeKind;
+  herdr?: import("./herdr/identity.ts").HerdrBinding;
   waitReason?: string;
   /** Owned integration effects; never restored from a saved record. */
   integrationControl?: { cancel(): void; suspend(): Promise<void> };
@@ -1011,6 +1013,7 @@ export interface Run {
 export interface RunRecord {
   /** Concrete backend, fixed at acceptance. Missing legacy tags mean subprocess. */
   readonly runtime?: import("./runtime.ts").RuntimeKind;
+  herdr?: import("./herdr/identity.ts").HerdrBinding;
   effort?: RunEffort;
   integration?: RunIntegration;
   landedCommit?: string;
@@ -1188,6 +1191,7 @@ export function toRunRecord(r: Run): RunRecord {
     tools: r.tools,
     excludeTools: r.excludeTools,
     runtime: r.runtime === undefined ? "subprocess" : r.runtime,
+    herdr: r.herdr,
     steerable: r.steerable,
     streamingMode: r.streamingMode,
     hookResult: r.hookResult,

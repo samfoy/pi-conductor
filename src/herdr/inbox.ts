@@ -129,3 +129,6 @@ export function dispatchInboxRequest(runDir: string, request: InboxRequest): voi
   absent(target);
   renameSync(source, target);
 }
+
+/** Bounded, no-follow JSON reader shared with launch identity records. */
+export { read as readControlRecord };

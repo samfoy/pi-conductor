@@ -670,6 +670,7 @@ export function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
   return {
     id: record.id,
     runtime: record.runtime === undefined ? "subprocess" : record.runtime,
+    herdr: record.herdr,
     persona: record.persona,
     task: record.task,
     model: record.model,

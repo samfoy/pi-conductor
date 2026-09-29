@@ -1,3 +1,4 @@
+import { runtimeFor } from "./runtime.ts";
 import { formatOwnerAnswer } from "./ask-owner.ts";
 /**
  * pi-conductor — Run registry and subprocess spawning.
@@ -453,12 +454,17 @@ export type PiArgsOptions = PiToolPolicyArgs &
     });
 
 export function buildPiArgs(opts: PiArgsOptions): string[] {
-  // Keep short one-shot prompts in argv. Larger UTF-8 prompts use native RPC stdin
-  // below the host's 128 KiB single-argument limit, without granting live steering.
   const rpc = opts.steerable || Buffer.byteLength(opts.prompt, "utf8") > 96 * 1024;
-  const args: string[] = rpc
-    ? ["--mode", "rpc"]
-    : ["--mode", "json", "-p"];
+  return [...(rpc ? ["--mode", "rpc"] : ["--mode", "json", "-p"]),
+    ...buildPiCoreArgs(opts), ...(rpc ? [] : [opts.prompt])];
+}
+
+export type PiCoreArgsOptions = Omit<Extract<PiArgsOptions, { kind: "fresh" }>, "prompt" | "steerable">
+  | Omit<Extract<PiArgsOptions, { kind: "resume" }>, "prompt" | "steerable">;
+
+/** Shared policy/session arguments; transports alone choose framing and task delivery. */
+export function buildPiCoreArgs(opts: PiCoreArgsOptions): string[] {
+  const args: string[] = [];
   if (opts.kind === "fresh") {
     args.push("--session-dir", opts.sessionDir);
   } else {
@@ -486,11 +492,6 @@ export function buildPiArgs(opts: PiArgsOptions): string[] {
   // collision-handling sees user dir first.
   if (opts.skillPaths && opts.skillPaths.length > 0) {
     for (const p of opts.skillPaths) args.push("--skill", p);
-  }
-  // Trailing prompt positional. RPC mode injects the prompt over
-  // stdin (slice 3); print mode passes it as the final argv slot.
-  if (!rpc) {
-    args.push(opts.prompt);
   }
   return args;
 }
@@ -1856,7 +1857,7 @@ type ActionObservations = ReturnType<typeof observeRunActions>;
 export function runActionError(run: Run, action: RunAction, observed: ActionObservations): string | undefined {
   if (action === "focus") return observed.canFocus ? undefined : "Focused stream requires terminal UI (TUI mode).";
   const unsupported = unsupportedRuntimeReason(run.runtime);
-  if (unsupported) return unsupported;
+  if (unsupported && !(action === "kill" && run.runtime === "herdr" && run.transport?.kind === "herdr")) return unsupported;
   if (action === "send" || action === "steer" || action === "follow_up") {
     if (observed.effortOwnershipError) return observed.effortOwnershipError;
     if (action === "send" && observed.effortAdmissionError) return observed.effortAdmissionError;
@@ -2854,7 +2855,7 @@ export function forceTerminate(
       }
     }
   }
-  subprocessRuntime.terminate(run, killGroup);
+  void runtimeFor(run).terminate(run, killGroup);
   run.pendingAsk = undefined;
   run.askExecution = undefined;
   discoverContextRetirement(run);

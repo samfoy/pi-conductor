@@ -70,6 +70,8 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
   let timer: ReturnType<typeof setInterval> | undefined;
   let compacting = false, compactionFinished = false;
   let inFlight: { text?: string } | undefined;
+  let initialInput: { requestId: string; text: string } | undefined;
+  let initialStart: string | undefined;
   const executingAsks = new Set<string>();
   const runDir = env.CONDUCTOR_RUN_DIR ?? "";
   const updates = new Map<string, number>();
@@ -86,6 +88,7 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
   }
   const dispose = (preservePhase = false) => {
     if (timer) clearInterval(timer);
+    initialInput = undefined; initialStart = undefined;
     timer = undefined; compacting = false; compactionFinished = false; inFlight = undefined; executingAsks.clear();
     try { flush(); } finally {
       if (!preservePhase || (phase && processState[faultKey]?.has(phase.identity))) { reloadSignal = undefined; forgetPhase(); }
@@ -118,6 +121,10 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
     try {
       flush();
       const type = event.type;
+      // Only the acknowledged input's preflight may label a native start. A human
+      // input or later input transformation invalidates this conservative proof.
+      if (type === "input" && typeof event.text === "string" && !event.text.startsWith(CONTROL_PREFIX)) { initialInput = undefined; initialStart = undefined; }
+      if (type === "before_agent_start") initialStart = initialInput?.text === event.prompt ? initialInput?.requestId : undefined;
       const signal = ctx.signal;
       if (phase && (type === "agent_start" || type === "turn_start") && phase.signal !== signal) { phase.signal = signal; phase.active = false; }
       observePhase(type, signal);
@@ -131,7 +138,8 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
       if (type === "message_end") {
         if (isRecord(event.message) && event.message.role !== "compactionSummary") pending = event.message;
       } else if (type === "agent_start" || type === "agent_end" || type === "agent_settled") {
-        write({ type });
+        write({ type, ...(type === "agent_start" && initialStart ? { initialRequestId: initialStart } : {}) });
+        if (type === "agent_start") { initialInput = undefined; initialStart = undefined; }
         if (type === "agent_settled" && accepted) {
           exclusive(`${statePath}.closing.json`, hello);
           closing = true;
@@ -286,7 +294,9 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
       writeInboxAck(runDir, r, code);
       if (code) { inFlight = undefined; return { action: "handled" }; }
       inFlight = { text: transformed };
-      if (r.kind === "initial" || r.kind === "reply") accepted = true;
+      if (r.kind === "initial" || r.kind === "reply") {
+        accepted = true; initialInput = { requestId: r.requestId, text: transformed };
+      }
       return { action: "transform", text: transformed };
     } catch (error) {
       if (hello) (processState[faultKey] ??= new Set()).add(faultIdentity(hello));

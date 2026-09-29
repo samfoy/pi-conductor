@@ -11,7 +11,7 @@ import { openEffort, effortRepository, effortGit } from "./effort/open.ts";
 import { readEffort, type EffortRecord } from "./effort/store.ts";
 import { EFFORT_NOTICE, effortSummary } from "./effort/policy.ts";
 import type { RuntimeKind, RuntimeEnvironment } from "./runtime.ts";
-import { subprocessRuntime } from "./subprocess-runtime.ts";
+import { runtimeFor } from "./runtime.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { readFileSync, existsSync } from "node:fs";
@@ -941,7 +941,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts, env: Runti
         // Honor abort.
         signal?.addEventListener("abort", () => {
           try {
-            subprocessRuntime.stopProcess(result.run);
+            void runtimeFor(result.run).stopProcess(result.run);
           } catch {
             // already dead
           }
@@ -1219,7 +1219,7 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         // Honor abort.
         signal?.addEventListener("abort", () => {
           try {
-            subprocessRuntime.stopProcess(result.run);
+            void runtimeFor(result.run).stopProcess(result.run);
           } catch {
             // already dead
           }

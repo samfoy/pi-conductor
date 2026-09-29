@@ -119,3 +119,14 @@ test("buildPiArgs(resume, steerable=false): emits today's resume argv EXACTLY (r
     "another question",
   ]);
 });
+
+
+test("H6 core argv strips only subprocess framing and task", async () => {
+  const builders = await import("../src/runs.ts");
+  assert.equal(typeof builders.buildPiCoreArgs, "function", "shared core argv builder exists");
+  for (const steerable of [false, true]) {
+    const opts = { kind: "fresh" as const, sessionDir: "/private/session", systemPrompt: "system", prompt: "task", steerable,
+      model: "provider/model", thinking: "high" as const, skillPaths: ["/skills/one"], tools: ["read"], excludeTools: ["write"] };
+    assert.deepEqual(builders.buildPiArgs(opts), [...(steerable ? ["--mode", "rpc"] : ["--mode", "json", "-p"]), ...builders.buildPiCoreArgs(opts), ...(steerable ? [] : [opts.prompt])]);
+  }
+});

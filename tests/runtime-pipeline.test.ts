@@ -89,3 +89,58 @@ test("H1 pipeline observer sees parsed events and decoded close tail once, befor
   assert.deepEqual(seen, [first, tail]);
   assert.equal(readFileSync(run.finalPath, "utf8"), tail.message.content[0].text);
 });
+
+
+test("H6 synchronous launch callbacks see initialized pipeline and attached transport", async t => {
+  const cwd = tmpDir("h6-sync-launch-");
+  const run: Run = { id: "inspector-sync", persona: "inspector", task: "probe", mode: "background", status: "running", startTime: Date.now(), lastEventAt: Date.now(), cwd,
+    messages: [], usage: emptyUsage(), recordPath: join(cwd, "record.json"), transcriptPath: join(cwd, "transcript.jsonl"), finalPath: join(cwd, "final.md") };
+  const registry = new RunRegistry(); registry.register(run);
+  let completed = 0;
+  const runtime = new SubprocessRuntime();
+  const proc = Object.assign(new EventEmitter(), { kill: () => true, pid: 42 });
+  t.mock.method(runtime, "launch", (_run: Run, _args: string[], _cwd: string, sink: import("../src/runtime.ts").RunSink) => {
+    sink.line(JSON.stringify(message("Synchronous startup output with complete verification.")));
+    sink.close(0);
+    return { kind: "subprocess", proc, closed: Promise.resolve(), stderr: "", drain: () => "", stop() {} } as never;
+  });
+  const done = createRunPipeline(run, ["--mode", "json", "-p", "probe"], { registry, runtime, cwd, steerable: false, timeoutMs: 4000, onComplete: () => completed++ });
+  t.after(() => clearTimeout(run.timeoutTimer));
+  await done;
+  assert.equal(run.status, "completed");
+  assert.equal(completed, 1);
+  assert.match(readFileSync(run.finalPath, "utf8"), /Synchronous startup output/);
+});
+
+
+for (const scenario of ["rejected", "late-ready-cancelled", "user-kill"]) test(`H6 pipeline ${scenario} unwinds once without accepting a saved answer`, async t => {
+  const { HerdrRuntime } = await import("../src/herdr/runtime.ts");
+  const { forceTerminate } = await import("../src/runs.ts");
+  const cwd = tmpDir("h6-answer-pipeline-");
+  const ask = { askId: "original-ask", question: "Choose?", evidence: "original evidence" };
+  const run: Run = { id: "oracle-answer", runtime: "herdr", persona: "oracle", task: "original task", mode: "background", status: "running", startTime: Date.now(), lastEventAt: Date.now(), cwd,
+    pendingAsk: ask, sessionPath: join(cwd, "original-session.jsonl"), worktreePath: "/preserved/worktree", worktreeBranch: "preserved-branch",
+    messages: [], usage: emptyUsage(), recordPath: join(cwd, "record.json"), transcriptPath: join(cwd, "transcript.jsonl"), finalPath: join(cwd, "final.md") };
+  const registry = new RunRegistry(); registry.register(run);
+  let completed = 0, cancelled = false;
+  let resolve!: (value: never) => void, reject!: (error: Error) => void;
+  const ready = new Promise<never>((res, rej) => { resolve = res; reject = rej; });
+  const runtime = new HerdrRuntime();
+  const transport = { kind: "herdr" as const, ready, closed: new Promise<void>(() => {}), stderr: "herdr: pane/worktree preserved: no proven child hello", drain: () => "", get cancelled() { return cancelled; },
+    async cancel() { cancelled = true; resolve(undefined as never); }, async stop() { await this.cancel(); } };
+  t.mock.method(runtime, "launch", () => transport);
+  const done = createRunPipeline(run, [], { registry, runtime, cwd, steerable: false, timeoutMs: 4000, answer: { ask, cwd }, onComplete: () => completed++ });
+  t.after(() => clearTimeout(run.timeoutTimer));
+  assert.equal(run.proc, undefined); assert.equal(run.pid, undefined); assert.equal(run.pendingAsk, ask);
+  assert.equal(registry.countActive(), 1);
+  if (scenario === "rejected") reject(new Error("herdr: initial ack timeout"));
+  else if (scenario === "user-kill") forceTerminate(run, "killed", registry, () => completed++);
+  else await transport.cancel();
+  await done;
+  assert.equal(completed, 1); assert.equal(registry.countActive(), 0);
+  assert.equal(run.status, scenario === "user-kill" ? "killed" : "blocked");
+  await run.recordWrite;
+  if (scenario === "user-kill") assert.match(JSON.parse(readFileSync(run.recordPath, "utf8")).errorMessage, /pane\/worktree preserved/, "cancellation diagnostics survive bookkeeping that already published killed");
+  assert.deepEqual(run.pendingAsk, scenario === "user-kill" ? undefined : ask);
+  assert.equal(run.sessionPath, join(cwd, "original-session.jsonl")); assert.equal(run.worktreePath, "/preserved/worktree"); assert.equal(run.cwd, cwd);
+});

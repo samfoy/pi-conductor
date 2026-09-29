@@ -36,6 +36,7 @@ function stubRegistry() {
 function fullRun(dir: string, over: Partial<Run> = {}): Run {
   return {
     id: "builder-full",
+    herdr: { runId: "builder-full", launchNonce: "persisted-nonce", sessionId: "persisted-session", sessionFile: join(dir, "session.jsonl"), socketPath: join(dir, "fake.socket"), paneId: "fake-pane", terminalId: "fake-terminal", workspaceId: "fake-workspace", tabId: "fake-tab", createdTab: true },
     persona: "builder",
     task: "carry everything",
     model: "amazon-bedrock/m",

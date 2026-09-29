@@ -31,7 +31,7 @@ export async function nativeWitness(root: string, scenario: string, t: TestConte
   let bridge!: ReturnType<typeof installChildBridge>, session: any, nativeCtx: any, sequence = 0, shutdowns = 0, starts = 0;
   const modelInputs: string[][] = [];
   const errors: any[] = [], seen: string[] = [], inputs: string[] = [], compactEvents: any[] = [];
-  let intercept = scenario === "intercept", settling = false;
+  let intercept = (scenario === "intercept" || scenario === "intercept-human"), settling = false;
   let late: InboxRequest | undefined, compactionMode = scenario;
   const held = deferred(), entered = deferred();
   let holdPreflight = scenario === "inflight";
@@ -291,12 +291,18 @@ export async function nativeWitness(root: string, scenario: string, t: TestConte
         assert.equal(ack(r), undefined); assert.equal(faux.state.callCount, 0); assert.deepEqual(inputs, []);
         await session.reload(); await tick(); assert.equal(ack(r), undefined); assert.equal(starts, 0);
         assert.equal(faux.state.callCount, 0, "faulted input cannot resurrect on reload");
-      } else if (scenario === "intercept" || scenario === "preflight") {
+      } else if (scenario === "intercept" || scenario === "intercept-human" || scenario === "preflight") {
         await tick();
         assert.equal(ack(r)?.accepted, true, "bridge input accepted even though native run never starts");
         assert.equal(starts, 0); assert.equal(faux.state.callCount, 0); assert.equal(shutdowns, 0);
         assert.deepEqual(inputs, [text]);
-        await session.reload(); await tick(); assert.equal(inputs.length, 1, "durable ack suppresses replay even without execution");
+        if (scenario === "intercept-human") {
+          intercept = false;
+          await session.prompt("Human turn after the intercepted inbox request");
+          assert.equal(starts, 1);
+        } else {
+          await session.reload(); await tick(); assert.equal(inputs.length, 1, "durable ack suppresses replay even without execution");
+        }
         if (scenario === "preflight") assert.ok(errors.some(e => /No model selected/.test(e.error)));
       } else if (scenario === "inflight") {
         t.mock.timers.tick(250); await entered.promise;

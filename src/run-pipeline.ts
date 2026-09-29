@@ -4,7 +4,7 @@ import { assertRunEffortOwner, readEffort } from "./effort/store.ts";
 import { effortSummary, resolveEffortPolicy } from "./effort/policy.ts";
 import { appendFile } from "node:fs/promises";
 import type { RunRuntime, RunTransport } from "./runtime.ts";
-import { subprocessRuntime } from "./subprocess-runtime.ts";
+import { runtimeFor } from "./runtime.ts";
 import { applyEvent } from "./event-handler.ts";
 import { classifyFailure } from "./failure-classify.ts";
 import { contextRetirementNotice } from "./context-retirement.ts";
@@ -15,7 +15,7 @@ import {
   type RunRegistry, attachSpawnedProc, stampSpawnStreamingMode, forceTerminate,
   discoverSessionPathIfMissing, discoverContextRetirement, applyHookToTerminal,
   applyCloseHandlerTerminal, emitFinalizeEvent, applyRetryIfNeeded, applySubstanceCheck,
-  settleWorktree, writeRecord, writeFinal, getFinalText, applyChainIfPresent, applyCompactionLine, checkTurnLimit,
+  failEffortLaunch, settleWorktree, writeRecord, writeFinal, getFinalText, applyChainIfPresent, applyCompactionLine, checkTurnLimit,
 } from "./runs.ts";
 
 export interface RunPipelineOpts {
@@ -31,6 +31,7 @@ export interface RunPipelineOpts {
   /** Explicit steering opt-in, independent of automatic large-prompt RPC transport. */
   steerable: boolean;
   initialPrompt?: string;
+  core?: import("./runs.ts").PiCoreArgsOptions;
   /** Launch is not acceptance: retain the same durable question until Pi acknowledges input. */
   answer?: { ask: NonNullable<Run["pendingAsk"]>; cwd: string };
   resolvedHook?: ResolvedHook;
@@ -44,7 +45,7 @@ export function createRunPipeline(
   piArgs: string[],
   opts: RunPipelineOpts,
 ): Promise<Run> {
-  const runtime = opts.runtime ?? subprocessRuntime;
+  const runtime = opts.runtime ?? runtimeFor(run);
 
   // The argv builder owns transport selection; steering remains an independent opt-in.
   const rpc = piArgs[1] === "rpc";
@@ -72,53 +73,6 @@ export function createRunPipeline(
     return run;
   };
   let transport: RunTransport;
-  try {
-    transport = runtime.launch(run, piArgs, opts.cwd, {
-      line: line => processLine(line),
-      close: code => {
-        if (finalized) return;
-        if ((code ?? 0) === 0) void finalize("completed", 0);
-        else void finalize("failed", code ?? 0);
-      },
-      error: () => {
-        run.errorMessage = "failed to spawn pi process";
-        void finalize("failed", 1);
-      },
-      initialDeliveryFailed: error => {
-        if (finalized) return;
-        run.errorMessage = `initial prompt delivery failed: ${error.message}`;
-        void finalize("failed", 1);
-      },
-    }, opts.initialPrompt);
-  } catch (e) {
-    if (awaitingAnswer) return restoreAnswer(`spawn failed: ${(e as Error).message}`);
-    run.status = "failed";
-    run.errorMessage = `spawn failed: ${(e as Error).message}`;
-    run.finishedAt = Date.now();
-    // v0.18: classify the in-process spawn failure (e.g. `spawn pi
-    // ENOENT` → environment) before persistence, same as the finalize
-    // and forceTerminate stamp sites.
-    run.failureClass = classifyFailure({
-      terminal: "failed",
-      errorMessage: run.errorMessage,
-    });
-    opts.registry.notify(run);
-    void writeRecord(run);
-    void writeFinal(run);
-    if (opts.onComplete) opts.onComplete(run);
-    return Promise.resolve(run);
-  }
-  answerRecord = attachSpawnedProc(run, transport.proc);
-  stampSpawnStreamingMode(run, opts.steerable === true);
-  run.streamingMode = rpc ? "rpc" : "print";
-
-  // Hard timeout.
-  run.timeoutTimer = setTimeout(() => {
-    if (run.status === "running" || run.status === "paused") {
-      forceTerminate(run, "timeout", opts.registry, opts.onComplete);
-    }
-  }, opts.timeoutMs);
-
   // Stream parsing.
   let finalized = false;
   let donePromiseResolve: (r: Run) => void;
@@ -322,7 +276,91 @@ export function createRunPipeline(
     );
   };
 
-  if (awaitingAnswer) run.rejectAnswerDelivery = reason => {
+  const early: (() => void)[] = [];
+  let launching = true;
+  const receive = (callback: () => void) => { if (launching) early.push(callback); else callback(); };
+  try {
+    transport = runtime.launch(run, piArgs, opts.cwd, {
+      line: line => receive(() => processLine(line)),
+      close: code => receive(() => {
+        if (finalized) return;
+        if ((code ?? 0) === 0) void finalize("completed", 0);
+        else void finalize("failed", code ?? 0);
+      }),
+      error: () => receive(() => {
+        run.errorMessage = "failed to spawn pi process";
+        void finalize("failed", 1);
+      }),
+      initialDeliveryFailed: error => receive(() => {
+        if (finalized) return;
+        run.errorMessage = `initial prompt delivery failed: ${error.message}`;
+        void finalize("failed", 1);
+      }),
+    }, opts.initialPrompt, opts.core);
+  } catch (e) {
+    if (awaitingAnswer) return restoreAnswer(`spawn failed: ${(e as Error).message}`);
+    run.status = "failed";
+    run.errorMessage = `spawn failed: ${(e as Error).message}`;
+    run.finishedAt = Date.now();
+    // v0.18: classify the in-process spawn failure (e.g. `spawn pi
+    // ENOENT` → environment) before persistence, same as the finalize
+    // and forceTerminate stamp sites.
+    run.failureClass = classifyFailure({
+      terminal: "failed",
+      errorMessage: run.errorMessage,
+    });
+    opts.registry.notify(run);
+    void writeRecord(run);
+    void writeFinal(run);
+    if (opts.onComplete) opts.onComplete(run);
+    return Promise.resolve(run);
+  }
+  run.transport = transport;
+  if (transport.kind === "subprocess") {
+    answerRecord = attachSpawnedProc(run, transport.proc);
+    stampSpawnStreamingMode(run, opts.steerable === true);
+    run.streamingMode = rpc ? "rpc" : "print";
+  } else {
+    run.proc = undefined; run.pid = undefined; run.streamingMode = undefined;
+    const launch = transport;
+    const launchFailed = async (error: Error) => {
+      if (finalized || run.transport !== launch) return;
+      finalized = true;
+      if (run.timeoutTimer) clearTimeout(run.timeoutTimer);
+      run.timeoutTimer = undefined;
+      run.rejectAnswerDelivery = undefined;
+      if (isTerminal(run.status)) {
+        if (launch.stderr) run.errorMessage = [run.errorMessage, launch.stderr].filter(Boolean).join("\n");
+        await writeRecord(run);
+      } else if (awaitingAnswer) await restoreAnswer(error.message);
+      else await failEffortLaunch(run, opts.registry, error.message, opts.onComplete).done;
+      donePromiseResolve(run);
+    };
+    void launch.ready.then(async () => {
+      if (launch.cancelled) { await launch.cancel(); await launchFailed(new Error("herdr: launch cancelled")); return; }
+      if (finalized || isTerminal(run.status) || run.transport !== launch) return;
+      if (awaitingAnswer) {
+        awaitingAnswer = false; run.pendingAsk = undefined; run.rejectAnswerDelivery = undefined;
+        answerRecord = answerRecord.then(() => writeRecord(run));
+        await answerRecord;
+      }
+    }, launchFailed);
+    if (awaitingAnswer) run.rejectAnswerDelivery = reason => {
+      void launch.cancel().then(() => launchFailed(new Error(reason)));
+    };
+  }
+
+  // Hard timeout.
+  run.timeoutTimer = setTimeout(() => {
+    if (run.status === "running" || run.status === "paused") {
+      forceTerminate(run, "timeout", opts.registry, opts.onComplete);
+    }
+  }, opts.timeoutMs);
+
+  launching = false;
+  for (const callback of early) callback();
+
+  if (transport.kind === "subprocess" && awaitingAnswer) run.rejectAnswerDelivery = reason => {
     run.errorMessage = reason;
     void finalize("failed", 1);
   };

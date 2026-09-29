@@ -4,11 +4,11 @@ import { dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { RpcStdinQueue } from "./rpc-stdin.ts";
 import type { Run } from "./types.ts";
-import { assertSupportedRuntime, unsupportedRuntimeReason } from "./runtime.ts";
-import type { RunRuntime, RunSink, RunTransport, Signaler, Delivery } from "./runtime.ts";
+import { assertSupportedRuntime, unsupportedRuntimeReason, runtimeFor } from "./runtime.ts";
+import type { RunRuntime, RunSink, SubprocessTransport, Signaler, Delivery } from "./runtime.ts";
 
 export class SubprocessRuntime implements RunRuntime {
-  launch(run: Run, args: string[], cwd: string, sink: RunSink, initialPrompt?: string): RunTransport {
+  launch(run: Run, args: string[], cwd: string, sink: RunSink, initialPrompt?: string): SubprocessTransport {
     assertSupportedRuntime(run.runtime);
     const invocation = getPiInvocation(args);
     const tmp = run.effort ? join(dirname(run.recordPath), "tmp") : undefined;
@@ -39,7 +39,7 @@ export class SubprocessRuntime implements RunRuntime {
       }
     }
     proc.unref();
-    return { proc, closed, get stderr() { return stderr; }, drain: () => stdoutLines.end(), stop: signal => { proc.kill(signal); } };
+    return { kind: "subprocess", proc, closed, get stderr() { return stderr; }, drain: () => stdoutLines.end(), stop: signal => { proc.kill(signal); } };
   }
 
   capabilities(run: Run) {
@@ -108,7 +108,7 @@ export class SubprocessRuntime implements RunRuntime {
 export const subprocessRuntime = new SubprocessRuntime();
 
 export function capabilitiesFor(run: Run) {
-  return subprocessRuntime.capabilities(run);
+  return run.runtime !== "herdr" && unsupportedRuntimeReason(run.runtime) ? { pause: false, liveSend: false } : runtimeFor(run).capabilities(run);
 }
 
 export function buildSubagentEnv(
