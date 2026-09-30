@@ -63,6 +63,7 @@ export async function nativeWitness(root: string, scenario: string, fault?: { by
     } });
     const hello = JSON.parse(readFileSync(join(runDir, "launch/native-nonce.json"), "utf8"));
     assert.equal(hello.piVersion, "0.87.1", "bridge itself resolves native Pi, not only harness imports");
+    assert.equal(hello.piLibraryVersion, "0.87.1", "host proof here is module identity with the imported library");
     assert.equal(hello.sessionFile, sm.getSessionFile());
     faux.setResponses([fauxAssistantMessage("Unaccepted human response")]);
     await session.prompt("A human typed before assignment acceptance");

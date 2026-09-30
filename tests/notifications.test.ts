@@ -622,3 +622,12 @@ test("formatCompletionNotification: no kept hint, no <worktree-kept>", () => {
   const out = formatCompletionNotification(makeRun({ worktreeBranch: "conductor-wt/oracle-abcd" }));
   assert.doesNotMatch(out, /<worktree-kept/);
 });
+
+test("H11 a persisted herdr Pi version warning reaches the completion envelope and card", () => {
+  const herdr = { runId: "r", launchNonce: "n", sessionId: "s", sessionFile: "/s", socketPath: "/sock", workspaceId: "w", tabId: "t", paneId: "p", terminalId: "x", createdTab: true,
+    versionWarning: "Pi version mismatch: lead 0.99.1, child 0.87.1" };
+  const run = makeRun({ runtime: "herdr", herdr });
+  assert.match(formatCompletionNotification(run), /<warning reason="pi-version">Pi version mismatch: lead 0\.99\.1, child 0\.87\.1<\/warning>/);
+  assert.ok(buildCompletionMessage(run).details.notes.some(n => n.slot === "warning" && n.text === herdr.versionWarning));
+  assert.doesNotMatch(formatCompletionNotification(makeRun({ runtime: "herdr", herdr: { ...herdr, versionWarning: undefined } })), /pi-version/);
+});

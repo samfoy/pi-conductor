@@ -196,6 +196,7 @@ export function formatCompletionNotification(run: Run, actions: RunAction[] = av
     }
     lines.push("  </hook>");
   }
+  if (run.herdr?.versionWarning) lines.push(`  <warning reason="pi-version">${escapeXml(run.herdr.versionWarning)}</warning>`);
   if (run.nonSubstantiveFinal) {
     lines.push(
       `  <warning reason="${run.nonSubstantiveFinal.reason}">` +
@@ -443,6 +444,7 @@ export function buildCompletionMessage(run: Run, canFocus = false, sessionId?: s
   if (run.integration) notes.push({ slot: "muted", text: `Integration: ${effortSummary(run)}; ${run.mergeResult?.reason ?? run.integration.state}; verify ${run.integration.verify?.durationMs ?? 0}ms; log ${run.integration.verify?.logPath ?? run.integration.commitHook?.logPath ?? "not run"}` });
   if (run.errorMessage) notes.push({ slot: "error", text: run.errorMessage });
   if (run.worktreeKept) notes.push({ slot: "warning", text: run.worktreeKept });
+  if (run.herdr?.versionWarning) notes.push({ slot: "warning", text: run.herdr.versionWarning });
   if (run.nonSubstantiveFinal) {
     notes.push({
       slot: "warning",

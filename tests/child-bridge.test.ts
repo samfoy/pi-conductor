@@ -457,3 +457,21 @@ test("H4 entry point registers the launch flag before lifecycle handlers", () =>
   conductor(pi as never);
   assert.equal(calls[0], "registerFlag:conductor-launch");
 });
+
+test("H11 hello reports the executing host Pi, not conductor's imported library copy", async t => {
+  const { VERSION } = await import("@earendil-works/pi-coding-agent");
+  const root = tmpDir("h11-host-pi-"), cli = join(root, "dist", "bundle", "cli.js");
+  mkdirSync(join(root, "dist", "bundle"), { recursive: true }); writeFileSync(cli, "");
+  writeFileSync(join(root, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "9.9.9-host", bin: { pi: "dist/bundle/cli.js" } }));
+  const argv1 = process.argv[1]; process.argv[1] = cli; t.after(() => { process.argv[1] = argv1; });
+  for (const [entry, expected] of [[cli, "9.9.9-host"], [join(root, "missing.js"), "unknown"]] as const) {
+    process.argv[1] = entry;
+    const f = fixture(), bridge = installChildBridge(f.pi as never, { env: f.env });
+    try {
+      f.fire("session_start", { reason: "startup" });
+      const hello = JSON.parse(readFileSync(join(f.runDir, "launch/nonce-h4.json"), "utf8"));
+      assert.equal(hello.piVersion, expected, "a look-alike session object is not host evidence; the executing CLI entry is");
+      assert.equal(hello.piLibraryVersion, VERSION, "the imported copy is labelled separately");
+    } finally { bridge.dispose(); }
+  }
+});

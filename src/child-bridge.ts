@@ -2,7 +2,8 @@ import { CONTROL_PREFIX, dispatchInboxRequest, inboxMarker, readInbox, readInbox
 import { formatOwnerAnswer } from "./ask-owner.ts";
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, writeSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { VERSION, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { hostPiVersion, PI_LIBRARY_VERSION } from "./pi-host.ts";
 import packageInfo from "../package.json" with { type: "json" };
 import { isRecord } from "./herdr/cli.ts";
 import type { HerdrBinding, LaunchHello } from "./herdr/identity.ts";
@@ -207,7 +208,8 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
       if ((b.childPid !== undefined && b.childPid !== process.pid) || (b.childStartTime !== undefined && b.childStartTime !== pidStartTime)) throw new Error("recorded process mismatch");
       if (process.pid <= 1 || (process.platform === "linux" && !pidStartTime)) throw new Error("missing process identity");
       const expected: Hello = { v: 1, bridgeProtocol: PROTOCOL, runId, launchNonce: nonce, pid: process.pid, pidStartTime,
-        paneId: b.paneId, terminalId: b.terminalId, sessionId, sessionFile, piVersion: VERSION, conductorVersion: packageInfo.version, at: Date.now() };
+        paneId: b.paneId, terminalId: b.terminalId, sessionId, sessionFile, piVersion: hostPiVersion({ sessionManager: ctx.sessionManager }),
+        piLibraryVersion: PI_LIBRARY_VERSION, conductorVersion: packageInfo.version, at: Date.now() };
       if (processState[faultKey]?.has(faultIdentity(expected))) throw new Error("invocation tee previously failed; reload cannot resume it; preserve evidence for the parent");
       const launchDir = join(runDir, "launch");
       mkdirSync(launchDir, { recursive: true });

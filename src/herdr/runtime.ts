@@ -4,7 +4,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { getAgentDir, hasTrustRequiringProjectResources, ProjectTrustStore, SessionManager, SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, hasTrustRequiringProjectResources, ProjectTrustStore, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { hostPiVersion } from "../pi-host.ts";
 import type { Delivery, DeliveryAck, HerdrTransport, RunRuntime, RunSink } from "../runtime.ts";
 import { isTerminal, type Run } from "../types.ts";
 import { HerdrTail } from "./tail.ts";
@@ -43,6 +44,11 @@ const failure = (message: string) => new Error(`herdr: ${message}`);
 export function herdrAgentName(runId: string, launchNonce: string): string {
   const base = /^[a-z][a-z0-9_-]{0,22}$/.test(runId) ? runId : `c${createHash("sha256").update(runId).digest("hex").slice(0, 12)}`;
   return `${base}-${createHash("sha256").update(launchNonce).digest("hex").slice(0, 8)}`;
+}
+/** Advisory: an unprovable host version is reported, never treated as a match. */
+export function piVersionWarning(lead: string, child: string): string | undefined {
+  if (lead === "unknown" || child === "unknown") return `Pi version unverified: lead ${lead}, child ${child}`;
+  return lead === child ? undefined : `Pi version mismatch: lead ${lead}, child ${child}`;
 }
 
 /** Gone is independently provable without a server; cached pane metadata never proves a live signal target. */
@@ -302,7 +308,7 @@ export class HerdrRuntime implements RunRuntime {
       }
       if (run.herdr !== previous) throw failure("launch binding replaced; preserving resources");
       binding.ownerGeneration = ownership!.identity.generation;
-      binding.agentName = alias;
+      binding.agentName = alias; delete binding.versionWarning;
       delete binding.settlement; run.herdrDelivery = undefined;
       run.herdr = binding; run.sessionPath = sessionFile;
       check(); await writeRecord(run, check); check();
@@ -344,7 +350,8 @@ export class HerdrRuntime implements RunRuntime {
       if (!identity.ok && identity.state !== "gone") throw failure(`child identity refused: ${identity.reason}`);
       binding.childPid = hello.pid; binding.childStartTime = hello.pidStartTime;
       provenPane = pane;
-      if (hello.piVersion !== (options.piVersion ?? VERSION)) diagnostic(`Pi version mismatch: expected ${options.piVersion ?? VERSION}; child differs`);
+      const versionWarning = piVersionWarning(options.piVersion ?? hostPiVersion(), hello.piVersion);
+      if (versionWarning) { binding.versionWarning = versionWarning; diagnostic(versionWarning); }
       await writeRecord(run, check); check();
       // Publish only to the proven, registered child; a gone child never gets the task.
       if (!identity.ok) throw failure(`child ${identity.state} before its task was published; prepared request preserved, not replayed`);

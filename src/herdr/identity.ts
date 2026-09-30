@@ -17,6 +17,8 @@ export interface HerdrBinding extends HerdrInvocation {
   createdTab: boolean;
   /** Physical herdr agent name for this launch only; herdr retains names after exit. */
   agentName?: string;
+  /** Lead/child host Pi versions differ or cannot be proven. Advisory, persisted for the card. */
+  versionWarning?: string;
   childPid?: number;
   childStartTime?: number;
 }
@@ -26,7 +28,9 @@ export interface LaunchHello extends HerdrInvocation {
   pid: number;
   pidStartTime?: number;
   paneId: string;
+  /** Executing host Pi, or "unknown"; never conductor's own imported copy. */
   piVersion: string;
+  piLibraryVersion?: string;
   conductorVersion: string;
   at: number;
 }

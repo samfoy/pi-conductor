@@ -48,6 +48,7 @@ async function fixture(mode = "healthy") {
     if (mode === "pid") hello.pid = 1;
     if (mode === "pid-start") hello.pidStartTime = 78;
     if (mode === "version") hello.piVersion = "different-version";
+    if (mode === "unknown-version") hello.piVersion = "unknown";
     if (mode === "session") pane.agent_session = { kind: "path", value: "/foreign/session", agent: "pi", source: "integration" };
     if (mode === "terminal") pane.terminal_id = "replaced";
     mkdirSync(join(dir, "launch"), { recursive: true });
@@ -198,7 +199,19 @@ test("H6 cancel in agent start never retries the ambiguous CLI outcome", async (
 });
 test("H6 Pi version mismatch is diagnostic, unlike bridge protocol mismatch", async () => {
   const h = await fixture("version"), transport = h.launch(); await transport.ready;
-  assert.match(transport.stderr, /Pi version mismatch/); await transport.stop();
+  assert.match(transport.stderr, /Pi version mismatch: lead 0\.87\.1, child different-version/);
+  assert.equal(h.run.herdr?.versionWarning, "Pi version mismatch: lead 0.87.1, child different-version", "persisted for the completion card");
+  assert.equal(JSON.parse(readFileSync(h.run.recordPath, "utf8")).herdr.versionWarning, h.run.herdr?.versionWarning);
+  await transport.stop();
+});
+test("H11 an unprovable child host version is reported unverified, never as a match", async () => {
+  const h = await fixture("unknown-version"), transport = h.launch(); await transport.ready;
+  assert.equal(h.run.herdr?.versionWarning, "Pi version unverified: lead 0.87.1, child unknown");
+  await transport.stop();
+});
+test("H11 matching host versions persist no warning", async () => {
+  const h = await fixture(), transport = h.launch(); await transport.ready;
+  assert.equal(h.run.herdr?.versionWarning, undefined); assert.equal(transport.stderr, ""); await transport.stop();
 });
 
 
