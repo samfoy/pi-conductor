@@ -128,6 +128,44 @@ A5's automatic large-prompt RPC both remain subprocess, and automatic RPC does
 not grant steering. A6 answers and M5 integration verification retain their existing
 subprocess semantics; verification commands are independent of the agent selector.
 
+### Isolated real-herdr acceptance (H11; blocked, not rolled out)
+
+`tests/herdr-live.test.ts` is opt-in. With `CONDUCTOR_LIVE_TESTS=1` and
+`CONDUCTOR_H11_PI_ROOTS=<pi-coding-agent root>[:<root>...]` it starts one uniquely
+named private `herdr --session conductor-h11-<id> server` per listed Pi root, with a
+temporary HOME/XDG/agent directory, `/bin/sh` non-login panes, an offline faux model
+and no credentials. The harness refuses inherited `HERDR_*` targets and name
+collisions, proves the socket is held by its own server before every control and
+cleanup call, stops only that session, waits for every captured process, and
+preserves evidence (failing the test) if teardown is incomplete. The default suite
+runs only its fake-effect guard tests.
+
+Measured against herdr 0.9.1 with interactive Pi 0.87.1 and 0.99.1 as the pane
+child (conductor's own `@earendil-works/pi-coding-agent` imports still resolve to
+the package's installed copy, so the child hello reports that copy's version, not
+the host Pi's):
+
+- **Works:** proof-backed kill (child only, shell and scrollback kept); lead
+  `/reload` and lead crash with a fresh lead reattaching the held child and
+  publishing one completion; herdr's omission of absent optional pane agent fields
+  (fixed in `src/herdr/identity.ts`).
+- **Blocks rollout:** `herdr agent start` succeeds only when the started agent is
+  idle. The child begins its inbox task at startup, so a working child times out
+  after 60 s and a fast child exits first; the launch fails and the alias is never
+  registered. Herdr also keeps an exited agent's name on its terminal, so a
+  same-pane relaunch (owner reply, resume) fails with `agent_name_taken`. Spawn,
+  live controls, owner answers and resume are therefore not usable on real herdr.
+  Resolving either needs a launch-handshake decision; none is shipped.
+- **Unverified:** context retirement (the fixture did not trigger Pi's threshold
+  compaction in either runtime), effort writers on herdr, and human TUI use:
+  regular-mode scrollback, foreground Esc-detach and Ctrl+G, Esc in a child and
+  resume, trust-prompt refusal, and the dialog card. Delivery remains at most
+  once; one observed notification per run is evidence, not an exactly-once
+  guarantee.
+
+Prior art: pi-herdsman's herdr-pane sub-agents informed these ideas; no
+herdsman code is copied.
+
 ### Available actions (Phase A A3)
 
 `ensemble_status` reports `available_actions` for every run, including queued,
@@ -790,4 +828,4 @@ pi-conductor does **not** replace `pi-essentials/subagent`. Different tools (`en
 
 ## License
 
-MIT.
+MIT. See [LICENSE](LICENSE).

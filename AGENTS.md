@@ -39,6 +39,7 @@ A pi extension that turns the parent pi session into an orchestrator driving per
 
 - `src/` — TypeScript source, strict mode.
 - `tests/` — `node:test` + `tsx`. Unit tests run in <5s. Live integration tests gated on `CONDUCTOR_LIVE_TESTS=1`.
+- `tests/herdr-live.test.ts` is the only real-herdr test. It is opt-in (`CONDUCTOR_LIVE_TESTS=1` plus explicit `CONDUCTOR_H11_PI_ROOTS`) and starts its own private herdr session. Never point a test at an inherited or ambient herdr session.
 - `personas/` — markdown files with YAML-ish frontmatter, one per shipped persona.
 - `~/.pi/agent/conductor/personas/` — user-level overrides at runtime (NOT in this repo).
 - `<project>/.pi/conductor/personas/` — project-level overrides at runtime (NOT in this repo).

@@ -17,6 +17,13 @@ The remainder of this document is a historical v0.10 map, not current line-numbe
 - `applyEvent` tracks matching UI prompt start/end occurrences for the current nonce. Continuous overlapping waits yield one nonwaking dialog card and suppress both watchdog evaluator and renderer. Settlement/new invocation clears prompt state. No prompt is auto-answered. First stall evidence optionally appends one redacted 2s/40-line/4-KiB CLI read; pending reads cannot dispatch a stale notice after a dialog, new invocation or settlement, and reminders do not poll.
 - Evidence uses executable fake herdr plus private owned processes and the approved offline native 0.87.1 harness. Actual herdr/TUI, human visual acceptance, global 0.99.1 parity, H10 readoption and live rollout remain unverified/deferred. CLI metadata proof and a subsequent close are separate server operations, not an atomic server-side compare-and-close transaction.
 
+## Current H11 real-herdr addendum
+
+- `tests/herdr-live.test.ts` (opt-in) drives interactive Pi 0.87.1 and 0.99.1 children in a private herdr 0.9.1 session through a real lead Pi. Isolation lives in `tests/helpers/herdr-live.ts`: allowlisted env, per-call socket ownership proof (session registry, server status and the owned server PID holding the socket inode), exact-identity teardown with evidence preservation.
+- Real herdr omits absent optional `PaneInfo.agent`/`agent_session`; `isHerdrPane`/`provePaneOurs` treat omission as none. A child proof still requires `agent: "pi"` and the exact session path.
+- Open protocol conflicts (not fixed): `agent start` returns only for an idle agent, while the launch writes the initial inbox request before it, so the child is busy or gone at readiness; and an exited agent's name stays on its terminal, so the reused alias fails same-pane relaunch. Kill, reload reattach and crash takeover pass because they do not depend on `agent start` success.
+- The bundled `dist/index.js` resolves `@earendil-works/pi-coding-agent` from the package's own `node_modules` when present, so `LaunchHello.piVersion` names that copy, not the host Pi. Human TUI acceptance is unverified.
+
 ## 1. Overview
 
 The runtime is the delivery vehicle for the persona library and the
