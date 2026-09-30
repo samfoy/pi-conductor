@@ -2874,6 +2874,7 @@ export function forceTerminate(
       }
     }
   }
+  if (run.runtime === "herdr" && !(run.transport?.kind === "herdr" && run.transport.childExited)) run.herdrExitUnconfirmed = true;
   void runtimeFor(run).terminate(run, killGroup);
   run.pendingAsk = undefined;
   run.askExecution = undefined;
@@ -3008,6 +3009,8 @@ export function writeRecord(run: Run, durableFence?: () => void): Promise<void> 
 }
 
 export async function writeFinal(run: Run, durable = false): Promise<void> {
+  // Keep any prior invocation's artifact intact; it is not this invocation's result.
+  if (run.herdrExitUnconfirmed) return;
   if (durable) {
     await mkdir(dirname(run.finalPath), { recursive: true });
     writeDurableFile(run.finalPath, getFinalText(run.messages) || run.integration?.resultText || "(no output)", () => assertRunEffortOwner(run));
@@ -3022,6 +3025,13 @@ export async function writeFinal(run: Run, durable = false): Promise<void> {
 }
 
 // ── Helpers (lifted/adapted from pi-essentials) ──────────────────────
+
+/** Completion surfaces must not present unquiesced assistant output as an assignment result. */
+export function getCompletionText(run: Run): string {
+  return run.herdrExitUnconfirmed
+    ? "herdr: child exit unconfirmed; no final result published. Any existing final.md belongs to a previous invocation. Inspect the retained transcript and diagnostics."
+    : getFinalText(run.messages);
+}
 
 export function getFinalText(messages: AgentMessage[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {

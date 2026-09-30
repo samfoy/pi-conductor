@@ -60,6 +60,7 @@ function fullRun(dir: string, over: Partial<Run> = {}): Run {
     recordPath: join(dir, "record.json"),
     transcriptPath: join(dir, "transcript.jsonl"),
     finalPath: join(dir, "final.md"),
+    herdrExitUnconfirmed: false,
     sessionPath: join(dir, "session.jsonl"),
     contextRetired: false,
     pendingAsk: { askId: "ask-test", question: "Continue?", evidence: "" },

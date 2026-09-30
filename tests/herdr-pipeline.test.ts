@@ -66,4 +66,6 @@ test("H7 hard timeout proves stop, resolves done, and retains requested status",
   const h = herdrFixture("running"); let callbacks = 0;
   await createRunPipeline(h.run, [], { ...h.opts, timeoutMs: 100, onComplete: () => callbacks++ });
   assert.equal(h.run.status, "timeout"); assert.equal(h.gone(), true); assert.equal(callbacks, 1); assert.deepEqual(h.signals, ["SIGTERM"]);
+  assert.equal(h.run.herdrExitUnconfirmed, undefined);
+  assert.match(readFileSync(h.run.finalPath, "utf8"), /Final verified evidence/, "proven forced exit still publishes its final");
 });

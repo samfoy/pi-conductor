@@ -101,3 +101,53 @@ reload/crash recovery preserves tagged records and refuses subprocess adoption o
 unproven cleanup; it does not attach or transfer stream ownership. H11 retains
 real isolated herdr and human foreground/overlay acceptance. No N/S or M6 features
 are included. Existing shared M5 integration behavior is retained, not replaced.
+
+## critic-hgv8 correction: uncertain exit is diagnostic-only
+
+The critic's owned-child probe found that failed exit proof correctly refused
+hooks/merge but still published the assistant result through ordinary writeFinal.
+This correction removes that publication, not the existing failure bookkeeping.
+
+- Persist `herdrExitUnconfirmed` on this outcome (also before a requested herdr
+  timeout/kill dispatch while exit is unproven). Positive exit proof clears it.
+- writeFinal leaves any prior invocation's final.md byte-for-byte intact, or
+  creates nothing when there was no prior artifact. No placeholder is substituted.
+- Completion text is diagnostic-only. Result references are neither advertised
+  nor accepted, including from a restored/on-disk record with a historical final.
+  Messages, canonical transcript, diagnostics and worktree/branch remain intact.
+- Proven exit retains normal publication, including after requested termination.
+  No hook/merge guards, subprocess behavior, H8 delivery or H9 cleanup changed.
+
+`tests/herdr-exit-publication-smoke.test.ts` reuses the existing executable fake
+CLI and test-owned child. The child emits the native event protocol, remains
+alive, and the terminal binding changes. Natural failure, prior-artifact
+preservation, timeout and kill all return in about 10.4 seconds with one callback,
+no new assistant final/reference, no hook/base merge, and preserved workspace.
+A same-protocol proven-exit control publishes and merges normally. These are
+scripted process fixtures, not a claim of native TUI exit. The separate actual
+Pi 0.87.1 native pipeline/A6 witnesses were rerun with the retained harness.
+
+Observed correction verification:
+
+- Baseline: 2592 passed / 12 skipped.
+- New regression before correction: four exact unsafe-publication/history
+  assertion failures; proven-exit positive control passed.
+  `/tmp/h7-correction-red.4ej1hK/red.log`
+- Corrected regression: five passed.
+  `/tmp/h7-correction-green.c8klTf/green.log`
+- Restoring unconditional writeFinal failed at
+  **"SAFETY: assistant final published without proven child exit"**.
+  Snapshot restored with identical SHA-256; negative and positive controls passed.
+  `/tmp/h7-correction-mutation.7TlZhZ/mutation.log`
+- Focused publication/notification/native checks: 79 passed, zero skipped.
+  `/tmp/h7-correction-check.CSYTQ4/check.log`
+- H7 + M5 + exhaustive record-roundtrip gates: 205 passed, zero skipped.
+  `/tmp/h7-correction-gate.Gkdqmn/gate.log`
+- Final full suite: **2597 passed / 12 skipped**; typecheck, build and diff check
+  passed. `/tmp/h7-correction-final.FLg59j/full.log`
+
+The exhaustive record-roundtrip fixture now sets the new field; none of its
+assertions was weakened. Complexity-only check: one persisted outcome flag and
+one shared completion-text helper replace unsafe publication at existing
+surfaces; no new lifecycle or finalization framework. Critic evidence under
+`/tmp/h7-critic.pzJww8/` was read only and retained.

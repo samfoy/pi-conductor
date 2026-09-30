@@ -17,7 +17,7 @@ import { effortSummary } from "./effort/policy.ts";
 import { resultRef } from "./file-evidence.ts";
 import { compactEnvelopeBlock } from "./compaction-hook.ts";
 import { contextRetirementNotice } from "./context-retirement.ts";
-import { availableActions, type RunAction, type RunRegistry, elapsedStr, formatUsage, getFinalText, sendsSinceSpawn } from "./runs.ts";
+import { availableActions, type RunAction, type RunRegistry, elapsedStr, formatUsage, getCompletionText, sendsSinceSpawn } from "./runs.ts";
 import { boundStallText, escapeStallEvidence, recentStallEvidence, STALL_GUIDANCE } from "./stall-evidence.ts";
 import type { Run, RunStatus } from "./types.ts";
 
@@ -123,7 +123,7 @@ export function formatCompletionNotification(run: Run, actions: RunAction[] = av
     const error = run.errorMessage ? `\n  <error>${escapeXml(run.errorMessage)}</error>` : "";
     return `<${tag}>${error}\n  <agent-id>${escapeXml(run.id)}</agent-id>\n  <status>blocked</status>\n  <ask-id>${escapeXml(ask?.askId ?? "")}</ask-id>\n  <question>${escapeXml(ask?.question ?? "Question unavailable; inspect transcript")}</question>\n${ask?.evidence ?? ""}\n  <available-actions>${actions.join(", ")}</available-actions>\n  <guidance>Answer via ensemble_send on this agent id. Assignment unresolved; do independent work while deciding.</guidance>\n  <transcript>${escapeXml(run.transcriptPath)}</transcript>\n</${tag}>`;
   }
-  const finalText = getFinalText(run.messages);
+  const finalText = getCompletionText(run);
   const perSend = perSendNumbers(run);
   // Per-send <duration>: render via elapsedStr against a synthetic
   // start anchor so the same formatter is used (s/m/h conventions).
@@ -471,7 +471,7 @@ export function buildCompletionMessage(run: Run, canFocus = false, sessionId?: s
       persona: run.persona,
       status: run.status,
       stats,
-      body: run.status === "blocked" ? `Question ${run.pendingAsk?.askId}: ${run.pendingAsk?.question}\n${run.pendingAsk?.evidence ?? ""}\nAnswer via ensemble_send; the original assignment remains unresolved.` : getFinalText(run.messages),
+      body: run.status === "blocked" ? `Question ${run.pendingAsk?.askId}: ${run.pendingAsk?.question}\n${run.pendingAsk?.evidence ?? ""}\nAnswer via ensemble_send; the original assignment remains unresolved.` : getCompletionText(run),
       transcriptPath: run.transcriptPath,
       notes,
     },

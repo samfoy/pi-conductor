@@ -34,7 +34,7 @@ import {
 } from "./autonomous.ts";
 import { resolveRetryPolicy } from "./retry.ts";
 import { collapseSteerableCascade } from "./steerable.ts";
-import { prepareSpawnRuntime, prepareSpawnEffort, availableActions, observeRunActions, computeAvailableActions, supportsFocus, validateRunAction, elapsedStr, failBeforeSpawn, forceTerminate, formatUsage, getFinalText, keptBranchHint, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendCwd, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
+import { prepareSpawnRuntime, prepareSpawnEffort, availableActions, observeRunActions, computeAvailableActions, supportsFocus, validateRunAction, elapsedStr, failBeforeSpawn, forceTerminate, formatUsage, getCompletionText, keptBranchHint, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendCwd, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
 import { registerAskOwner } from "./ask-owner.ts";
 import { isSettled, isTerminal } from "./types.ts";
 import { SpawnQueue } from "./queue.ts";
@@ -573,7 +573,7 @@ function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts, env: Runtim
           status: run.status,
           failureClass: run.failureClass,
           costUsd: run.usage.cost ?? 0,
-          finalText: getFinalText(run.messages),
+          finalText: getCompletionText(run),
         }));
       };
 
@@ -1710,7 +1710,7 @@ function foregroundFinalResult(r: Run, canFocus: boolean, answering?: { askId: s
       },
     };
   }
-  const finalText = getFinalText(r.messages) || "(no output)";
+  const finalText = getCompletionText(r) || "(no output)";
   return {
     content: [{ type: "text" as const, text: summary }],
     details: {

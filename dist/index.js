@@ -426,6 +426,7 @@ function toRunRecord(r) {
     recordPath: r.recordPath,
     transcriptPath: r.transcriptPath,
     finalPath: r.finalPath,
+    herdrExitUnconfirmed: r.herdrExitUnconfirmed,
     sessionPath: r.sessionPath,
     contextRetired: r.contextRetired,
     pendingAsk: r.pendingAsk,
@@ -1080,7 +1081,7 @@ function sourceRun(id, registry) {
 }
 function resultRef(run) {
   try {
-    return RUN_ID.test(run.id) && isTerminal(run.status) && usableResult(run.finalPath) ? `run:${run.id}` : void 0;
+    return RUN_ID.test(run.id) && isTerminal(run.status) && !run.herdrExitUnconfirmed && usableResult(run.finalPath) ? `run:${run.id}` : void 0;
   } catch {
     return void 0;
   }
@@ -1096,7 +1097,7 @@ function appendFileEvidence(task, files, options) {
     if (typeof input !== "string" || !input.trim() || input.includes("\0")) throw new Error("files entries must be non-empty local paths or run:<agent_id> references");
     try {
       const run = input.startsWith("run:") ? sourceRun(input.slice(4), options.registry) : void 0;
-      if (run && !usableResult(run.finalPath)) throw new Error(`no usable final result: ${input}`);
+      if (run && (run.herdrExitUnconfirmed || !usableResult(run.finalPath))) throw new Error(`no usable final result: ${input}`);
       const path2 = realpathSync(run ? run.finalPath : resolveLocalPath(input, options.cwd));
       const size = inspect(path2, (_fd, size2) => size2);
       if (seen.has(path2)) return void 0;
@@ -2061,6 +2062,7 @@ function buildOrphanRun(record, status) {
     recordPath: record.recordPath,
     transcriptPath: record.transcriptPath,
     finalPath: record.finalPath,
+    herdrExitUnconfirmed: record.herdrExitUnconfirmed,
     sessionPath: record.sessionPath,
     contextRetired: record.contextRetired,
     pendingAsk: status === "running" || status === "blocked" ? record.pendingAsk : void 0,
@@ -3133,6 +3135,7 @@ function createRunPipeline(run, piArgs, opts) {
     if (transport.kind === "herdr") {
       const exited = await transport.waitForExit();
       if (!exited) {
+        run.herdrExitUnconfirmed = true;
         run.errorMessage = "herdr: child exit unconfirmed; pane/worktree preserved";
         if (awaitingAnswer && !isTerminal(run.status)) {
           await restoreAnswer(run.errorMessage);
@@ -3142,6 +3145,7 @@ function createRunPipeline(run, piArgs, opts) {
         await settle("failed", 1);
         return;
       }
+      run.herdrExitUnconfirmed = void 0;
     }
     const rest = transport.drain();
     if (rest.trim()) processLine(rest);
@@ -3453,6 +3457,7 @@ async function settleRunEffects(run, terminal, exitCode, opts, transport = { std
 }) {
   if (!applyCloseHandlerTerminal(run, terminal, exitCode)) {
     discoverSessionPathIfMissing(run, opts.sessionDir);
+    if (run.runtime === "herdr" && !run.herdrExitUnconfirmed) await writeFinal(run);
     await writeRecord(run);
     run.proc = void 0;
     try {
@@ -6022,6 +6027,7 @@ function forceTerminate(run, reason, registry, onComplete, killGroup = defaultKi
       }
     }
   }
+  if (run.runtime === "herdr" && !(run.transport?.kind === "herdr" && run.transport.childExited)) run.herdrExitUnconfirmed = true;
   void runtimeFor(run).terminate(run, killGroup);
   run.pendingAsk = void 0;
   run.askExecution = void 0;
@@ -6111,6 +6117,7 @@ function writeRecord(run, durableFence) {
   return durableFence ? writing : run.recordWrite;
 }
 async function writeFinal(run, durable = false) {
+  if (run.herdrExitUnconfirmed) return;
   if (durable) {
     await mkdir(dirname12(run.finalPath), { recursive: true });
     writeDurableFile(run.finalPath, getFinalText(run.messages) || run.integration?.resultText || "(no output)", () => assertRunEffortOwner(run));
@@ -6121,6 +6128,9 @@ async function writeFinal(run, durable = false) {
     await writeFile2(run.finalPath, getFinalText(run.messages) || "(no output)");
   } catch {
   }
+}
+function getCompletionText(run) {
+  return run.herdrExitUnconfirmed ? "herdr: child exit unconfirmed; no final result published. Any existing final.md belongs to a previous invocation. Inspect the retained transcript and diagnostics." : getFinalText(run.messages);
 }
 function getFinalText(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -10686,7 +10696,7 @@ function registerAutoTool(pi, opts, env) {
           status: run.status,
           failureClass: run.failureClass,
           costUsd: run.usage.cost ?? 0,
-          finalText: getFinalText(run.messages)
+          finalText: getCompletionText(run)
         }));
       };
       const outcome = await runAutonomous(plan, { maxSteps: params.max_steps, budgetUsd: params.budget_usd, retryPolicy }, {
@@ -11620,7 +11630,7 @@ Answer via ensemble_send; the original assignment is unresolved.` }],
       }
     };
   }
-  const finalText = getFinalText(r.messages) || "(no output)";
+  const finalText = getCompletionText(r) || "(no output)";
   return {
     content: [{ type: "text", text: summary }],
     details: {
@@ -12236,7 +12246,7 @@ ${ask?.evidence ?? ""}
   <transcript>${escapeXml(run.transcriptPath)}</transcript>
 </${tag}>`;
   }
-  const finalText = getFinalText(run.messages);
+  const finalText = getCompletionText(run);
   const perSend = perSendNumbers(run);
   const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
   const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
@@ -12449,7 +12459,7 @@ function buildCompletionMessage(run, canFocus = false, sessionId, registry) {
       stats,
       body: run.status === "blocked" ? `Question ${run.pendingAsk?.askId}: ${run.pendingAsk?.question}
 ${run.pendingAsk?.evidence ?? ""}
-Answer via ensemble_send; the original assignment remains unresolved.` : getFinalText(run.messages),
+Answer via ensemble_send; the original assignment remains unresolved.` : getCompletionText(run),
       transcriptPath: run.transcriptPath,
       notes
     }

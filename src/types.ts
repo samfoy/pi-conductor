@@ -882,6 +882,8 @@ export interface Run {
   transcriptPath: string;
   /** Path to final.md (last assistant text). Written on terminal status. */
   finalPath: string;
+  /** Current herdr invocation lacks exit proof; any existing final is historical, not reusable. */
+  herdrExitUnconfirmed?: boolean;
   /**
    * Absolute path to the pi session JSONL for this sub-agent. Populated when
    * the spawn finalizes (pi creates the file under <runDir>/session/). Used
@@ -1064,6 +1066,8 @@ export interface RunRecord {
   recordPath: string;
   transcriptPath: string;
   finalPath: string;
+  /** Current herdr invocation lacks exit proof; any existing final is historical, not reusable. */
+  herdrExitUnconfirmed?: boolean;
   sessionPath?: string;
   /** The saved child session retired under context pressure; preserved on resume. */
   pendingAsk?: PendingAsk;
@@ -1184,6 +1188,7 @@ export function toRunRecord(r: Run): RunRecord {
     recordPath: r.recordPath,
     transcriptPath: r.transcriptPath,
     finalPath: r.finalPath,
+    herdrExitUnconfirmed: r.herdrExitUnconfirmed,
     sessionPath: r.sessionPath,
     contextRetired: r.contextRetired,
     pendingAsk: r.pendingAsk,

@@ -96,11 +96,13 @@ export function createRunPipeline(
     if (transport.kind === "herdr") {
       const exited = await transport.waitForExit();
       if (!exited) {
+        run.herdrExitUnconfirmed = true;
         run.errorMessage = "herdr: child exit unconfirmed; pane/worktree preserved";
         if (awaitingAnswer && !isTerminal(run.status)) { await restoreAnswer(run.errorMessage); donePromiseResolve(run); return; }
         await settle("failed", 1);
         return;
       }
+      run.herdrExitUnconfirmed = undefined;
     }
     const rest = transport.drain();
     if (rest.trim()) processLine(rest);
@@ -404,6 +406,7 @@ async function settleRunEffects(
     // Forced termination already published its state; retain discovery without notifying twice.
     if (!applyCloseHandlerTerminal(run, terminal, exitCode)) {
       discoverSessionPathIfMissing(run, opts.sessionDir);
+      if (run.runtime === "herdr" && !run.herdrExitUnconfirmed) await writeFinal(run);
       await writeRecord(run);
       run.proc = undefined;
       try {
