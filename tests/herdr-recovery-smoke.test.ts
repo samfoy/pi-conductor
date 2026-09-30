@@ -23,7 +23,7 @@ import { createWorktree } from "../src/worktree.ts";
 import { RunRegistry, runsRoot } from "../src/runs.ts";
 import { buildOrphanRun, readProcessStartTime } from "../src/reconcile-startup.ts";
 import { handleSessionShutdown } from "../src/shutdown.ts";
-import { emptyUsage, type Run } from "../src/types.ts";
+import { emptyUsage, toRunRecord, type Run } from "../src/types.ts";
 sandboxPi();
 const barrier = () => { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r; }); return { promise, resolve }; };
 const wait = async (path: string) => { const end = Date.now() + 20000; while (!existsSync(path)) { if (Date.now() > end) throw new Error(`barrier expired: ${path}`); await delay(10); } };
@@ -62,7 +62,8 @@ test("H10 real native child plus executable fake herdr: live reload, settled whi
     writeFileSync(statePath, JSON.stringify({ calls: [], childPid: child.pid, manifest, mode: phase,
       pane: { pane_id: "pane-owned", terminal_id: "terminal-owned", workspace_id: "workspace-owned", tab_id: "tab-owned", agent: null, agent_session: null } }));
     const env = { HOME: home, PATH: process.env.PATH, FAKE_HERDR_STATE: statePath, CONDUCTOR_HERDR_BIN: fileURLToPath(new URL("./fixtures/fake-herdr.mjs", import.meta.url)) };
-    const runtime = new HerdrRuntime({ cli: createHerdrCli({ env, socketPath }), env, workspaceId: "workspace-owned", trustArgs: () => [], piVersion: "0.87.1" });
+    const signals: NodeJS.Signals[] = [];
+    const runtime = new HerdrRuntime({ cli: createHerdrCli({ env, socketPath }), env, workspaceId: "workspace-owned", trustArgs: () => [], piVersion: "0.87.1", signal: (pid, signal) => { signals.push(signal); process.kill(pid, signal); } });
     const run: Run = { id: `oracle-${phase}`, runtime: "herdr", persona: "oracle", task: "offline native recovery", mode: "background", status: "running", cwd: dir,
       startTime: Date.now(), lastEventAt: Date.now(), messages: [], usage: emptyUsage(), recordPath: join(dir, "record.json"), transcriptPath: join(dir, "transcript.jsonl"), finalPath: join(dir, "final.md") };
     let effort: ReturnType<typeof openEffort> | undefined;
@@ -137,19 +138,42 @@ test("H10 real native child plus executable fake herdr: live reload, settled whi
       assert.equal(exited, false, stderr); assert.equal(readProcessStartTime(child.pid!), startTime);
     }
     assert.equal(oldCalls, 0);
+    const restorePipeline = phase === "live"
+      ? (await import(new URL("../src/run-pipeline.ts?stale-stop-reload", import.meta.url).href)).createRunPipeline as typeof createRunPipeline
+      : createRunPipeline;
     const restore = () => {
       const replacement = buildOrphanRun(JSON.parse(readFileSync(run.recordPath, "utf8")), "running"); current = replacement;
       const registry = new RunRegistry(); registry.register(replacement);
-      return { registry, replacement, done: createRunPipeline(replacement, [], { ...opts, registry, resolvedHook: undefined, reattach: true, onComplete: () => newCalls++ }) };
+      return { registry, replacement, done: restorePipeline(replacement, [], { ...opts, registry, resolvedHook: undefined, reattach: true, onComplete: () => newCalls++ }) };
     };
     const live = phase === "live" ? restore() : undefined;
-    if (live?.replacement.transport?.kind === "herdr") await live.replacement.transport.ready;
+    if (live?.replacement.transport?.kind === "herdr") {
+      await live.replacement.transport.ready;
+      const retired = run.transport, before = JSON.parse(readFileSync(statePath, "utf8")).calls.length;
+      const record = readFileSync(run.recordPath), state = structuredClone(toRunRecord(live.replacement)), diagnostic = retired.stderr;
+      await nextTurn().then(() => retired.stop());
+      const late = JSON.parse(readFileSync(statePath, "utf8")).calls.slice(before);
+      childTest.diagnostic(JSON.stringify({ lateOldTransportCliCalls: late }));
+      assert.equal(late.length, 0, "retired stop must perform zero executable CLI calls after takeover");
+      assert.deepEqual(readFileSync(run.recordPath), record); assert.deepEqual(toRunRecord(live.replacement), state);
+      assert.equal(retired.stderr, diagnostic); assert.equal(existsSync(run.finalPath), false);
+      assert.deepEqual(signals, [], "retired stop must not signal the native child");
+      assert.equal(live.replacement.transport.observable, true); assert.equal(live.replacement.transport.cancelled, false);
+      assert.equal(exited, false); assert.equal(child.signalCode, null); assert.equal(readProcessStartTime(child.pid!), startTime);
+    }
     if (phase !== "hook") {
       writeFileSync(`${manifest}.release`, "release"); await wait(`${manifest}.settled`);
       assert.equal(exited, false); assert.equal(existsSync(run.finalPath), false, "native settle is not child exit");
-      writeFileSync(`${manifest}.exit`, "exit"); await exit;
+      if (live?.replacement.transport?.kind === "herdr") {
+        const before = JSON.parse(readFileSync(statePath, "utf8")).calls.length;
+        await live.replacement.transport.stop(); await exit;
+        const active = JSON.parse(readFileSync(statePath, "utf8")).calls.slice(before);
+        assert.ok(active.some((call: { args: string[] }) => call.args[0] === "pane" && call.args[1] === "get"), "current owner stop still observes before signalling");
+        assert.equal(child.signalCode, "SIGTERM", stderr);
+        childTest.diagnostic(JSON.stringify({ currentOwnerStopCliCalls: active.length, signal: child.signalCode }));
+      } else { writeFileSync(`${manifest}.exit`, "exit"); await exit; }
     }
-    assert.equal(child.exitCode, 0, stderr);
+    if (!live) assert.equal(child.exitCode, 0, stderr);
     let first = live ?? restore();
     if (effort) {
       if (first.replacement.transport?.kind !== "herdr") throw new Error("transport");

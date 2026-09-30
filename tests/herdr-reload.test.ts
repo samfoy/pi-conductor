@@ -103,3 +103,31 @@ test("H10 live-control invocation markers do not double usage when reattaching t
   assert.equal(run.usage.input, 12); assert.equal(run.usage.turns, 1);
   await handleSessionShutdown({ reason: "reload" }, { runs: [run], resetSanitizer() {} });
 });
+
+test("H10 stale launch rollback fences stopOwned before its first CLI observation", { timeout: 10000 }, async () => {
+  const h = herdrFixture("running"), json = h.cli.json; let before = 0;
+  h.cli.json = async (...args) => {
+    const result = await json(...args);
+    if (args[0][0] === "agent" && args[0][1] === "start") {
+      h.run.herdrOwnership!.release(); before = h.calls.length;
+    }
+    return result;
+  };
+  const transport = h.runtime.launch(h.run, [], h.run.cwd, { line() {}, close() {}, error() {}, initialDeliveryFailed() {} }, "probe", h.opts.core);
+  await assert.rejects(transport.ready, /owner fenced/);
+  assert.equal(h.calls.length - before, 0, "stale rollback must not enter the CLI through stopOwned");
+  assert.deepEqual(h.signals, []);
+});
+
+test("H10 owned stop still rechecks ownership after awaited CLI observation", { timeout: 10000 }, async () => {
+  const h = herdrFixture("running");
+  const transport = h.runtime.launch(h.run, [], h.run.cwd, { line() {}, close() {}, error() {}, initialDeliveryFailed() {} }, "probe", h.opts.core);
+  await transport.ready;
+  const json = h.cli.json, before = h.calls.length;
+  h.cli.json = async (...args) => {
+    const result = await json(...args); h.run.herdrOwnership!.release(); return result;
+  };
+  await transport.stop();
+  assert.equal(h.calls.length - before, 1, "observation was authorized at entry");
+  assert.deepEqual(h.signals, [], "ownership lost during observation forbids signalling");
+});

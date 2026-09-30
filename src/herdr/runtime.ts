@@ -203,6 +203,7 @@ export class HerdrRuntime implements RunRuntime {
       catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return; throw failure("invalid launch hello"); }
     };
     const stopOwned = (rollback: boolean): Promise<void> => stopWork ??= (async () => {
+      if (!owned()) return;
       if (binding && !hello) {
         try { hello = readHello() as LaunchHello | undefined; } catch { /* Preserve invalid claim evidence. */ }
       }
@@ -385,6 +386,8 @@ export class HerdrRuntime implements RunRuntime {
       throw new Error(`herdr: ${stderr}`, { cause: e instanceof Error ? e.cause : undefined });
     });
     const stop = async () => {
+      // Cancellation before the launch microtask claims ownership must still abort readiness.
+      if (detached || (ownership && !owned())) return;
       abort.abort();
       if (!accepted) { await ready.catch(() => {}); return; }
       if (childExited) { finishObservation(); return; }

@@ -7202,6 +7202,7 @@ var HerdrRuntime = class {
       }
     };
     const stopOwned = (rollback) => stopWork ??= (async () => {
+      if (!owned()) return;
       if (binding && !hello) {
         try {
           hello = readHello();
@@ -7469,6 +7470,7 @@ var HerdrRuntime = class {
       throw new Error(`herdr: ${stderr}`, { cause: e instanceof Error ? e.cause : void 0 });
     });
     const stop = async () => {
+      if (detached || ownership && !owned()) return;
       abort.abort();
       if (!accepted) {
         await ready.catch(() => {
