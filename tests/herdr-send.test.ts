@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { sandboxPi } from "./helpers/tmp.ts";
 import { herdrFixture } from "./helpers/herdr-pipeline.ts";
 import { createRunPipeline } from "../src/run-pipeline.ts";
 import { availableActions, sendToRun, checkTurnLimit, GRACE_MESSAGE } from "../src/runs.ts";
 import { readInbox, writeInboxAck } from "../src/herdr/inbox.ts";
+import { herdrAgentName } from "../src/herdr/runtime.ts";
 
 sandboxPi();
 test("H8 accepted relaunch that exits without new output cannot reuse the prior final", { timeout: 5000 }, async () => {
@@ -193,4 +194,44 @@ test("H8 saved-session send relaunches exact session with a fresh nonce", { time
   assert.equal(h.run.maxTurns, 99); assert.equal(h.run.graceTurns, 4);
   assert.equal(h.calls.filter(c => c === "tab create").length, 1);
   assert.match(readFileSync(h.run.finalPath, "utf8"), /verified evidence/);
+});
+
+// Window: herdr registered the idle child (agent start returned, hello written) but the
+// prepared reply is not yet published. Triggered in the first pane get after registration.
+for (const variant of ["died", "timeout", "killed"] as const) test(`H11 reply relaunch ${variant} before publication keeps the reply unpublished, one start, correct ask outcome`, { timeout: 8000 }, async () => {
+  const h = herdrFixture("ask"); h.onSleep(h.exit);
+  await createRunPipeline(h.run, [], h.opts); h.onSleep(() => {});
+  assert.equal(h.run.status, "blocked");
+  const ask = { ...h.run.pendingAsk! }, firstNonce = h.run.herdr!.launchNonce, dir = dirname(h.run.recordPath);
+  const json = h.cli.json; let starts = 0, fired = false;
+  h.cli.json = async (args, limits) => {
+    const result = await json(args, limits);
+    if (args[0] === "agent" && args[1] === "start") starts++;
+    else if (args[1] === "get" && starts === 1 && !fired && existsSync(join(dir, "launch", `${h.run.herdr!.launchNonce}.json`))) {
+      fired = true;
+      if (variant === "died") h.exit(); else forceTerminate(h.run, variant, h.registry);
+    }
+    return result;
+  };
+  const signalsBefore = h.signals.length;
+  const sent = sendToRun(h.run, "Owner choice", { registry: h.registry, timeoutMs: 4000 });
+  assert.equal(sent.kind, "started"); if (sent.kind !== "started") return;
+  await sent.done;
+  const nonce = h.run.herdr!.launchNonce, inbox = join(dir, "inbox", nonce);
+  assert.equal(fired, true, "triggered inside the registration -> publication window");
+  assert.notEqual(nonce, firstNonce); assert.equal(h.run.herdr!.agentName, herdrAgentName(h.run.id, nonce));
+  assert.equal(starts, 1, "exactly one agent start; no blind retry");
+  assert.equal(readInbox(dir, nonce).length, 0, "the task never became visible to the child pump");
+  const prepared = readdirSync(inbox).filter(f => f.endsWith(".prepared.json")).map(f => JSON.parse(readFileSync(join(inbox, f), "utf8")));
+  assert.equal(prepared.length, 1, "prepared reply retained durably");
+  assert.equal(prepared[0].kind, "reply"); assert.equal(prepared[0].askId, ask.askId);
+  assert.deepEqual(readdirSync(inbox).filter(f => f.endsWith(".ack.json")), [], "no ack for an unpublished task");
+  if (variant === "killed") {
+    assert.equal(h.run.status, "killed"); assert.equal(h.run.pendingAsk, undefined, "user kill wins");
+  } else {
+    assert.equal(h.run.status, "blocked", h.run.errorMessage);
+    assert.deepEqual(h.run.pendingAsk, ask, "the owner question survives");
+    assert.deepEqual(JSON.parse(readFileSync(h.run.recordPath, "utf8")).pendingAsk, ask);
+  }
+  assert.deepEqual(h.signals.slice(signalsBefore), variant === "died" ? [] : ["SIGTERM"], "only a proven live child is signalled");
 });
