@@ -2,13 +2,13 @@
 // only with CONDUCTOR_LIVE_TESTS=1 and never touches an inherited or ambient session.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 import { tmpDir } from "./helpers/tmp.ts";
-import { ambientSnapshot, HerdrLiveFixture, liveEnabled, piEntry, procStartTime, startLiveFixture, writePiWrapper, planLiveIdentity, proveOwnedSocket, refuseInheritedTarget, type LiveEffects, type LiveIdentity, type ProcessIdentity } from "./helpers/herdr-live.ts";
+import { ambientSnapshot, HerdrLiveFixture, liveEnabled, liveParentRoot, ownedProcesses, piEntry, procStartTime, startLiveFixture, writePiWrapper, planLiveIdentity, proveOwnedSocket, refuseInheritedTarget, type LiveEffects, type LiveIdentity, type ProcessIdentity, type ProcFact } from "./helpers/herdr-live.ts";
 
 const scratch = realpathSync(tmpDir("h")); // short: unix socket paths are length-limited
 let n = 0;
@@ -16,9 +16,11 @@ function identity(): LiveIdentity {
   const root = join(scratch, `f${n++}`); mkdirSync(root);
   return planLiveIdentity(root, `unit${String(n).padStart(4, "0")}`, join(scratch, "no-real-home"));
 }
-function fake(id: LiveIdentity, over: { sessions?: unknown; status?: unknown; holds?: boolean; procs?: ProcessIdentity[]; survive?: boolean } = {}) {
+function fake(id: LiveIdentity, over: { sessions?: unknown; status?: unknown; holds?: boolean; procs?: ProcessIdentity[]; survive?: boolean;
+  net?: string; serverStart?: number; table?: Map<number, ProcFact>; reused?: number } = {}) {
   const log: string[][] = [];
   let serverAlive = true;
+  const seen: { root: string; server: { pid: number; startTime: number } }[] = [];
   const effects: LiveEffects = {
     async exec(args) {
       log.push(args);
@@ -28,14 +30,16 @@ function fake(id: LiveIdentity, over: { sessions?: unknown; status?: unknown; ho
       if (args[1] === "delete") return JSON.stringify({ deleted: true });
       return JSON.stringify({ result: { pane: { pane_id: args[2], agent: null } } });
     },
-    startTime: pid => pid === 4242 ? (serverAlive ? 77 : undefined) : over.procs?.find(p => p.pid === pid && over.survive)?.startTime,
+    startTime: pid => pid === 4242 ? (serverAlive ? over.serverStart ?? 77 : undefined)
+      : pid === over.reused ? 6 : over.procs?.find(p => p.pid === pid && over.survive)?.startTime ?? over.table?.get(pid)?.startTime,
     holdsSocket: () => over.holds ?? true,
-    processes: () => over.procs ?? [],
+    netns: pid => pid === process.pid ? "net:[host]" : over.net ?? "net:[private]",
+    processes: (root, server) => { seen.push({ root, server }); return over.table ? ownedProcesses(over.table, server) : over.procs ?? []; },
     signal: (pid, signal) => { log.push(["signal", String(pid), signal]); },
     remove: path => { log.push(["remove", path]); },
   };
   const server = { pid: 4242, startTime: 77, exited: () => !serverAlive, wait: async () => !serverAlive };
-  return { fixture: new HerdrLiveFixture(id, server, effects), log };
+  return { fixture: new HerdrLiveFixture(id, server, effects), log, seen };
 }
 
 test("H11 harness refuses inherited herdr targets before any control", () => {
@@ -43,6 +47,7 @@ test("H11 harness refuses inherited herdr targets before any control", () => {
     assert.throws(() => refuseInheritedTarget({ PATH: "/usr/bin", [key]: "ambient" }), /refuses inherited herdr target/);
   }
   refuseInheritedTarget({ PATH: "/usr/bin" });
+  for (const value of ["0", "1", ""]) assert.throws(() => refuseInheritedTarget({ PATH: "/usr/bin", CONDUCTOR_H11_NETNS: value }), /private network namespace is mandatory/, "no namespace opt-out");
   assert.equal(liveEnabled({}), false, "the default suite never starts a live session");
   assert.equal(liveEnabled({ CONDUCTOR_LIVE_TESTS: "1" }), true);
 });
@@ -62,7 +67,7 @@ test("H11 identity refuses ambient/wrong names and session collisions", () => {
 test("H11 socket ownership proof refuses each single-field mismatch", () => {
   const id = identity();
   const entry = { name: id.name, running: true, socket_path: id.socketPath, session_dir: id.sessionDir };
-  const good = { sessions: { sessions: [entry, { name: "default", running: true, socket_path: "/ambient/herdr.sock", session_dir: "/ambient" }] }, status: { running: true, socket: id.socketPath }, serverAlive: true, holdsSocket: true };
+  const good = { sessions: { sessions: [entry, { name: "default", running: true, socket_path: "/ambient/herdr.sock", session_dir: "/ambient" }] }, status: { running: true, socket: id.socketPath }, serverAlive: true, holdsSocket: true, privateNetwork: true };
   assert.deepEqual(proveOwnedSocket(id, good), { ok: true });
   const variants: Array<[string, typeof good]> = [
     ["session name not unique", { ...good, sessions: { sessions: [entry, entry] } }],
@@ -74,6 +79,7 @@ test("H11 socket ownership proof refuses each single-field mismatch", () => {
     ["server status socket mismatch", { ...good, status: { running: false, socket: id.socketPath } }],
     ["owned server process identity changed", { ...good, serverAlive: false }],
     ["socket not held by owned server", { ...good, holdsSocket: false }],
+    ["owned server is not in a private network namespace", { ...good, privateNetwork: false }],
     ["session list unavailable", { ...good, sessions: {} as never }],
   ];
   for (const [reason, ev] of variants) assert.deepEqual(proveOwnedSocket(id, ev), { ok: false, reason });
@@ -87,6 +93,62 @@ test("H11 control refuses a wrong socket before issuing the control command", as
   const held = fake(identity(), { holds: false });
   await assert.rejects(held.fixture.cli(["pane", "list"]), /socket not held/);
   assert.ok(!held.log.some(a => a[0] === "pane"));
+  for (const net of ["net:[host]", ""]) {
+    const shared = fake(identity(), { net });
+    await assert.rejects(shared.fixture.cli(["pane", "list"]), /not in a private network namespace/, `server netns ${JSON.stringify(net)}`);
+    assert.ok(!shared.log.some(a => a[0] === "pane"));
+  }
+});
+
+test("H11 process inventory seeds the server only with its original start identity", () => {
+  const facts = (entries: Array<[number, number, number, boolean?]>) => new Map(entries.map(([pid, ppid, startTime, marked]) => [pid, { ppid, startTime, marked: !!marked, argv: `p${pid}` }]));
+  const pids = (table: Map<number, ProcFact>, start = 77) => ownedProcesses(table, { pid: 4242, startTime: start }).map(p => p.pid).sort((a, b) => a - b);
+  // Server 4242 (start 77) -> shell 5000 -> pi 5001; marked 6000 elsewhere; unrelated 7000.
+  const live = facts([[4242, 1, 77], [5000, 4242, 80], [5001, 5000, 90], [6000, 1, 85, true], [7000, 1, 60]]);
+  assert.deepEqual(pids(live), [4242, 5000, 5001, 6000]);
+  // PID 4242 reused by an unrelated process tree: neither it nor its children are ours.
+  const reused = facts([[4242, 1, 900], [5500, 4242, 910], [6000, 1, 85, true]]);
+  assert.deepEqual(pids(reused), [6000]);
+  assert.deepEqual(pids(live, 0), [6000], "no captured start identity, no server seed");
+  // A "child" that predates its supposed parent is a reused-PID artifact, not a descendant.
+  assert.deepEqual(pids(facts([[4242, 1, 77], [5000, 4242, 50]])), [4242]);
+});
+
+test("H11 teardown after server PID reuse signals nothing unrelated and preserves the root", async () => {
+  const id = identity();
+  // The handle has not seen exit, but PID 4242 now has another start time and child 5500.
+  const table = new Map<number, ProcFact>([[4242, { ppid: 1, startTime: 900, marked: false, argv: "unrelated" }], [5500, { ppid: 4242, startTime: 910, marked: false, argv: "unrelated child" }]]);
+  const { fixture, log, seen } = fake(id, { serverStart: 900, table });
+  const report = await fixture.teardown(100);
+  assert.deepEqual(seen[0], { root: id.root, server: { pid: 4242, startTime: 77 } }, "inventory uses the original server identity");
+  assert.deepEqual(log.filter(a => a[0] === "signal"), [], "the unrelated process tree is never signalled");
+  assert.ok(!log.some(a => a[1] === "stop" || a[1] === "delete" || a[0] === "remove"), JSON.stringify(log));
+  assert.equal(report.clean, false); assert.equal(report.preserved, id.root);
+  assert.match(report.notes.join(";"), /owned server process identity changed/);
+  assert.deepEqual(report.captured, []);
+});
+
+test("H11 teardown never signals a captured PID whose start identity changed", async () => {
+  const id = identity();
+  const { fixture, log } = fake(id, { procs: [{ pid: 999, startTime: 5, argv: "pi" }], reused: 999 });
+  const report = await fixture.teardown(100);
+  assert.ok(!log.some(a => a[0] === "signal"), "the original process is gone; the reused PID is not ours");
+  assert.deepEqual(report.leftovers, []);
+});
+
+const runTeardownChild = (mode: string) => new Promise<{ root: string; report: { clean: boolean; preserved?: string; leftovers: unknown[] } }>((resolve, reject) => {
+  execFile(process.execPath, ["--import", "tsx", new URL("./fixtures/herdr-live-teardown-child.ts", import.meta.url).pathname, mode],
+    { env: process.env, timeout: 20000, encoding: "utf8" }, (error, stdout, stderr) => error ? reject(new Error(`${error.message}\n${stderr}`)) : resolve(JSON.parse(stdout)));
+});
+test("H11 a failed teardown's root survives its process exit; a clean one is gone", { timeout: 30000 }, async () => {
+  const failed = await runTeardownChild("survivor");
+  try {
+    assert.equal(failed.report.clean, false); assert.equal(failed.report.preserved, failed.root);
+    assert.ok(existsSync(join(failed.root, "server.log")), "preserved evidence still exists after the owning process exited");
+  } finally { rmSync(failed.root, { recursive: true, force: true }); }
+  const clean = await runTeardownChild("clean");
+  assert.equal(clean.report.clean, true);
+  assert.equal(existsSync(clean.root), false, "a clean teardown removes its own root");
 });
 
 test("H11 cleanup refuses unowned pane IDs and foreign bindings with zero calls", async () => {
@@ -152,14 +214,15 @@ for (const piRoot of LIVE ? (piRoots.length ? piRoots : [""]) : ["(gated)"]) {
     const herdrBin = realpathSync(process.env.CONDUCTOR_H11_HERDR_BIN ?? execFileSync("sh", ["-c", "command -v herdr"], { encoding: "utf8" }).trim());
     const integration = process.env.CONDUCTOR_H11_HERDR_INTEGRATION ?? join(userInfo().homedir, ".pi", "agent", "extensions", "herdr-agent-state.ts");
     assert.match(readFileSync(integration, "utf8"), /HERDR_INTEGRATION_ID=pi\n\/\/ HERDR_INTEGRATION_VERSION=9/);
-    const parent = realpathSync(tmpDir("h"));
+    const parent = liveParentRoot(); // removed only by a clean teardown
     const ambient = ambientSnapshot(parent);
     const alt = process.env.CONDUCTOR_H11_ALT_PI_ROOT ?? piRoots.find(r => r !== piRoot);
-    const evidence = { pi: version, piCli: piEntry(piRoot), conductor: join(worktree, "dist", "index.js"), herdr: execFileSync(herdrBin, ["--version"], { encoding: "utf8" }).trim(), integration, netns: process.env.CONDUCTOR_H11_NETNS !== "0" };
+    const evidence = { pi: version, piCli: piEntry(piRoot), conductor: join(worktree, "dist", "index.js"), herdr: execFileSync(herdrBin, ["--version"], { encoding: "utf8" }).trim(), integration };
     t.diagnostic(`H11 versions ${JSON.stringify(evidence)}`);
-    const fx = await startLiveFixture({ piRoot, worktree, herdrBin, integration, netns: evidence.netns }, randomUUID().replace(/-/g, "").slice(0, 12), parent);
+    const fx = await startLiveFixture({ piRoot, worktree, herdrBin, integration }, randomUUID().replace(/-/g, "").slice(0, 12), parent);
     const root = fx.id.root, runs = join(root, "home", ".pi", "agent", "conductor", "runs");
     t.diagnostic(`H11 fixture ${fx.id.name} server pid ${fx.server.pid}/${fx.server.startTime} socket ${fx.id.socketPath}`);
+    t.diagnostic(`H11 fixture netns server=${readlinkSync(`/proc/${fx.server.pid}/ns/net`)} test=${readlinkSync("/proc/self/ns/net")}`);
     let report: Awaited<ReturnType<typeof fx.teardown>> | undefined;
     const work = join(root, "work");
     try {

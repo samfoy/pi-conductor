@@ -134,13 +134,19 @@ subprocess semantics; verification commands are independent of the agent selecto
 `tests/herdr-live.test.ts` is opt-in. With `CONDUCTOR_LIVE_TESTS=1` and
 `CONDUCTOR_H11_PI_ROOTS=<pi-coding-agent root>[:<root>...]` it starts one uniquely
 named private `herdr --session conductor-h11-<id> server` per listed Pi root. Each
-server gets a temporary HOME/XDG/agent directory, `/bin/sh` non-login panes, the
-package's declared `pi` bin entry, an offline faux model and no credentials. The
-harness refuses inherited `HERDR_*` targets and name collisions, and proves the
-socket is held by its own server before every control and cleanup call. It stops
-only that session, waits for every captured process, and preserves evidence (and
-fails) if teardown is incomplete. `CONDUCTOR_H11_ALT_PI_ROOT` names the Pi used for
-the version-mismatch lead. The default suite runs only the fake-effect guard tests.
+server runs in a private user+network namespace and gets a temporary
+HOME/XDG/agent directory, `/bin/sh` non-login panes, the package's declared `pi`
+bin entry, an offline faux model and no credentials. The namespace is mandatory:
+there is no opt-out, and a host without unprivileged namespaces fails the test as
+blocked rather than skipping it. The harness refuses inherited `HERDR_*` targets
+and name collisions. Before every control and cleanup call it proves the socket is
+held by its own server, in a network namespace other than the test's. Teardown
+stops only that session and waits for every captured process. It captures and
+signals only processes whose start identity still matches; a reused server PID
+seeds nothing. The fixture root is a plain `mkdtemp` directory, not an auto-cleaned
+test temp dir. A clean teardown removes it; an incomplete one keeps it, reports its
+path and fails. `CONDUCTOR_H11_ALT_PI_ROOT` names the Pi used for the
+version-mismatch lead. The default suite runs only the fake-effect guard tests.
 
 **Launch contract, per real herdr 0.9.1.** `agent start` succeeds only for an idle
 agent, and herdr keeps an exited agent's name on its terminal. So conductor writes
@@ -185,6 +191,16 @@ and appears as a `<warning reason="pi-version">`. An unprovable version reads as
 - Completed and failed herdr records are still re-adopted and re-finalized on every
   lead restart. The ledger stopped any duplicate notification, but each restart does
   that CLI work again.
+- A lead crash after `agent start` registered the child but before the task was
+  published: with the child still alive, the record is left untouched as foreign
+  (`running`, ask kept, idle unfed Pi in the pane, no card). With the child gone it
+  fails with the generic "exited before accepted native launch evidence" message
+  instead of "prepared but never published". Nothing is replayed in either case.
+- A killed run whose ordinary notification stopped at `intent` stays `intent`; it is
+  not re-marked `uncertain`. Nothing is replayed.
+- The fake herdr CLI answers a reused name with `agent_name_taken`. Real herdr 0.9.1
+  answers `agent_name_not_found` and has already launched Pi in the pane by then.
+  Conductor never reuses names, so no behaviour depends on this.
 - **Human TUI acceptance is unverified.** Nobody has looked at regular-mode
   scrollback, foreground Esc-detach and Ctrl+G, Esc in a child followed by resume,
   trust-prompt refusal, or the dialog card.

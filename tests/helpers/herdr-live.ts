@@ -1,19 +1,22 @@
 // H11 isolated real-herdr fixture. Every control and cleanup call first proves the
 // private socket is served by the exact test-owned server process; nothing falls
 // back to an inherited or ambient herdr session.
-import { execFile, spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { userInfo } from "node:os";
+import { execFile, execFileSync, spawn } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir, userInfo } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 export interface LiveIdentity { root: string; name: string; sessionDir: string; socketPath: string }
 export interface ProcessIdentity { pid: number; startTime: number; argv: string }
+export interface ProcFact { ppid: number; startTime: number; marked: boolean; argv: string }
 export interface LiveEffects {
   exec(args: string[], env: Record<string, string>, timeoutMs: number): Promise<string>;
   startTime(pid: number): number | undefined;
   holdsSocket(pid: number, socketPath: string): boolean;
-  processes(root: string, serverPid: number): ProcessIdentity[];
+  /** Network namespace identity of a process, or undefined if unreadable. */
+  netns(pid: number): string | undefined;
+  processes(root: string, server: { pid: number; startTime: number }): ProcessIdentity[];
   signal(pid: number, signal: NodeJS.Signals): void;
   remove(path: string): void;
 }
@@ -25,6 +28,16 @@ export const liveEnabled = (env: NodeJS.ProcessEnv): boolean => env.CONDUCTOR_LI
 export function refuseInheritedTarget(env: NodeJS.ProcessEnv): void {
   const inherited = Object.keys(env).filter(key => key.startsWith("HERDR_"));
   if (inherited.length) throw new Error(`H11 refuses inherited herdr target (${inherited.sort().join(",")}); run under the env -u test wrapper`);
+  // The private network namespace is part of the approved isolation; there is no opt-out.
+  if (env.CONDUCTOR_H11_NETNS !== undefined) throw new Error("H11 refuses CONDUCTOR_H11_NETNS: the private network namespace is mandatory");
+}
+
+/**
+ * The live fixture root. Deliberately not tmpDir(): its exit hook would delete a
+ * failed teardown's preserved evidence. Only a clean teardown removes this root.
+ */
+export function liveParentRoot(): string {
+  return realpathSync(mkdtempSync(join(tmpdir(), "h")));
 }
 
 export function planLiveIdentity(root: string, unique: string, realHome = userInfo().homedir): LiveIdentity {
@@ -49,7 +62,7 @@ export function fixtureEnv(id: LiveIdentity): Record<string, string> {
   };
 }
 
-export function proveOwnedSocket(id: LiveIdentity, ev: { sessions: unknown; status: unknown; serverAlive: boolean; holdsSocket: boolean }): Proof {
+export function proveOwnedSocket(id: LiveIdentity, ev: { sessions: unknown; status: unknown; serverAlive: boolean; holdsSocket: boolean; privateNetwork: boolean }): Proof {
   const sessions = (ev.sessions as { sessions?: unknown })?.sessions;
   if (!Array.isArray(sessions)) return { ok: false, reason: "session list unavailable" };
   const mine = sessions.filter(s => s?.name === id.name);
@@ -59,6 +72,7 @@ export function proveOwnedSocket(id: LiveIdentity, ev: { sessions: unknown; stat
   if (status?.running !== true || status.socket !== id.socketPath) return { ok: false, reason: "server status socket mismatch" };
   if (!ev.serverAlive) return { ok: false, reason: "owned server process identity changed" };
   if (!ev.holdsSocket) return { ok: false, reason: "socket not held by owned server" };
+  if (!ev.privateNetwork) return { ok: false, reason: "owned server is not in a private network namespace" };
   return { ok: true };
 }
 
@@ -75,9 +89,11 @@ export class HerdrLiveFixture {
   async prove(): Promise<void> {
     const sessions = await this.session(["session", "list", "--json"]);
     const status = JSON.parse(await this.effects.exec(["status", "server", "--json"], { ...this.env, HERDR_SOCKET_PATH: this.id.socketPath }, 10000));
+    const serverNet = this.effects.netns(this.server.pid), ownNet = this.effects.netns(process.pid);
     const proof = proveOwnedSocket(this.id, { sessions, status,
       serverAlive: !this.server.exited() && this.effects.startTime(this.server.pid) === this.server.startTime,
-      holdsSocket: this.effects.holdsSocket(this.server.pid, this.id.socketPath) });
+      holdsSocket: this.effects.holdsSocket(this.server.pid, this.id.socketPath),
+      privateNetwork: !!serverNet && !!ownNet && serverNet !== ownNet });
     if (!proof.ok) throw new Error(`H11 socket ownership refused: ${proof.reason}`);
   }
   /** Proves ownership immediately before each API call. */
@@ -107,7 +123,7 @@ export class HerdrLiveFixture {
     const server = { pid: this.server.pid, startTime: this.server.startTime };
     let proven = true;
     try { await this.prove(); } catch (e) { proven = false; notes.push((e as Error).message); }
-    const captured = this.effects.processes(this.id.root, this.server.pid);
+    const captured = this.effects.processes(this.id.root, server);
     if (proven) {
       try {
         const stopped = await this.session(["session", "stop", this.id.name, "--json"]);
@@ -125,7 +141,7 @@ export class HerdrLiveFixture {
       for (let i = 0; i < Math.max(2, waitMs / 250) && alive().length; i++) await delay(50);
       leftovers = alive();
     }
-    const late = this.effects.processes(this.id.root, this.server.pid).filter(p => !captured.some(c => c.pid === p.pid && c.startTime === p.startTime));
+    const late = this.effects.processes(this.id.root, server).filter(p => !captured.some(c => c.pid === p.pid && c.startTime === p.startTime));
     if (late.length) { notes.push("unexpected late fixture processes"); leftovers = [...leftovers, ...late]; }
     if (this.server.exited() && !leftovers.length) {
       try {
@@ -146,15 +162,28 @@ export function procStartTime(pid: number): number | undefined {
 }
 function holdsSocket(pid: number, socketPath: string): boolean {
   try {
-    // The server's own netns view: the fixture may run in a private network namespace.
+    // The server's own netns view: the fixture runs in a private network namespace.
     const inodes = new Set(readFileSync(`/proc/${pid}/net/unix`, "utf8").split("\n").slice(1).map(line => line.trim().split(/\s+/))
       .filter(f => f[7] === socketPath && f[5] === "01").map(f => f[6]));
     return readdirSync(`/proc/${pid}/fd`).some(fd => { try { return inodes.has(readlinkSync(`/proc/${pid}/fd/${fd}`).match(/^socket:\[(\d+)\]$/)?.[1] ?? ""); } catch { return false; } });
   } catch { return false; }
 }
-/** Exact inventory: descendants of the owned server plus processes carrying this fixture's unique marker. */
-function fixtureProcesses(root: string, serverPid: number): ProcessIdentity[] {
-  const table = new Map<number, { ppid: number; startTime: number; marked: boolean; argv: string }>();
+/**
+ * Exact inventory from one procfs snapshot: processes carrying this fixture's unique
+ * marker, plus the server and its descendants. The server PID seeds only while it still
+ * has its original start identity; a descendant cannot predate its parent. A reused PID
+ * therefore never pulls an unrelated process tree into teardown.
+ */
+export function ownedProcesses(table: ReadonlyMap<number, ProcFact>, server: { pid: number; startTime: number }): ProcessIdentity[] {
+  const owned = new Set<number>([...table].filter(([pid, p]) => p.marked || (pid === server.pid && server.startTime > 0 && p.startTime === server.startTime)).map(([pid]) => pid));
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const [pid, p] of table) if (!owned.has(pid) && owned.has(p.ppid) && p.startTime >= table.get(p.ppid)!.startTime) { owned.add(pid); grew = true; }
+  }
+  return [...owned].map(pid => ({ pid, startTime: table.get(pid)!.startTime, argv: table.get(pid)!.argv }));
+}
+function fixtureProcesses(root: string, server: { pid: number; startTime: number }): ProcessIdentity[] {
+  const table = new Map<number, ProcFact>();
   for (const name of readdirSync("/proc").filter(n => /^\d+$/.test(n))) {
     const pid = Number(name);
     try {
@@ -164,12 +193,7 @@ function fixtureProcesses(root: string, serverPid: number): ProcessIdentity[] {
       table.set(pid, { ppid: Number(fields[1]), startTime: Number(fields[19]), marked, argv: readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").join(" ").slice(0, 200) });
     } catch { /* exited during scan */ }
   }
-  const owned = new Set<number>([...table].filter(([pid, p]) => p.marked || pid === serverPid).map(([pid]) => pid));
-  for (let grew = true; grew;) {
-    grew = false;
-    for (const [pid, p] of table) if (!owned.has(pid) && owned.has(p.ppid)) { owned.add(pid); grew = true; }
-  }
-  return [...owned].map(pid => ({ pid, startTime: table.get(pid)!.startTime, argv: table.get(pid)!.argv }));
+  return ownedProcesses(table, server);
 }
 export function realEffects(herdrBin: string): LiveEffects {
   return {
@@ -179,6 +203,7 @@ export function realEffects(herdrBin: string): LiveEffects {
       });
     }),
     startTime: procStartTime, holdsSocket, processes: fixtureProcesses,
+    netns: pid => { try { return readlinkSync(`/proc/${pid}/ns/net`); } catch { return undefined; } },
     signal: (pid, signal) => { try { process.kill(pid, signal); } catch { /* already gone */ } },
     remove: path => rmSync(path, { recursive: true, force: true, maxRetries: 3 }),
   };
@@ -198,7 +223,13 @@ export function ambientSnapshot(root: string): string {
   return JSON.stringify({ procs, sessions });
 }
 
-export interface LiveConfig { piRoot: string; worktree: string; herdrBin: string; integration: string; netns: boolean }
+export interface LiveConfig { piRoot: string; worktree: string; herdrBin: string; integration: string }
+const PRIVATE_NET = ["unshare", "--user", "--map-root-user", "--net"];
+/** Fails as blocked, never skipped, when unprivileged user+network namespaces are unavailable. */
+export function assertPrivateNetworkNamespace(): void {
+  try { execFileSync(PRIVATE_NET[0], [...PRIVATE_NET.slice(1), "true"], { env: { PATH: "/usr/bin:/bin" }, timeout: 5000, stdio: "pipe" }); }
+  catch (e) { throw new Error(`H11 blocked: private network namespace unavailable (${PRIVATE_NET.join(" ")}): ${String((e as { stderr?: unknown }).stderr ?? e).slice(0, 300)}`); }
+}
 /** The package's declared CLI, exactly what an installed `pi` executes. */
 export function piEntry(piRoot: string): string {
   const bin = JSON.parse(readFileSync(join(piRoot, "package.json"), "utf8")).bin;
@@ -230,11 +261,12 @@ export function writeFixtureFiles(id: LiveIdentity, cfg: LiveConfig): void {
 
 export async function startLiveFixture(cfg: LiveConfig, unique: string, parent: string): Promise<HerdrLiveFixture> {
   refuseInheritedTarget(process.env);
+  assertPrivateNetworkNamespace();
   const id = planLiveIdentity(realpathSync(parent), unique);
   writeFixtureFiles(id, cfg);
   const effects = realEffects(cfg.herdrBin), env = fixtureEnv(id);
   const log = openSync(join(id.root, "server.log"), "a");
-  const argv = [...(cfg.netns ? ["unshare", "--user", "--map-root-user", "--net"] : []), cfg.herdrBin, "--session", id.name, "server"];
+  const argv = [...PRIVATE_NET, cfg.herdrBin, "--session", id.name, "server"];
   const child = spawn(argv[0], argv.slice(1), { env, cwd: join(id.root, "work"), stdio: ["ignore", log, log] });
   let done = false;
   const exited = new Promise<void>(res => child.once("exit", () => { done = true; res(); }));
