@@ -46,6 +46,8 @@ export function createRunPipeline(
   opts: RunPipelineOpts,
 ): Promise<Run> {
   const runtime = opts.runtime ?? runtimeFor(run);
+  if (run.runtime === "herdr") run.herdrResultUnavailable = true;
+  const messageOffset = run.messages.length;
 
   // The argv builder owns transport selection; steering remains an independent opt-in.
   const rpc = piArgs[1] === "rpc";
@@ -106,6 +108,7 @@ export function createRunPipeline(
     }
     const rest = transport.drain();
     if (rest.trim()) processLine(rest);
+    if (transport.kind === "herdr") run.herdrResultUnavailable = !getFinalText(run.messages.slice(messageOffset)) || undefined;
     if (opts.answer) await answerRecord;
     discoverSessionPathIfMissing(run, opts.sessionDir);
     discoverContextRetirement(run, opts.sessionDir);
@@ -348,13 +351,21 @@ export function createRunPipeline(
       if (isTerminal(run.status)) {
         if (launch.stderr) run.errorMessage = [run.errorMessage, launch.stderr].filter(Boolean).join("\n");
         await writeRecord(run);
-      } else if (awaitingAnswer) await restoreAnswer(error.message);
-      else await failEffortLaunch(run, opts.registry, error.message, opts.onComplete).done;
+      } else if (awaitingAnswer && !launch.initialAccepted) {
+        run.herdrExitUnconfirmed = !launch.childExited || undefined;
+        await restoreAnswer(error.message);
+      }
+      else {
+        if (launch.initialAccepted) { awaitingAnswer = false; run.pendingAsk = undefined; }
+        run.herdrExitUnconfirmed = !launch.childExited || undefined;
+        await failEffortLaunch(run, opts.registry, error.message, opts.onComplete).done;
+      }
       donePromiseResolve(run);
     };
     void launch.ready.then(async () => {
       if (launch.cancelled) { await launch.cancel(); await launchFailed(new Error("herdr: launch cancelled")); return; }
       if (finalized || isTerminal(run.status) || run.transport !== launch) return;
+      run.herdrResultUnavailable = undefined;
       if (awaitingAnswer) {
         awaitingAnswer = false; run.pendingAsk = undefined; run.rejectAnswerDelivery = undefined;
         answerRecord = answerRecord.then(() => writeRecord(run));

@@ -170,7 +170,7 @@ var SubprocessRuntime = class {
   }
   deliver(run, type, message) {
     const reason = unsupportedRuntimeReason(run.runtime);
-    return reason ? { kind: "epipe", reason } : enqueueRpcSendWithAck(run, type, message);
+    return reason ? { kind: "epipe", reason } : enqueueRpcSendWithAck(run, type === "grace" ? "follow_up" : type, message);
   }
   stopProcess(run) {
     assertSupportedRuntime(run.runtime);
@@ -427,6 +427,7 @@ function toRunRecord(r) {
     transcriptPath: r.transcriptPath,
     finalPath: r.finalPath,
     herdrExitUnconfirmed: r.herdrExitUnconfirmed,
+    herdrResultUnavailable: r.herdrResultUnavailable,
     sessionPath: r.sessionPath,
     contextRetired: r.contextRetired,
     pendingAsk: r.pendingAsk,
@@ -1081,7 +1082,7 @@ function sourceRun(id, registry) {
 }
 function resultRef(run) {
   try {
-    return RUN_ID.test(run.id) && isTerminal(run.status) && !run.herdrExitUnconfirmed && usableResult(run.finalPath) ? `run:${run.id}` : void 0;
+    return RUN_ID.test(run.id) && isTerminal(run.status) && !run.herdrExitUnconfirmed && !run.herdrResultUnavailable && usableResult(run.finalPath) ? `run:${run.id}` : void 0;
   } catch {
     return void 0;
   }
@@ -1097,7 +1098,7 @@ function appendFileEvidence(task, files, options) {
     if (typeof input !== "string" || !input.trim() || input.includes("\0")) throw new Error("files entries must be non-empty local paths or run:<agent_id> references");
     try {
       const run = input.startsWith("run:") ? sourceRun(input.slice(4), options.registry) : void 0;
-      if (run && (run.herdrExitUnconfirmed || !usableResult(run.finalPath))) throw new Error(`no usable final result: ${input}`);
+      if (run && (run.herdrExitUnconfirmed || run.herdrResultUnavailable || !usableResult(run.finalPath))) throw new Error(`no usable final result: ${input}`);
       const path2 = realpathSync(run ? run.finalPath : resolveLocalPath(input, options.cwd));
       const size = inspect(path2, (_fd, size2) => size2);
       if (seen.has(path2)) return void 0;
@@ -2063,6 +2064,7 @@ function buildOrphanRun(record, status) {
     transcriptPath: record.transcriptPath,
     finalPath: record.finalPath,
     herdrExitUnconfirmed: record.herdrExitUnconfirmed,
+    herdrResultUnavailable: record.herdrResultUnavailable,
     sessionPath: record.sessionPath,
     contextRetired: record.contextRetired,
     pendingAsk: status === "running" || status === "blocked" ? record.pendingAsk : void 0,
@@ -3087,6 +3089,8 @@ function scoreForShape(task, now = Date.now(), path2 = memoryPath()) {
 // src/run-pipeline.ts
 function createRunPipeline(run, piArgs, opts) {
   const runtime = opts.runtime ?? runtimeFor(run);
+  if (run.runtime === "herdr") run.herdrResultUnavailable = true;
+  const messageOffset = run.messages.length;
   const rpc = piArgs[1] === "rpc";
   run.onComplete = opts.onComplete;
   const recoveredAnswer = !!opts.answer && !!run.reconciledAtStartup && !!run.effort && run.effort.gate !== void 0;
@@ -3149,6 +3153,7 @@ function createRunPipeline(run, piArgs, opts) {
     }
     const rest = transport.drain();
     if (rest.trim()) processLine(rest);
+    if (transport.kind === "herdr") run.herdrResultUnavailable = !getFinalText(run.messages.slice(messageOffset)) || void 0;
     if (opts.answer) await answerRecord;
     discoverSessionPathIfMissing(run, opts.sessionDir);
     discoverContextRetirement(run, opts.sessionDir);
@@ -3403,8 +3408,17 @@ function createRunPipeline(run, piArgs, opts) {
       if (isTerminal(run.status)) {
         if (launch.stderr) run.errorMessage = [run.errorMessage, launch.stderr].filter(Boolean).join("\n");
         await writeRecord(run);
-      } else if (awaitingAnswer) await restoreAnswer(error.message);
-      else await failEffortLaunch(run, opts.registry, error.message, opts.onComplete).done;
+      } else if (awaitingAnswer && !launch.initialAccepted) {
+        run.herdrExitUnconfirmed = !launch.childExited || void 0;
+        await restoreAnswer(error.message);
+      } else {
+        if (launch.initialAccepted) {
+          awaitingAnswer = false;
+          run.pendingAsk = void 0;
+        }
+        run.herdrExitUnconfirmed = !launch.childExited || void 0;
+        await failEffortLaunch(run, opts.registry, error.message, opts.onComplete).done;
+      }
       donePromiseResolve(run);
     };
     void launch.ready.then(async () => {
@@ -3414,6 +3428,7 @@ function createRunPipeline(run, piArgs, opts) {
         return;
       }
       if (finalized || isTerminal(run.status) || run.transport !== launch) return;
+      run.herdrResultUnavailable = void 0;
       if (awaitingAnswer) {
         awaitingAnswer = false;
         run.pendingAsk = void 0;
@@ -5490,7 +5505,12 @@ function observeRunActions(run, canFocus = false, sessionId, registry) {
 function runActionError(run, action, observed) {
   if (action === "focus") return observed.canFocus ? void 0 : "Focused stream requires terminal UI (TUI mode).";
   const unsupported = unsupportedRuntimeReason(run.runtime);
-  if (unsupported && !(action === "kill" && run.runtime === "herdr" && run.transport?.kind === "herdr")) return unsupported;
+  if (unsupported && !(run.runtime === "herdr" && run.transport?.kind === "herdr")) return unsupported;
+  if (run.runtime === "herdr") {
+    if (action === "pause" || action === "resume") return `${action} is subprocess-only; use send to relaunch a saved herdr session.`;
+    if (action === "send" && (run.herdrExitUnconfirmed || run.transport?.kind !== "herdr" || !run.transport.childExited)) return "herdr: previous child exit is unconfirmed; preserve the session and workspace";
+    if (!observed.owned) return `sub-agent ${run.id} is owned by another conductor (foreign run).`;
+  }
   if (action === "send" || action === "steer" || action === "follow_up") {
     if (observed.effortOwnershipError) return observed.effortOwnershipError;
     if (action === "send" && observed.effortAdmissionError) return observed.effortAdmissionError;
@@ -5511,7 +5531,7 @@ function runActionError(run, action, observed) {
   if (decision.strategy.kind === "rejected") return decision.strategy.reason;
   if (observed.sessionMissing) return `sub-agent ${run.id} session file is missing on disk: ${run.sessionPath}`;
   if (action !== "send" && !observed.capabilities.liveSend) {
-    return `sub-agent ${run.id} finished before steer was delivered (${run.rpcStdinQueue ? "stdin is not writable" : "stdin queue gone"}).`;
+    return run.runtime === "herdr" ? `sub-agent ${run.id}: herdr child is not owned, attached, ready and running.` : `sub-agent ${run.id} finished before steer was delivered (${run.rpcStdinQueue ? "stdin is not writable" : "stdin queue gone"}).`;
   }
   return void 0;
 }
@@ -5525,13 +5545,14 @@ function validateRunAction(run, action, canFocus = false, sessionId) {
   return runActionError(run, action, observeRunActions(run, canFocus, sessionId));
 }
 function validateSendable(run, behavior = "auto", sessionId) {
+  if (run.runtime === "herdr") run.transport?.drain();
   const action = behavior === "auto" ? run.status === "running" ? "follow_up" : "send" : behavior === "resume" ? "send" : behavior;
   const reason = validateRunAction(run, action, false, sessionId);
   return reason === void 0 ? { ok: true } : { ok: false, reason };
 }
 function resolveSendStrategy(run, behavior = "auto") {
   if (run.status === "running") {
-    const isRpc = run.streamingMode === "rpc" && run.steerable !== false;
+    const isRpc = run.runtime === "herdr" || run.streamingMode === "rpc" && run.steerable !== false;
     if (!isRpc) {
       return {
         strategy: {
@@ -5655,13 +5676,15 @@ function sendToRun(run, message, opts) {
   }
   if (decision.strategy.kind === "rpc-steer" || decision.strategy.kind === "rpc-follow-up") {
     const cmdType = decision.strategy.kind === "rpc-steer" ? "steer" : "follow_up";
+    if (run.runtime === "herdr" && opts.maxTurns !== void 0) run.maxTurns = opts.maxTurns;
+    if (run.runtime === "herdr" && opts.graceTurns !== void 0) run.graceTurns = opts.graceTurns;
     if (opts.killOnStall !== void 0) run.killOnStall = opts.killOnStall;
     if (opts.softStallSeconds !== void 0) run.softStallSeconds = opts.softStallSeconds;
     if (opts.onCompleteHook !== void 0) run.onCompleteHook = opts.onCompleteHook;
     if (opts.onCompleteHookTimeoutSeconds !== void 0)
       run.onCompleteHookTimeoutSeconds = opts.onCompleteHookTimeoutSeconds;
     snapshotInvocationMarkers(run, "steerCount");
-    const result = subprocessRuntime.deliver(run, cmdType, trimmed);
+    const result = runtimeFor(run).deliver(run, cmdType, trimmed, opts.sessionId);
     if (result.kind === "epipe") {
       return { kind: "rejected", reason: result.reason };
     }
@@ -5688,7 +5711,7 @@ function sendToRun(run, message, opts) {
   const worktreeBlocker = restoreResumeWorktree(run, () => readFileSync11(sessionPath, "utf8"));
   if (worktreeBlocker) return { kind: "rejected", reason: worktreeBlocker };
   const pendingAsk = run.pendingAsk;
-  if (pendingAsk) trimmed = formatOwnerAnswer(pendingAsk, trimmed);
+  if (pendingAsk && run.runtime !== "herdr") trimmed = formatOwnerAnswer(pendingAsk, trimmed);
   run.askExecution = void 0;
   run.askContinuation = void 0;
   run.failureClass = void 0;
@@ -5703,6 +5726,8 @@ function sendToRun(run, message, opts) {
   run.lastEventAt = Date.now();
   run.stalledSince = void 0;
   snapshotInvocationMarkers(run, "resumeCount");
+  if (run.runtime === "herdr" && opts.maxTurns !== void 0) run.maxTurns = opts.maxTurns;
+  if (run.runtime === "herdr" && opts.graceTurns !== void 0) run.graceTurns = opts.graceTurns;
   if (opts.killOnStall !== void 0) run.killOnStall = opts.killOnStall;
   if (opts.softStallSeconds !== void 0) run.softStallSeconds = opts.softStallSeconds;
   if (opts.onCompleteHook !== void 0) run.onCompleteHook = opts.onCompleteHook;
@@ -5719,7 +5744,9 @@ function sendToRun(run, message, opts) {
   const done = createRunPipeline(run, piArgs, {
     answer,
     registry: opts.registry,
-    cwd: run.effort?.cwd ?? run.cwd,
+    runtime: runtimeFor(run),
+    core: { kind: "resume", sessionPath, systemPrompt: run.systemPrompt, model: run.model, thinking: run.thinking, tools: run.tools, excludeTools: run.excludeTools },
+    cwd: run.runtime === "herdr" ? sessionHeaderCwd(readFileSync11(sessionPath, "utf8")) ?? run.cwd : run.effort?.cwd ?? run.cwd,
     timeoutMs: opts.timeoutMs,
     onUpdate: opts.onUpdate,
     onComplete: opts.onComplete,
@@ -5966,10 +5993,11 @@ async function applyHookToTerminal(run, resolvedHook, terminal, deps = {}) {
 }
 var GRACE_MESSAGE = "You have reached your turn limit. Wrap up immediately \u2014 provide your final answer now.";
 var defaultGraceEnqueue = (run, message) => {
-  subprocessRuntime.deliver(run, "follow_up", message);
+  runtimeFor(run).deliver(run, run.runtime === "herdr" ? "grace" : "follow_up", message, run.parentSessionId);
 };
 function checkTurnLimit(run, registry, terminateFn, enqueueGraceMsg = defaultGraceEnqueue) {
   if (!run.maxTurns || isTerminal(run.status)) return;
+  if (run.runtime === "herdr" && (run.pendingAsk || run.askExecution)) return;
   const { turns } = run.usage;
   const graceTurns = run.graceTurns ?? 5;
   if (run.gracePeriodActive && run.gracePeriodStartTurn !== void 0 && turns >= run.gracePeriodStartTurn + graceTurns) {
@@ -5977,7 +6005,7 @@ function checkTurnLimit(run, registry, terminateFn, enqueueGraceMsg = defaultGra
     return;
   }
   if (!run.gracePeriodActive && turns >= run.maxTurns) {
-    if (run.streamingMode === "rpc") {
+    if (run.runtime === "herdr" ? capabilitiesFor(run).liveSend : run.streamingMode === "rpc") {
       run.gracePeriodActive = true;
       run.gracePeriodStartTurn = turns;
       enqueueGraceMsg(run, GRACE_MESSAGE);
@@ -6117,7 +6145,7 @@ function writeRecord(run, durableFence) {
   return durableFence ? writing : run.recordWrite;
 }
 async function writeFinal(run, durable = false) {
-  if (run.herdrExitUnconfirmed) return;
+  if (run.herdrExitUnconfirmed || run.herdrResultUnavailable) return;
   if (durable) {
     await mkdir(dirname12(run.finalPath), { recursive: true });
     writeDurableFile(run.finalPath, getFinalText(run.messages) || run.integration?.resultText || "(no output)", () => assertRunEffortOwner(run));
@@ -6130,6 +6158,7 @@ async function writeFinal(run, durable = false) {
   }
 }
 function getCompletionText(run) {
+  if (run.herdrResultUnavailable) return "herdr: no usable final output from this invocation. Any existing final.md is historical; inspect the transcript and diagnostics.";
   return run.herdrExitUnconfirmed ? "herdr: child exit unconfirmed; no final result published. Any existing final.md belongs to a previous invocation. Inspect the retained transcript and diagnostics." : getFinalText(run.messages);
 }
 function getFinalText(messages) {
@@ -6533,11 +6562,11 @@ var HerdrRuntime = class {
     this.options = options;
   }
   options;
-  capabilities() {
-    return { pause: false, liveSend: false };
+  capabilities(run) {
+    return { pause: false, liveSend: run.transport?.kind === "herdr" && run.transport.liveSend?.() === true };
   }
-  deliver() {
-    return { kind: "epipe", reason: "herdr live delivery is unavailable" };
+  deliver(run, type, text3, sessionId) {
+    return run.transport?.kind === "herdr" && run.transport.deliver ? run.transport.deliver(type, text3, sessionId) : { kind: "epipe", reason: "herdr child is not attached and ready" };
   }
   signal() {
     throw failure("pause is subprocess-only");
@@ -6561,7 +6590,7 @@ var HerdrRuntime = class {
     const previous = run.herdr;
     const alias = /^[a-z][a-z0-9_-]{0,31}$/.test(run.id) ? run.id : `c${createHash4("sha256").update(run.id).digest("hex").slice(0, 16)}`;
     let binding, hello, provenPane;
-    let fresh = false, accepted = false, stderr = "", stopWork;
+    let fresh = false, accepted = false, initialAccepted = false, startAttempted = false, stderr = "", stopWork;
     let tail, monitor;
     let childExited = false, observing = false, nativeSettled = false;
     let observation;
@@ -6738,6 +6767,7 @@ var HerdrRuntime = class {
       }
       const startArgs = ["agent", "start", alias, "--kind", "pi", "--pane", binding.paneId, "--timeout", "60000", "--", ...args];
       let started;
+      startAttempted = true;
       try {
         started = await cli.json(startArgs, { timeoutMs: HERDR_LAUNCH_BUDGET.start, signal: abort.signal });
       } catch (e) {
@@ -6829,6 +6859,7 @@ var HerdrRuntime = class {
         scan();
         return nativeStart ? true : void 0;
       });
+      initialAccepted = true;
       check();
       const finalPane = await getPane(abort.signal);
       check();
@@ -6844,6 +6875,7 @@ var HerdrRuntime = class {
       return { binding, request, launchOffset };
     }).catch(async (e) => {
       diagnostic(e instanceof Error && e.message.startsWith("herdr:") ? e.message : "herdr: launch failed");
+      if (!startAttempted) childExited = true;
       await stopOwned(true);
       finishObservation();
       await capture();
@@ -6929,6 +6961,43 @@ var HerdrRuntime = class {
       if (childExited) gone();
       else if (!nativeSettled) monitor.start();
     };
+    let sequence = 1;
+    let deliveryTail = Promise.resolve();
+    const liveSend = () => run.runtime === "herdr" && run.herdr === binding && binding?.launchNonce === nonce && accepted && observing && !abort.signal.aborted && !nativeSettled && !childExited && run.status === "running" && (run.parentPid === void 0 || run.parentPid === process.pid) && !run.pendingAsk && !run.askExecution && proof(provenPane).ok;
+    const deliver = (type, text3, sessionId) => {
+      tail?.drain();
+      if (!liveSend()) return { kind: "epipe", reason: "herdr child is not owned, attached, ready and running" };
+      const request = { v: 1, launchNonce: nonce, requestId: randomUUID4(), sequence: ++sequence, kind: type, text: text3 };
+      const rejected = (reason, definite) => ({ delivered: false, deliveredAt: 0, reason, definite });
+      const ack = deliveryTail.then(async () => {
+        let pane;
+        try {
+          pane = await getPane(abort.signal);
+        } catch {
+          return rejected("pane observation unavailable; no input written", true);
+        }
+        const policy = validateSendable(run, type === "grace" ? "steer" : type, sessionId);
+        if (!liveSend() || !proof(pane).ok || !policy.ok) return rejected(policy.ok ? "child identity or readiness changed; no input written" : policy.reason, true);
+        try {
+          writeInboxRequest(dir, request);
+          const deadline = now() + HERDR_LAUNCH_BUDGET.ack;
+          for (; ; ) {
+            if (run.herdr !== binding || binding?.launchNonce !== nonce) return rejected("invocation changed; do not resend blindly", false);
+            tail?.drain();
+            const response = readInboxAck(dir, request);
+            if (response) return response.accepted ? { delivered: true, deliveredAt: response.at } : rejected(response.code, true);
+            if (childExited) return rejected("child exited without acknowledgement", true);
+            if (abort.signal.aborted || !proof(provenPane).ok) return rejected("child unavailable; do not resend blindly", false);
+            if (now() >= deadline) return rejected("ack timeout; do not resend blindly", false);
+            await sleep(250);
+          }
+        } catch {
+          return rejected("delivery unconfirmed; do not resend blindly", false);
+        }
+      });
+      deliveryTail = ack;
+      return { kind: "queued", ack };
+    };
     const releasePane = async () => {
       if (!childExited || !binding || run.herdr !== binding) return false;
       const result = await closeEmptyPane(cli, binding, () => current(), { timeoutMs: 2e3 });
@@ -6937,13 +7006,19 @@ var HerdrRuntime = class {
     };
     return {
       kind: "herdr",
+      runtime: this,
+      liveSend,
+      deliver,
       ready,
       closed,
       observe,
       waitForExit,
       releasePane,
+      get initialAccepted() {
+        return initialAccepted && run.herdr === binding;
+      },
       get childExited() {
-        return childExited && run.herdr === binding;
+        return childExited && (!binding || run.herdr === binding);
       },
       get cancelled() {
         return abort.signal.aborted;
@@ -6987,10 +7062,15 @@ function assertSupportedRuntime(kind) {
   const reason = unsupportedRuntimeReason(kind);
   if (reason) throw new Error(reason);
 }
+function describeDelivery(ack) {
+  if (ack.delivered) return "input accepted by the child bridge; this does not prove the request executed.";
+  return ack.definite ? `input rejected: ${ack.reason}` : `delivery unconfirmed: ${ack.reason}; do not resend blindly.`;
+}
 function isObservableHere(run) {
   return run.proc !== void 0;
 }
 function runtimeFor(run, env) {
+  if (run.runtime === "herdr" && run.transport?.kind === "herdr" && run.transport.runtime) return run.transport.runtime;
   if (run.runtime === "herdr") return new HerdrRuntime(env ? {
     cli: createHerdrCli({ env: { ...env }, socketPath: env.HERDR_SOCKET_PATH }),
     workspaceId: env.HERDR_WORKSPACE_ID,
@@ -9076,8 +9156,8 @@ async function runSendCmd(opts, ctx, arg) {
       (ack) => {
         try {
           ctx.ui.notify(
-            `${agentId} ack delivered (\u0394 ${ack.deliveredAt - run.lastEventAt}ms)`,
-            "info"
+            run.runtime === "herdr" ? `${agentId}: ${describeDelivery(ack)}` : `${agentId} ack delivered (\u0394 ${ack.deliveredAt - run.lastEventAt}ms)`,
+            ack.delivered ? "info" : "warning"
           );
         } catch {
         }
@@ -9095,7 +9175,7 @@ async function runSendCmd(opts, ctx, arg) {
     return;
   }
   ctx.ui.notify(
-    answering ? `${agentId} answering ${answering.askId}: ${answering.question}` : `${agentId} resuming via fresh subprocess (streaming_behavior=${behavior})`,
+    answering ? `${agentId} answering ${answering.askId}: ${answering.question}` : run.runtime === "herdr" ? `${agentId} relaunching saved session in herdr (streaming_behavior=${behavior})` : `${agentId} resuming via fresh subprocess (streaming_behavior=${behavior})`,
     "info"
   );
 }
@@ -11058,7 +11138,7 @@ function registerSendTool(pi, opts) {
   pi.registerTool({
     name: CONDUCTOR_LLM_TOOLS.send,
     label: "Send to sub-agent",
-    description: "Continue an existing sub-agent's session with a new user-role message, or answer its outstanding ask_owner question. send continues a saved session in a new process; steer/follow_up deliver over live RPC. Live RPC sends await acknowledgement only. Use the latest available_actions; each call revalidates. Foreground (default): blocks until the sub-agent's reply arrives. Background: returns immediately; completion or a blocking owner question arrives automatically.",
+    description: "Continue an existing sub-agent's session with a new user-role message, or answer its outstanding ask_owner question. send relaunches a saved session on its recorded backend; steer/follow_up deliver through live RPC or a proven attached herdr child. Live sends await input acknowledgement, not execution. Unconfirmed delivery must not be blindly retried. Use the latest available_actions; each call revalidates. Foreground (default): blocks until the sub-agent's reply arrives. Background: returns immediately; completion or a blocking owner question arrives automatically.",
     promptSnippet: "Send a follow-up message to an existing sub-agent",
     promptGuidelines: [
       "Use ensemble_send when you want to continue working with a sub-agent that already has the context you care about \u2014 don't re-spawn from scratch.",
@@ -11172,6 +11252,10 @@ function registerSendTool(pi, opts) {
       if (result.ack !== void 0) {
         try {
           const ackResult = await result.ack;
+          if (run.runtime === "herdr") return {
+            content: [{ type: "text", text: `${run.id}: ${describeDelivery(ackResult)}` }],
+            details: { status: ackResult.delivered ? "accepted-input" : ackResult.definite ? "rejected" : "unconfirmed", agent_id: run.id, persona: run.persona, ...ackResult }
+          };
           return {
             content: [
               {
@@ -14589,6 +14673,13 @@ async function executePromptAndSend(deps, agentId, presuppliedText) {
     currentModelProvider,
     persona
   });
+  if (result.kind === "started" && run.runtime === "herdr" && result.ack) {
+    const ack = await result.ack;
+    try {
+      ctx.ui.notify(`${run.id}: ${describeDelivery(ack)}`, ack.delivered ? "info" : "warning");
+    } catch {
+    }
+  }
   if (result.kind === "rejected") {
     try {
       ctx.ui.notify(result.reason, "warning");

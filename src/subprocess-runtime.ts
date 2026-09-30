@@ -51,9 +51,9 @@ export class SubprocessRuntime implements RunRuntime {
     };
   }
 
-  deliver(run: Run, type: "steer" | "follow_up", message: string) {
+  deliver(run: Run, type: "steer" | "follow_up" | "grace", message: string) {
     const reason = unsupportedRuntimeReason(run.runtime);
-    return reason ? { kind: "epipe" as const, reason } : enqueueRpcSendWithAck(run, type, message);
+    return reason ? { kind: "epipe" as const, reason } : enqueueRpcSendWithAck(run, type === "grace" ? "follow_up" : type, message);
   }
 
   stopProcess(run: Run): void {

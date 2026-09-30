@@ -22,7 +22,12 @@ else if (["nonzero", "stderr-error", "error-success"].includes(state.fault)) {
 else if (args.includes("--help") || args.join(" ") === "integration status") console.log("fake help/status: plain text");
 else if (args[0] === "agent" && args[1] === "read") console.log("fake terminal scrollback");
 else if (args[0] === "tab" && args[1] === "create") {
-  if (state.created) process.exit(91);
+  if (state.created && !state.allowNewTabs) process.exit(91);
+  if (state.created) {
+    (state.retainedPanes ??= []).push(state.pane);
+    const suffix = state.retainedPanes.length + 1;
+    state.pane = { ...state.pane, pane_id: `pane-${suffix}`, terminal_id: `terminal-${suffix}`, tab_id: `tab-${suffix}`, agent: null, agent_session: null };
+  }
   const flag = name => args[args.indexOf(name) + 1];
   state.created = true;
   state.pane = {...state.pane, cwd: flag("--cwd"), workspace_id: flag("--workspace")};

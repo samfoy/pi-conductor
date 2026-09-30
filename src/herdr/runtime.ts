@@ -3,11 +3,11 @@ import { closeSync, constants, fstatSync, openSync, readSync, statSync, writeFil
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { getAgentDir, hasTrustRequiringProjectResources, ProjectTrustStore, SessionManager, SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
-import type { HerdrTransport, RunRuntime, RunSink } from "../runtime.ts";
+import type { Delivery, DeliveryAck, HerdrTransport, RunRuntime, RunSink } from "../runtime.ts";
 import { isTerminal, type Run } from "../types.ts";
 import { HerdrTail } from "./tail.ts";
 import { HerdrMonitor } from "./monitor.ts";
-import { buildPiCoreArgs, writeRecord, type PiCoreArgsOptions } from "../runs.ts";
+import { buildPiCoreArgs, validateSendable, writeRecord, type PiCoreArgsOptions } from "../runs.ts";
 import { seedSessionFile } from "../session-seed.ts";
 import { readProcessStartTime } from "../reconcile-startup.ts";
 import { createLineDecoder } from "../subprocess-runtime.ts";
@@ -41,8 +41,11 @@ const failure = (message: string) => new Error(`herdr: ${message}`);
 /** Readiness correlates input; only the attached tail delivers pipeline events. */
 export class HerdrRuntime implements RunRuntime {
   constructor(private readonly options?: Options) {}
-  capabilities() { return { pause: false, liveSend: false }; }
-  deliver() { return { kind: "epipe" as const, reason: "herdr live delivery is unavailable" }; }
+  capabilities(run: Run) { return { pause: false, liveSend: run.transport?.kind === "herdr" && run.transport.liveSend?.() === true }; }
+  deliver(run: Run, type: "steer" | "follow_up" | "grace", text: string, sessionId?: string): Delivery {
+    return run.transport?.kind === "herdr" && run.transport.deliver
+      ? run.transport.deliver(type, text, sessionId) : { kind: "epipe", reason: "herdr child is not attached and ready" };
+  }
   signal(): never { throw failure("pause is subprocess-only"); }
   stopProcess(run: Run) { return run.transport?.kind === "herdr" ? run.transport.stop() : undefined; }
   terminate(run: Run) { return this.stopProcess(run); }
@@ -60,7 +63,7 @@ export class HerdrRuntime implements RunRuntime {
     const previous = run.herdr;
     const alias = /^[a-z][a-z0-9_-]{0,31}$/.test(run.id) ? run.id : `c${createHash("sha256").update(run.id).digest("hex").slice(0, 16)}`;
     let binding: HerdrBinding | undefined, hello: LaunchHello | undefined, provenPane: unknown;
-    let fresh = false, accepted = false, stderr = "", stopWork: Promise<void> | undefined;
+    let fresh = false, accepted = false, initialAccepted = false, startAttempted = false, stderr = "", stopWork: Promise<void> | undefined;
     let tail: HerdrTail | undefined, monitor: HerdrMonitor | undefined;
     let childExited = false, observing = false, nativeSettled = false;
     let observation: { launchOffset: number; requestId: string } | undefined;
@@ -178,6 +181,7 @@ export class HerdrRuntime implements RunRuntime {
       try { launchOffset = statSync(run.transcriptPath).size; } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
       const startArgs = ["agent", "start", alias, "--kind", "pi", "--pane", binding.paneId, "--timeout", "60000", "--", ...args];
       let started: Record<string, unknown>;
+      startAttempted = true;
       try { started = await cli.json(startArgs, { timeoutMs: HERDR_LAUNCH_BUDGET.start, signal: abort.signal }); }
       catch (e) {
         check();
@@ -239,6 +243,7 @@ export class HerdrRuntime implements RunRuntime {
         return ack;
       });
       await until(HERDR_LAUNCH_BUDGET.agentStart, "accepted task native agent_start", () => { scan(); return nativeStart ? true : undefined; });
+      initialAccepted = true;
       check();
       const finalPane = await getPane(abort.signal); check();
       let finalIdentity = proof(finalPane);
@@ -250,6 +255,7 @@ export class HerdrRuntime implements RunRuntime {
       return { binding, request, launchOffset };
     }).catch(async (e: unknown) => {
       diagnostic(e instanceof Error && e.message.startsWith("herdr:") ? e.message : "herdr: launch failed");
+      if (!startAttempted) childExited = true;
       await stopOwned(true); finishObservation(); await capture();
       throw failure(stderr);
     });
@@ -302,13 +308,50 @@ export class HerdrRuntime implements RunRuntime {
       tail.start();
       if (childExited) gone(); else if (!nativeSettled) monitor.start();
     };
+    let sequence = 1;
+    let deliveryTail: Promise<unknown> = Promise.resolve();
+    const liveSend = () => run.runtime === "herdr" && run.herdr === binding && binding?.launchNonce === nonce &&
+      accepted && observing && !abort.signal.aborted && !nativeSettled && !childExited && run.status === "running" &&
+      (run.parentPid === undefined || run.parentPid === process.pid) && !run.pendingAsk && !run.askExecution && proof(provenPane).ok;
+    const deliver = (type: "steer" | "follow_up" | "grace", text: string, sessionId?: string): Delivery => {
+      tail?.drain();
+      if (!liveSend()) return { kind: "epipe", reason: "herdr child is not owned, attached, ready and running" };
+      const request: InboxRequest = { v: 1, launchNonce: nonce, requestId: randomUUID(), sequence: ++sequence, kind: type, text };
+      const rejected = (reason: string, definite: boolean): DeliveryAck => ({ delivered: false, deliveredAt: 0, reason, definite });
+      const ack = deliveryTail.then(async (): Promise<DeliveryAck> => {
+        // CLI readiness is not authority. Reprove the current child, drain its tail,
+        // then repeat the shared policy gate immediately before publishing input.
+        let pane: unknown;
+        try { pane = await getPane(abort.signal); }
+        catch { return rejected("pane observation unavailable; no input written", true); }
+        const policy = validateSendable(run, type === "grace" ? "steer" : type, sessionId);
+        if (!liveSend() || !proof(pane).ok || !policy.ok) return rejected(policy.ok ? "child identity or readiness changed; no input written" : policy.reason, true);
+        try {
+          writeInboxRequest(dir, request);
+          const deadline = now() + HERDR_LAUNCH_BUDGET.ack;
+          for (;;) {
+            if (run.herdr !== binding || binding?.launchNonce !== nonce) return rejected("invocation changed; do not resend blindly", false);
+            tail?.drain();
+            const response = readInboxAck(dir, request);
+            if (response) return response.accepted ? { delivered: true, deliveredAt: response.at } : rejected(response.code!, true);
+            if (childExited) return rejected("child exited without acknowledgement", true);
+            if (abort.signal.aborted || !proof(provenPane).ok) return rejected("child unavailable; do not resend blindly", false);
+            if (now() >= deadline) return rejected("ack timeout; do not resend blindly", false);
+            await sleep(250);
+          }
+        } catch { return rejected("delivery unconfirmed; do not resend blindly", false); }
+      });
+      deliveryTail = ack;
+      return { kind: "queued", ack };
+    };
     const releasePane = async () => {
       if (!childExited || !binding || run.herdr !== binding) return false;
       const result = await closeEmptyPane(cli, binding, () => current()!, { timeoutMs: 2000 });
       if (!result.ok) diagnostic(`worktree kept: ${result.reason}`);
       return result.ok;
     };
-    return { kind: "herdr", ready, closed, observe, waitForExit, releasePane, get childExited() { return childExited && run.herdr === binding; },
+    return { kind: "herdr", runtime: this, liveSend, deliver, ready, closed, observe, waitForExit, releasePane, get initialAccepted() { return initialAccepted && run.herdr === binding; },
+      get childExited() { return childExited && (!binding || run.herdr === binding); },
       get cancelled() { return abort.signal.aborted; }, get stderr() { return stderr; }, drain: () => { tail?.drain(); return ""; }, stop, cancel: stop };
   }
 }

@@ -42,7 +42,7 @@ pi-conductor closes that gap. The parent pi session is the conductor, sub-agents
 - **Per-spawn `cwd`** on `ensemble_spawn` and on each `ensemble_auto` step sets where the sub-agent runs and where personas, config, and the git root for `worktree: true` isolation resolve. `~` and relative paths resolve against the conductor's default cwd; a missing directory is rejected before any run starts. `ensemble_send` resumes and chain successors keep the original run's cwd. A chain successor gets the same worktree decision as `ensemble_spawn`, branching from the current HEAD; a write-capable successor after a parent whose branch was kept unmerged fails instead of starting without that work.
 - **Conductor default cwd.** pi can't change a session's cwd, so the conductor keeps its own: `/conductor cwd [<path>|--reset]` or the `ensemble_cwd` tool (`{ path?, reset? }`) sets or clears an override for later spawns. With no argument, both report the effective cwd and its source. The override is saved as a `conductor-cwd` session entry, so it survives `/reload` and resume.
 
-### Runtime selection (H2 interim)
+### Runtime selection and herdr controls (H8; not rolled out)
 
 `runtime: "auto" | "subprocess" | "herdr"` is accepted on `ensemble_spawn`,
 each `ensemble_auto` step, persona frontmatter, and config (top-level or
@@ -51,12 +51,29 @@ each `ensemble_auto` step, persona frontmatter, and config (top-level or
 field-level project-over-user merge, above frontmatter.
 
 `auto` selects herdr only when `HERDR_ENV=1` and both `HERDR_SOCKET_PATH` and
-`HERDR_PANE_ID` are nonempty; otherwise it selects subprocess. **The herdr backend
-is not implemented yet.** Selecting it fails before queue, run, effort or worktree
-creation. Explicit herdr outside that environment also fails; there is no silent
-fallback. Inside herdr, pass **`runtime: "subprocess"`** on a spawn/auto step (or
-set that value in your effective persona/config) to keep using native subprocesses.
-H2 does not create panes, run herdr commands, or connect a bridge/monitor.
+`HERDR_PANE_ID` are nonempty; otherwise it selects subprocess. Explicit herdr
+outside that environment fails without silent fallback. H7/H8 implement managed
+pane launch, observation, live inbox controls and saved-session relaunch. This is
+**fake-CLI and offline native Pi 0.87.1 evidence, not real-herdr/TUI acceptance or
+a live rollout**. Global Pi 0.99.1 remains unchanged and is not parity-certified.
+Keep using **`runtime: "subprocess"`** until the later acceptance/rollout gates.
+
+For an owned, attached, ready and running herdr child, `steer`/`follow_up` use
+the nonce inbox; automatic turn-limit grace uses steer delivery. No RPC mode or
+steering opt-in is inferred from the runtime tag. Controls recheck child identity
+and current owner-question/retirement policy before writing. Their acknowledgement
+means **input accepted, not executed**; rejection and unconfirmed delivery are
+distinct. Never blindly retry an unconfirmed request.
+
+`send` on a finished or blocked herdr run relaunches the same saved session with
+a fresh nonce. It reuses only the exact proven empty prior pane, otherwise creates
+a new subtree tab and preserves the old pane. Unknown previous child exit blocks
+relaunch, including workspace reuse. An owner question remains pending until
+initial input acknowledgement **and a correlated native agent_start**; preacceptance
+failure restores the question, while later model failure does not roll back an
+accepted answer. Failed launch never advertises a historical final as new output.
+`pause`/`resume` (SIGSTOP/SIGCONT) remain subprocess-only; use `send` for a
+saved-session relaunch. Reloaded/unattached herdr records cannot be controlled yet.
 
 The concrete backend is frozen before queue admission and persisted in `record.json`.
 Queue drain, retries and saved-session sends retain it; legacy records without a
@@ -682,7 +699,8 @@ hooks and worktree safety still apply. Settlement uses Pi's `agent_settled` even
 (JSON and RPC), not `agent_end`, which can precede overflow recovery; process exit
 is the fallback. Supported host: **Pi 0.87.1 or newer** (`@earendil-works/pi-coding-agent >=0.87.1`);
 0.87.1 is the verified floor for the required `agent_settled` API.
-Phase A **A2–A5** are shipped; A6 and the herdr runtime remain deferred.
+Phase A **A2–A6** and H7/H8 are implemented. Herdr real-TUI acceptance, rollout,
+full quit/GC and reload/adoption remain later gates; see the runtime section.
 
 `~/.pi/agent/extensions/conductor/config.json` (user) or `<project>/.pi/conductor.json` (project, overrides user):
 

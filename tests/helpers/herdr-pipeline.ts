@@ -25,33 +25,34 @@ export function herdrFixture(mode = "healthy") {
     if (args[1] === "get") return { type: "pane_info", pane: { ...pane } };
     if (args[1] === "close") { assert.ok(gone, "pane never closes before child exit"); assert.equal(pane.agent, null); return { type: "ok" }; }
     assert.equal(args[1], "start");
+    gone = false;
     const binding = JSON.parse(readFileSync(run.recordPath, "utf8")).herdr;
     const request = readInbox(dir, binding.launchNonce)[0].request;
     pane.agent = "pi"; pane.agent_session = { kind: "path", value: binding.sessionFile, agent: "pi", source: "integration" };
     const hello = { ...binding, v: 1, bridgeProtocol: 1, pid: 12345, pidStartTime: 77, at: 0, piVersion: "0.87.1", conductorVersion: "test" };
-    mkdirSync(join(dir, "launch")); writeFileSync(join(dir, "launch", `${binding.launchNonce}.json`), JSON.stringify(hello));
+    mkdirSync(join(dir, "launch"), { recursive: true }); writeFileSync(join(dir, "launch", `${binding.launchNonce}.json`), JSON.stringify(hello));
     emit({ type: "conductor_child", event: "launch", ...hello });
     emit({ type: "agent_settled" }); // unaccepted human turn cannot complete the assignment
     if (mode !== "preaccept-death") {
-      emit({ type: "agent_start", initialRequestId: request.requestId });
-      emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Final verified evidence 漢🙂 with sufficient substance." }], stopReason: "stop", usage: { input: 12, output: 7, cost: { total: 0.01 } } } });
+      if (!["no-start", "busy-ack", "stale-ack", "no-ack"].includes(mode)) emit({ type: "agent_start", initialRequestId: request.requestId });
+      if (mode !== "accepted-no-output") emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Final verified evidence 漢🙂 with sufficient substance." }], stopReason: "stop", usage: { input: 12, output: 7, cost: { total: 0.01 } } } });
       emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "FOREIGN" }] } }, "foreign");
       if (mode === "ask") {
         emit({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", id: "question", name: "ask_owner", arguments: { question: "Choose?" } }], stopReason: "toolUse" } });
         emit({ type: "tool_execution_start", toolName: "ask_owner", toolCallId: "question", args: { question: "Choose?" } });
         emit({ type: "tool_execution_end", toolName: "ask_owner", toolCallId: "question", isError: false, result: { details: { askId: "question", question: "Choose?", evidence: "original evidence" } } });
       }
-      if (!["crash", "partial", "running"].includes(mode)) emit({ type: "agent_settled" });
+      if (!["crash", "partial", "running", "accepted-no-output"].includes(mode)) emit({ type: "agent_settled" });
       if (mode === "partial") appendFileSync(run.transcriptPath, JSON.stringify({ type: "agent_settled", _c: { n: binding.launchNonce } }));
-      writeInboxAck(dir, request); // deliberately after fast settled/start
+      if (mode !== "no-ack") writeInboxAck(dir, request, mode === "busy-ack" ? "busy" : mode === "stale-ack" ? "stale-ask" : undefined); // deliberately after fast settled/start
     }
     const agent = { ...pane };
-    if (["healthy", "crash", "partial", "preaccept-death"].includes(mode)) exit();
+    if (["healthy", "crash", "partial", "preaccept-death", "accepted-no-output"].includes(mode)) exit();
     return { type: "agent_started", agent };
   } };
   const runtime = new HerdrRuntime({ cli, workspaceId: "workspace", env: {}, trustArgs: () => [], piVersion: "0.87.1", platform: "linux", now: () => time,
     sleep: async ms => { time += ms; onSleep(); }, probe: pid => ({ pid, state: unknown ? "unknown" : gone ? "gone" : "alive", startTime: 77 }),
     signal: (_pid, signal) => { signals.push(signal); if (mode !== "stubborn") exit(); } });
-  return { run, registry, runtime, pane, calls, signals, emit, exit, advance: (ms: number) => { time += ms; }, gone: () => gone, unknown: () => { unknown = true; }, onSleep: (fn: () => void) => { onSleep = fn; },
+  return { run, registry, runtime, pane, calls, signals, emit, exit, setMode: (value: string) => { mode = value; }, advance: (ms: number) => { time += ms; }, gone: () => gone, unknown: () => { unknown = true; }, onSleep: (fn: () => void) => { onSleep = fn; },
     opts: { registry, runtime, cwd, steerable: false, timeoutMs: 4000, initialPrompt: "probe", core: { kind: "fresh" as const, sessionDir: join(dir, "session"), systemPrompt: "probe" } } };
 }

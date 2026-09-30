@@ -702,6 +702,7 @@ export function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
     transcriptPath: record.transcriptPath,
     finalPath: record.finalPath,
     herdrExitUnconfirmed: record.herdrExitUnconfirmed,
+    herdrResultUnavailable: record.herdrResultUnavailable,
     sessionPath: record.sessionPath,
     contextRetired: record.contextRetired,
     pendingAsk: status === "running" || status === "blocked" ? record.pendingAsk : undefined,

@@ -65,6 +65,10 @@ export interface SubprocessTransport extends TransportLifecycle {
 export interface HerdrTransport extends TransportLifecycle {
   readonly kind: "herdr";
   readonly cancelled: boolean;
+  readonly runtime?: RunRuntime;
+  readonly initialAccepted?: boolean;
+  liveSend?(): boolean;
+  deliver?(type: "steer" | "follow_up" | "grace", text: string, sessionId?: string): Delivery;
   readonly ready: Promise<{ binding: HerdrBinding; request: InboxRequest; launchOffset: number }>;
   cancel(): Promise<void>;
   observe(): void;
@@ -75,14 +79,20 @@ export interface HerdrTransport extends TransportLifecycle {
 export type RunTransport = SubprocessTransport | HerdrTransport;
 
 export type Signaler = (pid: number, signal: NodeJS.Signals | number) => void;
+export type DeliveryAck = { delivered: boolean; deliveredAt: number; definite?: boolean; reason?: string };
+export function describeDelivery(ack: DeliveryAck): string {
+  if (ack.delivered) return "input accepted by the child bridge; this does not prove the request executed.";
+  return ack.definite ? `input rejected: ${ack.reason}` : `delivery unconfirmed: ${ack.reason}; do not resend blindly.`;
+}
+
 export type Delivery =
-  | { kind: "queued"; ack: Promise<{ delivered: boolean; deliveredAt: number }> }
+  | { kind: "queued"; ack: Promise<DeliveryAck> }
   | { kind: "epipe"; reason: string };
 
 export interface RunRuntime {
   launch(run: Run, args: string[], cwd: string, sink: RunSink, initialPrompt?: string, core?: PiCoreArgsOptions): RunTransport;
   capabilities(run: Run): { pause: boolean; liveSend: boolean };
-  deliver(run: Run, type: "steer" | "follow_up", text: string): Delivery;
+  deliver(run: Run, type: "steer" | "follow_up" | "grace", text: string, sessionId?: string): Delivery;
   stopProcess(run: Run): void | Promise<void>;
   terminate(run: Run, killGroup: (pid: number, signal: NodeJS.Signals) => void): void | Promise<void>;
   signal(run: Run, signal: NodeJS.Signals, signaler?: Signaler): void;
@@ -95,6 +105,7 @@ export function isObservableHere(run: Run): boolean {
 
 /** Recorded backend selects effects. Only a fresh spawn supplies launch routing. */
 export function runtimeFor(run: Run, env?: RuntimeEnvironment): RunRuntime {
+  if (run.runtime === "herdr" && run.transport?.kind === "herdr" && run.transport.runtime) return run.transport.runtime;
   if (run.runtime === "herdr") return new HerdrRuntime(env ? {
     cli: createHerdrCli({ env: { ...env }, socketPath: env.HERDR_SOCKET_PATH! }),
     workspaceId: env.HERDR_WORKSPACE_ID, env: { ...env },

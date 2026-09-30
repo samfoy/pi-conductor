@@ -884,6 +884,8 @@ export interface Run {
   finalPath: string;
   /** Current herdr invocation lacks exit proof; any existing final is historical, not reusable. */
   herdrExitUnconfirmed?: boolean;
+  /** No usable output belongs to the current herdr invocation; any final is historical. */
+  herdrResultUnavailable?: boolean;
   /**
    * Absolute path to the pi session JSONL for this sub-agent. Populated when
    * the spawn finalizes (pi creates the file under <runDir>/session/). Used
@@ -1068,6 +1070,7 @@ export interface RunRecord {
   finalPath: string;
   /** Current herdr invocation lacks exit proof; any existing final is historical, not reusable. */
   herdrExitUnconfirmed?: boolean;
+  herdrResultUnavailable?: boolean;
   sessionPath?: string;
   /** The saved child session retired under context pressure; preserved on resume. */
   pendingAsk?: PendingAsk;
@@ -1189,6 +1192,7 @@ export function toRunRecord(r: Run): RunRecord {
     transcriptPath: r.transcriptPath,
     finalPath: r.finalPath,
     herdrExitUnconfirmed: r.herdrExitUnconfirmed,
+    herdrResultUnavailable: r.herdrResultUnavailable,
     sessionPath: r.sessionPath,
     contextRetired: r.contextRetired,
     pendingAsk: r.pendingAsk,

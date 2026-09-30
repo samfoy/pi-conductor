@@ -26,6 +26,8 @@
  *   - sendToRun rejected → notify the reason.
  */
 
+import { describeDelivery } from "./runtime.ts";
+import type { SendToRunResult } from "./runs.ts";
 import type { Persona, Run, StreamingBehavior } from "./types.ts";
 import { modelRegistryPredicate, sendCwd, type ModelRegisteredPredicate, type RunRegistry } from "./runs.ts";
 
@@ -69,7 +71,7 @@ export interface PromptAndSendDeps {
       currentModelProvider?: string;
       persona?: Persona;
     },
-  ) => { kind: "queued" } | { kind: "rejected"; reason: string };
+  ) => { kind: "queued" } | SendToRunResult;
   pushCompletionNotification: (run: Run) => void;
 }
 
@@ -147,6 +149,10 @@ export async function executePromptAndSend(
     currentModelProvider,
     persona,
   });
+  if (result.kind === "started" && run.runtime === "herdr" && result.ack) {
+    const ack = await result.ack;
+    try { ctx.ui.notify(`${run.id}: ${describeDelivery(ack)}`, ack.delivered ? "info" : "warning"); } catch { /* stale UI */ }
+  }
   if (result.kind === "rejected") {
     try {
       ctx.ui.notify(result.reason, "warning");

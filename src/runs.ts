@@ -1804,7 +1804,7 @@ export type SendToRunResult =
        * resolves on terminal status of the sub-agent, independent of
        * the ack.
        */
-      ack?: Promise<{ delivered: boolean; deliveredAt: number }>;
+      ack?: Promise<import("./runtime.ts").DeliveryAck>;
     }
   | { kind: "rejected"; reason: string };
 
@@ -1863,7 +1863,12 @@ type ActionObservations = ReturnType<typeof observeRunActions>;
 export function runActionError(run: Run, action: RunAction, observed: ActionObservations): string | undefined {
   if (action === "focus") return observed.canFocus ? undefined : "Focused stream requires terminal UI (TUI mode).";
   const unsupported = unsupportedRuntimeReason(run.runtime);
-  if (unsupported && !(action === "kill" && run.runtime === "herdr" && run.transport?.kind === "herdr")) return unsupported;
+  if (unsupported && !(run.runtime === "herdr" && run.transport?.kind === "herdr")) return unsupported;
+  if (run.runtime === "herdr") {
+    if (action === "pause" || action === "resume") return `${action} is subprocess-only; use send to relaunch a saved herdr session.`;
+    if (action === "send" && (run.herdrExitUnconfirmed || run.transport?.kind !== "herdr" || !run.transport.childExited)) return "herdr: previous child exit is unconfirmed; preserve the session and workspace";
+    if (!observed.owned) return `sub-agent ${run.id} is owned by another conductor (foreign run).`;
+  }
   if (action === "send" || action === "steer" || action === "follow_up") {
     if (observed.effortOwnershipError) return observed.effortOwnershipError;
     if (action === "send" && observed.effortAdmissionError) return observed.effortAdmissionError;
@@ -1884,7 +1889,8 @@ export function runActionError(run: Run, action: RunAction, observed: ActionObse
   if (decision.strategy.kind === "rejected") return decision.strategy.reason;
   if (observed.sessionMissing) return `sub-agent ${run.id} session file is missing on disk: ${run.sessionPath}`;
   if (action !== "send" && !observed.capabilities.liveSend) {
-    return `sub-agent ${run.id} finished before steer was delivered (${run.rpcStdinQueue ? "stdin is not writable" : "stdin queue gone"}).`;
+    return run.runtime === "herdr" ? `sub-agent ${run.id}: herdr child is not owned, attached, ready and running.`
+      : `sub-agent ${run.id} finished before steer was delivered (${run.rpcStdinQueue ? "stdin is not writable" : "stdin queue gone"}).`;
   }
   return undefined;
 }
@@ -1910,6 +1916,7 @@ export function validateSendable(
   behavior: StreamingBehavior = "auto",
   sessionId?: string,
 ): { ok: true } | { ok: false; reason: string } {
+  if (run.runtime === "herdr") run.transport?.drain();
   const action = behavior === "auto" ? (run.status === "running" ? "follow_up" : "send")
     : behavior === "resume" ? "send" : behavior;
   const reason = validateRunAction(run, action, false, sessionId);
@@ -1967,7 +1974,7 @@ export function resolveSendStrategy(
 ): ResolvedSendStrategy {
   // running
   if (run.status === "running") {
-    const isRpc = run.streamingMode === "rpc" && run.steerable !== false;
+    const isRpc = run.runtime === "herdr" || (run.streamingMode === "rpc" && run.steerable !== false);
     if (!isRpc) {
       return {
         strategy: {
@@ -2148,6 +2155,8 @@ export function sendToRun(
     decision.strategy.kind === "rpc-follow-up"
   ) {
     const cmdType = decision.strategy.kind === "rpc-steer" ? "steer" : "follow_up";
+    if (run.runtime === "herdr" && opts.maxTurns !== undefined) run.maxTurns = opts.maxTurns;
+    if (run.runtime === "herdr" && opts.graceTurns !== undefined) run.graceTurns = opts.graceTurns;
     // v0.10 watchdog (Slice 3) per-send overrides apply on RPC paths
     // too: a steer can be the moment the operator decides to
     // re-arm `kill_on_stall`. Status stays "running" — the
@@ -2166,7 +2175,7 @@ export function sendToRun(
     // completion envelope when the run eventually terminates. Not a
     // resume: the subprocess is the same one.
     snapshotInvocationMarkers(run, "steerCount");
-    const result = subprocessRuntime.deliver(run, cmdType, trimmed);
+    const result = runtimeFor(run).deliver(run, cmdType, trimmed, opts.sessionId);
     if (result.kind === "epipe") {
       return { kind: "rejected", reason: result.reason };
     }
@@ -2205,7 +2214,7 @@ export function sendToRun(
   if (worktreeBlocker) return { kind: "rejected", reason: worktreeBlocker };
 
   const pendingAsk = run.pendingAsk;
-  if (pendingAsk) trimmed = formatOwnerAnswer(pendingAsk, trimmed);
+  if (pendingAsk && run.runtime !== "herdr") trimmed = formatOwnerAnswer(pendingAsk, trimmed);
 
   // Reset terminal state so listeners and the panel see this as a fresh run.
   run.askExecution = undefined;
@@ -2227,6 +2236,8 @@ export function sendToRun(
   // subprocess fires. The completion envelope reads these to compute
   // per-most-recent-send <duration> / <usage> / <cost>.
   snapshotInvocationMarkers(run, "resumeCount");
+  if (run.runtime === "herdr" && opts.maxTurns !== undefined) run.maxTurns = opts.maxTurns;
+  if (run.runtime === "herdr" && opts.graceTurns !== undefined) run.graceTurns = opts.graceTurns;
   // v0.10 watchdog (Slice 3) per-send overrides. Replace prior values
   // when provided; leave the spawn-time values alone otherwise.
   if (opts.killOnStall !== undefined) run.killOnStall = opts.killOnStall;
@@ -2251,7 +2262,9 @@ export function sendToRun(
   const done = createRunPipeline(run, piArgs, {
     answer,
     registry: opts.registry,
-    cwd: run.effort?.cwd ?? run.cwd,
+    runtime: runtimeFor(run),
+    core: { kind: "resume", sessionPath, systemPrompt: run.systemPrompt, model: run.model, thinking: run.thinking, tools: run.tools, excludeTools: run.excludeTools },
+    cwd: run.runtime === "herdr" ? sessionHeaderCwd(readFileSync(sessionPath, "utf8")) ?? run.cwd : run.effort?.cwd ?? run.cwd,
     timeoutMs: opts.timeoutMs,
     onUpdate: opts.onUpdate,
     onComplete: opts.onComplete,
@@ -2763,7 +2776,7 @@ export type TurnLimitTerminateFn = (run: Run, reason: TerminationReason) => void
 export type GraceEnqueueFn = (run: Run, message: string) => void;
 
 const defaultGraceEnqueue: GraceEnqueueFn = (run, message) => {
-  subprocessRuntime.deliver(run, "follow_up", message);
+  runtimeFor(run).deliver(run, run.runtime === "herdr" ? "grace" : "follow_up", message, run.parentSessionId);
 };
 
 /**
@@ -2786,6 +2799,7 @@ export function checkTurnLimit(
 ): void {
   // No limit configured or run is already terminal → strict no-op.
   if (!run.maxTurns || isTerminal(run.status)) return;
+  if (run.runtime === "herdr" && (run.pendingAsk || run.askExecution)) return;
 
   const { turns } = run.usage;
   const graceTurns = run.graceTurns ?? 5;
@@ -2802,7 +2816,7 @@ export function checkTurnLimit(
 
   // ── Grace entry: hit maxTurns for the first time ──────────────────────
   if (!run.gracePeriodActive && turns >= run.maxTurns) {
-    if (run.streamingMode === "rpc") {
+    if (run.runtime === "herdr" ? capabilitiesFor(run).liveSend : run.streamingMode === "rpc") {
       // Steerable: inject wrap-up message, enter grace period.
       run.gracePeriodActive = true;
       run.gracePeriodStartTurn = turns;
@@ -3010,7 +3024,7 @@ export function writeRecord(run: Run, durableFence?: () => void): Promise<void> 
 
 export async function writeFinal(run: Run, durable = false): Promise<void> {
   // Keep any prior invocation's artifact intact; it is not this invocation's result.
-  if (run.herdrExitUnconfirmed) return;
+  if (run.herdrExitUnconfirmed || run.herdrResultUnavailable) return;
   if (durable) {
     await mkdir(dirname(run.finalPath), { recursive: true });
     writeDurableFile(run.finalPath, getFinalText(run.messages) || run.integration?.resultText || "(no output)", () => assertRunEffortOwner(run));
@@ -3028,6 +3042,7 @@ export async function writeFinal(run: Run, durable = false): Promise<void> {
 
 /** Completion surfaces must not present unquiesced assistant output as an assignment result. */
 export function getCompletionText(run: Run): string {
+  if (run.herdrResultUnavailable) return "herdr: no usable final output from this invocation. Any existing final.md is historical; inspect the transcript and diagnostics.";
   return run.herdrExitUnconfirmed
     ? "herdr: child exit unconfirmed; no final result published. Any existing final.md belongs to a previous invocation. Inspect the retained transcript and diagnostics."
     : getFinalText(run.messages);

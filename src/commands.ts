@@ -1,3 +1,4 @@
+import { describeDelivery } from "./runtime.ts";
 /**
  * pi-conductor — Slash commands.
  *
@@ -597,8 +598,8 @@ async function runSendCmd(
       (ack) => {
         try {
           ctx.ui.notify(
-            `${agentId} ack delivered (Δ ${ack.deliveredAt - run.lastEventAt}ms)`,
-            "info",
+            run.runtime === "herdr" ? `${agentId}: ${describeDelivery(ack)}` : `${agentId} ack delivered (Δ ${ack.deliveredAt - run.lastEventAt}ms)`,
+            ack.delivered ? "info" : "warning",
           );
         } catch {
           // ctx may have gone stale; nothing to do.
@@ -622,7 +623,7 @@ async function runSendCmd(
   // Mirror the LLM tool's spawn-resume notify; we don't await `done`
   // because that blocks the slash command until the sub-agent finishes.
   ctx.ui.notify(
-    answering ? `${agentId} answering ${answering.askId}: ${answering.question}` : `${agentId} resuming via fresh subprocess (streaming_behavior=${behavior})`,
+    answering ? `${agentId} answering ${answering.askId}: ${answering.question}` : run.runtime === "herdr" ? `${agentId} relaunching saved session in herdr (streaming_behavior=${behavior})` : `${agentId} resuming via fresh subprocess (streaming_behavior=${behavior})`,
     "info",
   );
 }

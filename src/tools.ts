@@ -11,7 +11,7 @@ import { openEffort, effortRepository, effortGit } from "./effort/open.ts";
 import { readEffort, type EffortRecord } from "./effort/store.ts";
 import { EFFORT_NOTICE, effortSummary } from "./effort/policy.ts";
 import type { RuntimeKind, RuntimeEnvironment } from "./runtime.ts";
-import { runtimeFor } from "./runtime.ts";
+import { describeDelivery, runtimeFor } from "./runtime.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { readFileSync, existsSync } from "node:fs";
@@ -1011,8 +1011,8 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
     label: "Send to sub-agent",
     description:
       "Continue an existing sub-agent's session with a new user-role message, or answer its outstanding ask_owner question. " +
-      "send continues a saved session in a new process; steer/follow_up deliver over live RPC. " +
-      "Live RPC sends await acknowledgement only. " +
+      "send relaunches a saved session on its recorded backend; steer/follow_up deliver through live RPC or a proven attached herdr child. " +
+      "Live sends await input acknowledgement, not execution. Unconfirmed delivery must not be blindly retried. " +
       "Use the latest available_actions; each call revalidates. " +
       "Foreground (default): blocks until the sub-agent's reply arrives. " +
       "Background: returns immediately; completion or a blocking owner question arrives automatically.",
@@ -1157,6 +1157,10 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       if (result.ack !== undefined) {
         try {
           const ackResult = await result.ack;
+          if (run.runtime === "herdr") return {
+            content: [{ type: "text" as const, text: `${run.id}: ${describeDelivery(ackResult)}` }],
+            details: { status: ackResult.delivered ? "accepted-input" : ackResult.definite ? "rejected" : "unconfirmed", agent_id: run.id, persona: run.persona, ...ackResult },
+          };
           return {
             content: [
               {

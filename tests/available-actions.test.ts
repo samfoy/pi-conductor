@@ -19,6 +19,26 @@ import { emptyUsage, type Run, type RunStatus } from "../src/types.ts";
 import { sandboxPi, tmpDir } from "./helpers/tmp.ts";
 
 sandboxPi();
+import { herdrFixture } from "./helpers/herdr-pipeline.ts";
+import { createRunPipeline } from "../src/run-pipeline.ts";
+import { readInbox, writeInboxAck } from "../src/herdr/inbox.ts";
+import { dirname } from "node:path";
+for (const outcome of ["accepted", "busy", "timeout"] as const) test(`A3 H8 registered herdr tool reports ${outcome} truthfully`, { timeout: 5000 }, async t => {
+  const native = herdrFixture("running"), run = native.run, h = harness(run);
+  const done = createRunPipeline(run, [], { ...native.opts, registry: h.registry });
+  assert.ok(run.transport?.kind === "herdr"); await run.transport.ready;
+  t.after(async () => { native.exit(); native.emit({ type: "agent_settled" }); run.transport?.drain(); await done; });
+  assert.deepEqual(await actions(h), ["steer", "follow_up", "kill"]);
+  assert.ok((await h.call("pause")).details.error.includes("subprocess-only"));
+  if (outcome !== "timeout") native.onSleep(() => {
+    const request = readInbox(dirname(run.recordPath), run.herdr!.launchNonce)[1].request;
+    writeInboxAck(dirname(run.recordPath), request, outcome === "busy" ? "busy" : undefined); native.onSleep(() => {});
+  });
+  const response = await h.call("send", { message: "Control", foreground: false });
+  assert.equal(response.details.status, outcome === "accepted" ? "accepted-input" : outcome === "busy" ? "rejected" : "unconfirmed");
+  assert.match(response.content[0].text, outcome === "accepted" ? /does not prove.*executed/ : outcome === "busy" ? /input rejected/ : /do not resend blindly/);
+});
+
 const terminal: RunStatus[] = ["completed", "failed", "killed", "timeout", "hook_failed", "merge_conflict", "aborted"];
 function fixture(status: RunStatus = "completed") {
   const cwd = tmpDir("a3-actions-");
