@@ -13,6 +13,58 @@ import { createRunPipeline } from "../src/run-pipeline.ts";
 import { runWorktreeCmd } from "../src/commands.ts";
 sandboxPi();
 
+for (const change of ["none", "resume", "replacement-resume", "equivalent"] as const) {
+  test(`H9 manual merge post-cleanup bookkeeping: ${change}`, { timeout: 10000 }, async () => {
+    const h = setup("healthy");
+    const transport = h.runtime.launch(h.run, [], h.path, { line() {}, close() {}, error() {}, initialDeliveryFailed() {} }, "probe", h.opts.core);
+    h.run.transport = transport; await transport.ready; await h.run.recordWrite;
+    h.run.status = "merge_conflict";
+    writeFileSync(h.run.recordPath, JSON.stringify(toRunRecord(h.run)));
+    const branchHead = git(h.root, "rev-parse", "writer"), statePath = join(h.root, "fake");
+    writeFileSync(statePath, JSON.stringify({ calls: [], pane: h.pane }));
+    const cli = createHerdrCli({ socketPath: `${statePath}.socket`, env: {
+      HOME: h.root, TMPDIR: h.root, PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
+      FAKE_HERDR_STATE: statePath, CONDUCTOR_HERDR_BIN: new URL("fixtures/fake-herdr.mjs", import.meta.url).pathname,
+    } });
+    h.cli.json = cli.json;
+    const release = transport.releasePane;
+    let releases = 0, resumedRecord: string | undefined;
+    const newResult = { success: false, errorMessage: "new invocation result" };
+    transport.releasePane = async (...args) => {
+      if (++releases === 2) {
+        assert.notEqual(git(h.root, "rev-parse", "HEAD"), h.base, "original merge legitimately completed before cleanup");
+        if (change === "equivalent") h.registry.register({ ...h.run });
+        if (change === "resume" || change === "replacement-resume") {
+          const current = change === "resume" ? h.run : { ...h.run };
+          Object.assign(current, { status: "running", herdr: { ...h.run.herdr!, launchNonce: "post-merge-resume" }, mergeResult: newResult, errorMessage: "new invocation error" });
+          h.registry.register(current);
+          resumedRecord = JSON.stringify(toRunRecord(current));
+          writeFileSync(current.recordPath, resumedRecord);
+        }
+      }
+      return release(...args);
+    };
+    const notices: string[] = [];
+    await runWorktreeCmd({ getRegistry: () => h.registry } as any, { ui: { notify: (message: string) => notices.push(message) } } as any, `merge ${h.run.id}`);
+    assert.equal(releases, 2);
+    const current = h.registry.get(h.run.id)!;
+    if (resumedRecord !== undefined) {
+      assert.equal(current.status, "running", "old command must not mark resumed invocation completed");
+      assert.deepEqual(current.mergeResult, newResult);
+      assert.equal(current.errorMessage, "new invocation error");
+      assert.equal(readFileSync(current.recordPath, "utf8"), resumedRecord);
+      assert.equal(existsSync(h.path), true); assert.equal(git(h.root, "rev-parse", "writer"), branchHead);
+      assert.doesNotMatch(notices.join("\n"), /Run is now completed|✔ Merged/);
+    } else {
+      assert.equal(current.status, "completed", "normal and equivalent-registry controls complete");
+      assert.equal(current.mergeResult?.success, true); assert.equal(current.errorMessage, undefined);
+      assert.equal(existsSync(h.path), false); assert.equal(current.worktreePath, undefined); assert.equal(current.worktreeBranch, undefined);
+      assert.match(notices.join("\n"), /Run is now completed/);
+    }
+  });
+}
+
+
 for (const command of ["clean", "merge"] as const) {
   for (const race of ["none", "durable-resume", "malformed", "missing", "invalid-runtime", "invalid-worktree", "registry-replacement", "mutated-alias", "cleared-path", "after-close", "invalid-base"] as const) {
     test(`H9 manual ${command} effect-time ownership: ${race}`, { timeout: 10000 }, async () => {

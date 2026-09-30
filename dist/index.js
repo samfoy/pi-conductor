@@ -6098,10 +6098,10 @@ function worktreeCleanupGuard(run, currentRun) {
     const value = binding[key];
     return typeof value === "string" && value.length > 0 && !value.includes("\0");
   });
-  const matches = (value) => valid && isRecord(value) && value.effort === void 0 && keys.every((key) => value[key] === expected[key]) && isRecord(value.herdr) && value.herdr.createdTab === binding?.createdTab && sameHerdrBinding(binding, value.herdr);
-  return () => {
+  const matches = (value, allowRemoved = false) => valid && isRecord(value) && value.effort === void 0 && keys.every((key) => value[key] === expected[key] || allowRemoved && (key === "worktreePath" || key === "worktreeBranch") && value[key] === void 0) && isRecord(value.herdr) && value.herdr.createdTab === binding?.createdTab && sameHerdrBinding(binding, value.herdr);
+  return (worktreeRemoved = false) => {
     try {
-      return matches(run) && matches(currentRun()) && matches(read(recordPath));
+      return matches(run, worktreeRemoved) && matches(currentRun(), worktreeRemoved) && matches(read(recordPath));
     } catch {
       return false;
     }
@@ -9889,10 +9889,19 @@ async function runWorktreeCmd(opts, ctx, subRest) {
             return;
           }
           run.worktreeKept = void 0;
-          await releaseWorktree(run, { keepBranch: false, isCurrent });
-          run.status = "completed";
-          run.mergeResult = result;
-          run.errorMessage = void 0;
+          const removed = await releaseWorktree(run, { keepBranch: false, isCurrent });
+          if (!isCurrent(removed)) {
+            ctx.ui.notify("Original merge completed, but current invocation changed during cleanup; no completion assigned.", "warning");
+            return;
+          }
+          const completion = {
+            status: "completed",
+            mergeResult: result,
+            errorMessage: void 0,
+            ...removed ? { worktreePath: void 0, worktreeBranch: void 0 } : {}
+          };
+          Object.assign(run, completion);
+          Object.assign(opts.getRegistry().get(runId), completion);
           ctx.ui.notify(
             `\u2714 Merged ${run.id} \u2192 ${baseBranch}. Run is now completed.` + (run.worktreeKept ? `
 ${run.worktreeKept}` : ""),

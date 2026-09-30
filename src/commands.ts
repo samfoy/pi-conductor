@@ -1420,10 +1420,12 @@ export async function runWorktreeCmd(
         if (result.success) {
           if (!isCurrent()) { ctx.ui.notify("Cleanup refused: ownership changed after merge; work preserved.", "warning"); return; }
           run.worktreeKept = undefined;
-          await releaseWorktree(run, { keepBranch: false, isCurrent });
-          run.status = "completed";
-          run.mergeResult = result;
-          run.errorMessage = undefined;
+          const removed = await releaseWorktree(run, { keepBranch: false, isCurrent });
+          if (!isCurrent(removed)) { ctx.ui.notify("Original merge completed, but current invocation changed during cleanup; no completion assigned.", "warning"); return; }
+          const completion = { status: "completed" as const, mergeResult: result, errorMessage: undefined,
+            ...(removed ? { worktreePath: undefined, worktreeBranch: undefined } : {}) };
+          Object.assign(run, completion);
+          Object.assign(opts.getRegistry().get(runId)!, completion);
           ctx.ui.notify(
             `✔ Merged ${run.id} → ${baseBranch}. Run is now completed.` +
               (run.worktreeKept ? `\n${run.worktreeKept}` : ""),

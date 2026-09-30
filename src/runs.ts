@@ -2560,7 +2560,7 @@ function keptWorktreeHint(worktreePath: string, branch: string): string {
 }
 
 /** Manual commands fence their immutable ownership snapshot against both live and durable state. */
-export function worktreeCleanupGuard(run: Run, currentRun: () => Run | undefined): () => boolean {
+export function worktreeCleanupGuard(run: Run, currentRun: () => Run | undefined): (worktreeRemoved?: boolean) => boolean {
   if (run.runtime !== "herdr") return () => run.runtime === undefined || run.runtime === "subprocess";
   const keys = ["id", "runtime", "status", "recordPath", "cwd", "worktreePath", "worktreeBranch",
     "worktreeBaseBranch", "mergeStrategy", "sessionPath", "parentPid", "parentSessionId"] as const;
@@ -2580,11 +2580,14 @@ export function worktreeCleanupGuard(run: Run, currentRun: () => Run | undefined
       const value = binding[key];
       return typeof value === "string" && value.length > 0 && !value.includes("\0");
     });
-  const matches = (value: unknown) => valid && isRecord(value) && value.effort === undefined &&
-    keys.every(key => value[key] === expected[key]) && isRecord(value.herdr) && value.herdr.createdTab === binding?.createdTab &&
+  const matches = (value: unknown, allowRemoved = false) => valid && isRecord(value) && value.effort === undefined &&
+    keys.every(key => value[key] === expected[key] || (allowRemoved &&
+      (key === "worktreePath" || key === "worktreeBranch") && value[key] === undefined)) &&
+    isRecord(value.herdr) && value.herdr.createdTab === binding?.createdTab &&
     sameHerdrBinding(binding, value.herdr as unknown as NonNullable<Run["herdr"]>);
-  return () => {
-    try { return matches(run) && matches(currentRun()) && matches(readControlRecord(recordPath)); }
+  return (worktreeRemoved = false) => {
+    // Removal clears live fields, not the durable ownership record or invocation identity.
+    try { return matches(run, worktreeRemoved) && matches(currentRun(), worktreeRemoved) && matches(readControlRecord(recordPath)); }
     catch { return false; }
   };
 }
