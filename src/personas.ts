@@ -21,7 +21,6 @@ import {
   FOREIGN_SPAWN_TOOLS,
   LEGACY_CHILD_SCOPE,
   THINKING_LEVELS,
-  isDelegating,
   type ChildToolScope,
   type ContextInheritance,
   type Persona,
@@ -348,8 +347,8 @@ const LEAF_MUTATION_TOOLS = ["edit", "write", "insert_before", "insert_after"];
 /**
  * The `--exclude-tools` list a sub-agent actually gets: the persona's own
  * exclusions (first, in order), every conductor LLM tool, the foreign spawn
- * tools, `delegate` unless the scope delegates, and at depth 2 the owner
- * tool and write tools too. Deduped; idempotent for the same scope.
+ * tools, `delegate`, and at depth 2 the owner tool and write tools too.
+ * Deduped; idempotent for the same scope.
  */
 export function effectiveExcludeTools(
   excludeTools?: readonly string[],
@@ -359,14 +358,16 @@ export function effectiveExcludeTools(
     ...(excludeTools ?? []),
     ...CONDUCTOR_LLM_TOOL_NAMES,
     ...FOREIGN_SPAWN_TOOLS,
-    ...(isDelegating(scope) ? [] : ["delegate"]),
+    // Every scope, delegators too: the conductor registers no delegate before N2, so
+    // another extension's tool would fill the name. N2 relaxes this with its own tool.
+    "delegate",
     ...(scope.depth === 2 ? ["ask_owner", ...LEAF_MUTATION_TOOLS] : []),
   ])];
 }
 
 /**
- * An explicit allowlist keeps the scope's own child tools: `ask_owner` at
- * depth 1 and `delegate` for a delegator. An excluded name is never added.
+ * An explicit allowlist keeps the scope's own child tool, `ask_owner` at
+ * depth 1 (never `delegate` before N2). An excluded name is never added.
  */
 export function effectiveAllowTools(
   tools: readonly string[] | undefined,
@@ -374,7 +375,7 @@ export function effectiveAllowTools(
   excluded: readonly string[],
 ): string[] | undefined {
   if (tools === undefined) return undefined;
-  const own = [...(scope.depth === 1 ? ["ask_owner"] : []), ...(isDelegating(scope) ? ["delegate"] : [])];
+  const own = scope.depth === 1 ? ["ask_owner"] : [];
   return [...new Set([...tools, ...own.filter((n) => !excluded.includes(n))])];
 }
 

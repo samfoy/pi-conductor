@@ -17,13 +17,16 @@ import { join } from "node:path";
 import {
   CONDUCTOR_LLM_TOOL_NAMES,
   FOREIGN_SPAWN_TOOLS,
+  LEGACY_CHILD_SCOPE,
   toRunRecord,
+  type ChildToolScope,
   type Persona,
   type PersonaOverride,
   type Run,
 } from "../src/types.ts";
 import {
   builtinPersonasDir,
+  effectiveAllowTools,
   effectiveExcludeTools,
   parseFrontmatter,
   resolvePersonas,
@@ -37,7 +40,7 @@ import { SpawnQueue } from "../src/queue.ts";
 import { FocusedStreamModel } from "../src/focused-stream-model.ts";
 
 const READ_ONLY_EXCLUSIONS = ["edit", "write", "insert_before", "insert_after"];
-/** What every non-delegating depth-1 child excludes after the persona's own list. */
+/** What every depth-1 child, a delegator included, excludes after the persona's own list. */
 const ALWAYS_EXCLUDED = [...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS, "delegate"];
 
 /** Value following `flag`, asserting the flag appears at most once. */
@@ -151,6 +154,20 @@ test("effectiveExcludeTools: persona exclusions first, then every conductor tool
     "agent",
     ...ALWAYS_EXCLUDED.filter((n) => n !== "ensemble_spawn" && n !== "agent"),
   ]);
+});
+
+// N1 registers no delegate, so another extension's tool would fill the name. N2 relaxes
+// this for delegators in the same commit that registers the conductor's own tool.
+test("effectiveExcludeTools/effectiveAllowTools: until N2, every scope excludes delegate and none adds it", () => {
+  const scopes: ChildToolScope[] = [LEGACY_CHILD_SCOPE, { depth: 1, delegateAllow: [] }, { depth: 1, delegateAllow: ["inspector"] }, { depth: 2, delegateAllow: [] }];
+  for (const scope of scopes) {
+    for (const [own, allow] of [[undefined, ["read"]], [["edit"], ["read", "delegate"]]] as const) {
+      assert.ok(effectiveExcludeTools(own, scope).includes("delegate"), `${JSON.stringify(scope)} must exclude delegate`);
+      // No exclusions passed: the allowlist must not add it even where nothing would filter it back out.
+      const tools = effectiveAllowTools([...allow], scope, [])!;
+      assert.equal(tools.filter((n) => n === "delegate").length, allow.filter((n) => n === "delegate").length, `${JSON.stringify(scope)} must not add delegate`);
+    }
+  }
 });
 
 test("FOREIGN_SPAWN_TOOLS names pi's subagent example and pi-herdsman's agent tool", () => {

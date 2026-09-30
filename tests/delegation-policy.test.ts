@@ -1,6 +1,7 @@
 /**
  * N1: validated `agents:` allowlists, frozen depth scope, and the child
- * tool policy built from it. No `delegate` tool or broker exists yet.
+ * tool policy built from it. No `delegate` tool or broker exists yet, so
+ * every child, a delegator included, excludes `delegate` until N2.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -20,7 +21,7 @@ import {
   RunRegistry, sendToRun, spawnRun, type SpawnOptions,
 } from "../src/runs.ts";
 import { buildHerdrEnv, tabCreateArgs } from "../src/herdr/placement.ts";
-import { HerdrCliError, type HerdrCli } from "../src/herdr/cli.ts";
+import { herdrLaunchArgv } from "./helpers/herdr-launch-argv.ts";
 import { buildOrphanRun, classifyRecord, reconcileOrphansAtStartup } from "../src/reconcile-startup.ts";
 import { SpawnQueue } from "../src/queue.ts";
 import { buildOnRetryCallback, formatPersonaListForLLM, registerTools } from "../src/tools.ts";
@@ -30,7 +31,6 @@ import {
   CONDUCTOR_LLM_TOOL_NAMES, DEFAULT_CONFIG, LEGACY_CHILD_SCOPE, emptyUsage, toRunRecord,
   type ChildToolScope, type Persona, type Run,
 } from "../src/types.ts";
-import type { RunSink } from "../src/runtime.ts";
 
 sandboxPi();
 
@@ -39,7 +39,8 @@ sandboxPi();
 const LEAD: ChildToolScope = { depth: 1, delegateAllow: [] };
 const DELEGATOR: ChildToolScope = { depth: 1, delegateAllow: ["inspector", "oracle"] };
 const LEAF: ChildToolScope = { depth: 2, delegateAllow: [] };
-const ALWAYS = [...CONDUCTOR_LLM_TOOL_NAMES, "subagent", "agent"];
+/** What every child excludes after its own list, in every N1 scope: no child keeps `delegate` before N2 registers it. */
+const ALWAYS = [...CONDUCTOR_LLM_TOOL_NAMES, "subagent", "agent", "delegate"];
 const LEAF_ONLY = ["ask_owner", "edit", "write", "insert_before", "insert_after"];
 const NINE_READERS = ["analyst", "clarifier", "critic", "finalizer", "inspector", "investigator", "oracle", "profiler", "redteam"];
 
@@ -122,6 +123,15 @@ const REJECTIONS: [string, { lead: string; user?: Record<string, string>; projec
   ["a target that is not read_only", { lead: "agents:\n  - planner\n" }, /entry "planner" is not read_only: true/],
   ["a known write-capable target", { lead: "agents:\n  - builder\n", user: { "builder.md": doc("builder", "read_only: true\n") } }, /entry "builder" is write-capable/],
   ["a masked target", { lead: "agents:\n  - inspector\n", project: { "inspector.md": "---\nname: inspector\n" } }, /entry "inspector" is not an available persona/],
+  // An override-supplied list gets the same roster check; a valid file list never survives a bad override.
+  ["an override-supplied non-read_only target", { lead: "agents:\n  - inspector\n", overrides: { lead: { agents: ["planner"] } } },
+    /personaOverrides\.lead: field "agents" entry "planner" is not read_only: true/],
+  ["an override-supplied write-capable target", { lead: "agents:\n  - inspector\n", user: { "builder.md": doc("builder", "read_only: true\n") }, overrides: { lead: { agents: ["builder"] } } },
+    /personaOverrides\.lead: field "agents" entry "builder" is write-capable/],
+  ["an override-supplied unknown target", { lead: "", overrides: { lead: { agents: ["ghost"] } } }, /personaOverrides\.lead: field "agents" entry "ghost" is not an available persona/],
+  ["an override-supplied self entry", { lead: "read_only: true\n", overrides: { lead: { agents: ["lead"] } } }, /personaOverrides\.lead: field "agents" entry "lead" names the persona itself/],
+  ["an override-supplied disabled target", { lead: "", overrides: { lead: { agents: ["inspector"] }, inspector: { disabled: true } } },
+    /personaOverrides\.lead: field "agents" entry "inspector" is disabled/],
 ];
 for (const [label, c, reason] of REJECTIONS) {
   test(`N1 allowlist naming ${label} makes the delegator unavailable, not partial`, async (t) => {
@@ -209,13 +219,14 @@ for (const kind of ["fresh", "resume"] as const) {
     ? ({ kind, sessionDir: "/tmp/s", systemPrompt: "SYS", prompt: "P", steerable: false } as const)
     : ({ kind, sessionPath: "/tmp/s/a.jsonl", prompt: "P", steerable: false } as const);
   const cases: [string, ChildToolScope | undefined, string[] | undefined, string[], string | undefined, string[]][] = [
-    ["legacy default", undefined, ["read", "bash"], [], "read,bash,ask_owner", [...ALWAYS, "delegate"]],
-    ["depth-1 lead child", LEAD, ["read", "bash"], [], "read,bash,ask_owner", [...ALWAYS, "delegate"]],
-    ["depth-1 delegator", DELEGATOR, ["read", "bash"], [], "read,bash,ask_owner,delegate", ALWAYS],
-    ["depth-1 delegator, explicit exclusion wins", DELEGATOR, ["read", "bash"], ["delegate", "ask_owner"], "read,bash", ["delegate", "ask_owner", ...ALWAYS]],
-    ["depth-1 lead child, explicit ask exclusion wins", LEAD, ["read"], ["ask_owner"], "read", ["ask_owner", ...ALWAYS, "delegate"]],
-    ["depth-2 leaf", LEAF, ["read", "bash"], [], "read,bash", [...ALWAYS, "delegate", ...LEAF_ONLY]],
-    ["depth-2 leaf, default tool set", LEAF, undefined, ["grep"], undefined, ["grep", ...ALWAYS, "delegate", ...LEAF_ONLY]],
+    ["legacy default", undefined, ["read", "bash"], [], "read,bash,ask_owner", ALWAYS],
+    ["depth-1 lead child", LEAD, ["read", "bash"], [], "read,bash,ask_owner", ALWAYS],
+    ["depth-1 delegator", DELEGATOR, ["read", "bash"], [], "read,bash,ask_owner", ALWAYS],
+    ["depth-1 delegator whose allowlist names delegate", DELEGATOR, ["read", "delegate"], [], "read,delegate,ask_owner", ALWAYS],
+    ["depth-1 delegator, explicit exclusion wins", DELEGATOR, ["read", "bash"], ["delegate", "ask_owner"], "read,bash", [...new Set(["delegate", "ask_owner", ...ALWAYS])]],
+    ["depth-1 lead child, explicit ask exclusion wins", LEAD, ["read"], ["ask_owner"], "read", ["ask_owner", ...ALWAYS]],
+    ["depth-2 leaf", LEAF, ["read", "bash"], [], "read,bash", [...ALWAYS, ...LEAF_ONLY]],
+    ["depth-2 leaf, default tool set", LEAF, undefined, ["grep"], undefined, ["grep", ...ALWAYS, ...LEAF_ONLY]],
     ["depth-1 delegator, default tool set", DELEGATOR, undefined, [], undefined, ALWAYS],
   ];
   for (const [label, scope, allow, exclude, tools, excluded] of cases) {
@@ -299,30 +310,14 @@ test("N1 herdr pane env forwards no secrets or mode overrides and owns every sco
 });
 
 test("N1 herdr launch takes pane env and argv from the run's frozen scope, not the caller or lead env", async () => {
-  const { HerdrRuntime } = await import("../src/herdr/runtime.ts");
   const root = tmpDir("n1-herdr-"), dir = join(root, "lead-herd"); mkdirSync(dir);
   const r = run({ id: "lead-herd", runtime: "herdr", status: "running", cwd: root, recordPath: join(dir, "record.json"), transcriptPath: join(dir, "transcript.jsonl"),
     finalPath: join(dir, "final.md"), depth: 1, delegateAllow: ["inspector", "oracle"] });
-  const pane = { pane_id: "pane-n1", terminal_id: "term-n1", workspace_id: "ws-n1", tab_id: "tab-n1", agent: null, agent_session: null };
-  const calls: string[][] = [];
-  const cli: HerdrCli = { socketPath: join(root, "fake.sock"), async text() { return ""; }, async json(args) {
-    calls.push([...args]);
-    if (args[0] === "tab") return { type: "tab_created", root_pane: { ...pane }, tab: { tab_id: pane.tab_id, workspace_id: pane.workspace_id, label: r.id, pane_count: 1 } };
-    if (args[1] === "get") return { type: "pane_info", pane: { ...pane } };
-    throw new HerdrCliError("remote", undefined, "n1_stop_before_start");
-  } };
-  const runtime = new HerdrRuntime({ cli, workspaceId: pane.workspace_id, env: { ...POLLUTION, AWS_SECRET_ACCESS_KEY: "SECRET", PI_CONDUCTOR_MODE: "on" },
-    trustArgs: () => [], piVersion: "0.87.1", platform: "linux", now: () => 0, sleep: async () => {}, probe: (pid) => ({ pid, state: "alive", startTime: 1 }), signal: () => {} });
-  const sink: RunSink = { line() {}, close() {}, error() {}, initialDeliveryFailed() {} };
-  const transport = runtime.launch(r, [], root, sink, "task", { kind: "fresh", sessionDir: join(dir, "session"), systemPrompt: "SYS", tools: ["read"], excludeTools: ["write"], scope: LEAF });
-  await assert.rejects((transport as { ready: Promise<unknown> }).ready, /agent start outcome unconfirmed/);
-  const tab = calls.find((c) => c[0] === "tab")!;
-  const paneEnv = Object.fromEntries(tab.flatMap((a, i) => tab[i - 1] === "--env" ? [a.split(/=(.*)/s).slice(0, 2)] : []));
+  const { paneEnv, argv } = await herdrLaunchArgv(r, { kind: "fresh", sessionDir: join(dir, "session"), systemPrompt: "SYS", tools: ["read"], excludeTools: ["write"], scope: LEAF },
+    { ...POLLUTION, AWS_SECRET_ACCESS_KEY: "SECRET", PI_CONDUCTOR_MODE: "on" });
   assert.deepEqual({ d: paneEnv.CONDUCTOR_DEPTH, r: paneEnv.CONDUCTOR_RUN_DIR, a: paneEnv.CONDUCTOR_DELEGATE_ALLOW }, { d: "1", r: dir, a: "inspector,oracle" });
   assert.equal(paneEnv.AWS_SECRET_ACCESS_KEY, undefined); assert.equal(paneEnv.PI_CONDUCTOR_MODE, undefined);
-  const start = calls.find((c) => c[1] === "start")!;
-  const argv = start.slice(start.indexOf("--") + 1);
-  assert.deepEqual(toolFlags(argv), { tools: "read,ask_owner,delegate", exclude: ["write", ...ALWAYS].join(",") }, "the caller's core scope never wins over the run");
+  assert.deepEqual(toolFlags(argv), { tools: "read,ask_owner", exclude: ["write", ...ALWAYS].join(",") }, "the caller's core scope never wins over the run");
 });
 
 // ── Durable scope: record, orphan restore and resume ─────────────────
@@ -365,7 +360,7 @@ test("N1 a record with no scope fields is a legacy depth-1 leaf", () => {
   assert.equal("depth" in raw || "delegateAllow" in raw, false);
   assert.equal(runScopeError(raw), undefined);
   assert.deepEqual(childToolScope(buildOrphanRun(raw, "completed")), LEGACY_CHILD_SCOPE);
-  assert.deepEqual(toolFlags(buildResumePiArgs(buildOrphanRun(raw, "completed"), "x")), { tools: "read,ask_owner", exclude: [...ALWAYS, "delegate"].join(",") });
+  assert.deepEqual(toolFlags(buildResumePiArgs(buildOrphanRun(raw, "completed"), "x")), { tools: "read,ask_owner", exclude: ALWAYS.join(",") });
 });
 
 const MALFORMED: [string, Record<string, unknown>][] = [
@@ -424,7 +419,7 @@ test("N1 queue, retry and seeded parent context keep the same scoped tool flags"
   const delegator = persona({ agents: ["inspector"], tools: ["read"] });
   const direct = spawnRun(options({ persona: delegator })); t.after(() => clearTimeout(direct.run.timeoutTimer));
   const expected = toolFlags(launches[0]!.args);
-  assert.deepEqual(expected, { tools: "read,ask_owner,delegate", exclude: ALWAYS.join(",") });
+  assert.deepEqual(expected, { tools: "read,ask_owner", exclude: ALWAYS.join(",") });
 
   const registry = new RunRegistry(); const busy = run({ id: "busy-a", status: "running" }); registry.register(busy);
   const queue = new SpawnQueue(registry, 1);
@@ -466,7 +461,7 @@ test("N1 an ordinary LLM caller cannot supply depth or an allowlist to widen a s
   for (const r of registry.list()) t.after(() => clearTimeout(r.timeoutTimer));
   assert.deepEqual({ d: oracle!.depth, a: oracle!.delegateAllow, env: launches[0]!.env.CONDUCTOR_DELEGATE_ALLOW }, { d: 1, a: [], env: undefined });
   assert.deepEqual({ d: lead!.depth, a: lead!.delegateAllow, env: launches[1]!.env.CONDUCTOR_DELEGATE_ALLOW }, { d: 1, a: ["inspector"], env: "inspector" });
-  assert.ok(flag(launches[0]!.args, "--exclude-tools")!.split(",").includes("delegate"));
+  for (const { args } of launches) assert.ok(flag(args, "--exclude-tools")!.split(",").includes("delegate"), "no child, delegator included, keeps delegate in N1");
 });
 
 test("N1 a persona object bypassing resolution still cannot launch a malformed allowlist", (t) => {
@@ -490,4 +485,20 @@ test("N1 ensemble_list and doctor show the effective allowlist without advertisi
   assert.match(report, /## Delegation allowlists\n {2}lead: inspector, oracle\n.*no delegate tool is registered yet/);
   const empty = await buildDoctorReport({ cwd: tmpDir("n1-doctor-"), registry, queue: new SpawnQueue(registry, 1), conductorMode: false, env: {} });
   assert.match(empty, /## Delegation allowlists\n {2}· none/);
+});
+
+test("N1 doctor's always-excluded list holds for every scope, so it never silences a name a delegator keeps", async (t) => {
+  const r = await roster(t, { project: { "lead.md": doc("lead", "agents:\n  - inspector\n") } });
+  const registry = new RunRegistry();
+  const report = await buildDoctorReport({ cwd: r.cwd, registry, queue: new SpawnQueue(registry, 1), conductorMode: false, env: {},
+    loadedToolNames: ["read", "delegate", "run_agent"] });
+  const listed = /always excluded: (.*)/.exec(report)![1]!.split(", ");
+  assert.ok(listed.includes("delegate"), report);
+  const lead = childToolScope({ depth: 1, delegateAllow: r.personas.get("lead")!.agents });
+  for (const scope of [LEGACY_CHILD_SCOPE, LEAD, lead, LEAF]) {
+    const excluded = effectiveExcludeTools(undefined, scope);
+    for (const name of listed) assert.ok(excluded.includes(name), `doctor calls ${name} always excluded, but scope ${JSON.stringify(scope)} keeps it`);
+  }
+  assert.doesNotMatch(report, /⚠ delegate /, "silent only because every child really excludes it");
+  assert.match(report, /⚠ run_agent looks spawn-capable/, "a spawn-looking name children keep still warns");
 });

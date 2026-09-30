@@ -822,13 +822,15 @@ function effectiveExcludeTools(excludeTools, scope = LEGACY_CHILD_SCOPE) {
     ...excludeTools ?? [],
     ...CONDUCTOR_LLM_TOOL_NAMES,
     ...FOREIGN_SPAWN_TOOLS,
-    ...isDelegating(scope) ? [] : ["delegate"],
+    // Every scope, delegators too: the conductor registers no delegate before N2, so
+    // another extension's tool would fill the name. N2 relaxes this with its own tool.
+    "delegate",
     ...scope.depth === 2 ? ["ask_owner", ...LEAF_MUTATION_TOOLS] : []
   ])];
 }
 function effectiveAllowTools(tools, scope, excluded) {
   if (tools === void 0) return void 0;
-  const own = [...scope.depth === 1 ? ["ask_owner"] : [], ...isDelegating(scope) ? ["delegate"] : []];
+  const own = scope.depth === 1 ? ["ask_owner"] : [];
   return [.../* @__PURE__ */ new Set([...tools, ...own.filter((n) => !excluded.includes(n))])];
 }
 function requireString(fm, key) {

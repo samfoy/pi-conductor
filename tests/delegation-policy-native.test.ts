@@ -3,25 +3,32 @@
  * child argv (parsed by that Pi) and env. The minimum is Pi 0.87.1 from
  * CONDUCTOR_NATIVE_PI_ROOT and fails, never skips, when it is missing. Newer
  * roots listed in CONDUCTOR_H11_PI_ROOTS also prove `ctx.executeTool()` nested
- * calls cannot reach an excluded tool. Offline faux model only.
+ * calls cannot reach an excluded tool. An eligible delegator's argv comes from
+ * real subprocess and herdr launches, and another extension's `delegate` stays
+ * unreachable until N2 registers the conductor's own. Offline faux model only.
  */
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build, stop } from "esbuild";
 import { sandboxPi, tmpDir } from "./helpers/tmp.ts";
-import { buildPiArgs, buildResumePiArgs, buildSubagentEnv } from "../src/runs.ts";
+import { buildPiArgs, buildResumePiArgs, buildSubagentEnv, RunRegistry, spawnRun } from "../src/runs.ts";
 import { childToolScope } from "../src/personas.ts";
 import { buildOrphanRun } from "../src/reconcile-startup.ts";
-import { CONDUCTOR_LLM_TOOL_NAMES, childScopeEnv, emptyUsage, toRunRecord, type ChildToolScope, type Run } from "../src/types.ts";
+import { CONDUCTOR_LLM_TOOL_NAMES, childScopeEnv, emptyUsage, toRunRecord, type ChildToolScope, type Persona, type Run } from "../src/types.ts";
 import type { NativeSurface } from "./helpers/delegation-policy-native.ts";
+import { herdrLaunchArgv } from "./helpers/herdr-launch-argv.ts";
 
 sandboxPi();
 process.env.PI_OFFLINE = "1"; process.env.PI_SKIP_VERSION_CHECK = "1"; process.env.PI_TELEMETRY = "0";
 const root = tmpDir("n1-native-");
 process.env.TMPDIR = root; process.env.PI_CODING_AGENT_DIR = join(root, "agent"); process.env.CONDUCTOR_MEMORY_PATH = join(root, "memory.jsonl");
+// The subprocess runtime starts this stub for real; it records the argv and env it got, then exits.
+process.env.PI_BIN = join(root, "pi-capture.mjs");
+writeFileSync(process.env.PI_BIN, 'import { writeFileSync } from "node:fs";\n' +
+  'writeFileSync(process.env.CONDUCTOR_RUN_DIR + "/launch.json", JSON.stringify({ argv: process.argv.slice(2), env: process.env }));\nprocess.exit(1);\n');
 after(() => stop());
 
 type Harness = { VERSION: string; nativeSurface: (root: string, label: string, opts: object) => Promise<NativeSurface> };
@@ -43,7 +50,11 @@ async function harness(t: test.TestContext, piRoot: string): Promise<Harness> {
 }
 
 const LEAF: ChildToolScope = { depth: 2, delegateAllow: [] };
-const DELEGATOR: ChildToolScope = { depth: 1, delegateAllow: ["inspector"] };
+/** An eligible delegator with an explicit allowlist, the case N1 first exposed; `nested_probe` enables the nested calls. */
+const DELEGATOR: Persona = { name: "lead", description: "probe", inheritContext: "none", inheritSkills: false, defaultReads: [], worktree: false, timeoutMinutes: 1,
+  systemPrompt: "You are lead.", source: "project", sourcePath: "/fake/lead.md", readOnly: false, tools: ["read", "nested_probe"], agents: ["inspector"] };
+/** With Pi's default set only the exclusion, not a missing allowlist entry, keeps a foreign `delegate` out. */
+const DELEGATORS: [string, Persona][] = [["allowlisted", DELEGATOR], ["default-tools", { ...DELEGATOR, tools: undefined }]];
 const FORBIDDEN_AT_LEAF = ["ask_owner", "delegate", "subagent", "agent", "edit", "write", "insert_before", "insert_after", ...CONDUCTOR_LLM_TOOL_NAMES];
 /** Tools other extensions could register; `ask_owner` is only a decoy where the conductor registers none. */
 const DECOYS = ["delegate", "subagent", "agent", "ensemble_spawn", "insert_before", "insert_after"];
@@ -56,6 +67,15 @@ function childEnv(runDir: string, scope: ChildToolScope): NodeJS.ProcessEnv {
 }
 const fresh = (scope: ChildToolScope, tools?: string[]) =>
   buildPiArgs({ kind: "fresh", sessionDir: join(root, "unused"), systemPrompt: "S", prompt: "P", steerable: false, tools, scope });
+/** The argv and env each runtime actually hands an eligible delegator: a real subprocess spawn, then its saved record relaunched on herdr. */
+async function delegatorLaunches(persona: Persona): Promise<[string, { argv: string[]; env: NodeJS.ProcessEnv }][]> {
+  const { run, done } = spawnRun({ registry: new RunRegistry(), persona, task: "probe", cwd: tmpDir("n1-native-spawn-"), mode: "background", timeoutMs: 20000, runtimeEnv: {} });
+  await done;
+  const subprocess = JSON.parse(readFileSync(join(dirname(run.recordPath), "launch.json"), "utf8"));
+  const saved = { ...buildOrphanRun(JSON.parse(readFileSync(run.recordPath, "utf8")), "completed"), runtime: "herdr", status: "running" } as Run;
+  const herdr = await herdrLaunchArgv(saved, { kind: "fresh", sessionDir: join(dirname(saved.recordPath), "session"), systemPrompt: "S", tools: saved.tools, excludeTools: saved.excludeTools }, process.env);
+  return [["subprocess", subprocess], ["herdr", { argv: herdr.argv, env: herdr.paneEnv }]];
+}
 function absent(surface: NativeSurface, names: readonly string[], where: string) {
   for (const name of names) {
     assert.ok(!surface.active.includes(name), `${where}: ${name} must not be active`);
@@ -104,11 +124,24 @@ async function witness(t: test.TestContext, pi: Harness, nested: boolean) {
     for (const name of ["delegate", "subagent", "agent", "ensemble_spawn"]) assert.match(probe.nested[name]?.text ?? "", notFound, `nested ${name}`);
   }
 
-  // An eligible delegator keeps delegate out of --exclude-tools, but N1 registers no delegate tool.
-  const delegator = await pi.nativeSurface(root, `${pi.VERSION}-delegator`, { argv: fresh(DELEGATOR, ["read"]), env: childEnv(dir, DELEGATOR), decoys: ["subagent", "agent"] });
-  assert.equal(childEnv(dir, DELEGATOR).CONDUCTOR_DELEGATE_ALLOW, "inspector");
-  assert.deepEqual([...delegator.active].sort(), ["ask_owner", "read"]);
-  absent(delegator, ["delegate", "subagent", "agent"], "depth-1 delegator");
+  // N1 registers no delegate, so an eligible delegator still excludes the name and another extension's cannot fill it.
+  for (const [kind, persona] of DELEGATORS) for (const [path, launch] of await delegatorLaunches(persona)) {
+    const where = `${path} ${kind} delegator`;
+    assert.equal(launch.env.CONDUCTOR_DELEGATE_ALLOW, "inspector", `${where}: the child is an eligible delegator`);
+    const delegator = await pi.nativeSurface(root, `${pi.VERSION}-delegator-${path}-${kind}`, { argv: launch.argv, env: launch.env, decoys: ["delegate", "subagent", "agent"],
+      calls: [{ name: "delegate", args: {} }, ...(nested ? [{ name: "nested_probe", args: {} }] : [])], nested: nested ? ["delegate", "read"] : undefined });
+    const call = delegator.ends.find(e => e.name === "delegate");
+    t.diagnostic(`Pi ${pi.VERSION} ${where}: active=${delegator.active.join(",")} callable=${delegator.callable?.join(",") ?? "n/a"} ` +
+      `delegate=${JSON.stringify(call?.text)} nested=${JSON.stringify(delegator.nested.delegate?.text ?? null)}`);
+    if (persona.tools) assert.deepEqual([...delegator.active].sort(), ["ask_owner", "nested_probe", "read"], where);
+    else for (const name of ["ask_owner", "nested_probe", "read", "bash"]) assert.ok(delegator.active.includes(name), `${where} keeps ${name}; the set is not vacuous`);
+    absent(delegator, ["delegate", "subagent", "agent"], where);
+    assert.ok(call?.isError && notFound.test(call.text), `${where}: model-issued delegate must not resolve: ${JSON.stringify(call)}`);
+    if (nested) {
+      assert.ok(delegator.nested.delegate?.isError && notFound.test(delegator.nested.delegate.text), `${where}: nested delegate: ${JSON.stringify(delegator.nested.delegate)}`);
+      assert.doesNotMatch(delegator.nested.read?.text ?? "not found", notFound, `${where}: nested positive control reaches an allowed tool`);
+    }
+  }
   t.diagnostic(`Pi ${pi.VERSION}: depth2 active=${leaf.active.join(",")} callable=${leaf.callable?.join(",") ?? "n/a"}`);
 }
 
