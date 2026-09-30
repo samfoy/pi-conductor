@@ -127,6 +127,8 @@ export type ClassifyResult =
  * undefined` and fall through to the legacy liveness-on-child-pid
  * logic — the safest available behavior for pre-fix records.
  */
+const isRequestedTermination = (status: RunRecord["status"]) => status === "killed" || status === "timeout" || status === "aborted";
+
 export function classifyRecord(
   record: RunRecord,
   isAlive: (pid: number) => boolean,
@@ -140,6 +142,8 @@ export function classifyRecord(
   herdrProbe: "alive" | "settled" | "gone" | "unknown" | "other-socket" = "unknown",
 ): ClassifyResult {
   if (record.runtime === "herdr") {
+    // A user/conductor stop is final; never resurrect it as running, even if the child lives.
+    if (isRequestedTermination(record.status)) return "skip-terminal";
     if (herdrProbe === "other-socket" || herdrProbe === "unknown") return "skip-foreign";
     if (record.status === "integrating" || (record.effort && record.integration)) return "restore-integrating";
     return "readopt-herdr";
@@ -512,7 +516,7 @@ export async function reconcileOrphansAtStartup(
       }
 
       if (record.runtime === "herdr" && deps.admit && !deps.admit()) continue;
-      const herdrProbe = record.runtime === "herdr" ? await deps.herdrProbe?.(record) : undefined;
+      const herdrProbe = record.runtime === "herdr" && !isRequestedTermination(record.status) ? await deps.herdrProbe?.(record) : undefined;
       if (record.runtime === "herdr" && deps.admit && !deps.admit()) continue;
       const verdict = classifyRecord(
         record,

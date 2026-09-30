@@ -53,6 +53,29 @@ test("H10 startup classifies herdr before legacy pid/effort branches; unknown ne
   assert.equal(classifyRecord(record, never, 0, 1, never, "session", "gone"), "readopt-herdr");
 });
 
+test("H11 a requested herdr termination is never readopted as running on startup", async () => {
+  // Live H11: a killed herdr run became "failed: pi exited before settling" after the next lead /reload.
+  const { classifyRecord, reconcileOrphansAtStartup } = await import("../src/reconcile-startup.ts");
+  const { herdrFixture } = await import("./helpers/herdr-pipeline.ts");
+  const { toRunRecord } = await import("../src/types.ts");
+  const { RunRegistry } = await import("../src/runs.ts");
+  const { mkdirSync, writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const never = () => { assert.fail("must not consult legacy PID probe for herdr"); };
+  for (const status of ["killed", "timeout", "aborted"] as const) {
+    const h = herdrFixture(); const record = { ...toRunRecord(h.run), status };
+    for (const probe of ["alive", "settled", "gone"] as const) assert.equal(classifyRecord(record, never, 0, 1, never, "session", probe), "skip-terminal", `${status}/${probe}`);
+    const root = join(h.run.cwd, "runs"), dir = join(root, h.run.id); mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "record.json"), JSON.stringify({ ...record, recordPath: join(dir, "record.json"), transcriptPath: join(dir, "transcript.jsonl"), finalPath: join(dir, "final.md") }));
+    let probes = 0, attaches = 0;
+    const result = await reconcileOrphansAtStartup({ runsRoot: root, registry: new RunRegistry(), isAlive: never, now: 0, selfSessionId: "session",
+      herdrProbe: async () => { probes++; return "gone"; }, attachHerdr: () => { attaches++; } });
+    assert.deepEqual([probes, attaches, result.readopted], [0, 0, []], `${status}: no CLI probe, no attachment`);
+  }
+  const h = herdrFixture(); const running = toRunRecord(h.run);
+  assert.equal(classifyRecord(running, never, 0, 1, never, "session", "gone"), "readopt-herdr", "an unfinished running record still recovers");
+});
+
 test("H10 missing accepted native start after proven child death is an orphan failure, not successful recovery", { timeout: 10000 }, async () => {
   const { herdrFixture } = await import("./helpers/herdr-pipeline.ts");
   const { createRunPipeline } = await import("../src/run-pipeline.ts");

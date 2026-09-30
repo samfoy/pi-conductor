@@ -944,8 +944,10 @@ function isTerminal(s) {
 }
 
 // src/reconcile-startup.ts
+var isRequestedTermination = (status) => status === "killed" || status === "timeout" || status === "aborted";
 function classifyRecord(record, isAlive, _now, selfPid = process.pid, isParentAlive = (pid, startTime) => defaultParentLivenessProbe(pid, startTime), selfSessionId = void 0, herdrProbe = "unknown") {
   if (record.runtime === "herdr") {
+    if (isRequestedTermination(record.status)) return "skip-terminal";
     if (herdrProbe === "other-socket" || herdrProbe === "unknown") return "skip-foreign";
     if (record.status === "integrating" || record.effort && record.integration) return "restore-integrating";
     return "readopt-herdr";
@@ -1064,7 +1066,7 @@ async function reconcileOrphansAtStartup(deps) {
         continue;
       }
       if (record.runtime === "herdr" && deps.admit && !deps.admit()) continue;
-      const herdrProbe = record.runtime === "herdr" ? await deps.herdrProbe?.(record) : void 0;
+      const herdrProbe = record.runtime === "herdr" && !isRequestedTermination(record.status) ? await deps.herdrProbe?.(record) : void 0;
       if (record.runtime === "herdr" && deps.admit && !deps.admit()) continue;
       const verdict = classifyRecord(
         record,
