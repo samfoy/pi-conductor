@@ -8,7 +8,7 @@ import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync,
 import { userInfo } from "node:os";
 import { join } from "node:path";
 import { tmpDir } from "./helpers/tmp.ts";
-import { ambientSnapshot, HerdrLiveFixture, liveEnabled, procStartTime, startLiveFixture, planLiveIdentity, proveOwnedSocket, refuseInheritedTarget, type LiveEffects, type LiveIdentity, type ProcessIdentity } from "./helpers/herdr-live.ts";
+import { ambientSnapshot, HerdrLiveFixture, liveEnabled, piEntry, procStartTime, startLiveFixture, writePiWrapper, planLiveIdentity, proveOwnedSocket, refuseInheritedTarget, type LiveEffects, type LiveIdentity, type ProcessIdentity } from "./helpers/herdr-live.ts";
 
 const scratch = realpathSync(tmpDir("h")); // short: unix socket paths are length-limited
 let n = 0;
@@ -154,17 +154,35 @@ for (const piRoot of LIVE ? (piRoots.length ? piRoots : [""]) : ["(gated)"]) {
     assert.match(readFileSync(integration, "utf8"), /HERDR_INTEGRATION_ID=pi\n\/\/ HERDR_INTEGRATION_VERSION=9/);
     const parent = realpathSync(tmpDir("h"));
     const ambient = ambientSnapshot(parent);
-    const evidence = { pi: version, piCli: realpathSync(join(piRoot, "dist", "cli.js")), conductor: join(worktree, "dist", "index.js"), herdr: execFileSync(herdrBin, ["--version"], { encoding: "utf8" }).trim(), integration, netns: process.env.CONDUCTOR_H11_NETNS !== "0" };
+    const alt = process.env.CONDUCTOR_H11_ALT_PI_ROOT ?? piRoots.find(r => r !== piRoot);
+    const evidence = { pi: version, piCli: piEntry(piRoot), conductor: join(worktree, "dist", "index.js"), herdr: execFileSync(herdrBin, ["--version"], { encoding: "utf8" }).trim(), integration, netns: process.env.CONDUCTOR_H11_NETNS !== "0" };
     t.diagnostic(`H11 versions ${JSON.stringify(evidence)}`);
     const fx = await startLiveFixture({ piRoot, worktree, herdrBin, integration, netns: evidence.netns }, randomUUID().replace(/-/g, "").slice(0, 12), parent);
     const root = fx.id.root, runs = join(root, "home", ".pi", "agent", "conductor", "runs");
     t.diagnostic(`H11 fixture ${fx.id.name} server pid ${fx.server.pid}/${fx.server.startTime} socket ${fx.id.socketPath}`);
     let report: Awaited<ReturnType<typeof fx.teardown>> | undefined;
+    const work = join(root, "work");
     try {
+      const cliVersion = execFileSync(join(root, "bin", "pi"), ["--version"], { env: fx.env, cwd: work, encoding: "utf8", timeout: 30000 }).trim();
+      t.diagnostic(`H11 fixture pi --version: ${cliVersion}`);
+      assert.match(cliVersion, new RegExp(`\\b${version.replace(/\./g, "\\.")}\\b`), "the pinned executable reports its own version");
+      // Miniature effort repository: generated gen/all.txt, independent verify, a recorded repository hook.
+      const git = (...args: string[]) => execFileSync("git", args, { cwd: work, env: fx.env, encoding: "utf8", timeout: 20000 }).trim();
+      mkdirSync(join(work, "src")); mkdirSync(join(work, "gen")); mkdirSync(join(work, ".githooks"));
+      writeFileSync(join(work, "src", "base.txt"), "base\n");
+      writeFileSync(join(work, "gen.sh"), "mkdir -p gen && cat src/*.txt > gen/all.txt\n");
+      writeFileSync(join(work, "verify.sh"), 'cat src/*.txt | cmp -s - gen/all.txt || { echo "generated drift"; exit 1; }\necho "verified $(git rev-parse HEAD) candidate=${CONDUCTOR_CANDIDATE:-}"\n');
+      writeFileSync(join(work, "gen", "all.txt"), "base\n");
+      writeFileSync(join(work, ".githooks", "pre-commit"), '#!/bin/sh\nprintf "%s\\n" "$(git rev-parse --show-toplevel)" >> "$(git rev-parse --git-common-dir)/h11-hook.log"\n', { mode: 0o755 });
+      writeFileSync(join(work, ".gitignore"), ".worktrees/\n");
+      git("init", "-q", "-b", "main"); git("config", "core.hooksPath", ".githooks");
+      git("add", "."); git("commit", "-q", "-m", "base");
+      const base = git("rev-parse", "HEAD");
+      writeFileSync(join(root, "pads", "retire.txt"), Array.from({ length: 150 }, (_, i) => `evidence line ${i}: context pressure sample ${"x".repeat(24)}`).join("\n"));
       const record = (id: string) => JSON.parse(readFileSync(join(runs, id, "record.json"), "utf8"));
-      const leadStarts = () => readdirSync(join(root, "obs")).filter(f => f.startsWith("lead-")  && f.includes("-start-")).sort().map(f => JSON.parse(readFileSync(join(root, "obs", f), "utf8")));
+      const leadStarts = () => readdirSync(join(root, "obs")).filter(f => f.startsWith("lead-")  && f.includes("-start-")).sort((a, b) => Number(a.split("-").at(-1)!.slice(0, -5)) - Number(b.split("-").at(-1)!.slice(0, -5))).map(f => JSON.parse(readFileSync(join(root, "obs", f), "utf8")));
       const paneText = async (pane: string) => (await fx.cli(["pane", "read", pane, "--source", "recent-unwrapped", "--lines", "400"])).text as string;
-      const leadPane = await fx.createWorkspace(join(root, "work"), "h11-lead");
+      let leadPane = await fx.createWorkspace(work, "h11-lead");
       let leadName = "lead";
       const startLead = async (name: string, args: string[] = []) => {
         const before = leadStarts().length;
@@ -199,7 +217,7 @@ for (const piRoot of LIVE ? (piRoots.length ? piRoots : [""]) : ["(gated)"]) {
       const notifications = (id: string) => jsonLines(lead.sessionFile).filter(e => e.type === "custom_message" && JSON.stringify(e).includes("<sub-agent-completed>") && JSON.stringify(e).includes(id)).length;
       const gone = (h: { pid: number; pidStartTime: number }) => procStartTime(h.pid) !== h.pidStartTime;
       const release = (token: string) => writeFileSync(join(root, "script", `release-${token}`), "go");
-      let b1 = "";
+      let b1 = "", k4 = "";
       const held = (token: string, id: string) => until(`child ${token} held`, 60000, () => {
         if (existsSync(join(runs, id, "record.json")) && ["failed", "killed", "completed"].includes(record(id).status)) throw new Error(`H11 ${id} ended before its barrier: ${record(id).status} ${record(id).errorMessage}`);
         return existsSync(join(root, "obs", `child-${token}-held.json`));
@@ -212,10 +230,12 @@ for (const piRoot of LIVE ? (piRoots.length ? piRoots : [""]) : ["(gated)"]) {
         fx.adopt(r.herdr);
         assert.equal(r.runtime, "herdr"); assert.equal(r.herdr.socketPath, fx.id.socketPath);
         const h = hello(id);
-        // The host Pi is the pinned version; conductor's own library imports bind to its package's node_modules copy.
         const host = readdirSync(join(root, "obs")).filter(f => f.startsWith(`child-${h.pid}-start-`)).map(f => JSON.parse(readFileSync(join(root, "obs", f), "utf8")));
         assert.equal(host.length, 1); assert.equal(host[0].version, version, "the pane child runs the pinned host Pi");
-        t.diagnostic(`H11 child host Pi ${host[0].version}; conductor-bound pi-coding-agent VERSION in hello ${h.piVersion}`);
+        assert.equal(h.piVersion, version, "hello reports the executing host Pi");
+        t.diagnostic(`H11 hello piVersion=${h.piVersion} piLibraryVersion=${h.piLibraryVersion}; agentName=${r.herdr.agentName}`);
+        assert.equal(r.herdr.versionWarning, undefined, "same host version on lead and child");
+        assert.match(r.herdr.agentName, /^[a-z][a-z0-9_-]{0,31}$/);
         assert.equal(h.sessionFile, r.herdr.sessionFile);
         await until("child pid exit", 15000, () => gone(h));
         const types = events(id).map(e => e.type === "conductor_child" ? `child:${e.event}` : e.type);
@@ -276,11 +296,12 @@ for (const piRoot of LIVE ? (piRoots.length ? piRoots : [""]) : ["(gated)"]) {
         assert.equal(r.pendingAsk, undefined);
         assert.equal(r.herdr.sessionFile, first.sessionFile); assert.notEqual(r.herdr.launchNonce, first.launchNonce);
         assert.equal(r.herdr.paneId, first.paneId, "a proven empty prior pane is reused"); assert.equal(r.herdr.createdTab, false);
+        assert.notEqual(r.herdr.agentName, first.agentName, "same-pane relaunch uses a fresh physical alias");
         assert.match(readFileSync(join(runs, id, "final.md"), "utf8"), /owner-answer[\s\S]*H11 answer a3/);
       });
 
       await t.test("kill signals only the proven child and keeps pane scrollback", async () => {
-        const id = await spawnChild("H11-CHILD hold k4");
+        const id = k4 = await spawnChild("H11-CHILD hold k4");
         await held("k4", id);
         const r0 = record(id); fx.adopt(r0.herdr);
         const shell = (await fx.cli(["pane", "process-info", "--pane", r0.herdr.paneId])).result.process_info.shell_pid;
@@ -307,18 +328,22 @@ for (const piRoot of LIVE ? (piRoots.length ? piRoots : [""]) : ["(gated)"]) {
         assert.match(readFileSync(join(runs, b1, "final.md"), "utf8"), /H11 saw b1: H11 resume r5/);
       });
 
-      // Unverified live: in both runtimes Pi's threshold compaction did not fire for this single-turn faux child.
-      await t.test("context retirement is honoured and refuses later sends", { todo: "fixture does not yet trigger Pi threshold compaction (subprocess twin also unretired)" }, async () => {
-        // The fixture pins analyst to a small faux window; the subprocess twin shows whether Pi's threshold compaction fired at all.
-        const twin = await spawnChild("H11-CHILD basic t6", "subprocess", { persona: "analyst" });
-        const id = await spawnChild("H11-CHILD basic t6", "herdr", { persona: "analyst" });
+      await t.test("native automatic compaction retires the context under exit-at-settle", async () => {
+        // Analyst is pinned to the 8K faux window; repeated reads grow context until Pi's own policy compacts.
+        const twin = await spawnChild("H11-CHILD retire t6", "subprocess", { persona: "analyst" });
+        const id = await spawnChild("H11-CHILD retire t6", "herdr", { persona: "analyst" });
         const r = await status(id, "completed", "failed"), s = await status(twin, "completed", "failed");
         fx.adopt(r.herdr);
-        t.diagnostic(`H11 retirement herdr=${r.contextRetired} subprocess=${s.contextRetired}`);
-        assert.equal(r.contextRetired, true, JSON.stringify({ status: r.status, error: r.errorMessage, subprocessRetired: s.contextRetired }));
+        const compactions = readdirSync(join(root, "obs")).filter(f => f.startsWith("child-") && f.includes("-compact-")).map(f => JSON.parse(readFileSync(join(root, "obs", f), "utf8")));
+        t.diagnostic(`H11 retirement herdr=${r.contextRetired} subprocess=${s.contextRetired} compactions=${JSON.stringify(compactions)}`);
+        assert.equal(r.contextRetired, true, JSON.stringify({ status: r.status, error: r.errorMessage, subprocessRetired: s.contextRetired, compactions }));
+        assert.ok(compactions.some(c => c.runId === id && c.reason !== "manual"), "an automatic native compaction, not a manual one");
+        assert.match(readFileSync(join(runs, id, "final.md"), "utf8"), /retirement instruction received/, "the child saw A2's finalize instruction and handed off");
+        const saved = readFileSync(r.herdr.sessionFile, "utf8");
+        assert.match(saved, /"customType":"conductor-context-retired"/);
+        // Conductor tools report refusals as details.error results (not thrown), like every other tool error.
         const refused = await leadTool("ensemble_send", { agent_id: id, message: "H11 after retirement", foreground: false });
-        assert.equal(refused.isError, true, JSON.stringify(refused.result));
-        assert.match(JSON.stringify(refused.result), /retire/i);
+        assert.match(String(refused.result.details?.error), /Session retired due to context pressure/, JSON.stringify(refused.result));
       });
 
       await t.test("lead /reload fences the old owner; one completion after reattach", async () => {
@@ -355,6 +380,94 @@ for (const piRoot of LIVE ? (piRoots.length ? piRoots : [""]) : ["(gated)"]) {
         assert.equal(r.status, "completed", r.errorMessage);
         await until("single post-crash notification", 20000, () => notifications(id) === 1);
       });
+
+      const effortTip = () => git("rev-parse", "refs/heads/conductor-int/h11");
+      const hookLog = () => existsSync(join(work, ".git", "h11-hook.log")) ? readFileSync(join(work, ".git", "h11-hook.log"), "utf8").trim().split("\n") : [];
+      const spawnWriter = async (task: string, token: string) => {
+        const r = await leadTool("ensemble_spawn", { persona: "builder", task, runtime: "herdr", effort: "h11", touches: ["src/**"], on_complete_hook: `test -f src/${token}.txt`, foreground: false });
+        assert.equal(r.isError, false, JSON.stringify(r.result));
+        return r.result.details.agent_id as string;
+      };
+      const integrated = async (id: string, token: string, previousTip: string) => {
+        const r = await status(id, "completed", "failed", "merge_conflict", "hook_failed", "killed", "blocked");
+        assert.equal(r.status, "completed", JSON.stringify({ error: r.errorMessage, integration: r.integration, merge: r.mergeResult }));
+        fx.adopt(r.herdr);
+        const tip = effortTip();
+        assert.notEqual(tip, previousTip, "CAS advanced the integration ref");
+        assert.equal(git("show", `${tip}:src/${token}.txt`), `from ${token}`);
+        const raw = (spec: string) => execFileSync("git", ["show", spec], { cwd: work, env: fx.env, encoding: "utf8", timeout: 20000 });
+        const sources = git("ls-tree", "--name-only", `${tip}:src`).split("\n");
+        assert.ok(sources.includes(`${token}.txt`));
+        assert.equal(raw(`${tip}:gen/all.txt`), sources.map(f => raw(`${tip}:src/${f}`)).join(""), "generated artifact rebuilt from the integrated sources, not the writer's stale copy");
+        assert.equal(git("merge-base", "--is-ancestor", previousTip, tip), "");
+        assert.equal(git("rev-parse", "HEAD"), base, "main checkout untouched"); assert.equal(git("rev-parse", "--abbrev-ref", "HEAD"), "main");
+        assert.equal(git("status", "--porcelain"), "", "main checkout clean");
+        t.diagnostic(`H11 effort ${id} ${previousTip.slice(0, 8)} -> ${tip.slice(0, 8)} integration=${JSON.stringify(r.integration)?.slice(0, 600)}`);
+        return { r, tip };
+      };
+
+      await t.test("effort writer: persona hook -> generated artifact -> verify -> CAS on real herdr", async () => {
+        const hooksBefore = hookLog().length;
+        const id = await spawnWriter("H11-CHILD write e9", "e9");
+        const { r } = await integrated(id, "e9", base);
+        assert.equal(r.runtime, "herdr"); assert.ok(r.effort, "an effort writer");
+        assert.ok(hookLog().length >= hooksBefore + 2, "repository hook ran for the writer commit and the candidate commit");
+        assert.equal(git("show", `${r.integration.branchHead}:gen/all.txt`), "stale e9", "the writer's own artifact was stale");
+        assert.ok(r.integration.generation?.passed, `generation evidence: ${JSON.stringify(r.integration.generation)}`);
+        assert.match(readFileSync(r.integration.verify.logPath, "utf8"), /^verified [0-9a-f]{40} candidate=/m);
+        await until("single effort notification", 20000, () => notifications(id) === 1);
+      });
+
+      await t.test("effort writer survives a lead crash; the fresh lead recovers and integrates once", async () => {
+        const before = effortTip();
+        const id = await spawnWriter("H11-CHILD holdwrite e10", "e10");
+        await held("e10", id); fx.adopt(record(id).herdr);
+        const info = (await fx.cli(["pane", "process-info", "--pane", leadPane])).result.process_info;
+        const leadProc = info.foreground_processes.find((p: { name: string }) => p.name === "pi");
+        const start = procStartTime(leadProc.pid), deadGeneration = record(id).herdr.ownerGeneration;
+        const oldSession = lead.sessionFile;
+        assert.equal(JSON.parse(readFileSync(join(runs, id, "owner", `${String(deadGeneration).padStart(6, "0")}.json`), "utf8")).pid, leadProc.pid, "the crash target is the proven stream owner");
+        process.kill(leadProc.pid, "SIGKILL");
+        await until("lead exit", 15000, () => procStartTime(leadProc.pid) !== start);
+        await until("lead pane shell", 15000, async () => !(await fx.cli(["pane", "get", leadPane])).result.pane.agent);
+        leadName = "lead3"; lead = await startLead(leadName);
+        // Stream recovery and effort recovery may each claim; the newest generation must belong to the fresh lead.
+        const newest = () => readdirSync(join(runs, id, "owner")).filter(f => /^\d{6}\.json$/.test(f)).sort().at(-1)!;
+        await until("herdr stream takeover by the fresh lead", 30000, () => Number(newest().slice(0, 6)) > deadGeneration && JSON.parse(readFileSync(join(runs, id, "owner", newest()), "utf8")).pid === lead.pid);
+        t.diagnostic(`H11 effort crash owner generations ${readdirSync(join(runs, id, "owner")).sort().join(",")}`);
+        release("e10");
+        await integrated(id, "e10", before);
+        await until("single post-crash effort notification", 20000, () => notifications(id) === 1);
+        assert.equal(jsonLines(oldSession).filter(e => e.type === "custom_message" && JSON.stringify(e).includes(id)).length, 0, "the crashed lead published nothing for it");
+      });
+
+      await t.test("restarts keep terminal statuses and scrollback panes", async () => {
+        // Two crashes and one /reload have happened; a requested kill must stay killed.
+        assert.equal(record(k4).status, "killed", record(k4).errorMessage);
+        for (const id of readdirSync(runs)) {
+          const r = record(id);
+          if (r.runtime !== "herdr" || !r.herdr) continue;
+          const pane = await fx.cli(["pane", "get", r.herdr.paneId]).catch(e => ({ error: String(e) }));
+          assert.ok("result" in pane, `${id} (${r.status}) pane ${r.herdr.paneId} still present: ${JSON.stringify(pane)}`);
+        }
+      });
+
+      await t.test("a lead/child host Pi version mismatch is detected, persisted and shown", { skip: alt ? false : "needs a second explicit Pi root in CONDUCTOR_H11_PI_ROOTS" }, async () => {
+        const altVersion = JSON.parse(readFileSync(join(alt!, "package.json"), "utf8")).version;
+        await fx.cli(["agent", "send-keys", leadName, "ctrl+c"]); await fx.cli(["agent", "send-keys", leadName, "ctrl+c"]);
+        await until("lead quit", 20000, async () => !(await fx.cli(["pane", "get", leadPane])).result.pane.agent);
+        writePiWrapper(join(root, "altbin"), alt!);
+        leadPane = await fx.createWorkspace(work, "h11-mismatch", { PATH: `${join(root, "altbin")}:${fx.env.PATH}` });
+        leadName = "leadm"; lead = await startLead(leadName);
+        assert.equal(lead.version, altVersion, "the lead runs the other Pi version");
+        const id = await spawnChild("H11-CHILD basic m11");
+        const r = await status(id, "completed", "failed");
+        assert.equal(r.status, "completed", r.errorMessage); fx.adopt(r.herdr);
+        assert.equal(hello(id).piVersion, version, "the child runs the matrix version");
+        assert.equal(r.herdr.versionWarning, `Pi version mismatch: lead ${altVersion}, child ${version}`);
+        await until("mismatch notification", 20000, () => notifications(id) === 1);
+        assert.ok(jsonLines(lead.sessionFile).some(e => e.type === "custom_message" && JSON.stringify(e).includes(`reason=\\"pi-version\\">Pi version mismatch: lead ${altVersion}, child ${version}`)), "shown on the completion envelope");
+      });
     } finally {
       const diag = process.env.CONDUCTOR_H11_DIAG;
       if (diag) {
@@ -369,7 +482,7 @@ for (const piRoot of LIVE ? (piRoots.length ? piRoots : [""]) : ["(gated)"]) {
         try { writeFileSync(join(out, "lead-pane.txt"), (await fx.cli(["pane", "read", [...fx.panes][0], "--source", "recent-unwrapped", "--lines", "200"])).text); } catch (e) { writeFileSync(join(out, "lead-pane.txt"), String(e)); }
         if (existsSync(join(root, "lead-sessions"))) cpSync(join(root, "lead-sessions"), join(out, "lead-sessions"), { recursive: true });
       }
-      for (const f of existsSync(join(root, "script")) ? ["s2", "k4", "l7", "c8"] : []) writeFileSync(join(root, "script", `release-${f}`), "teardown");
+      for (const f of existsSync(join(root, "script")) ? ["s2", "k4", "l7", "c8", "e10"] : []) writeFileSync(join(root, "script", `release-${f}`), "teardown");
       if (existsSync(join(root, "script"))) writeFileSync(join(root, "script", "release-s2-2"), "teardown");
       report = await fx.teardown();
       t.diagnostic(`H11 teardown ${JSON.stringify({ clean: report.clean, server: report.server, captured: report.captured.length, leftovers: report.leftovers, notes: report.notes, preserved: report.preserved })}`);

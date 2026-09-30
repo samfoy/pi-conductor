@@ -37,29 +37,43 @@ function lead(messages: Message[]) {
   return fauxAssistantMessage([fauxToolCall(tool, args, { id: `h11_${step.replace(/-/g, "_")}` })], { stopReason: "toolUse" });
 }
 
+const RETIRING = "retiring because of context pressure";
 async function child(messages: Message[], calls: number) {
   const users = messages.filter(m => m.role === "user").map(text);
   const task = users.find(t => /H11-CHILD /.test(t)) ?? "";
   const [, scenario = "", token = ""] = task.match(/H11-CHILD ([a-z0-9]+) ([a-z0-9]+)/) ?? [];
   observe(`child-${token}-${process.pid}-call-${calls}`, { users, version: VERSION, pid: process.pid });
-  const answered = messages.some(m => m.role === "toolResult") || users.length > 1;
-  // hold: first call waits for release-<token>; hold2 also holds the next call on release-<token>-2.
-  if ((scenario === "hold" && !answered && calls === 1) || (scenario === "hold2" && calls <= 2)) {
+  const tools = messages.filter(m => m.role === "toolResult").length;
+  const answered = tools > 0 || users.length > 1;
+  // hold/holdwrite: call 1 waits for release-<token>; hold2 also holds call 2 on release-<token>-2.
+  if (((scenario === "hold" || scenario === "holdwrite") && !answered && calls === 1) || (scenario === "hold2" && calls <= 2)) {
     const name = calls === 1 ? token : `${token}-${calls}`;
     observe(`child-${name}-held`, { pid: process.pid, startTime: startTime() });
     if (!await barrier(name)) return fauxAssistantMessage("", { stopReason: "error", errorMessage: "H11 barrier expired" });
-    if (calls === 1) return fauxAssistantMessage(`H11 held turn complete ${token}`);
+    if (scenario !== "holdwrite" && calls === 1) return fauxAssistantMessage(`H11 held turn complete ${token}`);
   }
   if (scenario === "ask" && !answered) {
     return fauxAssistantMessage([fauxToolCall("ask_owner", { question: `H11 question ${token}?`, evidence: `H11 evidence ${token}` }, { id: `ask_${token}` })], { stopReason: "toolUse" });
+  }
+  if ((scenario === "write" || scenario === "holdwrite") && !tools) {
+    // Touches the generated region with a stale artifact: integration must rebuild it by policy.
+    const command = `printf 'from ${token}\\n' > src/${token}.txt && printf 'stale ${token}\\n' > gen/all.txt && git add -- src/${token}.txt gen/all.txt && git commit -q -m 'test: h11 ${token}'`;
+    return fauxAssistantMessage([fauxToolCall("bash", { command }, { id: `bash_${token}` })], { stopReason: "toolUse" });
+  }
+  // retire: an ordinary multi-tool task whose growing context reaches Pi's own compaction policy.
+  if (scenario === "retire") {
+    const retiring = JSON.stringify(messages).includes(RETIRING);
+    observe(`child-${token}-${process.pid}-retire-${calls}`, { retiring, tools });
+    if (!retiring && tools < 12) return fauxAssistantMessage([fauxToolCall("read", { path: join(root!, "pads", "retire.txt") }, { id: `read_${token}_${tools}` })], { stopReason: "toolUse" });
+    return fauxAssistantMessage(`H11 retirement handoff ${token}: read ${tools} evidence chunks; ${retiring ? "retirement instruction received" : "no retirement instruction"}; next child should continue from the saved notes.`);
   }
   if (users.length > 1) return fauxAssistantMessage(`H11 saw ${token}: ${users.slice(1).join(" | ")}`);
   return fauxAssistantMessage(`H11 final ${token} 漢🙂 verified with offline faux evidence.`);
 }
 
 export default function (pi: ExtensionAPI) {
-  // h11-small puts one ordinary first turn between Pi's compaction threshold and its context window.
-  const faux = fauxProvider({ tokensPerSecond: Infinity, models: [{ id: "h11-offline", contextWindow: 16384, maxTokens: 1024 }, { id: "h11-small", contextWindow: 5120, maxTokens: 1024 }] });
+  // h11-small is a realistic small window: a few tool results reach Pi's compaction threshold.
+  const faux = fauxProvider({ tokensPerSecond: Infinity, models: [{ id: "h11-offline", contextWindow: 131072, maxTokens: 1024 }, { id: "h11-small", contextWindow: 8192, maxTokens: 1024 }] });
   let calls = 0;
   const next = async (context: { messages: Message[] }) => {
     faux.appendResponses([next]);
@@ -72,6 +86,7 @@ export default function (pi: ExtensionAPI) {
     observe(`${role}-${process.pid}-start-${Date.now()}`, { role, pid: process.pid, startTime: startTime(), version: VERSION, mode: ctx.mode,
       reason: (event as { reason?: unknown }).reason, sessionFile: ctx.sessionManager.getSessionFile(), runId: process.env.CONDUCTOR_RUN_ID });
   });
+  pi.on("session_before_compact", event => { observe(`${role}-${process.pid}-compact-${Date.now()}`, { reason: event.reason, runId: process.env.CONDUCTOR_RUN_ID }); });
   if (role === "lead") pi.on("tool_execution_end", event => {
     observe(`lead-tool-${event.toolCallId}`, { toolName: event.toolName, isError: event.isError, result: event.result });
   });

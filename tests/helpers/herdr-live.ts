@@ -91,8 +91,8 @@ export class HerdrLiveFixture {
     if (binding.socketPath !== this.id.socketPath || typeof binding.paneId !== "string") throw new Error("H11 refuses to adopt a pane from another socket");
     this.panes.add(binding.paneId);
   }
-  async createWorkspace(cwd: string, label: string): Promise<string> {
-    const created = (await this.cli(["workspace", "create", "--cwd", cwd, "--label", label, "--no-focus"])).result;
+  async createWorkspace(cwd: string, label: string, env: Record<string, string> = {}): Promise<string> {
+    const created = (await this.cli(["workspace", "create", "--cwd", cwd, "--label", label, ...Object.entries(env).flatMap(([k, v]) => ["--env", `${k}=${v}`]), "--no-focus"])).result;
     this.panes.add(created.root_pane.pane_id);
     return created.root_pane.pane_id;
   }
@@ -199,12 +199,21 @@ export function ambientSnapshot(root: string): string {
 }
 
 export interface LiveConfig { piRoot: string; worktree: string; herdrBin: string; integration: string; netns: boolean }
+/** The package's declared CLI, exactly what an installed `pi` executes. */
+export function piEntry(piRoot: string): string {
+  const bin = JSON.parse(readFileSync(join(piRoot, "package.json"), "utf8")).bin;
+  return realpathSync(join(piRoot, typeof bin === "string" ? bin : bin.pi));
+}
+export function writePiWrapper(binDir: string, piRoot: string): void {
+  mkdirSync(binDir, { recursive: true, mode: 0o700 });
+  writeFileSync(join(binDir, "pi"), `#!/bin/sh\nexec ${process.execPath} ${piEntry(piRoot)} "$@"\n`); chmodSync(join(binDir, "pi"), 0o755);
+}
 /** Private settings: worktree package once, faux fixture, read-only installed herdr integration. */
 export function writeFixtureFiles(id: LiveIdentity, cfg: LiveConfig): void {
   const r = id.root;
-  for (const d of ["home/.pi/agent/extensions/conductor", "c/herdr", "d", "s", "k", "r", "tmp", "bin", "work", "script", "obs"]) mkdirSync(join(r, d), { recursive: true, mode: 0o700 });
+  for (const d of ["home/.pi/agent/extensions/conductor", "c/herdr", "d", "s", "k", "r", "tmp", "bin", "work", "script", "obs", "pads"]) mkdirSync(join(r, d), { recursive: true, mode: 0o700 });
   writeFileSync(join(r, "c/herdr/config.toml"), 'onboarding = false\n[terminal]\ndefault_shell = "/bin/sh"\nshell_mode = "non_login"\n[update]\nversion_check = false\nmanifest_check = false\n');
-  writeFileSync(join(r, "bin/pi"), `#!/bin/sh\nexec ${process.execPath} ${join(cfg.piRoot, "dist", "cli.js")} "$@"\n`); chmodSync(join(r, "bin/pi"), 0o755);
+  writePiWrapper(join(r, "bin"), cfg.piRoot);
   symlinkSync(process.execPath, join(r, "bin/node"));
   symlinkSync(cfg.herdrBin, join(r, "bin/herdr"));
   writeFileSync(join(r, "home/.gitconfig"), "[user]\n\tname = H11 Fixture\n\temail = h11@example.invalid\n[init]\n\tdefaultBranch = main\n");
@@ -215,6 +224,7 @@ export function writeFixtureFiles(id: LiveIdentity, cfg: LiveConfig): void {
   }, null, 2));
   writeFileSync(join(r, "home/.pi/agent/extensions/conductor/config.json"), JSON.stringify({
     contextRetirement: true, chains: { builder: { then: "" }, simplifier: { then: "" } }, personaOverrides: { analyst: { model: "faux/h11-small" } },
+    efforts: { verify: "sh verify.sh", verifyTimeoutSeconds: 60, verifyRetries: 0, generated: { paths: ["gen/**"], command: "sh gen.sh" }, maxParallel: 1 },
   }, null, 2));
 }
 
