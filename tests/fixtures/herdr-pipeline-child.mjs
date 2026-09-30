@@ -8,7 +8,6 @@ while (!existsSync(manifest)) await delay(10);
 const { runDir, mode } = JSON.parse(readFileSync(manifest, "utf8"));
 if (mode === "stubborn") process.on("SIGTERM", () => {});
 const b = JSON.parse(readFileSync(join(runDir, "record.json"), "utf8")).herdr;
-const request = readInbox(runDir, b.launchNonce)[0].request;
 const hello = { v: 1, bridgeProtocol: 1, runId: b.runId, launchNonce: b.launchNonce,
   sessionId: b.sessionId, sessionFile: b.sessionFile, paneId: b.paneId, pid: process.pid,
   pidStartTime: Number(readFileSync("/proc/self/stat", "utf8").split(") ")[1].split(" ")[19]),
@@ -19,9 +18,11 @@ const path = join(runDir, "transcript.jsonl");
 const emit = event => appendFileSync(path, JSON.stringify({ ...event, _c: { n: b.launchNonce } }) + "\n");
 emit({ type: "conductor_child", event: "launch", ...hello });
 emit({ type: "agent_settled" }); // preaccept human turn
+writeFileSync(`${manifest}.ready`, "ready"); // idle: herdr registers the agent before any task is published
+let request;
+while (!(request = readInbox(runDir, b.launchNonce)[0]?.request)) await delay(10);
 writeInboxAck(runDir, request);
 emit({ type: "agent_start", initialRequestId: request.requestId });
-writeFileSync(`${manifest}.ready`, "ready");
 const text = "Full Unicode final evidence 漢🙂\u2028\u2029 and verified outcome.";
 const bytes = Buffer.from(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text }], stopReason: "stop", usage: { input: 19, output: 23, cost: { total: 0.02 } } }, _c: { n: b.launchNonce } }) + "\n");
 const split = bytes.indexOf(Buffer.from("🙂")) + 2;

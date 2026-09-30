@@ -71,15 +71,36 @@ function publish(file: string, value: unknown): void {
   renameSync(tmp, file); // Retain tmp evidence on failure; never infer non-delivery from a thrown write.
 }
 const name = (r: InboxRequest) => `${String(r.sequence).padStart(6, "0")}-${r.requestId}`;
+const PREPARED = ".prepared.json";
 
-/** Parent edge: text is already A5-prepared. Never expand or reread its evidence here. */
-export function writeInboxRequest(runDir: string, request: InboxRequest): void {
+function newRequest(runDir: string, request: InboxRequest): string {
   if (!validRequest(request) || Buffer.byteLength(JSON.stringify(request)) >= MAX_RECORD_BYTES) throw new Error("invalid inbox request");
   const dir = directory(runDir, request.launchNonce, true);
   if (readInbox(runDir, request.launchNonce).some(e => e.request.requestId === request.requestId || e.request.sequence === request.sequence)) throw new Error("duplicate inbox request identity");
-  absent(join(dir, `${name(request)}.sending.json`));
+  for (const suffix of [".sending.json", PREPARED]) absent(join(dir, `${name(request)}${suffix}`));
   absent(join(dir, `${request.requestId}.ack.json`));
-  publish(join(dir, `${name(request)}.json`), request);
+  return dir;
+}
+/** Parent edge: text is already A5-prepared. Never expand or reread its evidence here. */
+export function writeInboxRequest(runDir: string, request: InboxRequest): void {
+  publish(join(newRequest(runDir, request), `${name(request)}.json`), request);
+}
+/** Durable launch intent the pump cannot see: herdr only registers an idle child. */
+export function prepareInboxRequest(runDir: string, request: InboxRequest): void {
+  publish(join(newRequest(runDir, request), `${name(request)}${PREPARED}`), request);
+}
+/** Make the exact prepared request visible to the child's pump. Never retried after a throw. */
+export function publishPreparedInboxRequest(runDir: string, request: InboxRequest): void {
+  if (!validRequest(request)) throw new Error("invalid inbox request");
+  const dir = directory(runDir, request.launchNonce), source = join(dir, `${name(request)}${PREPARED}`);
+  if (JSON.stringify(read(source)) !== JSON.stringify(request)) throw new Error("prepared inbox request changed before publication");
+  for (const suffix of [".json", ".sending.json"]) absent(join(dir, `${name(request)}${suffix}`));
+  renameSync(source, join(dir, `${name(request)}.json`));
+}
+/** A prepared request never published means the child never received its task. */
+export function hasPreparedInboxRequest(runDir: string, nonce: string): boolean {
+  try { return readdirSync(directory(runDir, nonce)).some(file => file.endsWith(PREPARED)); }
+  catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return false; throw e; }
 }
 
 export function readInbox(runDir: string, nonce: string): InboxEntry[] {

@@ -15,6 +15,8 @@ export interface HerdrBinding extends HerdrInvocation {
   paneId: string;
   terminalId: string;
   createdTab: boolean;
+  /** Physical herdr agent name for this launch only; herdr retains names after exit. */
+  agentName?: string;
   childPid?: number;
   childStartTime?: number;
 }
@@ -56,7 +58,7 @@ type Refusal = {ok: false; state: "unknown" | "gone"; reason: string};
 const unknown = (reason: string): Refusal => ({ok: false, state: "unknown", reason});
 
 export function sameHerdrBinding(a: HerdrBinding | undefined, b: HerdrBinding | undefined): boolean {
-  return !!a && !!b && (["runId", "launchNonce", "sessionId", "sessionFile", "socketPath", "workspaceId", "tabId", "paneId", "terminalId", "childPid", "childStartTime", "ownerGeneration"] as const).every(key => a[key] === b[key]);
+  return !!a && !!b && (["runId", "launchNonce", "sessionId", "sessionFile", "socketPath", "workspaceId", "tabId", "paneId", "terminalId", "agentName", "childPid", "childStartTime", "ownerGeneration"] as const).every(key => a[key] === b[key]);
 }
 
 export function provePaneOurs(ev: PaneEvidence): {ok: true} | Refusal {

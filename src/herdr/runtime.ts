@@ -17,7 +17,7 @@ import { boundStallText, redactPaneEvidence } from "../stall-evidence.ts";
 import { createHerdrCli, HerdrCliError, isRecord, type HerdrCli } from "./cli.ts";
 import { sameHerdrBinding, proveChildProcess, provePaneOurs, type HerdrBinding, type HerdrInvocation, type LaunchHello } from "./identity.ts";
 import { buildHerdrEnv, closeEmptyPane, createRunTab } from "./placement.ts";
-import { readControlRecord, readInboxAck, writeInboxRequest, type InboxRequest } from "./inbox.ts";
+import { hasPreparedInboxRequest, prepareInboxRequest, publishPreparedInboxRequest, readControlRecord, readInboxAck, writeInboxRequest, type InboxRequest } from "./inbox.ts";
 
 export const HERDR_LAUNCH_BUDGET = { start: 65000, hello: 15000, ack: 30000, agentStart: 30000, busy: 2000, diagnostic: 2000 } as const;
 export function projectTrustArgs(cwd: string, agentDir = getAgentDir()): string[] {
@@ -39,6 +39,11 @@ interface Options {
   signal?: (pid: number, signal: NodeJS.Signals) => void;
 }
 const failure = (message: string) => new Error(`herdr: ${message}`);
+/** Fresh physical name per launch: herdr keeps an exited agent's name on its terminal. */
+export function herdrAgentName(runId: string, launchNonce: string): string {
+  const base = /^[a-z][a-z0-9_-]{0,22}$/.test(runId) ? runId : `c${createHash("sha256").update(runId).digest("hex").slice(0, 12)}`;
+  return `${base}-${createHash("sha256").update(launchNonce).digest("hex").slice(0, 8)}`;
+}
 
 /** Gone is independently provable without a server; cached pane metadata never proves a live signal target. */
 export function herdrChildAbsent(run: Pick<Run, "id" | "herdr" | "recordPath">): boolean {
@@ -107,6 +112,7 @@ export class HerdrRuntime implements RunRuntime {
     const provenPane = state.ok ? pane : recordedPane;
     try {
       const requests = readInbox(dir, nonce).filter(entry => entry.request.kind === "initial" || entry.request.kind === "reply");
+      if (!requests.length && hasPreparedInboxRequest(dir, nonce)) throw failure("reattach: initial request prepared but never published; the child never received its task; preserved, not replayed");
       if (requests.length !== 1) throw failure("reattach initial request missing/ambiguous");
       const request = requests[0].request;
       if (!readInboxAck(dir, request)?.accepted) throw failure("reattach initial input acceptance unknown");
@@ -168,7 +174,7 @@ export class HerdrRuntime implements RunRuntime {
     const owned = () => !detached && !!ownership && run.herdrOwnership === ownership && ownsHerdrRun(run);
     const previous = run.herdr;
     run.herdrPrompts = undefined;
-    const alias = /^[a-z][a-z0-9_-]{0,31}$/.test(run.id) ? run.id : `c${createHash("sha256").update(run.id).digest("hex").slice(0, 16)}`;
+    const alias = herdrAgentName(run.id, nonce);
     let binding: HerdrBinding | undefined, hello: LaunchHello | undefined, provenPane: unknown;
     let fresh = false, accepted = false, initialAccepted = false, startAttempted = false, stderr = "", stopWork: Promise<void> | undefined;
     let tail: HerdrTail | undefined, monitor: HerdrMonitor | undefined;
@@ -238,9 +244,9 @@ export class HerdrRuntime implements RunRuntime {
       } catch { diagnostic("pane/worktree preserved: child stop unconfirmed"); }
     })();
     const readStallEvidence = async () => {
-      if (!owned() || !binding || run.herdr !== binding || cleanupSignal?.aborted) return "Live pane diagnostic unavailable.";
+      if (!owned() || !binding?.agentName || run.herdr !== binding || cleanupSignal?.aborted) return "Live pane diagnostic unavailable.";
       try {
-        const text = await cli.text(["agent", "read", alias, "--source", "recent-unwrapped", "--lines", "40"],
+        const text = await cli.text(["agent", "read", binding.agentName, "--source", "recent-unwrapped", "--lines", "40"],
           { timeoutMs: HERDR_LAUNCH_BUDGET.diagnostic, maxBuffer: 4096, signal: cleanupSignal });
         return redactPaneEvidence(text.split("\n").slice(-40).join("\n"), env);
       } catch { return "Live pane diagnostic unavailable; unknown dialogs are not answered automatically."; }
@@ -296,12 +302,14 @@ export class HerdrRuntime implements RunRuntime {
       }
       if (run.herdr !== previous) throw failure("launch binding replaced; preserving resources");
       binding.ownerGeneration = ownership!.identity.generation;
+      binding.agentName = alias;
       delete binding.settlement; run.herdrDelivery = undefined;
       run.herdr = binding; run.sessionPath = sessionFile;
       check(); await writeRecord(run, check); check();
       const request: InboxRequest = { v: 1, launchNonce: nonce, requestId: randomUUID(), sequence: 1,
         kind: run.pendingAsk ? "reply" : "initial", text: initialPrompt, ...(run.pendingAsk ? { askId: run.pendingAsk.askId } : {}) };
-      writeInboxRequest(dir, request);
+      // Durable but invisible to the pump: real herdr registers only an idle child.
+      prepareInboxRequest(dir, request);
       let launchOffset = 0;
       try { launchOffset = statSync(run.transcriptPath).size; } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
       const startArgs = ["agent", "start", alias, "--kind", "pi", "--pane", binding.paneId, "--timeout", "60000", "--", ...args];
@@ -317,6 +325,7 @@ export class HerdrRuntime implements RunRuntime {
         started = await cli.json(startArgs, { timeoutMs: HERDR_LAUNCH_BUDGET.start, signal: abort.signal });
       }
       check();
+      if (!isRecord(started.agent) || started.agent.name !== alias || started.agent.pane_id !== binding.paneId) throw failure("agent start registered a different agent or pane");
       const until = async <T>(budget: number, name: string, observe: () => T | undefined): Promise<T> => {
         const deadline = now() + budget;
         for (;;) {
@@ -337,6 +346,9 @@ export class HerdrRuntime implements RunRuntime {
       provenPane = pane;
       if (hello.piVersion !== (options.piVersion ?? VERSION)) diagnostic(`Pi version mismatch: expected ${options.piVersion ?? VERSION}; child differs`);
       await writeRecord(run, check); check();
+      // Publish only to the proven, registered child; a gone child never gets the task.
+      if (!identity.ok) throw failure(`child ${identity.state} before its task was published; prepared request preserved, not replayed`);
+      publishPreparedInboxRequest(dir, request);
       let offset = launchOffset, boundary = false, nativeStart = false;
       const decoder = createLineDecoder(line => {
         let event: unknown; try { event = JSON.parse(line); } catch { return; }

@@ -74,7 +74,8 @@ test("H10 late readiness: reload waits for held CLI, then fences old launch fail
   const json = h.cli.json; let gets = 0, callbacks = 0, shutdownReturned = false;
   h.cli.json = async (...args) => {
     const result = await json(...args);
-    if (args[0][1] === "get" && ++gets === 2) { ready(); await held; }
+    // Third get = final readiness observation, after the task was published and accepted.
+    if (args[0][1] === "get" && ++gets === 3) { ready(); await held; }
     return result;
   };
   void createRunPipeline(h.run, [], { ...h.opts, onComplete: () => callbacks++ });
@@ -87,7 +88,7 @@ test("H10 late readiness: reload waits for held CLI, then fences old launch fail
   h.emit({ type: "agent_settled" }); h.exit();
   const run = buildOrphanRun(JSON.parse(saved), "running"), registry = new RunRegistry(); registry.register(run);
   await createRunPipeline(run, [], { ...h.opts, registry, reattach: true, onComplete: () => callbacks++ });
-  assert.equal(callbacks, 1); assert.equal(run.status, "completed");
+  assert.equal(callbacks, 1); assert.equal(run.status, "completed", run.errorMessage);
   await handleSessionShutdown({ reason: "reload" }, { runs: [run], resetSanitizer() {} });
 });
 

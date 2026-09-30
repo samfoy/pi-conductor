@@ -1367,13 +1367,35 @@ function publish(file, value) {
   renameSync2(tmp, file);
 }
 var name = (r) => `${String(r.sequence).padStart(6, "0")}-${r.requestId}`;
-function writeInboxRequest(runDir2, request) {
+var PREPARED = ".prepared.json";
+function newRequest(runDir2, request) {
   if (!validRequest(request) || Buffer.byteLength(JSON.stringify(request)) >= MAX_RECORD_BYTES) throw new Error("invalid inbox request");
   const dir = directory(runDir2, request.launchNonce, true);
   if (readInbox(runDir2, request.launchNonce).some((e) => e.request.requestId === request.requestId || e.request.sequence === request.sequence)) throw new Error("duplicate inbox request identity");
-  absent(join4(dir, `${name(request)}.sending.json`));
+  for (const suffix of [".sending.json", PREPARED]) absent(join4(dir, `${name(request)}${suffix}`));
   absent(join4(dir, `${request.requestId}.ack.json`));
-  publish(join4(dir, `${name(request)}.json`), request);
+  return dir;
+}
+function writeInboxRequest(runDir2, request) {
+  publish(join4(newRequest(runDir2, request), `${name(request)}.json`), request);
+}
+function prepareInboxRequest(runDir2, request) {
+  publish(join4(newRequest(runDir2, request), `${name(request)}${PREPARED}`), request);
+}
+function publishPreparedInboxRequest(runDir2, request) {
+  if (!validRequest(request)) throw new Error("invalid inbox request");
+  const dir = directory(runDir2, request.launchNonce), source = join4(dir, `${name(request)}${PREPARED}`);
+  if (JSON.stringify(read(source)) !== JSON.stringify(request)) throw new Error("prepared inbox request changed before publication");
+  for (const suffix of [".json", ".sending.json"]) absent(join4(dir, `${name(request)}${suffix}`));
+  renameSync2(source, join4(dir, `${name(request)}.json`));
+}
+function hasPreparedInboxRequest(runDir2, nonce) {
+  try {
+    return readdirSync3(directory(runDir2, nonce)).some((file) => file.endsWith(PREPARED));
+  } catch (e) {
+    if (e.code === "ENOENT") return false;
+    throw e;
+  }
 }
 function readInbox(runDir2, nonce) {
   let dir;
@@ -1666,7 +1688,7 @@ function isHerdrPane(value) {
 }
 var unknown = (reason) => ({ ok: false, state: "unknown", reason });
 function sameHerdrBinding(a, b) {
-  return !!a && !!b && ["runId", "launchNonce", "sessionId", "sessionFile", "socketPath", "workspaceId", "tabId", "paneId", "terminalId", "childPid", "childStartTime", "ownerGeneration"].every((key) => a[key] === b[key]);
+  return !!a && !!b && ["runId", "launchNonce", "sessionId", "sessionFile", "socketPath", "workspaceId", "tabId", "paneId", "terminalId", "agentName", "childPid", "childStartTime", "ownerGeneration"].every((key) => a[key] === b[key]);
 }
 function provePaneOurs(ev) {
   const { binding: b, current, pane } = ev;
@@ -6966,6 +6988,10 @@ function probeProcess(pid) {
   }
 }
 var failure = (message) => new Error(`herdr: ${message}`);
+function herdrAgentName(runId, launchNonce) {
+  const base = /^[a-z][a-z0-9_-]{0,22}$/.test(runId) ? runId : `c${createHash4("sha256").update(runId).digest("hex").slice(0, 12)}`;
+  return `${base}-${createHash4("sha256").update(launchNonce).digest("hex").slice(0, 8)}`;
+}
 function herdrChildAbsent(run) {
   const b = run.herdr;
   if (!b || b.runId !== run.id || typeof b.sessionFile !== "string" || typeof b.socketPath !== "string" || !isAbsolute5(b.socketPath) || !/^[A-Za-z0-9_-]+$/.test(b.launchNonce) || dirname14(b.sessionFile) !== join16(dirname14(run.recordPath), "session")) return false;
@@ -7059,6 +7085,7 @@ var HerdrRuntime = class {
     const provenPane = state.ok ? pane : recordedPane;
     try {
       const requests = readInbox(dir, nonce).filter((entry) => entry.request.kind === "initial" || entry.request.kind === "reply");
+      if (!requests.length && hasPreparedInboxRequest(dir, nonce)) throw failure("reattach: initial request prepared but never published; the child never received its task; preserved, not replayed");
       if (requests.length !== 1) throw failure("reattach initial request missing/ambiguous");
       const request = requests[0].request;
       if (!readInboxAck(dir, request)?.accepted) throw failure("reattach initial input acceptance unknown");
@@ -7147,7 +7174,7 @@ var HerdrRuntime = class {
     const owned = () => !detached && !!ownership && run.herdrOwnership === ownership && ownsHerdrRun(run);
     const previous = run.herdr;
     run.herdrPrompts = void 0;
-    const alias = /^[a-z][a-z0-9_-]{0,31}$/.test(run.id) ? run.id : `c${createHash4("sha256").update(run.id).digest("hex").slice(0, 16)}`;
+    const alias = herdrAgentName(run.id, nonce);
     let binding, hello, provenPane;
     let fresh = false, accepted = false, initialAccepted = false, startAttempted = false, stderr = "", stopWork;
     let tail, monitor;
@@ -7252,10 +7279,10 @@ var HerdrRuntime = class {
       }
     })();
     const readStallEvidence = async () => {
-      if (!owned() || !binding || run.herdr !== binding || cleanupSignal?.aborted) return "Live pane diagnostic unavailable.";
+      if (!owned() || !binding?.agentName || run.herdr !== binding || cleanupSignal?.aborted) return "Live pane diagnostic unavailable.";
       try {
         const text3 = await cli.text(
-          ["agent", "read", alias, "--source", "recent-unwrapped", "--lines", "40"],
+          ["agent", "read", binding.agentName, "--source", "recent-unwrapped", "--lines", "40"],
           { timeoutMs: HERDR_LAUNCH_BUDGET.diagnostic, maxBuffer: 4096, signal: cleanupSignal }
         );
         return redactPaneEvidence(text3.split("\n").slice(-40).join("\n"), env);
@@ -7330,6 +7357,7 @@ var HerdrRuntime = class {
       }
       if (run.herdr !== previous) throw failure("launch binding replaced; preserving resources");
       binding.ownerGeneration = ownership.identity.generation;
+      binding.agentName = alias;
       delete binding.settlement;
       run.herdrDelivery = void 0;
       run.herdr = binding;
@@ -7346,7 +7374,7 @@ var HerdrRuntime = class {
         text: initialPrompt,
         ...run.pendingAsk ? { askId: run.pendingAsk.askId } : {}
       };
-      writeInboxRequest(dir, request);
+      prepareInboxRequest(dir, request);
       let launchOffset = 0;
       try {
         launchOffset = statSync4(run.transcriptPath).size;
@@ -7369,6 +7397,7 @@ var HerdrRuntime = class {
         started = await cli.json(startArgs, { timeoutMs: HERDR_LAUNCH_BUDGET.start, signal: abort.signal });
       }
       check();
+      if (!isRecord(started.agent) || started.agent.name !== alias || started.agent.pane_id !== binding.paneId) throw failure("agent start registered a different agent or pane");
       const until = async (budget, name2, observe2) => {
         const deadline = now() + budget;
         for (; ; ) {
@@ -7400,6 +7429,8 @@ var HerdrRuntime = class {
       if (hello.piVersion !== (options.piVersion ?? VERSION)) diagnostic(`Pi version mismatch: expected ${options.piVersion ?? VERSION}; child differs`);
       await writeRecord(run, check);
       check();
+      if (!identity.ok) throw failure(`child ${identity.state} before its task was published; prepared request preserved, not replayed`);
+      publishPreparedInboxRequest(dir, request);
       let offset = launchOffset, boundary = false, nativeStart = false;
       const decoder2 = createLineDecoder((line) => {
         let event;

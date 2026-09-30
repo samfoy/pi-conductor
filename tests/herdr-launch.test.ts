@@ -2,11 +2,12 @@ import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, appendFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { sandboxPi, tmpDir } from "./helpers/tmp.ts";
 import { emptyUsage, type Run } from "../src/types.ts";
 import { readInbox, writeInboxAck } from "../src/herdr/inbox.ts";
+import { readProcessStartTime } from "../src/reconcile-startup.ts";
 import { HerdrCliError, type HerdrCli } from "../src/herdr/cli.ts";
 import type { RunSink } from "../src/runtime.ts";
 
@@ -22,20 +23,24 @@ async function fixture(mode = "healthy") {
   const pane = { pane_id: "pane-owned", terminal_id: "terminal-owned", workspace_id: "workspace-owned", tab_id: "tab-owned", agent: null as string | null, agent_session: null as unknown };
   const calls: { args: readonly string[]; timeoutMs?: number }[] = [], signals: unknown[] = [];
   let time = 0, gone = false, starts = 0;
-  let onSleep: (() => void) | undefined, onStart: (() => void) | undefined;
+  let onSleep: (() => void) | undefined, onStart: (() => void) | undefined, react: (() => void) | undefined;
+  const observed: { preparedText?: string; visibleAtStart?: number; aliases: string[] } = { aliases: [] };
   const cli: HerdrCli = { socketPath: join(root, "explicit-fake.socket"), async text(args, limits) { calls.push({ args, ...limits }); return "Authorization: Bearer secret-token\nhttps://user:proxy-secret@proxy.invalid\n"; }, async json(args, limits) {
     calls.push({ args, ...limits });
     if (args[0] === "tab") return { type: "tab_created", root_pane: { ...pane }, tab: { tab_id: pane.tab_id, workspace_id: pane.workspace_id, label: run.id, pane_count: 1 } };
     if (args[1] === "get") return { type: "pane_info", pane: { ...pane } };
     if (args[1] === "close") { assert.equal(gone, true, "never close before proven child death"); assert.equal(pane.agent, null); return { type: "ok" }; }
-    assert.equal(args[1], "start"); starts++; onStart?.();
+    assert.equal(args[1], "start"); starts++; onStart?.(); observed.aliases.push(args[2]);
     if (limits?.signal?.aborted) throw new HerdrCliError("cancelled");
     if (mode === "start-timeout") { time += 65000; throw new HerdrCliError("timeout"); }
     const record = JSON.parse(readFileSync(run.recordPath, "utf8")), binding = record.herdr;
     assert.equal(binding.launchNonce, run.herdr?.launchNonce);
-    const request = readInbox(dir, binding.launchNonce)[0]?.request;
-    assert.ok(request, "binding and request precede agent start");
-    assert.equal(request.text, "  Prepared evidence 漢🙂  ");
+    const inbox = join(dir, "inbox", binding.launchNonce);
+    const prepared = existsSync(inbox) ? readdirSync(inbox).filter(f => f.endsWith(".prepared.json")) : [];
+    observed.preparedText = prepared.length === 1 ? JSON.parse(readFileSync(join(inbox, prepared[0]), "utf8")).text : undefined;
+    observed.visibleAtStart = readInbox(dir, binding.launchNonce).length;
+    // Real herdr: start succeeds only for an idle child. A task visible to the pump keeps it busy.
+    if (observed.visibleAtStart) { time += 65000; throw new HerdrCliError("timeout"); }
     if (mode === "busy" && starts === 1 || mode === "always-busy") throw new HerdrCliError("remote", undefined, "agent_pane_busy");
     pane.agent = "pi"; pane.agent_session = { kind: "path", value: binding.sessionFile, agent: "pi", source: "integration" };
     const hello = { ...binding, v: 1, bridgeProtocol: mode === "protocol" ? 99 : 1, pid: 12345, pidStartTime: 77, at: 0, piVersion: "0.87.1", conductorVersion: "test" };
@@ -49,18 +54,26 @@ async function fixture(mode = "healthy") {
     if (mode !== "no-hello") writeFileSync(join(dir, "launch", `${binding.launchNonce}.json`), JSON.stringify(hello));
     const emit = (e: unknown) => appendFileSync(run.transcriptPath, JSON.stringify(e) + "\n");
     emit({ type: "conductor_child", event: "launch", ...hello, _c: { n: mode === "stale-boundary" ? "foreign" : binding.launchNonce } });
-    if (mode !== "no-ack" && mode !== "early-death") writeInboxAck(dir, request, mode === "busy-ack" ? "busy" : mode === "stale-ack" ? "stale-ask" : undefined);
-    if (mode !== "no-start" && mode !== "late-start") emit({ type: "agent_start", _c: { n: binding.launchNonce }, initialRequestId: mode === "human" ? undefined : request.requestId });
-    emit({ type: "agent_settled", _c: { n: binding.launchNonce } });
-    const agent = { ...pane };
-    if (mode === "fast-settle" || mode === "early-death") { gone = true; pane.agent = null; pane.agent_session = null; }
+    // The idle child reacts only once the parent publishes its task.
+    react = () => {
+      const request = readInbox(dir, binding.launchNonce)[0]?.request;
+      if (!request) return;
+      react = undefined;
+      if (mode !== "no-ack" && mode !== "early-death") writeInboxAck(dir, request, mode === "busy-ack" ? "busy" : mode === "stale-ack" ? "stale-ask" : undefined);
+      if (mode !== "no-start" && mode !== "late-start") emit({ type: "agent_start", _c: { n: binding.launchNonce }, initialRequestId: mode === "human" ? undefined : request.requestId });
+      emit({ type: "agent_settled", _c: { n: binding.launchNonce } });
+      if (mode === "fast-settle" || mode === "early-death") { gone = true; pane.agent = null; pane.agent_session = null; }
+      return true;
+    };
+    const agent = { ...pane, name: mode === "other-name" ? "someone-else" : args[2] };
+    if (mode === "prepublish-death") { gone = true; pane.agent = null; pane.agent_session = null; } // registered, then died unfed
     return { type: "agent_started", agent };
   } };
   const runtime = new HerdrRuntime({ cli, workspaceId: pane.workspace_id, env: { HTTPS_PROXY: "https://user:proxy-secret@proxy.invalid" },
-    trustArgs: () => [], piVersion: "0.87.1", platform: "linux", now: () => time, sleep: async ms => { time += ms; onSleep?.(); },
+    trustArgs: () => [], piVersion: "0.87.1", platform: "linux", now: () => time, sleep: async ms => { if (react?.()) return; time += ms; onSleep?.(); },
     probe: pid => ({ pid, state: gone ? "gone" : "alive", startTime: 77 }), signal: (pid, signal) => { signals.push([pid, signal]); if (mode === "stubborn" && signal === "SIGTERM") return; gone = true; pane.agent = null; pane.agent_session = null; } });
   const launch = () => runtime.launch(run, [], root, sink, "  Prepared evidence 漢🙂  ", { kind: "fresh", sessionDir: join(dir, "session"), systemPrompt: "Private system prompt", model: "provider/model", thinking: "high", skillPaths: ["/private/skills"], tools: ["read"], excludeTools: ["write"] });
-  return { run, runtime, launch, calls, signals, pane, now: () => time, onStart: (fn: () => void) => { onStart = fn; }, onSleep: (fn: () => void) => { onSleep = fn; } };
+  return { run, dir, runtime, launch, calls, signals, pane, observed, now: () => time, onStart: (fn: () => void) => { onStart = fn; }, onSleep: (fn: () => void) => { onSleep = fn; } };
 }
 
 test("H6 bounded launch proves ack and subsequent native start without a CLI proc", async () => {
@@ -221,4 +234,62 @@ test("H6 effective child cwd and spawning config cwd remain distinct", async () 
   assert.ok(args.includes(`CONDUCTOR_CONFIG_CWD=${configCwd}`));
   assert.equal(JSON.parse(readFileSync(h.run.sessionPath!, "utf8").split("\n")[0]).cwd, effectiveCwd);
   await transport.stop();
+});
+
+test("H11 the prepared task is durable before agent start but published only to the registered idle child", async () => {
+  const h = await fixture(), transport = h.launch(); await transport.ready;
+  assert.equal(h.observed.preparedText, "  Prepared evidence 漢🙂  ", "exact prepared intent is durable before start");
+  assert.equal(h.observed.visibleAtStart, 0, "the pump could not see the task while herdr waited for idle");
+  const entries = readInbox(h.dir, h.run.herdr!.launchNonce);
+  assert.equal(entries.length, 1); assert.equal(entries[0].request.text, "  Prepared evidence 漢🙂  ");
+  assert.deepEqual(readdirSync(join(h.dir, "inbox", h.run.herdr!.launchNonce)).filter(f => f.endsWith(".prepared.json")), []);
+  await transport.stop();
+});
+for (const mode of ["no-hello", "foreign", "protocol", "pid-start", "other-name", "prepublish-death", "always-busy", "start-timeout"]) test(`H11 ${mode} before publication preserves the prepared task unpublished`, async () => {
+  const h = await fixture(mode); await assert.rejects(h.launch().ready, /herdr:/);
+  const nonce = h.run.herdr!.launchNonce;
+  assert.equal(readInbox(h.dir, nonce).length, 0, "no task reached the pump");
+  assert.equal(readdirSync(join(h.dir, "inbox", nonce)).filter(f => f.endsWith(".prepared.json")).length, 1, "durable intent kept for diagnosis");
+  assert.equal(h.calls.filter(c => c.args[1] === "start").length, mode === "always-busy" ? 2 : 1, "no blind relaunch");
+  if (mode === "prepublish-death") assert.equal(h.calls.filter(c => c.args[1] === "close").length, 1, "proven-dead fresh pane is still rolled back");
+});
+test("H11 a pending owner question survives failure between registration and publication", async () => {
+  const h = await fixture("no-hello");
+  h.run.pendingAsk = { askId: "original", question: "Choose?", evidence: "" };
+  h.run.sessionPath = join(h.dir, "session", "original.jsonl");
+  const { seedSessionFile } = await import("../src/session-seed.ts"); seedSessionFile(h.run.sessionPath, [], h.run.cwd);
+  const transport = h.runtime.launch(h.run, [], h.run.cwd, sink, "answer text", { kind: "resume", sessionPath: h.run.sessionPath, systemPrompt: "p" });
+  await assert.rejects(transport.ready, /herdr:/);
+  assert.equal(h.run.pendingAsk?.askId, "original");
+  const nonce = h.run.herdr!.launchNonce, file = readdirSync(join(h.dir, "inbox", nonce)).find(f => f.endsWith(".prepared.json"))!;
+  const prepared = JSON.parse(readFileSync(join(h.dir, "inbox", nonce, file), "utf8"));
+  assert.equal(prepared.kind, "reply"); assert.equal(prepared.askId, "original");
+});
+test("H11 each launch gets a fresh bounded physical alias persisted in its binding; old aliases never authorize", async () => {
+  const { herdrAgentName } = await import("../src/herdr/runtime.ts");
+  const h = await fixture();
+  h.run.herdr = { runId: h.run.id, launchNonce: "previous", sessionId: "prior-session", sessionFile: join(h.dir, "session", "prior.jsonl"), agentName: herdrAgentName(h.run.id, "previous"),
+    socketPath: join(h.run.cwd, "explicit-fake.socket"), paneId: h.pane.pane_id, terminalId: h.pane.terminal_id, tabId: h.pane.tab_id, workspaceId: h.pane.workspace_id, createdTab: true };
+  const transport = h.launch(); await transport.ready;
+  const [alias] = h.observed.aliases;
+  assert.match(alias, /^[a-z][a-z0-9_-]{0,31}$/); assert.equal(alias, herdrAgentName(h.run.id, h.run.herdr!.launchNonce));
+  assert.notEqual(alias, herdrAgentName(h.run.id, "previous"), "same-pane relaunch never reuses a retained name");
+  assert.equal(h.run.herdr!.agentName, alias); assert.equal(JSON.parse(readFileSync(h.run.recordPath, "utf8")).herdr.agentName, alias);
+  assert.equal(h.run.herdr!.paneId, h.pane.pane_id, "logical run and pane stay; only the physical alias changes");
+  await transport.readStallEvidence!();
+  assert.deepEqual(h.calls.filter(c => c.args[1] === "read").map(c => c.args[2]), [alias]);
+  const ids = new Set(Array.from({ length: 200 }, (_, i) => herdrAgentName("x".repeat(40), `nonce-${i}`)));
+  assert.equal(ids.size, 200); for (const id of ids) assert.match(id, /^[a-z][a-z0-9_-]{0,31}$/);
+  await transport.stop();
+});
+test("H11 crash between registration and publication is diagnosable on reattach, never replayed", async () => {
+  const h = await fixture("no-hello"); await assert.rejects(h.launch().ready, /herdr:/);
+  const hello = { v: 1, bridgeProtocol: 1, ...h.run.herdr!, pid: process.pid, pidStartTime: readProcessStartTime(process.pid), at: 0, piVersion: "0.87.1", conductorVersion: "test" };
+  writeFileSync(join(h.dir, "launch", `${h.run.herdr!.launchNonce}.json`), JSON.stringify(hello));
+  h.run.herdr!.childPid = hello.pid; h.run.herdr!.childStartTime = hello.pidStartTime;
+  h.pane.agent = "pi"; h.pane.agent_session = { kind: "path", value: h.run.herdr!.sessionFile, agent: "pi", source: "integration" };
+  const { HerdrRuntime } = await import("../src/herdr/runtime.ts");
+  const runtime = new HerdrRuntime({ cli: h.runtime["options"]!.cli, env: {}, platform: "linux" });
+  await assert.rejects(runtime.inspect(h.run), /prepared but never published; the child never received its task; preserved, not replayed/);
+  assert.equal(readInbox(h.dir, h.run.herdr!.launchNonce).length, 0);
 });

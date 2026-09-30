@@ -43,13 +43,13 @@ export async function nativePipeline(root: string, ask: boolean, t: TestContext)
     await session.bindExtensions({ mode: "tui", onError: (e: unknown) => assert.fail(JSON.stringify(e)), shutdownHandler: () => { shutdowns++; gone = true; pane.agent = null; pane.agent_session = null; } });
     assert.equal(JSON.parse(readFileSync(join(dir, "launch", `${b.launchNonce}.json`), "utf8")).piVersion, "0.87.1");
     pane.agent = "pi"; pane.agent_session = { kind: "path", value: b.sessionFile, agent: "pi", source: "integration" };
-    const agent = { ...pane };
     faux.setResponses([ask ? fauxAssistantMessage([fauxToolCall("ask_owner", { question: "Native choice?", evidence: "Native evidence" }, { id: "native-ask" })], { stopReason: "toolUse" }) : fauxAssistantMessage("Native final evidence 漢🙂\u2028\u2029 with full verification.")]);
-    const settled = new Promise<void>(resolve => { const off = session.subscribe((e: any) => { if (e.type === "agent_settled") { off(); resolve(); } }); });
-    t.mock.timers.tick(250); await settled;
-    return { type: "agent_started", agent };
+    // Registered idle: the task is published after this returns, then the pump ticks via sleep.
+    assert.equal(session.isStreaming, false);
+    return { type: "agent_started", agent: { ...pane, name: args[2] } };
   } };
   const runtime = new HerdrRuntime({ cli, workspaceId: "workspace", env: {}, trustArgs: () => [], piVersion: VERSION,
+    sleep: async () => { t.mock.timers.tick(250); await new Promise(resolve => setImmediate(resolve)); },
     probe: pid => ({ pid, state: gone ? "gone" : "alive", startTime: readProcessStartTime(pid) }), signal: () => assert.fail("native fixture must settle without signals") });
   const prior = process.env.CONDUCTOR_SUBAGENT; process.env.CONDUCTOR_SUBAGENT = "1";
   let completions = 0;

@@ -16,7 +16,7 @@ export function herdrFixture(mode = "healthy") {
   const pane = { pane_id: "owned", terminal_id: "term", workspace_id: "workspace", tab_id: "tab", agent: null as string | null, agent_session: null as unknown };
   let time = 0, gone = false, unknown = false;
   const calls: string[] = [], signals: string[] = [];
-  let onSleep = () => {};
+  let onSleep = () => {}, react: (() => boolean) | undefined;
   const emit = (event: object, nonce = run.herdr!.launchNonce) => appendFileSync(run.transcriptPath, JSON.stringify({ ...event, _c: { n: nonce } }) + "\n");
   const exit = () => { gone = true; pane.agent = null; pane.agent_session = null; };
   const cli: HerdrCli = { socketPath: join(cwd, "fake.socket"), async text() { return "fake"; }, async json(args) {
@@ -27,12 +27,18 @@ export function herdrFixture(mode = "healthy") {
     assert.equal(args[1], "start");
     gone = false;
     const binding = JSON.parse(readFileSync(run.recordPath, "utf8")).herdr;
-    const request = readInbox(dir, binding.launchNonce)[0].request;
+    // Real herdr registers only an idle child: no task may be visible to the pump yet.
+    assert.equal(readInbox(dir, binding.launchNonce).length, 0, "task published before herdr registered an idle child");
     pane.agent = "pi"; pane.agent_session = { kind: "path", value: binding.sessionFile, agent: "pi", source: "integration" };
     const hello = { ...binding, v: 1, bridgeProtocol: 1, pid: 12345, pidStartTime: 77, at: 0, piVersion: "0.87.1", conductorVersion: "test" };
     mkdirSync(join(dir, "launch"), { recursive: true }); writeFileSync(join(dir, "launch", `${binding.launchNonce}.json`), JSON.stringify(hello));
     emit({ type: "conductor_child", event: "launch", ...hello });
     emit({ type: "agent_settled" }); // unaccepted human turn cannot complete the assignment
+    const agent = { ...pane, name: args[2] };
+    react = () => {
+    const request = readInbox(dir, binding.launchNonce)[0]?.request;
+    if (!request) return false;
+    react = undefined;
     if (mode !== "preaccept-death") {
       if (!["no-start", "busy-ack", "stale-ack", "no-ack"].includes(mode)) emit({ type: "agent_start", initialRequestId: request.requestId });
       if (mode !== "accepted-no-output") emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Final verified evidence 漢🙂 with sufficient substance." }], stopReason: "stop", usage: { input: 12, output: 7, cost: { total: 0.01 } } } });
@@ -46,12 +52,14 @@ export function herdrFixture(mode = "healthy") {
       if (mode === "partial") appendFileSync(run.transcriptPath, JSON.stringify({ type: "agent_settled", _c: { n: binding.launchNonce } }));
       if (mode !== "no-ack") writeInboxAck(dir, request, mode === "busy-ack" ? "busy" : mode === "stale-ack" ? "stale-ask" : undefined); // deliberately after fast settled/start
     }
-    const agent = { ...pane };
     if (["healthy", "crash", "partial", "preaccept-death", "accepted-no-output"].includes(mode)) exit();
+    return true;
+    };
     return { type: "agent_started", agent };
   } };
   const runtime = new HerdrRuntime({ cli, workspaceId: "workspace", env: {}, trustArgs: () => [], piVersion: "0.87.1", platform: "linux", now: () => time,
-    sleep: async ms => { time += ms; onSleep(); }, probe: pid => ({ pid, state: unknown ? "unknown" : gone ? "gone" : "alive", startTime: 77 }),
+    // The idle child reacts once its task is published.
+    sleep: async ms => { if (react?.()) return; time += ms; onSleep(); }, probe: pid => ({ pid, state: unknown ? "unknown" : gone ? "gone" : "alive", startTime: 77 }),
     signal: (_pid, signal) => { signals.push(signal); if (mode !== "stubborn") exit(); } });
   return { run, registry, runtime, cli, pane, calls, signals, emit, exit, setMode: (value: string) => { mode = value; }, advance: (ms: number) => { time += ms; }, gone: () => gone, unknown: () => { unknown = true; }, onSleep: (fn: () => void) => { onSleep = fn; },
     opts: { registry, runtime, cwd, steerable: false, timeoutMs: 4000, initialPrompt: "probe", core: { kind: "fresh" as const, sessionDir: join(dir, "session"), systemPrompt: "probe" } } };

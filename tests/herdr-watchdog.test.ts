@@ -24,7 +24,7 @@ test("H9 dialog message is a human-wait card, with explicit nonwaking production
 test("H9 live evidence uses fixed bounded argv and strongly redacts secrets without splitting Unicode", async () => {
   const h = await fixture(); let reads = 0;
   h.cli.text = async (args, limits) => {
-    reads++; assert.deepEqual(args, ["agent", "read", h.run.id, "--source", "recent-unwrapped", "--lines", "40"]);
+    reads++; assert.deepEqual(args, ["agent", "read", h.run.herdr!.agentName, "--source", "recent-unwrapped", "--lines", "40"], "the current launch's physical alias");
     assert.equal(limits?.timeoutMs, 2000); assert.equal(limits?.maxBuffer, 4096);
     return "Bearer hide-me\nhttps://user:password@host/\n{\"api_key\":\"hidden\"}\n" + "漢🙂".repeat(2000);
   };

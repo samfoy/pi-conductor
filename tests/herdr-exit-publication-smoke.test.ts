@@ -32,11 +32,8 @@ for (const [outcome, previous] of [["unknown", false], ["unknown", true], ["time
     writeFileSync(statePath, JSON.stringify({ calls: [], childPid: child.pid, manifest, mode: outcome === "exited" ? "healthy" : "held", pane: { pane_id: "owned", terminal_id: "terminal", tab_id: "tab", workspace_id: "workspace", agent: null, agent_session: null } }));
     const env = { ...gitTestEnv(), HERDR_ENV: "1", HERDR_SOCKET_PATH: `${statePath}.socket`, HERDR_PANE_ID: "parent", HERDR_WORKSPACE_ID: "workspace", FAKE_HERDR_STATE: statePath, CONDUCTOR_HERDR_BIN: new URL("fixtures/fake-herdr.mjs", import.meta.url).pathname };
     const cli = createHerdrCli({ env, socketPath: env.HERDR_SOCKET_PATH });
-    const runtime = new HerdrRuntime({ env, workspaceId: "workspace", trustArgs: () => [], cli: { ...cli, async json(args, limits) {
-      const result = await cli.json(args, limits);
-      if (outcome === "exited" && args[0] === "agent" && args[1] === "start") await closed;
-      return result;
-    } } });
+    // "exited": the healthy child settles and exits on its own once its published task is accepted.
+    const runtime = new HerdrRuntime({ env, workspaceId: "workspace", trustArgs: () => [], cli });
     git(root, "init", "-b", "main"); git(root, "config", "user.name", "Fixture"); git(root, "config", "user.email", "fixture@example.test");
     mkdirSync(join(root, ".githooks")); writeFileSync(join(root, ".githooks", "pre-commit"), `#!/bin/sh\nprintf 'policy\\n' >> '${dir}/policy.log'\n`, { mode: 0o755 }); git(root, "config", "core.hooksPath", ".githooks");
     writeFileSync(join(root, ".gitignore"), ".worktrees/\n"); writeFileSync(join(root, "base"), "base"); git(root, "add", ".gitignore", "base", ".githooks"); git(root, "commit", "-m", "base");

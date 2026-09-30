@@ -47,6 +47,18 @@ else if (args[0] === "tab" && args[1] === "create") {
   output({type: "pane_info", pane: state.getPane ?? state.pane});
 }
 else if (args[0] === "agent" && args[1] === "start") {
+  // Real herdr 0.9.1: names stay on their terminal after the agent exits, and start
+  // succeeds only once the agent is idle (a task already visible keeps it busy).
+  const { readdirSync } = await import("node:fs");
+  const { dirname, join } = await import("node:path");
+  const fail = (code, message) => { console.log(JSON.stringify({ id: "cli:agent:start", error: { code, message } })); save(); process.exit(1); };
+  if ((state.agentNames ??= []).includes(args[2])) fail("agent_name_taken", `agent name ${args[2]} is already used`);
+  state.agentNames.push(args[2]);
+  const busy = () => {
+    const session = args[args.indexOf("--session") + 1], nonce = args[args.indexOf("--conductor-launch") + 1];
+    try { return readdirSync(join(dirname(dirname(session)), "inbox", nonce)).some(f => /^\d{6}-[^.]+(\.sending)?\.json$/.test(f)); } catch { return false; }
+  };
+  if (busy()) fail("timeout", "timed out waiting for agent startup");
   if (state.childPid) {
     const sessionFile = args[args.indexOf("--session") + 1];
     state.sessionFile = sessionFile;
@@ -60,6 +72,7 @@ else if (args[0] === "agent" && args[1] === "start") {
       await delay(10);
     }
   }
+  if (busy()) fail("timeout", "timed out waiting for agent startup");
   state.pane.agent = "pi";
   state.pane.agent_session = {kind: "path", value: state.sessionFile, source: "integration", agent: "pi"};
   save(); output({type: "agent_started", agent: {...state.pane, name: args[2], interactive_ready: true}, argv: args.slice(args.indexOf("--") + 1)});
