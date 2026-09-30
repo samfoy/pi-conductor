@@ -46,6 +46,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { unsupportedRuntimeReason } from "./runtime.ts";
+import { runScopeError } from "./personas.ts";
 import type { Run, RunRecord, RunStatus } from "./types.ts";
 import { TERMINAL_STATUSES, emptyUsage } from "./types.ts";
 
@@ -83,6 +84,7 @@ export type ClassifyResult =
   | "restore-integrating"
   | "restore-blocked"
   | "skip-unsupported-runtime"
+  | "skip-malformed-scope"
   | "skip-terminal"
   | "skip-foreign";
 
@@ -141,6 +143,8 @@ export function classifyRecord(
   selfSessionId: string | undefined = undefined,
   herdrProbe: "alive" | "settled" | "gone" | "unknown" | "other-socket" = "unknown",
 ): ClassifyResult {
+  // Like an unsupported runtime: preserve the record untouched rather than adopt a guessed scope.
+  if (runScopeError(record)) return "skip-malformed-scope";
   if (record.runtime === "herdr") {
     // A user/conductor stop is final; never resurrect it as running, even if the child lives.
     if (isRequestedTermination(record.status)) return "skip-terminal";
@@ -516,7 +520,7 @@ export async function reconcileOrphansAtStartup(
       }
 
       if (record.runtime === "herdr" && deps.admit && !deps.admit()) continue;
-      const herdrProbe = record.runtime === "herdr" && !isRequestedTermination(record.status) ? await deps.herdrProbe?.(record) : undefined;
+      const herdrProbe = record.runtime === "herdr" && !isRequestedTermination(record.status) && !runScopeError(record) ? await deps.herdrProbe?.(record) : undefined;
       if (record.runtime === "herdr" && deps.admit && !deps.admit()) continue;
       const verdict = classifyRecord(
         record,
@@ -538,6 +542,9 @@ export async function reconcileOrphansAtStartup(
           break;
         case "skip-unsupported-runtime":
           result.errors.push({ id: record.id, message: unsupportedRuntimeReason(record.runtime)! });
+          break;
+        case "skip-malformed-scope":
+          result.errors.push({ id: record.id, message: runScopeError(record)! });
           break;
         case "restore-effort":
           if (!dryRun) {
@@ -736,6 +743,9 @@ export function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
     // loses its exclusions (buildResumePiArgs reads these).
     tools: record.tools,
     excludeTools: record.excludeTools,
+    // Verbatim, so a malformed saved scope still refuses relaunch after roundtrip.
+    depth: record.depth,
+    delegateAllow: record.delegateAllow,
     // resolveSendStrategy picks rpc vs spawn-resume from these.
     steerable: record.steerable,
     streamingMode: record.streamingMode,

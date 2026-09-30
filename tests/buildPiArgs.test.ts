@@ -69,8 +69,8 @@ test("buildPiArgs(fresh, steerable=false): emits today's argv EXACTLY (regressio
     steerable: false,
   });
   // Tool-policy slice: every argv now carries --exclude-tools with the
-  // conductor's own LLM tools and the foreign spawn tools (see
-  // tests/tool-policy.test.ts).
+  // conductor's own LLM tools, the foreign spawn tools and, for a
+  // non-delegating child, `delegate` (see tests/tool-policy.test.ts).
   assert.deepEqual(args, [
     "--mode",
     "json",
@@ -78,7 +78,7 @@ test("buildPiArgs(fresh, steerable=false): emits today's argv EXACTLY (regressio
     "--session-dir",
     "/tmp/sess",
     "--exclude-tools",
-    [...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS].join(","),
+    [...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS, "delegate"].join(","),
     "--append-system-prompt",
     "SYS",
     "PROMPT",
@@ -115,7 +115,7 @@ test("buildPiArgs(resume, steerable=false): emits today's resume argv EXACTLY (r
     "--session",
     "/tmp/sess/abc.jsonl",
     "--exclude-tools",
-    [...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS].join(","),
+    [...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS, "delegate"].join(","),
     "another question",
   ]);
 });

@@ -57,6 +57,33 @@ export const CONDUCTOR_LLM_TOOL_NAMES: readonly string[] = Object.values(CONDUCT
  */
 export const FOREIGN_SPAWN_TOOLS: readonly string[] = ["subagent", "agent"];
 
+/** 1: spawned by the lead. 2: a read-only leaf a depth-1 delegator may own (not spawned yet). */
+export type ChildDepth = 1 | 2;
+
+/** A run's frozen tool scope. Only depth 1 with a non-empty allowlist is a delegator. */
+export interface ChildToolScope {
+  readonly depth: ChildDepth;
+  readonly delegateAllow: readonly string[];
+}
+
+/** What a run without persisted scope fields gets: every child before delegation existed. */
+export const LEGACY_CHILD_SCOPE: ChildToolScope = { depth: 1, delegateAllow: [] };
+
+export function isDelegating(scope: ChildToolScope): boolean {
+  return scope.depth === 1 && scope.delegateAllow.length > 0;
+}
+
+/** Conductor-owned child env names. Launchers drop inherited copies before setting their own. */
+export const CHILD_SCOPE_ENV = ["CONDUCTOR_DEPTH", "CONDUCTOR_RUN_DIR", "CONDUCTOR_DELEGATE_ALLOW"] as const;
+
+export function childScopeEnv(runDir: string, scope: ChildToolScope): Record<string, string> {
+  return {
+    CONDUCTOR_DEPTH: String(scope.depth),
+    CONDUCTOR_RUN_DIR: runDir,
+    ...(isDelegating(scope) ? { CONDUCTOR_DELEGATE_ALLOW: scope.delegateAllow.join(",") } : {}),
+  };
+}
+
 /**
  * A persona definition resolved from a markdown file with YAML-ish frontmatter.
  * `model` and `thinking` are intentionally optional — when omitted, the
@@ -146,6 +173,12 @@ export interface Persona {
    * unioned at spawn time with {@link CONDUCTOR_LLM_TOOL_NAMES}.
    */
   excludeTools?: string[];
+  /**
+   * Frontmatter `agents` / `personaOverrides.<name>.agents`: read-only
+   * personas this one may delegate to at depth 1, validated against the
+   * resolved roster. Undefined or empty: a leaf. No builtin sets it.
+   */
+  agents?: string[];
 }
 
 export interface PersonaResolution {
@@ -325,6 +358,8 @@ export interface GcConfig {
 
 export interface PersonaOverride {
   runtime?: import("./runtime.ts").RuntimeChoice;
+  /** Replaces the persona's whole `agents` list; `[]` disables delegation. */
+  agents?: string[];
   disabled?: boolean;
   model?: string;
   thinking?: ThinkingLevel;
@@ -932,6 +967,13 @@ export interface Run {
    * resumes still exclude the conductor tools.
    */
   excludeTools?: string[];
+  /**
+   * Tool scope frozen at spawn for the run's lifetime: lead spawns are
+   * depth 1 with the persona's validated `agents`. Both absent is a legacy
+   * depth-1 leaf; any other shape refuses relaunch rather than guess.
+   */
+  depth?: ChildDepth;
+  delegateAllow?: string[];
 
   /** Working directory of the subprocess. */
   cwd: string;
@@ -1090,6 +1132,9 @@ export interface RunRecord {
   tools?: string[];
   /** See `Run.excludeTools`. */
   excludeTools?: string[];
+  /** See `Run.depth` / `Run.delegateAllow`. Persisted verbatim, never normalized. */
+  depth?: ChildDepth;
+  delegateAllow?: string[];
   /**
    * v0.12 steering: spawn-time steerable flag. See `Run.steerable`.
    * Persisted to record.json so post-startup reconcile (v0.9.x) knows
@@ -1209,6 +1254,8 @@ export function toRunRecord(r: Run): RunRecord {
     systemPrompt: r.systemPrompt,
     tools: r.tools,
     excludeTools: r.excludeTools,
+    depth: r.depth,
+    delegateAllow: r.delegateAllow,
     runtime: r.runtime === undefined ? "subprocess" : r.runtime,
     herdr: r.herdr,
     herdrUsageBaseline: r.herdrUsageBaseline,

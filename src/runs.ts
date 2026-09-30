@@ -58,12 +58,15 @@ import { loadConfigWithErrors } from "./config.ts";
 import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage, currentBranch, worktreeHasUncommittedChanges, branchHasUnmergedCommits, restoreWorktree, refExists, worktreeCwd } from "./worktree.ts";
 import { readProcessStartTime } from "./reconcile-startup.ts";
 import { ConductorEventEmitter } from "./conductor-events.ts";
-import { builtinPersonasDir, effectiveAllowTools, effectiveExcludeTools } from "./personas.ts";
+import { builtinPersonasDir, childToolScope, effectiveAllowTools, effectiveExcludeTools, runScopeError } from "./personas.ts";
 import { loadWorkspaceDoctrine } from "./workspace-doctrine.ts";
 import {  emptyUsage,
+  isDelegating,
   isSettled,
   isTerminal,
+  LEGACY_CHILD_SCOPE,
   toRunRecord,
+  type ChildToolScope,
   type ConductorConfig,
   type ContextInheritance,
   type HookResult,
@@ -244,6 +247,20 @@ const SUBAGENT_NESTING_GUARD = [
   "Complete the entire task yourself and return your findings.",
 ].join(" ");
 
+/** Leaves have no owner tool (C2); read-only is a tool and prompt boundary, not a sandbox. */
+const LEAF_GUARD = "You are a read-only leaf: do not edit, write, or commit files. " +
+  "If you need a decision, end your final answer with `QUESTION: …`; your owner decides. You cannot ask anyone.";
+
+/** An allowlisted child is told its policy, but no `delegate` tool exists until the lead broker does. */
+function delegatingGuard(allow: readonly string[]): string {
+  return [
+    "IMPORTANT: You are running as a pi-conductor sub-agent. Your persona may later delegate",
+    `read-only work to: ${allow.join(", ")}, but no delegation tool is available yet. Do NOT attempt to spawn`,
+    "sub-agents (no calls to ensemble_spawn, subagent, agent, delegate, etc).",
+    "Complete the entire task yourself and return your findings.",
+  ].join(" ");
+}
+
 /**
  * Item 13 (docs/backlog.md, 2026-05-28): scope-enforcer block prepended
  * to a read-only persona's `--append-system-prompt` content at spawn
@@ -355,8 +372,15 @@ export function resolveDefaultReads(reads: readonly string[], childCwd: string, 
  * nesting-guard preface, the worktree fence when there is a worktree, and
  * any default_reads instructions. Without `place` the reads stay as written.
  */
-export function buildSubAgentPrompt(persona: Persona, task: string, place?: SubAgentPromptPlace): string {
-  const parts: string[] = [SUBAGENT_NESTING_GUARD, ""];
+export function buildSubAgentPrompt(
+  persona: Persona,
+  task: string,
+  place?: SubAgentPromptPlace,
+  scope: ChildToolScope = LEGACY_CHILD_SCOPE,
+): string {
+  const guard = scope.depth === 2 ? `${SUBAGENT_NESTING_GUARD}\n${LEAF_GUARD}`
+    : isDelegating(scope) ? delegatingGuard(scope.delegateAllow) : SUBAGENT_NESTING_GUARD;
+  const parts: string[] = [guard, ""];
   if (place?.worktree) {
     const wt = place.worktree;
     parts.push(
@@ -398,6 +422,8 @@ export function buildSubAgentPrompt(persona: Persona, task: string, place?: SubA
 interface PiToolPolicyArgs {
   tools?: readonly string[];
   excludeTools?: readonly string[];
+  /** The run's frozen scope; omitted means a legacy depth-1 leaf. */
+  scope?: ChildToolScope;
 }
 
 export type PiArgsOptions = PiToolPolicyArgs &
@@ -477,9 +503,11 @@ export function buildPiCoreArgs(opts: PiCoreArgsOptions): string[] {
   }
   if (opts.model) args.push("--model", opts.model);
   if (opts.thinking) args.push("--thinking", opts.thinking);
-  const tools = effectiveAllowTools(opts.tools);
+  const scope = opts.scope ?? LEGACY_CHILD_SCOPE;
+  const excluded = effectiveExcludeTools(opts.excludeTools, scope);
+  const tools = effectiveAllowTools(opts.tools, scope, excluded);
   if (tools && tools.length > 0) args.push("--tools", tools.join(","));
-  args.push("--exclude-tools", effectiveExcludeTools(opts.excludeTools).join(","));
+  args.push("--exclude-tools", excluded.join(","));
   if (opts.kind === "fresh") {
     // Pi exposes --append-system-prompt for system prompt addenda; we use that
     // for the persona body so pi's own system prompt logic still runs.
@@ -531,6 +559,7 @@ export function buildResumePiArgs(run: Run, message: string): string[] {
     systemPrompt: run.systemPrompt,
     tools: run.tools,
     excludeTools: run.excludeTools,
+    scope: childToolScope(run),
     // v0.12 steering: spawn-resume on a terminal run is always
     // print-mode by design (§4.4 archived-run compat / Q10 lock).
     // RPC mode is NOT sticky across the original-subprocess boundary
@@ -696,6 +725,8 @@ export interface PlanSpawnOptions {
    * Passed through from `tools.ts` → `SpawnQueue` → `spawnRun`.
    */
   mergeStrategy?: MergeStrategy;
+  /** The run's frozen tool scope; spawnRun derives it from the resolved persona. */
+  scope?: ChildToolScope;
 }
 
 export interface PlanSpawnResult {
@@ -795,7 +826,8 @@ function filteredHistorySentinel(): AgentMessage {
 export function planSpawnPiArgs(opts: PlanSpawnOptions): PlanSpawnResult {
   const { persona, parentMessages = [], sessionDir, systemPrompt, prompt, cwd, model, thinking, skillPaths } = opts;
   const steerable = opts.steerable === true;
-  const toolPolicy = { tools: persona.tools, excludeTools: persona.excludeTools };
+  // Seeded parent context never changes the child's tools: both argv shapes carry this policy.
+  const toolPolicy = { tools: persona.tools, excludeTools: persona.excludeTools, scope: opts.scope };
 
   // Item 12 candidate #3: per-call inherit_context wins above
   // persona.inheritContext (which already merges project/user
@@ -1264,6 +1296,8 @@ export function prepareSpawnEffort(opts: Pick<SpawnOptions, "effort" | "touches"
 
 /** Spawn immediately; foreground/background callers await the same terminal promise. */
 export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
+  // Lead spawns are depth 1; the resolved persona alone grants delegation, never the caller.
+  const scope = childToolScope({ depth: 1, delegateAllow: opts.persona.agents ?? [] });
   opts = prepareSpawnRuntime(opts);
   if (opts.runtime === "herdr" && !opts.registry.herdrAdmissionOpen) throw new Error("herdr runtime shutting down; launch refused");
   opts = prepareSpawnEvidence(opts, opts.registry);
@@ -1303,7 +1337,9 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // Effective tool policy, captured for record.json and re-applied on
     // resume. Same inputs planSpawnPiArgs reads from opts.persona below.
     tools: opts.persona.tools,
-    excludeTools: effectiveExcludeTools(opts.persona.excludeTools),
+    excludeTools: effectiveExcludeTools(opts.persona.excludeTools, scope),
+    depth: scope.depth,
+    delegateAllow: [...scope.delegateAllow],
     // Item 15: per-invocation markers. Initial spawn IS the start of
     // the (sole, so far) invocation, so:
     //   - thisInvocationStartedAt mirrors startTime
@@ -1474,7 +1510,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
       cwd: effectiveCwd,
       requestedCwd: opts.cwd,
       worktree: worktreeFence,
-    });
+    }, scope);
     const sessionDir = join(dir, "session");
     mkdirSync(sessionDir, { recursive: true });
     const plan = planSpawnPiArgs({
@@ -1515,6 +1551,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
       // the chain is deep. Excludes the run we just registered (it is
       // already in the registry at this point) to count only siblings.
       siblingRunCount: opts.registry.list().length - 1,
+      scope,
     });
     // When we seeded a session, populate run.sessionPath up-front so callers
     // (e.g. ensemble_send mid-run) can find it without waiting for finalize().
@@ -1871,6 +1908,11 @@ export function runActionError(run: Run, action: RunAction, observed: ActionObse
   if (action === "focus") return observed.canFocus ? undefined : "Focused stream requires terminal UI (TUI mode).";
   const unsupported = unsupportedRuntimeReason(run.runtime);
   if (unsupported && !(run.runtime === "herdr" && run.transport?.kind === "herdr")) return unsupported;
+  // Only a relaunch rebuilds tools from the saved scope; a malformed one refuses, never widens.
+  if (action === "send") {
+    const scopeError = runScopeError(run);
+    if (scopeError) return scopeError;
+  }
   if (run.runtime === "herdr") {
     if (!ownsHerdrRun(run)) return "herdr owner generation fenced; action refused";
     if (run.transport?.kind !== "herdr") return "herdr runtime unavailable here: stream is not attached";

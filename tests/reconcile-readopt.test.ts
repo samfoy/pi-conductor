@@ -69,6 +69,8 @@ function fullRun(dir: string, over: Partial<Run> = {}): Run {
     systemPrompt: "You are builder.",
     tools: ["read", "bash"],
     excludeTools: ["edit"],
+    depth: 1,
+    delegateAllow: ["inspector"],
     steerable: false,
     streamingMode: "print",
     hookResult: {

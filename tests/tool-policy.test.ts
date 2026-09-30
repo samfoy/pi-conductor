@@ -37,8 +37,8 @@ import { SpawnQueue } from "../src/queue.ts";
 import { FocusedStreamModel } from "../src/focused-stream-model.ts";
 
 const READ_ONLY_EXCLUSIONS = ["edit", "write", "insert_before", "insert_after"];
-/** What every child excludes after the persona's own list. */
-const ALWAYS_EXCLUDED = [...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS];
+/** What every non-delegating depth-1 child excludes after the persona's own list. */
+const ALWAYS_EXCLUDED = [...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS, "delegate"];
 
 /** Value following `flag`, asserting the flag appears at most once. */
 function flagValue(args: string[], flag: string): string | undefined {
@@ -82,28 +82,22 @@ async function resolveOne(
   });
 }
 
-function captureRegisteredToolNames(): string[] {
+/** Tool names `registerTools` registers under an injected env (the lead's by default). */
+function captureRegisteredToolNames(env: NodeJS.ProcessEnv = {}): string[] {
   const names: string[] = [];
   const reg = new RunRegistry();
   const queue = new SpawnQueue(reg, 4);
   const model = new FocusedStreamModel(reg);
-  const prev = process.env.CONDUCTOR_SUBAGENT;
-  delete process.env.CONDUCTOR_SUBAGENT;
-  try {
-    registerTools({ registerTool: (t: { name: string }) => names.push(t.name) } as any, {
-      getCwd: () => tmpdir(),
-      getRegistry: () => reg,
-      getQueue: () => queue,
-      getModel: () => model,
-      getParentMessages: () => [],
-      openFocusedOverlay: () => {},
-      registerForegroundDetach: () => ({ detachSignal: new Promise<void>(() => {}), unregister: () => {} }),
-      pushCompletionNotification: () => {},
-    });
-  } finally {
-    if (prev === undefined) delete process.env.CONDUCTOR_SUBAGENT;
-    else process.env.CONDUCTOR_SUBAGENT = prev;
-  }
+  registerTools({ registerTool: (t: { name: string }) => names.push(t.name) } as any, {
+    getCwd: () => tmpdir(),
+    getRegistry: () => reg,
+    getQueue: () => queue,
+    getModel: () => model,
+    getParentMessages: () => [],
+    openFocusedOverlay: () => {},
+    registerForegroundDetach: () => ({ detachSignal: new Promise<void>(() => {}), unregister: () => {} }),
+    pushCompletionNotification: () => {},
+  }, env);
   return names;
 }
 
@@ -131,6 +125,23 @@ test("CONDUCTOR_LLM_TOOL_NAMES is exactly the set of tools registerTools registe
   assert.equal(registered.length, CONDUCTOR_LLM_TOOL_NAMES.length, "sanity: registerTools registers the ensemble_* surface");
   assert.deepEqual([...CONDUCTOR_LLM_TOOL_NAMES].sort(), [...registered].sort());
 });
+
+// N1: set equality per injected env; no child ever gets an ensemble_* tool, and
+// no `delegate` is registered anywhere until the lead broker exists.
+for (const [label, env, expected] of [
+  ["lead", {}, [...CONDUCTOR_LLM_TOOL_NAMES]],
+  ["lead with a non-exact child flag", { CONDUCTOR_SUBAGENT: "true" }, [...CONDUCTOR_LLM_TOOL_NAMES]],
+  ["legacy child without depth", { CONDUCTOR_SUBAGENT: "1" }, ["ask_owner"]],
+  ["depth-1 child", { CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: "1" }, ["ask_owner"]],
+  ["depth-1 delegator", { CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: "1", CONDUCTOR_DELEGATE_ALLOW: "inspector" }, ["ask_owner"]],
+  ["depth-2 leaf", { CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: "2" }, []],
+  ["depth-2 leaf with a leaked allowlist", { CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: "2", CONDUCTOR_DELEGATE_ALLOW: "inspector" }, []],
+  ...["", "0", "3", "01", " 1", "1 ", "one"].map((d) => [`unknown depth ${JSON.stringify(d)}`, { CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: d }, []] as const),
+] as const) {
+  test(`registerTools under ${label} registers exactly ${expected.length ? expected.length > 1 ? "the lead tools" : expected.join(",") : "nothing"}`, () => {
+    assert.deepEqual(captureRegisteredToolNames(env).sort(), [...expected].sort());
+  });
+}
 
 test("effectiveExcludeTools: persona exclusions first, then every conductor tool, then the foreign spawn tools, deduped", () => {
   assert.deepEqual(effectiveExcludeTools(undefined), ALWAYS_EXCLUDED);

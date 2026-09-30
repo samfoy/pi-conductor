@@ -1,19 +1,21 @@
 import { HerdrCliError, isRecord, type HerdrCli, type CliLimits } from "./cli.js";
 import { isHerdrPane, provePaneOurs, type HerdrBinding, type HerdrInvocation } from "./identity.js";
+import { CHILD_SCOPE_ENV, childScopeEnv, type ChildToolScope } from "../types.js";
 
 export const HERDR_FORWARD_ENV = [
   "AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE",
   "PI_BEDROCK_PROFILE", "PI_CODING_AGENT_DIR", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
 ] as const;
-const ownedNames = ["CONDUCTOR_SUBAGENT", "CONDUCTOR_RUNTIME", "CONDUCTOR_RUN_ID", "CONDUCTOR_RUN_DIR", "CONDUCTOR_CONFIG_CWD", "CONDUCTOR_DEPTH", "TMPDIR"];
+const ownedNames: readonly string[] = ["CONDUCTOR_SUBAGENT", "CONDUCTOR_RUNTIME", "CONDUCTOR_RUN_ID", "CONDUCTOR_CONFIG_CWD", ...CHILD_SCOPE_ENV, "TMPDIR"];
 
+/** Only allowlisted names are forwarded; every conductor-owned name comes from the run's frozen scope. */
 export function buildHerdrEnv(source: NodeJS.ProcessEnv, owned: {
-  runId: string; runDir: string; configCwd: string; tmpDir?: string;
+  runId: string; runDir: string; configCwd: string; tmpDir?: string; scope: ChildToolScope;
 }): Record<string, string> {
   return {
     ...Object.fromEntries(HERDR_FORWARD_ENV.flatMap(key => source[key] === undefined ? [] : [[key, source[key]]])),
     CONDUCTOR_SUBAGENT: "1", CONDUCTOR_RUNTIME: "herdr", CONDUCTOR_RUN_ID: owned.runId,
-    CONDUCTOR_RUN_DIR: owned.runDir, CONDUCTOR_CONFIG_CWD: owned.configCwd, CONDUCTOR_DEPTH: "1",
+    CONDUCTOR_CONFIG_CWD: owned.configCwd, ...childScopeEnv(owned.runDir, owned.scope),
     ...(owned.tmpDir === undefined ? {} : {TMPDIR: owned.tmpDir}),
   };
 }

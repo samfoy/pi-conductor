@@ -1,7 +1,7 @@
 // src/herdr/ownership.ts
 import { randomUUID as randomUUID3 } from "node:crypto";
-import { existsSync as existsSync3, readdirSync as readdirSync4 } from "node:fs";
-import { dirname as dirname3, join as join5 } from "node:path";
+import { existsSync as existsSync4, readdirSync as readdirSync4 } from "node:fs";
+import { dirname as dirname4, join as join6 } from "node:path";
 
 // src/effort/store.ts
 import { createHash, randomUUID } from "node:crypto";
@@ -311,14 +311,14 @@ function assertRunEffortOwner(run) {
 }
 
 // src/reconcile-startup.ts
-import { readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { readFile as readFile2, readdir as readdir2, stat as stat2, writeFile } from "node:fs/promises";
 import { readFileSync as readFileSync3 } from "node:fs";
-import { join as join3 } from "node:path";
+import { join as join4 } from "node:path";
 
 // src/subprocess-runtime.ts
 import { spawn } from "node:child_process";
-import { existsSync as existsSync2, mkdirSync as mkdirSync2 } from "node:fs";
-import { dirname as dirname2, join as join2 } from "node:path";
+import { existsSync as existsSync3, mkdirSync as mkdirSync2 } from "node:fs";
+import { dirname as dirname3, join as join3 } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 // src/rpc-stdin.ts
@@ -438,12 +438,589 @@ var RpcStdinQueue = class {
   }
 };
 
+// src/types.ts
+var THINKING_LEVELS = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh"
+];
+var CONTEXT_INHERITANCE = [
+  "none",
+  "filtered",
+  "filtered_compact",
+  "full"
+];
+var CONDUCTOR_LLM_TOOLS = {
+  list: "ensemble_list",
+  status: "ensemble_status",
+  spawn: "ensemble_spawn",
+  send: "ensemble_send",
+  pause: "ensemble_pause",
+  resume: "ensemble_resume",
+  kill: "ensemble_kill",
+  focus: "ensemble_focus",
+  recommend: "ensemble_recommend",
+  auto: "ensemble_auto",
+  cwd: "ensemble_cwd",
+  effort: "ensemble_effort"
+};
+var CONDUCTOR_LLM_TOOL_NAMES = Object.values(CONDUCTOR_LLM_TOOLS);
+var FOREIGN_SPAWN_TOOLS = ["subagent", "agent"];
+var LEGACY_CHILD_SCOPE = { depth: 1, delegateAllow: [] };
+function isDelegating(scope) {
+  return scope.depth === 1 && scope.delegateAllow.length > 0;
+}
+var CHILD_SCOPE_ENV = ["CONDUCTOR_DEPTH", "CONDUCTOR_RUN_DIR", "CONDUCTOR_DELEGATE_ALLOW"];
+function childScopeEnv(runDir2, scope) {
+  return {
+    CONDUCTOR_DEPTH: String(scope.depth),
+    CONDUCTOR_RUN_DIR: runDir2,
+    ...isDelegating(scope) ? { CONDUCTOR_DELEGATE_ALLOW: scope.delegateAllow.join(",") } : {}
+  };
+}
+var DEFAULT_CONFIG = {
+  contextRetirement: true,
+  inlineAttachmentLimitBytes: 131072,
+  defaultTimeoutMinutes: 60,
+  maxConcurrent: 4,
+  worktreeMode: "conductor",
+  maxConcurrentWriteCapable: 1,
+  queueOnConcurrencyCap: true,
+  autoOpenFocusOnSpawn: false,
+  defaultSpawnMode: "foreground",
+  defaultMode: "off",
+  personaOverrides: {},
+  conductorPromptPath: null,
+  gc: {
+    enabled: true,
+    completedTtlDays: 30,
+    failedTtlDays: 60,
+    mergeConflictTtlDays: 14,
+    totalSizeBudgetBytes: 5 * 1024 * 1024 * 1024,
+    transcriptSizeCapBytes: 100 * 1024 * 1024,
+    orphanReconcileAfterHours: 24,
+    autoOnSessionStart: true,
+    autoDebounceHours: 6,
+    perPersonaTtlDays: {}
+  },
+  watchdog: {
+    enabled: true,
+    defaultSoftSeconds: 120,
+    defaultHardSeconds: 600,
+    graceSeconds: 30,
+    tickIntervalSeconds: 30,
+    defaultKillOnStall: false
+  },
+  // v0.12 steering: built-in default OFF — mirrors v0.10 kill_on_stall
+  // posture (PRD.md:517). No autonomous-chain field data justifies
+  // flipping it. Slice 1 ships the field; slice 4 wires per-call.
+  defaultSteerable: false,
+  // v0.15 chains: builder and simplifier auto-chain to critic by default.
+  // Override at user or project level; use { then: "" } to disable a
+  // default chain without affecting others.
+  chains: {
+    builder: { then: "critic" },
+    simplifier: { then: "critic" }
+  },
+  // v0.18 classified retry: OFF by default (maxAttempts 1). Opt in via
+  // config/frontmatter/per-call. Retryable set excludes deterministic-
+  // cause classes (syntax/logic) and human-gated ones (permission).
+  retry: {
+    maxAttempts: 1,
+    retryableClasses: ["environment", "stall", "timeout", "test"]
+  }
+};
+var WRITE_CAPABLE_PERSONAS = /* @__PURE__ */ new Set(["builder", "simplifier"]);
+function emptyUsage() {
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
+}
+function toRunRecord(r) {
+  return {
+    id: r.id,
+    persona: r.persona,
+    task: r.task,
+    model: r.model,
+    thinking: r.thinking,
+    mode: r.mode,
+    status: r.status,
+    startTime: r.startTime,
+    pid: r.pid,
+    parentPid: r.parentPid,
+    parentSessionId: r.parentSessionId,
+    parentStartTime: r.parentStartTime,
+    finishedAt: r.finishedAt,
+    pausedAt: r.pausedAt,
+    exitCode: r.exitCode,
+    stopReason: r.stopReason,
+    errorMessage: r.errorMessage,
+    failureClass: r.failureClass,
+    retryAttempt: r.retryAttempt,
+    usage: r.usage,
+    cwd: r.cwd,
+    recordPath: r.recordPath,
+    transcriptPath: r.transcriptPath,
+    finalPath: r.finalPath,
+    herdrExitUnconfirmed: r.herdrExitUnconfirmed,
+    herdrResultUnavailable: r.herdrResultUnavailable,
+    sessionPath: r.sessionPath,
+    contextRetired: r.contextRetired,
+    pendingAsk: r.pendingAsk,
+    systemPrompt: r.systemPrompt,
+    tools: r.tools,
+    excludeTools: r.excludeTools,
+    depth: r.depth,
+    delegateAllow: r.delegateAllow,
+    runtime: r.runtime === void 0 ? "subprocess" : r.runtime,
+    herdr: r.herdr,
+    herdrUsageBaseline: r.herdrUsageBaseline,
+    steerable: r.steerable,
+    streamingMode: r.streamingMode,
+    hookResult: r.hookResult,
+    worktreePath: r.worktreePath,
+    worktreeBranch: r.worktreeBranch,
+    effort: r.effort,
+    integration: r.integration,
+    landedCommit: r.landedCommit,
+    worktreeBaseBranch: r.worktreeBaseBranch,
+    mergeStrategy: r.mergeStrategy,
+    mergeResult: r.mergeResult,
+    lastEventAt: r.lastEventAt,
+    thisInvocationStartedAt: r.thisInvocationStartedAt,
+    thisInvocationUsageBaseline: r.thisInvocationUsageBaseline,
+    resumeCount: r.resumeCount,
+    compactionCount: r.compactionCount,
+    maxTurns: r.maxTurns,
+    graceTurns: r.graceTurns
+  };
+}
+var TERMINAL_STATUSES = [
+  "completed",
+  "failed",
+  "killed",
+  "timeout",
+  "hook_failed",
+  "merge_conflict",
+  "aborted"
+  // v0.17: turn-limit termination
+];
+function isSettled(s) {
+  return s === "blocked" || isTerminal(s);
+}
+function isTerminal(s) {
+  return TERMINAL_STATUSES.includes(s);
+}
+
+// src/personas.ts
+import { readdir, readFile, stat } from "node:fs/promises";
+import { existsSync as existsSync2, realpathSync } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { basename, dirname as dirname2, join as join2, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+var WRITE_CAPABLE_PERSONAS2 = /* @__PURE__ */ new Set([
+  "builder",
+  "simplifier"
+]);
+function isWriteCapable(personaName) {
+  return WRITE_CAPABLE_PERSONAS2.has(personaName);
+}
+function resolveBuiltinPersonasDir(metaUrl) {
+  const here = realpathSync(fileURLToPath(metaUrl));
+  return resolve(dirname2(here), "..", "personas");
+}
+function builtinPersonasDir() {
+  return resolveBuiltinPersonasDir(import.meta.url);
+}
+function userPersonasDir() {
+  return join2(homedir2(), ".pi", "agent", "conductor", "personas");
+}
+function projectPersonasDir(cwd) {
+  return join2(cwd, ".pi", "conductor", "personas");
+}
+var FRONTMATTER_FENCE = "---";
+function parseFrontmatter(text3) {
+  const lines = text3.split(/\r?\n/);
+  if (lines[0]?.trim() !== FRONTMATTER_FENCE) {
+    return { frontmatter: {}, body: text3 };
+  }
+  let endIdx = -1;
+  for (let i2 = 1; i2 < lines.length; i2++) {
+    if (lines[i2]?.trim() === FRONTMATTER_FENCE) {
+      endIdx = i2;
+      break;
+    }
+  }
+  if (endIdx === -1) {
+    throw new Error("frontmatter opened with `---` but never closed");
+  }
+  const fmLines = lines.slice(1, endIdx);
+  const body = lines.slice(endIdx + 1).join("\n");
+  const frontmatter = {};
+  let i = 0;
+  while (i < fmLines.length) {
+    const raw = fmLines[i] ?? "";
+    const line = raw.trim();
+    i++;
+    if (!line || line.startsWith("#")) continue;
+    const colon = line.indexOf(":");
+    if (colon === -1) {
+      throw new Error(`frontmatter line missing colon: "${line}"`);
+    }
+    const key = line.slice(0, colon).trim();
+    const valuePart = line.slice(colon + 1).trim();
+    if (valuePart === "") {
+      const items = [];
+      while (i < fmLines.length) {
+        const next = fmLines[i] ?? "";
+        const trimmed = next.trim();
+        if (trimmed.startsWith("- ")) {
+          items.push(unquote(trimmed.slice(2).trim()));
+          i++;
+        } else if (trimmed === "" || trimmed.startsWith("#")) {
+          i++;
+        } else {
+          break;
+        }
+      }
+      frontmatter[key] = items;
+    } else {
+      frontmatter[key] = parseScalar(valuePart);
+    }
+  }
+  return { frontmatter, body };
+}
+function unquote(s) {
+  if (s.startsWith('"') && s.endsWith('"') || s.startsWith("'") && s.endsWith("'")) {
+    return s.slice(1, -1);
+  }
+  return s;
+}
+function parseScalar(s) {
+  const u = unquote(s);
+  if (u === "true") return true;
+  if (u === "false") return false;
+  if (/^-?\d+$/.test(u)) return Number.parseInt(u, 10);
+  if (/^-?\d+\.\d+$/.test(u)) return Number.parseFloat(u);
+  return u;
+}
+function validateAndBuild(raw, source, sourcePath) {
+  const { frontmatter, body } = raw;
+  const name2 = requireString(frontmatter, "name");
+  const description = requireString(frontmatter, "description");
+  const model = optionalString(frontmatter, "model");
+  const thinking = optionalEnum(frontmatter, "thinking", THINKING_LEVELS);
+  const inheritContext = optionalEnum(frontmatter, "inherit_context", CONTEXT_INHERITANCE) ?? "filtered";
+  const inheritSkills = optionalBoolean(frontmatter, "inherit_skills") ?? false;
+  const defaultReads = optionalStringList(frontmatter, "default_reads") ?? [];
+  const worktree = optionalBoolean(frontmatter, "worktree") ?? false;
+  const timeoutMinutes = optionalNumber(frontmatter, "timeout_minutes") ?? 60;
+  const readOnly = optionalBoolean(frontmatter, "read_only") ?? false;
+  const runtime = frontmatter.runtime === void 0 ? void 0 : parseRuntimeChoice(frontmatter.runtime);
+  const onCompleteHook = optionalStringAllowEmpty(frontmatter, "on_complete_hook");
+  const onCompleteHookTimeoutSeconds = optionalPositiveInteger(
+    frontmatter,
+    "on_complete_hook_timeout_seconds"
+  );
+  const maxTurns = optionalPositiveInteger(frontmatter, "max_turns");
+  const graceTurns = optionalNonNegativeInteger(frontmatter, "grace_turns");
+  const retryMaxAttempts = optionalPositiveInteger(frontmatter, "retry_max_attempts");
+  const tools = frontmatter.tools === void 0 ? void 0 : parseToolList(frontmatter.tools, "tools");
+  const excludeTools = frontmatter.exclude_tools === void 0 ? void 0 : parseToolList(frontmatter.exclude_tools, "exclude_tools");
+  const agents = frontmatter.agents === void 0 ? void 0 : parseAgentList(frontmatter.agents);
+  if (timeoutMinutes <= 0 || timeoutMinutes > 24 * 60) {
+    throw new Error(`timeout_minutes must be in (0, 1440]; got ${timeoutMinutes}`);
+  }
+  const systemPrompt = body.trim();
+  if (!systemPrompt) {
+    throw new Error("system prompt body is empty");
+  }
+  return {
+    name: name2,
+    description,
+    model,
+    thinking,
+    inheritContext,
+    inheritSkills,
+    defaultReads,
+    worktree,
+    timeoutMinutes,
+    systemPrompt,
+    source,
+    sourcePath,
+    readOnly,
+    runtime,
+    onCompleteHook,
+    onCompleteHookTimeoutSeconds,
+    maxTurns,
+    graceTurns,
+    retryMaxAttempts,
+    tools,
+    excludeTools,
+    agents
+  };
+}
+var TOOL_NAME_PATTERN = /^[A-Za-z0-9_.:-]+$/;
+function parseToolList(value, field) {
+  const names = parseNameList(value, field, "tool");
+  if (field === "tools" && names.length === 0) {
+    throw new Error(`field "tools" must list at least one tool name; omit it to keep pi's default set`);
+  }
+  return [...new Set(names)];
+}
+function parseNameList(value, field, kind) {
+  if (typeof value === "string" && /^\[.*\]$/.test(value.trim())) {
+    throw new Error(
+      `field "${field}" must be a block list (one \`- name\` per line); flow syntax [a, b] is not supported`
+    );
+  }
+  if (!Array.isArray(value) || !value.every((x) => typeof x === "string")) {
+    throw new Error(`field "${field}" must be a list of ${kind} names`);
+  }
+  const names = value.map((s) => s.trim());
+  if (names.includes("")) throw new Error(`field "${field}" has an empty entry`);
+  const bad = names.find((n) => !TOOL_NAME_PATTERN.test(n));
+  if (bad !== void 0) {
+    throw new Error(
+      `field "${field}" entry "${bad}" is not a valid ${kind} name (allowed: letters, digits, _ . : -)`
+    );
+  }
+  return names;
+}
+var MAX_DELEGATE_TARGETS = 8;
+function parseAgentList(value, field = "agents") {
+  const names = parseNameList(value, field, "persona");
+  const duplicate = names.find((n, i) => names.indexOf(n) !== i);
+  if (duplicate !== void 0) throw new Error(`field "${field}" lists "${duplicate}" more than once`);
+  if (names.length > MAX_DELEGATE_TARGETS) {
+    throw new Error(`field "${field}" has ${names.length} entries; at most ${MAX_DELEGATE_TARGETS} are allowed`);
+  }
+  return names;
+}
+function runScopeError(run) {
+  if (run.depth === void 0 && run.delegateAllow === void 0) return void 0;
+  if (run.depth !== 1 && run.depth !== 2) {
+    return `run depth ${JSON.stringify(run.depth) ?? "missing"} is not 1 or 2; refusing to launch with a guessed tool scope`;
+  }
+  try {
+    if (parseAgentList(run.delegateAllow, "delegateAllow").length > 0 && run.depth === 2) return "run scope is malformed: a depth-2 run cannot delegate";
+  } catch (e) {
+    return `run scope is malformed: ${e.message}`;
+  }
+  return void 0;
+}
+function childToolScope(run) {
+  const error = runScopeError(run);
+  if (error) throw new Error(error);
+  if (run.depth === void 0) return LEGACY_CHILD_SCOPE;
+  return { depth: run.depth, delegateAllow: [...run.delegateAllow] };
+}
+var LEAF_MUTATION_TOOLS = ["edit", "write", "insert_before", "insert_after"];
+function effectiveExcludeTools(excludeTools, scope = LEGACY_CHILD_SCOPE) {
+  return [.../* @__PURE__ */ new Set([
+    ...excludeTools ?? [],
+    ...CONDUCTOR_LLM_TOOL_NAMES,
+    ...FOREIGN_SPAWN_TOOLS,
+    ...isDelegating(scope) ? [] : ["delegate"],
+    ...scope.depth === 2 ? ["ask_owner", ...LEAF_MUTATION_TOOLS] : []
+  ])];
+}
+function effectiveAllowTools(tools, scope, excluded) {
+  if (tools === void 0) return void 0;
+  const own = [...scope.depth === 1 ? ["ask_owner"] : [], ...isDelegating(scope) ? ["delegate"] : []];
+  return [.../* @__PURE__ */ new Set([...tools, ...own.filter((n) => !excluded.includes(n))])];
+}
+function requireString(fm, key) {
+  const v = fm[key];
+  if (typeof v !== "string" || v.trim() === "") {
+    throw new Error(`required field "${key}" is missing or empty`);
+  }
+  return v.trim();
+}
+function optionalString(fm, key) {
+  const v = fm[key];
+  if (v === void 0) return void 0;
+  if (typeof v !== "string") {
+    throw new Error(`field "${key}" must be a string; got ${typeof v}`);
+  }
+  return v.trim() === "" ? void 0 : v.trim();
+}
+function optionalEnum(fm, key, allowed) {
+  const v = fm[key];
+  if (v === void 0) return void 0;
+  if (typeof v !== "string" || !allowed.includes(v)) {
+    throw new Error(`field "${key}" must be one of ${allowed.join("|")}; got ${String(v)}`);
+  }
+  return v;
+}
+function optionalBoolean(fm, key) {
+  const v = fm[key];
+  if (v === void 0) return void 0;
+  if (typeof v !== "boolean") {
+    throw new Error(`field "${key}" must be a boolean; got ${typeof v}`);
+  }
+  return v;
+}
+function optionalNumber(fm, key) {
+  const v = fm[key];
+  if (v === void 0) return void 0;
+  if (typeof v !== "number") {
+    throw new Error(`field "${key}" must be a number; got ${typeof v}`);
+  }
+  return v;
+}
+function optionalStringList(fm, key) {
+  const v = fm[key];
+  if (v === void 0) return void 0;
+  if (!Array.isArray(v) || !v.every((x) => typeof x === "string")) {
+    throw new Error(`field "${key}" must be a list of strings`);
+  }
+  return v.map((s) => s.trim()).filter(Boolean);
+}
+function optionalStringAllowEmpty(fm, key) {
+  const v = fm[key];
+  if (v === void 0) return void 0;
+  if (typeof v !== "string") {
+    throw new Error(`field "${key}" must be a string; got ${typeof v}`);
+  }
+  return v;
+}
+function optionalPositiveInteger(fm, key) {
+  const v = fm[key];
+  if (v === void 0) return void 0;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 1) {
+    throw new Error(`field "${key}" must be a positive integer; got ${String(v)}`);
+  }
+  return v;
+}
+function optionalNonNegativeInteger(fm, key) {
+  const v = fm[key];
+  if (v === void 0) return void 0;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 0) {
+    throw new Error(`field "${key}" must be a non-negative integer; got ${String(v)}`);
+  }
+  return v;
+}
+var PRIVILEGE_KEYS = ["runtime", "read_only", "tools", "exclude_tools", "agents"];
+async function loadPersonasFromDir(dir, source) {
+  const personas = [];
+  const errors = [];
+  const blockedNames = [];
+  if (!existsSync2(dir)) return { personas, errors, blockedNames };
+  let entries;
+  try {
+    entries = await readdir(dir);
+  } catch (e) {
+    errors.push({ path: dir, reason: `cannot read directory: ${e.message}` });
+    return { personas, errors, blockedNames };
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith(".md") || entry.startsWith("_")) continue;
+    const filePath = join2(dir, entry);
+    let raw;
+    try {
+      const st = await stat(filePath);
+      if (!st.isFile()) continue;
+      const text3 = await readFile(filePath, "utf-8");
+      raw = parseFrontmatter(text3);
+      const persona = validateAndBuild(raw, source, filePath);
+      personas.push(persona);
+    } catch (e) {
+      errors.push({ path: filePath, reason: e.message });
+      if (!raw || PRIVILEGE_KEYS.some((k) => raw.frontmatter[k] !== void 0)) blockedNames.push(entry.slice(0, -3));
+    }
+  }
+  return { personas, errors, blockedNames };
+}
+async function resolvePersonas(opts) {
+  const overrides = opts.personaOverrides ?? {};
+  const builtin = await loadPersonasFromDir(builtinPersonasDir(), "builtin");
+  const user = await loadPersonasFromDir(userPersonasDir(), "user");
+  const project = await loadPersonasFromDir(projectPersonasDir(opts.cwd), "project");
+  const errors = [...builtin.errors, ...user.errors, ...project.errors];
+  const personas = /* @__PURE__ */ new Map();
+  const shadowed = /* @__PURE__ */ new Map();
+  for (const layer of [builtin, user, project]) {
+    for (const name2 of layer.blockedNames) {
+      for (const p of personas.values()) {
+        if (p.name === name2 || basename(p.sourcePath, ".md") === name2) personas.delete(p.name);
+      }
+    }
+    for (const p of layer.personas) {
+      const list = shadowed.get(p.name) ?? [];
+      list.push(p);
+      shadowed.set(p.name, list);
+      personas.set(p.name, p);
+    }
+  }
+  for (const [name2, ov] of Object.entries(overrides)) {
+    if (ov.disabled) {
+      personas.delete(name2);
+      continue;
+    }
+    const base = personas.get(name2);
+    if (!base) continue;
+    let runtime = base.runtime;
+    let tools = base.tools;
+    let excludeTools = base.excludeTools;
+    let agents = base.agents;
+    try {
+      if (ov.runtime !== void 0) runtime = parseRuntimeChoice(ov.runtime);
+      if (ov.tools !== void 0) tools = parseToolList(ov.tools, "tools");
+      if (ov.exclude_tools !== void 0) {
+        excludeTools = parseToolList(ov.exclude_tools, "exclude_tools");
+      }
+      if (ov.agents !== void 0) agents = parseAgentList(ov.agents);
+    } catch (e) {
+      errors.push({ path: `personaOverrides.${name2}`, reason: e.message });
+      personas.delete(name2);
+      continue;
+    }
+    personas.set(name2, {
+      ...base,
+      runtime,
+      tools,
+      excludeTools,
+      agents,
+      model: ov.model ?? base.model,
+      thinking: ov.thinking ?? base.thinking,
+      timeoutMinutes: ov.timeoutMinutes ?? base.timeoutMinutes,
+      inheritContext: ov.inheritContext ?? base.inheritContext,
+      inheritSkills: ov.inheritSkills ?? base.inheritSkills
+    });
+  }
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const p of personas.values()) {
+      const reason = agentsRosterError(p, personas, overrides);
+      if (reason === void 0) continue;
+      errors.push({ path: overrides[p.name]?.agents !== void 0 ? `personaOverrides.${p.name}` : p.sourcePath, reason });
+      personas.delete(p.name);
+      changed = true;
+    }
+  }
+  return { personas, shadowed, errors };
+}
+function agentsRosterError(p, roster, overrides) {
+  for (const name2 of p.agents ?? []) {
+    const entry = `field "agents" entry "${name2}"`;
+    if (name2 === p.name) return `${entry} names the persona itself`;
+    if (overrides[name2]?.disabled) return `${entry} is disabled`;
+    const target = roster.get(name2);
+    if (!target) return `${entry} is not an available persona`;
+    if (target.readOnly !== true) return `${entry} is not read_only: true`;
+    if (isWriteCapable(name2)) return `${entry} is write-capable`;
+  }
+  return void 0;
+}
+
 // src/subprocess-runtime.ts
 var SubprocessRuntime = class {
   launch(run, args, cwd, sink, initialPrompt) {
     assertSupportedRuntime(run.runtime);
     const invocation = getPiInvocation(args);
-    const tmp = run.effort ? join2(dirname2(run.recordPath), "tmp") : void 0;
+    const tmp = run.effort ? join3(dirname3(run.recordPath), "tmp") : void 0;
     if (tmp) mkdirSync2(tmp, { recursive: true });
     const rpc = args[1] === "rpc";
     const proc = spawn(invocation.command, invocation.args, {
@@ -451,7 +1028,12 @@ var SubprocessRuntime = class {
       shell: false,
       stdio: [rpc ? "pipe" : "ignore", "pipe", "pipe"],
       // Worktrees may not contain the spawning project's untracked config.
-      env: { ...buildSubagentEnv(), CONDUCTOR_CONFIG_CWD: run.cwd, CONDUCTOR_RUN_ID: run.id, ...tmp ? { TMPDIR: tmp } : {} }
+      env: buildSubagentEnv(process.env, {
+        CONDUCTOR_CONFIG_CWD: run.cwd,
+        CONDUCTOR_RUN_ID: run.id,
+        ...childScopeEnv(dirname3(run.recordPath), childToolScope(run)),
+        ...tmp ? { TMPDIR: tmp } : {}
+      })
     });
     const closed = new Promise((resolve7) => proc.once("close", () => resolve7()));
     const stdoutLines = createLineDecoder((line) => sink.line(line));
@@ -534,17 +1116,19 @@ var subprocessRuntime = new SubprocessRuntime();
 function capabilitiesFor(run) {
   return run.runtime !== "herdr" && unsupportedRuntimeReason(run.runtime) ? { pause: false, liveSend: false } : runtimeFor(run).capabilities(run);
 }
-function buildSubagentEnv(baseEnv = process.env) {
-  return { ...baseEnv, CONDUCTOR_SUBAGENT: "1" };
+function buildSubagentEnv(baseEnv = process.env, owned = {}) {
+  const env = { ...baseEnv };
+  for (const name2 of CHILD_SCOPE_ENV) delete env[name2];
+  return { ...env, CONDUCTOR_SUBAGENT: "1", ...owned };
 }
 function getPiInvocation(args) {
   const piBinEnv = process.env.PI_BIN;
-  if (piBinEnv && existsSync2(piBinEnv)) {
+  if (piBinEnv && existsSync3(piBinEnv)) {
     return { command: process.execPath, args: [piBinEnv, ...args] };
   }
   const currentScript = process.argv[1];
   const isBunVirtual = currentScript?.startsWith("/$bunfs/root/");
-  if (currentScript && !isBunVirtual && existsSync2(currentScript)) {
+  if (currentScript && !isBunVirtual && existsSync3(currentScript)) {
     const looksLikePi = /(^|\/)(pi|cli\.js)$/.test(currentScript) && currentScript.includes("pi-coding-agent");
     if (looksLikePi) {
       return { command: process.execPath, args: [currentScript, ...args] };
@@ -782,170 +1366,10 @@ function runtimeFor(run, env) {
   return subprocessRuntime;
 }
 
-// src/types.ts
-var THINKING_LEVELS = [
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh"
-];
-var CONTEXT_INHERITANCE = [
-  "none",
-  "filtered",
-  "filtered_compact",
-  "full"
-];
-var CONDUCTOR_LLM_TOOLS = {
-  list: "ensemble_list",
-  status: "ensemble_status",
-  spawn: "ensemble_spawn",
-  send: "ensemble_send",
-  pause: "ensemble_pause",
-  resume: "ensemble_resume",
-  kill: "ensemble_kill",
-  focus: "ensemble_focus",
-  recommend: "ensemble_recommend",
-  auto: "ensemble_auto",
-  cwd: "ensemble_cwd",
-  effort: "ensemble_effort"
-};
-var CONDUCTOR_LLM_TOOL_NAMES = Object.values(CONDUCTOR_LLM_TOOLS);
-var FOREIGN_SPAWN_TOOLS = ["subagent", "agent"];
-var DEFAULT_CONFIG = {
-  contextRetirement: true,
-  inlineAttachmentLimitBytes: 131072,
-  defaultTimeoutMinutes: 60,
-  maxConcurrent: 4,
-  worktreeMode: "conductor",
-  maxConcurrentWriteCapable: 1,
-  queueOnConcurrencyCap: true,
-  autoOpenFocusOnSpawn: false,
-  defaultSpawnMode: "foreground",
-  defaultMode: "off",
-  personaOverrides: {},
-  conductorPromptPath: null,
-  gc: {
-    enabled: true,
-    completedTtlDays: 30,
-    failedTtlDays: 60,
-    mergeConflictTtlDays: 14,
-    totalSizeBudgetBytes: 5 * 1024 * 1024 * 1024,
-    transcriptSizeCapBytes: 100 * 1024 * 1024,
-    orphanReconcileAfterHours: 24,
-    autoOnSessionStart: true,
-    autoDebounceHours: 6,
-    perPersonaTtlDays: {}
-  },
-  watchdog: {
-    enabled: true,
-    defaultSoftSeconds: 120,
-    defaultHardSeconds: 600,
-    graceSeconds: 30,
-    tickIntervalSeconds: 30,
-    defaultKillOnStall: false
-  },
-  // v0.12 steering: built-in default OFF — mirrors v0.10 kill_on_stall
-  // posture (PRD.md:517). No autonomous-chain field data justifies
-  // flipping it. Slice 1 ships the field; slice 4 wires per-call.
-  defaultSteerable: false,
-  // v0.15 chains: builder and simplifier auto-chain to critic by default.
-  // Override at user or project level; use { then: "" } to disable a
-  // default chain without affecting others.
-  chains: {
-    builder: { then: "critic" },
-    simplifier: { then: "critic" }
-  },
-  // v0.18 classified retry: OFF by default (maxAttempts 1). Opt in via
-  // config/frontmatter/per-call. Retryable set excludes deterministic-
-  // cause classes (syntax/logic) and human-gated ones (permission).
-  retry: {
-    maxAttempts: 1,
-    retryableClasses: ["environment", "stall", "timeout", "test"]
-  }
-};
-var WRITE_CAPABLE_PERSONAS = /* @__PURE__ */ new Set(["builder", "simplifier"]);
-function emptyUsage() {
-  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 };
-}
-function toRunRecord(r) {
-  return {
-    id: r.id,
-    persona: r.persona,
-    task: r.task,
-    model: r.model,
-    thinking: r.thinking,
-    mode: r.mode,
-    status: r.status,
-    startTime: r.startTime,
-    pid: r.pid,
-    parentPid: r.parentPid,
-    parentSessionId: r.parentSessionId,
-    parentStartTime: r.parentStartTime,
-    finishedAt: r.finishedAt,
-    pausedAt: r.pausedAt,
-    exitCode: r.exitCode,
-    stopReason: r.stopReason,
-    errorMessage: r.errorMessage,
-    failureClass: r.failureClass,
-    retryAttempt: r.retryAttempt,
-    usage: r.usage,
-    cwd: r.cwd,
-    recordPath: r.recordPath,
-    transcriptPath: r.transcriptPath,
-    finalPath: r.finalPath,
-    herdrExitUnconfirmed: r.herdrExitUnconfirmed,
-    herdrResultUnavailable: r.herdrResultUnavailable,
-    sessionPath: r.sessionPath,
-    contextRetired: r.contextRetired,
-    pendingAsk: r.pendingAsk,
-    systemPrompt: r.systemPrompt,
-    tools: r.tools,
-    excludeTools: r.excludeTools,
-    runtime: r.runtime === void 0 ? "subprocess" : r.runtime,
-    herdr: r.herdr,
-    herdrUsageBaseline: r.herdrUsageBaseline,
-    steerable: r.steerable,
-    streamingMode: r.streamingMode,
-    hookResult: r.hookResult,
-    worktreePath: r.worktreePath,
-    worktreeBranch: r.worktreeBranch,
-    effort: r.effort,
-    integration: r.integration,
-    landedCommit: r.landedCommit,
-    worktreeBaseBranch: r.worktreeBaseBranch,
-    mergeStrategy: r.mergeStrategy,
-    mergeResult: r.mergeResult,
-    lastEventAt: r.lastEventAt,
-    thisInvocationStartedAt: r.thisInvocationStartedAt,
-    thisInvocationUsageBaseline: r.thisInvocationUsageBaseline,
-    resumeCount: r.resumeCount,
-    compactionCount: r.compactionCount,
-    maxTurns: r.maxTurns,
-    graceTurns: r.graceTurns
-  };
-}
-var TERMINAL_STATUSES = [
-  "completed",
-  "failed",
-  "killed",
-  "timeout",
-  "hook_failed",
-  "merge_conflict",
-  "aborted"
-  // v0.17: turn-limit termination
-];
-function isSettled(s) {
-  return s === "blocked" || isTerminal(s);
-}
-function isTerminal(s) {
-  return TERMINAL_STATUSES.includes(s);
-}
-
 // src/reconcile-startup.ts
 var isRequestedTermination = (status) => status === "killed" || status === "timeout" || status === "aborted";
 function classifyRecord(record, isAlive, _now, selfPid = process.pid, isParentAlive = (pid, startTime) => defaultParentLivenessProbe(pid, startTime), selfSessionId = void 0, herdrProbe = "unknown") {
+  if (runScopeError(record)) return "skip-malformed-scope";
   if (record.runtime === "herdr") {
     if (isRequestedTermination(record.status)) return "skip-terminal";
     if (herdrProbe === "other-socket" || herdrProbe === "unknown") return "skip-foreign";
@@ -1028,7 +1452,7 @@ async function reconcileOrphansAtStartup(deps) {
   };
   let entries;
   try {
-    entries = await readdir(deps.runsRoot);
+    entries = await readdir2(deps.runsRoot);
   } catch (e) {
     const code = e?.code;
     if (code === "ENOENT") return result;
@@ -1039,11 +1463,11 @@ async function reconcileOrphansAtStartup(deps) {
     return result;
   }
   for (const id of entries) {
-    const recordPath = join3(deps.runsRoot, id, "record.json");
+    const recordPath = join4(deps.runsRoot, id, "record.json");
     try {
       let raw;
       try {
-        raw = await readFile(recordPath, "utf-8");
+        raw = await readFile2(recordPath, "utf-8");
       } catch (e) {
         const code = e?.code;
         if (code === "ENOENT" || code === "ENOTDIR") {
@@ -1066,7 +1490,7 @@ async function reconcileOrphansAtStartup(deps) {
         continue;
       }
       if (record.runtime === "herdr" && deps.admit && !deps.admit()) continue;
-      const herdrProbe = record.runtime === "herdr" && !isRequestedTermination(record.status) ? await deps.herdrProbe?.(record) : void 0;
+      const herdrProbe = record.runtime === "herdr" && !isRequestedTermination(record.status) && !runScopeError(record) ? await deps.herdrProbe?.(record) : void 0;
       if (record.runtime === "herdr" && deps.admit && !deps.admit()) continue;
       const verdict = classifyRecord(
         record,
@@ -1084,12 +1508,15 @@ async function reconcileOrphansAtStartup(deps) {
             result.errors.push({ id, message: "herdr attachment unavailable; preserved" });
             break;
           }
-          if (record.id !== id || record.recordPath !== recordPath || record.transcriptPath !== join3(deps.runsRoot, id, "transcript.jsonl") || record.finalPath !== join3(deps.runsRoot, id, "final.md")) throw new Error("noncanonical herdr run record");
+          if (record.id !== id || record.recordPath !== recordPath || record.transcriptPath !== join4(deps.runsRoot, id, "transcript.jsonl") || record.finalPath !== join4(deps.runsRoot, id, "final.md")) throw new Error("noncanonical herdr run record");
           if (!dryRun) await deps.attachHerdr(record);
           result.readopted.push(id);
           break;
         case "skip-unsupported-runtime":
           result.errors.push({ id: record.id, message: unsupportedRuntimeReason(record.runtime) });
+          break;
+        case "skip-malformed-scope":
+          result.errors.push({ id: record.id, message: runScopeError(record) });
           break;
         case "restore-effort":
           if (!dryRun) {
@@ -1248,6 +1675,9 @@ function buildOrphanRun(record, status) {
     // loses its exclusions (buildResumePiArgs reads these).
     tools: record.tools,
     excludeTools: record.excludeTools,
+    // Verbatim, so a malformed saved scope still refuses relaunch after roundtrip.
+    depth: record.depth,
+    delegateAllow: record.delegateAllow,
     // resolveSendStrategy picks rpc vs spawn-resume from these.
     steerable: record.steerable,
     streamingMode: record.streamingMode,
@@ -1291,15 +1721,15 @@ async function checkSessionResumability(record, result) {
     return;
   }
   try {
-    await stat(record.sessionPath);
+    await stat2(record.sessionPath);
   } catch {
     result.unresumable.push(record.id);
   }
 }
 
 // src/herdr/inbox.ts
-import { closeSync as closeSync2, constants, fstatSync, lstatSync, mkdirSync as mkdirSync3, openSync as openSync2, readdirSync as readdirSync3, readSync, realpathSync, renameSync as renameSync2, writeSync } from "node:fs";
-import { basename, isAbsolute as isAbsolute2, join as join4, resolve } from "node:path";
+import { closeSync as closeSync2, constants, fstatSync, lstatSync, mkdirSync as mkdirSync3, openSync as openSync2, readdirSync as readdirSync3, readSync, realpathSync as realpathSync2, renameSync as renameSync2, writeSync } from "node:fs";
+import { basename as basename2, isAbsolute as isAbsolute2, join as join5, resolve as resolve2 } from "node:path";
 import { randomUUID as randomUUID2 } from "node:crypto";
 var CONTROL_PREFIX = "__CONDUCTOR_CTL_V1__:";
 var MAX_INBOX_TEXT_BYTES = 8 * 1048576;
@@ -1310,12 +1740,12 @@ function validRequest(v) {
   return isRecord(v) && v.v === 1 && token(v.launchNonce) && token(v.requestId) && Number.isSafeInteger(v.sequence) && Number(v.sequence) > 0 && Number(v.sequence) <= 999999 && kinds.includes(v.kind) && typeof v.text === "string" && !!v.text.trim() && !v.text.includes("\0") && Buffer.byteLength(v.text) <= MAX_INBOX_TEXT_BYTES && (v.kind === "reply" ? typeof v.askId === "string" && v.askId.length > 0 && v.askId.length <= 512 && !/[\0\r\n]/.test(v.askId) : v.askId === void 0);
 }
 function directory(runDir2, nonce, create = false) {
-  if (!token(nonce) || !isAbsolute2(runDir2) || resolve(runDir2) !== runDir2 || realpathSync(runDir2) !== runDir2) throw new Error("invalid inbox identity/path");
+  if (!token(nonce) || !isAbsolute2(runDir2) || resolve2(runDir2) !== runDir2 || realpathSync2(runDir2) !== runDir2) throw new Error("invalid inbox identity/path");
   if (create) {
-    const record = read(join4(runDir2, "record.json"));
-    if (!isRecord(record) || record.id !== basename(runDir2) || record.runtime !== "herdr" || !isRecord(record.herdr) || record.herdr.runId !== record.id || record.herdr.launchNonce !== nonce) throw new Error("inbox invocation mismatch");
+    const record = read(join5(runDir2, "record.json"));
+    if (!isRecord(record) || record.id !== basename2(runDir2) || record.runtime !== "herdr" || !isRecord(record.herdr) || record.herdr.runId !== record.id || record.herdr.launchNonce !== nonce) throw new Error("inbox invocation mismatch");
   }
-  for (const path2 of [join4(runDir2, "inbox"), join4(runDir2, "inbox", nonce)]) {
+  for (const path2 of [join5(runDir2, "inbox"), join5(runDir2, "inbox", nonce)]) {
     if (create) {
       try {
         mkdirSync3(path2, { mode: 448 });
@@ -1323,9 +1753,9 @@ function directory(runDir2, nonce, create = false) {
         if (e.code !== "EEXIST") throw e;
       }
     }
-    if (!lstatSync(path2).isDirectory() || realpathSync(path2) !== path2) throw new Error("invalid inbox directory");
+    if (!lstatSync(path2).isDirectory() || realpathSync2(path2) !== path2) throw new Error("invalid inbox directory");
   }
-  return join4(runDir2, "inbox", nonce);
+  return join5(runDir2, "inbox", nonce);
 }
 function read(file) {
   const fd = openSync2(file, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
@@ -1374,22 +1804,22 @@ function newRequest(runDir2, request) {
   if (!validRequest(request) || Buffer.byteLength(JSON.stringify(request)) >= MAX_RECORD_BYTES) throw new Error("invalid inbox request");
   const dir = directory(runDir2, request.launchNonce, true);
   if (readInbox(runDir2, request.launchNonce).some((e) => e.request.requestId === request.requestId || e.request.sequence === request.sequence)) throw new Error("duplicate inbox request identity");
-  for (const suffix of [".sending.json", PREPARED]) absent(join4(dir, `${name(request)}${suffix}`));
-  absent(join4(dir, `${request.requestId}.ack.json`));
+  for (const suffix of [".sending.json", PREPARED]) absent(join5(dir, `${name(request)}${suffix}`));
+  absent(join5(dir, `${request.requestId}.ack.json`));
   return dir;
 }
 function writeInboxRequest(runDir2, request) {
-  publish(join4(newRequest(runDir2, request), `${name(request)}.json`), request);
+  publish(join5(newRequest(runDir2, request), `${name(request)}.json`), request);
 }
 function prepareInboxRequest(runDir2, request) {
-  publish(join4(newRequest(runDir2, request), `${name(request)}${PREPARED}`), request);
+  publish(join5(newRequest(runDir2, request), `${name(request)}${PREPARED}`), request);
 }
 function publishPreparedInboxRequest(runDir2, request) {
   if (!validRequest(request)) throw new Error("invalid inbox request");
-  const dir = directory(runDir2, request.launchNonce), source = join4(dir, `${name(request)}${PREPARED}`);
+  const dir = directory(runDir2, request.launchNonce), source = join5(dir, `${name(request)}${PREPARED}`);
   if (JSON.stringify(read(source)) !== JSON.stringify(request)) throw new Error("prepared inbox request changed before publication");
-  for (const suffix of [".json", ".sending.json"]) absent(join4(dir, `${name(request)}${suffix}`));
-  renameSync2(source, join4(dir, `${name(request)}.json`));
+  for (const suffix of [".json", ".sending.json"]) absent(join5(dir, `${name(request)}${suffix}`));
+  renameSync2(source, join5(dir, `${name(request)}.json`));
 }
 function hasPreparedInboxRequest(runDir2, nonce) {
   try {
@@ -1413,7 +1843,7 @@ function readInbox(runDir2, nonce) {
   for (const file of files) {
     if (!/^\d{6}-[A-Za-z0-9][A-Za-z0-9_-]{0,127}(\.sending)?\.json$/.test(file)) continue;
     try {
-      const request = read(join4(dir, file));
+      const request = read(join5(dir, file));
       if (!validRequest(request) || request.launchNonce !== nonce) continue;
       const dispatched = file.endsWith(".sending.json");
       if (file !== `${name(request)}${dispatched ? ".sending" : ""}.json`) continue;
@@ -1427,7 +1857,7 @@ function readInboxAck(runDir2, request) {
   if (!validRequest(request)) throw new Error("invalid ack request identity");
   let value;
   try {
-    value = read(join4(directory(runDir2, request.launchNonce), `${request.requestId}.ack.json`));
+    value = read(join5(directory(runDir2, request.launchNonce), `${request.requestId}.ack.json`));
   } catch (e) {
     if (e.code === "ENOENT") return;
     throw e;
@@ -1438,13 +1868,13 @@ function readInboxAck(runDir2, request) {
 function writeInboxAck(runDir2, request, code) {
   if (!validRequest(request)) throw new Error("invalid ack request identity");
   const { v, launchNonce, requestId, sequence, kind } = request;
-  publish(join4(directory(runDir2, launchNonce), `${requestId}.ack.json`), { v, launchNonce, requestId, sequence, kind, accepted: code === void 0, ...code ? { code } : {}, at: Date.now() });
+  publish(join5(directory(runDir2, launchNonce), `${requestId}.ack.json`), { v, launchNonce, requestId, sequence, kind, accepted: code === void 0, ...code ? { code } : {}, at: Date.now() });
 }
 var inboxMarker = (r) => `${CONTROL_PREFIX}${r.launchNonce}:${r.sequence}:${r.requestId}`;
 function dispatchInboxRequest(runDir2, request) {
   if (!validRequest(request)) throw new Error("invalid dispatch request identity");
   const dir = directory(runDir2, request.launchNonce);
-  const source = join4(dir, `${name(request)}.json`), target = join4(dir, `${name(request)}.sending.json`);
+  const source = join5(dir, `${name(request)}.json`), target = join5(dir, `${name(request)}.sending.json`);
   if (JSON.stringify(read(source)) !== JSON.stringify(request)) throw new Error("inbox request changed before dispatch");
   absent(target);
   renameSync2(source, target);
@@ -1452,12 +1882,12 @@ function dispatchInboxRequest(runDir2, request) {
 
 // src/herdr/ownership.ts
 var herdrModuleEpoch = randomUUID3();
-var pathFor = (dir, n) => join5(dir, "owner", `${String(n).padStart(6, "0")}.json`);
+var pathFor = (dir, n) => join6(dir, "owner", `${String(n).padStart(6, "0")}.json`);
 var same = (a, b) => !!a && ["epoch", "sessionId", "pid", "startTime", "socketPath", "runId", "launchNonce", "at", "generation"].every((k) => a[k] === b[k]);
 function readHerdrOwner(dir) {
   let files;
   try {
-    files = readdirSync4(join5(dir, "owner")).filter((name2) => /^\d+\.json$/.test(name2)).sort((a, b) => Number(a.split(".")[0]) - Number(b.split(".")[0]));
+    files = readdirSync4(join6(dir, "owner")).filter((name2) => /^\d+\.json$/.test(name2)).sort((a, b) => Number(a.split(".")[0]) - Number(b.split(".")[0]));
   } catch (e) {
     if (e.code === "ENOENT") return;
     throw e;
@@ -1477,7 +1907,7 @@ function readHerdrOwner(dir) {
 }
 function released(dir, owner) {
   const path2 = `${pathFor(dir, owner.generation)}.released`;
-  if (!existsSync3(path2)) return false;
+  if (!existsSync4(path2)) return false;
   const release = read(path2);
   if (!isRecord(release) || !same(release, owner)) throw new Error("invalid herdr release claim; preserve for inspection");
   return true;
@@ -1519,7 +1949,7 @@ function assertHerdrOwner(run) {
     return;
   }
   if (run.effort && run.integration) return;
-  if (run.herdr?.ownerGeneration !== void 0 || readHerdrOwner(dirname3(run.recordPath))) throw new Error("herdr stream not owned by this runtime");
+  if (run.herdr?.ownerGeneration !== void 0 || readHerdrOwner(dirname4(run.recordPath))) throw new Error("herdr stream not owned by this runtime");
 }
 function ownsHerdrRun(run) {
   try {
@@ -1547,25 +1977,25 @@ import { setTimeout as delay2 } from "node:timers/promises";
 import { getAgentDir, hasTrustRequiringProjectResources, ProjectTrustStore, SessionManager as SessionManager2, SettingsManager } from "@earendil-works/pi-coding-agent";
 
 // src/pi-host.ts
-import { readFileSync as readFileSync4, realpathSync as realpathSync2 } from "node:fs";
-import { dirname as dirname4, join as join6 } from "node:path";
+import { readFileSync as readFileSync4, realpathSync as realpathSync3 } from "node:fs";
+import { dirname as dirname5, join as join7 } from "node:path";
 import { SessionManager, VERSION } from "@earendil-works/pi-coding-agent";
 var PI_LIBRARY_VERSION = VERSION;
 function hostPiVersion(evidence = {}, entry = process.argv[1]) {
   if (evidence.sessionManager instanceof SessionManager) return VERSION;
   if (!entry) return "unknown";
   try {
-    const script = realpathSync2(entry);
-    for (let dir = dirname4(script); dir !== dirname4(dir); dir = dirname4(dir)) {
+    const script = realpathSync3(entry);
+    for (let dir = dirname5(script); dir !== dirname5(dir); dir = dirname5(dir)) {
       let pkg;
       try {
-        pkg = JSON.parse(readFileSync4(join6(dir, "package.json"), "utf8"));
+        pkg = JSON.parse(readFileSync4(join7(dir, "package.json"), "utf8"));
       } catch {
         continue;
       }
       if (pkg.name === void 0) continue;
       const bins = typeof pkg.bin === "string" ? [pkg.bin] : pkg.bin && typeof pkg.bin === "object" ? Object.values(pkg.bin) : [];
-      return pkg.name === "@earendil-works/pi-coding-agent" && typeof pkg.version === "string" && bins.some((bin) => typeof bin === "string" && join6(dir, bin) === script) ? pkg.version : "unknown";
+      return pkg.name === "@earendil-works/pi-coding-agent" && typeof pkg.version === "string" && bins.some((bin) => typeof bin === "string" && join7(dir, bin) === script) ? pkg.version : "unknown";
     }
   } catch {
   }
@@ -1574,7 +2004,7 @@ function hostPiVersion(evidence = {}, entry = process.argv[1]) {
 
 // src/herdr/tail.ts
 import { closeSync as closeSync3, constants as constants2, fstatSync as fstatSync2, openSync as openSync3, readSync as readSync2, watch } from "node:fs";
-import { dirname as dirname5 } from "node:path";
+import { dirname as dirname6 } from "node:path";
 import { StringDecoder as StringDecoder2 } from "node:string_decoder";
 var LIMIT = 32 * 1048576;
 var HerdrTail = class {
@@ -1593,7 +2023,7 @@ var HerdrTail = class {
   start() {
     if (this.closed || this.timer) return;
     try {
-      this.watcher = watch(dirname5(this.options.path), { persistent: false }, () => this.drain());
+      this.watcher = watch(dirname6(this.options.path), { persistent: false }, () => this.drain());
       this.watcher.on("error", () => {
         this.watcher?.close();
         this.watcher = void 0;
@@ -1752,17 +2182,17 @@ function proveChildProcess(ev) {
 import { Type } from "@sinclair/typebox";
 
 // src/config.ts
-import { existsSync as existsSync4, readFileSync as readFileSync5 } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { join as join7 } from "node:path";
+import { existsSync as existsSync5, readFileSync as readFileSync5 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join8 } from "node:path";
 function userConfigPath() {
-  return join7(homedir2(), ".pi", "agent", "extensions", "conductor", "config.json");
+  return join8(homedir3(), ".pi", "agent", "extensions", "conductor", "config.json");
 }
 function projectConfigPath(cwd) {
-  return join7(cwd, ".pi", "conductor.json");
+  return join8(cwd, ".pi", "conductor.json");
 }
 function safeReadJson(path2) {
-  if (!existsSync4(path2)) return { value: null };
+  if (!existsSync5(path2)) return { value: null };
   try {
     return { value: JSON.parse(readFileSync5(path2, "utf-8")) };
   } catch (e) {
@@ -1980,17 +2410,17 @@ function contextRetirementNotice(run) {
 }
 
 // src/file-evidence.ts
-import { closeSync as closeSync4, constants as constants3, fstatSync as fstatSync3, openSync as openSync4, readFileSync as readFileSync7, readSync as readSync3, realpathSync as realpathSync3 } from "node:fs";
-import { dirname as dirname6, isAbsolute as isAbsolute3, join as join9 } from "node:path";
+import { closeSync as closeSync4, constants as constants3, fstatSync as fstatSync3, openSync as openSync4, readFileSync as readFileSync7, readSync as readSync3, realpathSync as realpathSync4 } from "node:fs";
+import { dirname as dirname7, isAbsolute as isAbsolute3, join as join10 } from "node:path";
 
 // src/conductor-cwd.ts
 import { statSync } from "node:fs";
-import { homedir as homedir3 } from "node:os";
-import { join as join8, resolve as resolve2 } from "node:path";
+import { homedir as homedir4 } from "node:os";
+import { join as join9, resolve as resolve3 } from "node:path";
 var CWD_ENTRY_TYPE = "conductor-cwd";
 function resolveLocalPath(raw, base) {
-  const expanded = raw === "~" ? homedir3() : raw.startsWith("~/") ? join8(homedir3(), raw.slice(2)) : raw;
-  return resolve2(base, expanded);
+  const expanded = raw === "~" ? homedir4() : raw.startsWith("~/") ? join9(homedir4(), raw.slice(2)) : raw;
+  return resolve3(base, expanded);
 }
 function resolveCwdArg(input, base) {
   const raw = input.trim();
@@ -2096,13 +2526,13 @@ function sourceRun(id, registry) {
   if (!RUN_ID.test(id)) throw new Error(`files: malformed run reference: run:${id}`);
   const live = registry.get(id);
   if (live) return live;
-  const root = realpathSync3(runsRoot());
-  const dir = realpathSync3(join9(root, id));
-  if (dirname6(dir) !== root) throw new Error(`files: run record outside canonical runs directory: ${id}`);
-  const recordPath = join9(dir, "record.json");
-  if (realpathSync3(recordPath) !== recordPath) throw new Error(`files: invalid run record path: ${id}`);
+  const root = realpathSync4(runsRoot());
+  const dir = realpathSync4(join10(root, id));
+  if (dirname7(dir) !== root) throw new Error(`files: run record outside canonical runs directory: ${id}`);
+  const recordPath = join10(dir, "record.json");
+  if (realpathSync4(recordPath) !== recordPath) throw new Error(`files: invalid run record path: ${id}`);
   const r = inspect(recordPath, (fd) => JSON.parse(readFileSync7(fd, "utf8")));
-  if (!r || r.id !== id || typeof r.persona !== "string" || !r.persona || typeof r.cwd !== "string" || !isAbsolute3(r.cwd) || !(isTerminal(r.status) || r.status === "running" || r.status === "paused" || r.status === "queued") || typeof r.finalPath !== "string" || realpathSync3(r.finalPath) !== realpathSync3(join9(dir, "final.md")) || typeof r.recordPath !== "string" || realpathSync3(r.recordPath) !== recordPath || r.sessionPath !== void 0 && typeof r.sessionPath !== "string") {
+  if (!r || r.id !== id || typeof r.persona !== "string" || !r.persona || typeof r.cwd !== "string" || !isAbsolute3(r.cwd) || !(isTerminal(r.status) || r.status === "running" || r.status === "paused" || r.status === "queued") || typeof r.finalPath !== "string" || realpathSync4(r.finalPath) !== realpathSync4(join10(dir, "final.md")) || typeof r.recordPath !== "string" || realpathSync4(r.recordPath) !== recordPath || r.sessionPath !== void 0 && typeof r.sessionPath !== "string") {
     throw new Error(`files: invalid run record: ${id}`);
   }
   return r;
@@ -2126,7 +2556,7 @@ function appendFileEvidence(task, files, options) {
     try {
       const run = input.startsWith("run:") ? sourceRun(input.slice(4), options.registry) : void 0;
       if (run && (run.herdrExitUnconfirmed || run.herdrResultUnavailable || !usableResult(run.finalPath))) throw new Error(`no usable final result: ${input}`);
-      const path2 = realpathSync3(run ? run.finalPath : resolveLocalPath(input, options.cwd));
+      const path2 = realpathSync4(run ? run.finalPath : resolveLocalPath(input, options.cwd));
       const size = inspect(path2, (_fd, size2) => size2);
       if (seen.has(path2)) return void 0;
       seen.add(path2);
@@ -2204,339 +2634,6 @@ Continue the original assignment, not a new task.
 
 // src/effort/admit.ts
 import { matchesGlob as matchesGlob2 } from "node:path";
-
-// src/personas.ts
-import { readdir as readdir2, readFile as readFile2, stat as stat2 } from "node:fs/promises";
-import { existsSync as existsSync5, realpathSync as realpathSync4 } from "node:fs";
-import { homedir as homedir4 } from "node:os";
-import { basename as basename2, dirname as dirname7, join as join10, resolve as resolve3 } from "node:path";
-import { fileURLToPath } from "node:url";
-var WRITE_CAPABLE_PERSONAS2 = /* @__PURE__ */ new Set([
-  "builder",
-  "simplifier"
-]);
-function isWriteCapable(personaName) {
-  return WRITE_CAPABLE_PERSONAS2.has(personaName);
-}
-function resolveBuiltinPersonasDir(metaUrl) {
-  const here = realpathSync4(fileURLToPath(metaUrl));
-  return resolve3(dirname7(here), "..", "personas");
-}
-function builtinPersonasDir() {
-  return resolveBuiltinPersonasDir(import.meta.url);
-}
-function userPersonasDir() {
-  return join10(homedir4(), ".pi", "agent", "conductor", "personas");
-}
-function projectPersonasDir(cwd) {
-  return join10(cwd, ".pi", "conductor", "personas");
-}
-var FRONTMATTER_FENCE = "---";
-function parseFrontmatter(text3) {
-  const lines = text3.split(/\r?\n/);
-  if (lines[0]?.trim() !== FRONTMATTER_FENCE) {
-    return { frontmatter: {}, body: text3 };
-  }
-  let endIdx = -1;
-  for (let i2 = 1; i2 < lines.length; i2++) {
-    if (lines[i2]?.trim() === FRONTMATTER_FENCE) {
-      endIdx = i2;
-      break;
-    }
-  }
-  if (endIdx === -1) {
-    throw new Error("frontmatter opened with `---` but never closed");
-  }
-  const fmLines = lines.slice(1, endIdx);
-  const body = lines.slice(endIdx + 1).join("\n");
-  const frontmatter = {};
-  let i = 0;
-  while (i < fmLines.length) {
-    const raw = fmLines[i] ?? "";
-    const line = raw.trim();
-    i++;
-    if (!line || line.startsWith("#")) continue;
-    const colon = line.indexOf(":");
-    if (colon === -1) {
-      throw new Error(`frontmatter line missing colon: "${line}"`);
-    }
-    const key = line.slice(0, colon).trim();
-    const valuePart = line.slice(colon + 1).trim();
-    if (valuePart === "") {
-      const items = [];
-      while (i < fmLines.length) {
-        const next = fmLines[i] ?? "";
-        const trimmed = next.trim();
-        if (trimmed.startsWith("- ")) {
-          items.push(unquote(trimmed.slice(2).trim()));
-          i++;
-        } else if (trimmed === "" || trimmed.startsWith("#")) {
-          i++;
-        } else {
-          break;
-        }
-      }
-      frontmatter[key] = items;
-    } else {
-      frontmatter[key] = parseScalar(valuePart);
-    }
-  }
-  return { frontmatter, body };
-}
-function unquote(s) {
-  if (s.startsWith('"') && s.endsWith('"') || s.startsWith("'") && s.endsWith("'")) {
-    return s.slice(1, -1);
-  }
-  return s;
-}
-function parseScalar(s) {
-  const u = unquote(s);
-  if (u === "true") return true;
-  if (u === "false") return false;
-  if (/^-?\d+$/.test(u)) return Number.parseInt(u, 10);
-  if (/^-?\d+\.\d+$/.test(u)) return Number.parseFloat(u);
-  return u;
-}
-function validateAndBuild(raw, source, sourcePath) {
-  const { frontmatter, body } = raw;
-  const name2 = requireString(frontmatter, "name");
-  const description = requireString(frontmatter, "description");
-  const model = optionalString(frontmatter, "model");
-  const thinking = optionalEnum(frontmatter, "thinking", THINKING_LEVELS);
-  const inheritContext = optionalEnum(frontmatter, "inherit_context", CONTEXT_INHERITANCE) ?? "filtered";
-  const inheritSkills = optionalBoolean(frontmatter, "inherit_skills") ?? false;
-  const defaultReads = optionalStringList(frontmatter, "default_reads") ?? [];
-  const worktree = optionalBoolean(frontmatter, "worktree") ?? false;
-  const timeoutMinutes = optionalNumber(frontmatter, "timeout_minutes") ?? 60;
-  const readOnly = optionalBoolean(frontmatter, "read_only") ?? false;
-  const runtime = frontmatter.runtime === void 0 ? void 0 : parseRuntimeChoice(frontmatter.runtime);
-  const onCompleteHook = optionalStringAllowEmpty(frontmatter, "on_complete_hook");
-  const onCompleteHookTimeoutSeconds = optionalPositiveInteger(
-    frontmatter,
-    "on_complete_hook_timeout_seconds"
-  );
-  const maxTurns = optionalPositiveInteger(frontmatter, "max_turns");
-  const graceTurns = optionalNonNegativeInteger(frontmatter, "grace_turns");
-  const retryMaxAttempts = optionalPositiveInteger(frontmatter, "retry_max_attempts");
-  const tools = frontmatter.tools === void 0 ? void 0 : parseToolList(frontmatter.tools, "tools");
-  const excludeTools = frontmatter.exclude_tools === void 0 ? void 0 : parseToolList(frontmatter.exclude_tools, "exclude_tools");
-  if (timeoutMinutes <= 0 || timeoutMinutes > 24 * 60) {
-    throw new Error(`timeout_minutes must be in (0, 1440]; got ${timeoutMinutes}`);
-  }
-  const systemPrompt = body.trim();
-  if (!systemPrompt) {
-    throw new Error("system prompt body is empty");
-  }
-  return {
-    name: name2,
-    description,
-    model,
-    thinking,
-    inheritContext,
-    inheritSkills,
-    defaultReads,
-    worktree,
-    timeoutMinutes,
-    systemPrompt,
-    source,
-    sourcePath,
-    readOnly,
-    runtime,
-    onCompleteHook,
-    onCompleteHookTimeoutSeconds,
-    maxTurns,
-    graceTurns,
-    retryMaxAttempts,
-    tools,
-    excludeTools
-  };
-}
-var TOOL_NAME_PATTERN = /^[A-Za-z0-9_.:-]+$/;
-function parseToolList(value, field) {
-  if (typeof value === "string" && /^\[.*\]$/.test(value.trim())) {
-    throw new Error(
-      `field "${field}" must be a block list (one \`- name\` per line); flow syntax [a, b] is not supported`
-    );
-  }
-  if (!Array.isArray(value) || !value.every((x) => typeof x === "string")) {
-    throw new Error(`field "${field}" must be a list of tool names`);
-  }
-  const names = value.map((s) => s.trim());
-  if (names.includes("")) throw new Error(`field "${field}" has an empty entry`);
-  const bad = names.find((n) => !TOOL_NAME_PATTERN.test(n));
-  if (bad !== void 0) {
-    throw new Error(
-      `field "${field}" entry "${bad}" is not a valid tool name (allowed: letters, digits, _ . : -)`
-    );
-  }
-  if (field === "tools" && names.length === 0) {
-    throw new Error(`field "tools" must list at least one tool name; omit it to keep pi's default set`);
-  }
-  return [...new Set(names)];
-}
-function effectiveExcludeTools(excludeTools) {
-  return [.../* @__PURE__ */ new Set([...excludeTools ?? [], ...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS])];
-}
-function effectiveAllowTools(tools) {
-  return tools === void 0 ? void 0 : [.../* @__PURE__ */ new Set([...tools, "ask_owner"])];
-}
-function requireString(fm, key) {
-  const v = fm[key];
-  if (typeof v !== "string" || v.trim() === "") {
-    throw new Error(`required field "${key}" is missing or empty`);
-  }
-  return v.trim();
-}
-function optionalString(fm, key) {
-  const v = fm[key];
-  if (v === void 0) return void 0;
-  if (typeof v !== "string") {
-    throw new Error(`field "${key}" must be a string; got ${typeof v}`);
-  }
-  return v.trim() === "" ? void 0 : v.trim();
-}
-function optionalEnum(fm, key, allowed) {
-  const v = fm[key];
-  if (v === void 0) return void 0;
-  if (typeof v !== "string" || !allowed.includes(v)) {
-    throw new Error(`field "${key}" must be one of ${allowed.join("|")}; got ${String(v)}`);
-  }
-  return v;
-}
-function optionalBoolean(fm, key) {
-  const v = fm[key];
-  if (v === void 0) return void 0;
-  if (typeof v !== "boolean") {
-    throw new Error(`field "${key}" must be a boolean; got ${typeof v}`);
-  }
-  return v;
-}
-function optionalNumber(fm, key) {
-  const v = fm[key];
-  if (v === void 0) return void 0;
-  if (typeof v !== "number") {
-    throw new Error(`field "${key}" must be a number; got ${typeof v}`);
-  }
-  return v;
-}
-function optionalStringList(fm, key) {
-  const v = fm[key];
-  if (v === void 0) return void 0;
-  if (!Array.isArray(v) || !v.every((x) => typeof x === "string")) {
-    throw new Error(`field "${key}" must be a list of strings`);
-  }
-  return v.map((s) => s.trim()).filter(Boolean);
-}
-function optionalStringAllowEmpty(fm, key) {
-  const v = fm[key];
-  if (v === void 0) return void 0;
-  if (typeof v !== "string") {
-    throw new Error(`field "${key}" must be a string; got ${typeof v}`);
-  }
-  return v;
-}
-function optionalPositiveInteger(fm, key) {
-  const v = fm[key];
-  if (v === void 0) return void 0;
-  if (typeof v !== "number" || !Number.isInteger(v) || v < 1) {
-    throw new Error(`field "${key}" must be a positive integer; got ${String(v)}`);
-  }
-  return v;
-}
-function optionalNonNegativeInteger(fm, key) {
-  const v = fm[key];
-  if (v === void 0) return void 0;
-  if (typeof v !== "number" || !Number.isInteger(v) || v < 0) {
-    throw new Error(`field "${key}" must be a non-negative integer; got ${String(v)}`);
-  }
-  return v;
-}
-async function loadPersonasFromDir(dir, source) {
-  const personas = [];
-  const errors = [];
-  const blockedNames = [];
-  if (!existsSync5(dir)) return { personas, errors, blockedNames };
-  let entries;
-  try {
-    entries = await readdir2(dir);
-  } catch (e) {
-    errors.push({ path: dir, reason: `cannot read directory: ${e.message}` });
-    return { personas, errors, blockedNames };
-  }
-  for (const entry of entries) {
-    if (!entry.endsWith(".md") || entry.startsWith("_")) continue;
-    const filePath = join10(dir, entry);
-    let raw;
-    try {
-      const st = await stat2(filePath);
-      if (!st.isFile()) continue;
-      const text3 = await readFile2(filePath, "utf-8");
-      raw = parseFrontmatter(text3);
-      const persona = validateAndBuild(raw, source, filePath);
-      personas.push(persona);
-    } catch (e) {
-      errors.push({ path: filePath, reason: e.message });
-      if (raw?.frontmatter.runtime !== void 0) blockedNames.push(entry.slice(0, -3));
-    }
-  }
-  return { personas, errors, blockedNames };
-}
-async function resolvePersonas(opts) {
-  const overrides = opts.personaOverrides ?? {};
-  const builtin = await loadPersonasFromDir(builtinPersonasDir(), "builtin");
-  const user = await loadPersonasFromDir(userPersonasDir(), "user");
-  const project = await loadPersonasFromDir(projectPersonasDir(opts.cwd), "project");
-  const errors = [...builtin.errors, ...user.errors, ...project.errors];
-  const personas = /* @__PURE__ */ new Map();
-  const shadowed = /* @__PURE__ */ new Map();
-  for (const layer of [builtin, user, project]) {
-    for (const name2 of layer.blockedNames) {
-      for (const p of personas.values()) {
-        if (p.name === name2 || basename2(p.sourcePath, ".md") === name2) personas.delete(p.name);
-      }
-    }
-    for (const p of layer.personas) {
-      const list = shadowed.get(p.name) ?? [];
-      list.push(p);
-      shadowed.set(p.name, list);
-      personas.set(p.name, p);
-    }
-  }
-  for (const [name2, ov] of Object.entries(overrides)) {
-    if (ov.disabled) {
-      personas.delete(name2);
-      continue;
-    }
-    const base = personas.get(name2);
-    if (!base) continue;
-    let runtime = base.runtime;
-    let tools = base.tools;
-    let excludeTools = base.excludeTools;
-    try {
-      if (ov.runtime !== void 0) runtime = parseRuntimeChoice(ov.runtime);
-      if (ov.tools !== void 0) tools = parseToolList(ov.tools, "tools");
-      if (ov.exclude_tools !== void 0) {
-        excludeTools = parseToolList(ov.exclude_tools, "exclude_tools");
-      }
-    } catch (e) {
-      errors.push({ path: `personaOverrides.${name2}`, reason: e.message });
-      personas.delete(name2);
-      continue;
-    }
-    personas.set(name2, {
-      ...base,
-      runtime,
-      tools,
-      excludeTools,
-      model: ov.model ?? base.model,
-      thinking: ov.thinking ?? base.thinking,
-      timeoutMinutes: ov.timeoutMinutes ?? base.timeoutMinutes,
-      inheritContext: ov.inheritContext ?? base.inheritContext,
-      inheritSkills: ov.inheritSkills ?? base.inheritSkills
-    });
-  }
-  return { personas, shadowed, errors };
-}
 
 // src/effort/generated.ts
 import { createHash as createHash2 } from "node:crypto";
@@ -5287,6 +5384,15 @@ var SUBAGENT_NESTING_GUARD = [
   "further sub-agents (no calls to ensemble_spawn, subagent, agent, delegate, etc).",
   "Complete the entire task yourself and return your findings."
 ].join(" ");
+var LEAF_GUARD = "You are a read-only leaf: do not edit, write, or commit files. If you need a decision, end your final answer with `QUESTION: \u2026`; your owner decides. You cannot ask anyone.";
+function delegatingGuard(allow) {
+  return [
+    "IMPORTANT: You are running as a pi-conductor sub-agent. Your persona may later delegate",
+    `read-only work to: ${allow.join(", ")}, but no delegation tool is available yet. Do NOT attempt to spawn`,
+    "sub-agents (no calls to ensemble_spawn, subagent, agent, delegate, etc).",
+    "Complete the entire task yourself and return your findings."
+  ].join(" ");
+}
 var FILTERED_COMPACT_CHAIN_DEPTH_CAP = 6;
 var READ_ONLY_PERSONA_ENFORCER = [
   "[READ-ONLY PERSONA ENFORCER]",
@@ -5322,8 +5428,10 @@ function resolveDefaultReads(reads, childCwd, requestedCwd) {
     return existsSync9(own) ? own : resolve5(requestedCwd, f);
   });
 }
-function buildSubAgentPrompt(persona, task, place) {
-  const parts = [SUBAGENT_NESTING_GUARD, ""];
+function buildSubAgentPrompt(persona, task, place, scope = LEGACY_CHILD_SCOPE) {
+  const guard = scope.depth === 2 ? `${SUBAGENT_NESTING_GUARD}
+${LEAF_GUARD}` : isDelegating(scope) ? delegatingGuard(scope.delegateAllow) : SUBAGENT_NESTING_GUARD;
+  const parts = [guard, ""];
   if (place?.worktree) {
     const wt = place.worktree;
     parts.push(
@@ -5359,9 +5467,11 @@ function buildPiCoreArgs(opts) {
   }
   if (opts.model) args.push("--model", opts.model);
   if (opts.thinking) args.push("--thinking", opts.thinking);
-  const tools = effectiveAllowTools(opts.tools);
+  const scope = opts.scope ?? LEGACY_CHILD_SCOPE;
+  const excluded = effectiveExcludeTools(opts.excludeTools, scope);
+  const tools = effectiveAllowTools(opts.tools, scope, excluded);
   if (tools && tools.length > 0) args.push("--tools", tools.join(","));
-  args.push("--exclude-tools", effectiveExcludeTools(opts.excludeTools).join(","));
+  args.push("--exclude-tools", excluded.join(","));
   if (opts.kind === "fresh") {
     args.push("--append-system-prompt", opts.systemPrompt);
   } else if (opts.systemPrompt) {
@@ -5387,6 +5497,7 @@ function buildResumePiArgs(run, message) {
     systemPrompt: run.systemPrompt,
     tools: run.tools,
     excludeTools: run.excludeTools,
+    scope: childToolScope(run),
     // v0.12 steering: spawn-resume on a terminal run is always
     // print-mode by design (§4.4 archived-run compat / Q10 lock).
     // RPC mode is NOT sticky across the original-subprocess boundary
@@ -5453,7 +5564,7 @@ function filteredHistorySentinel() {
 function planSpawnPiArgs(opts) {
   const { persona, parentMessages = [], sessionDir, systemPrompt, prompt, cwd, model, thinking, skillPaths } = opts;
   const steerable = opts.steerable === true;
-  const toolPolicy = { tools: persona.tools, excludeTools: persona.excludeTools };
+  const toolPolicy = { tools: persona.tools, excludeTools: persona.excludeTools, scope: opts.scope };
   const resolvedInheritContext = resolveInheritContext(
     opts.inheritContextOverride,
     persona
@@ -5639,6 +5750,7 @@ function prepareSpawnEffort(opts) {
   return ownedEffort(opts.cwd, opts.effort, opts.parentSessionId);
 }
 function spawnRun(opts) {
+  const scope = childToolScope({ depth: 1, delegateAllow: opts.persona.agents ?? [] });
   opts = prepareSpawnRuntime(opts);
   if (opts.runtime === "herdr" && !opts.registry.herdrAdmissionOpen) throw new Error("herdr runtime shutting down; launch refused");
   opts = prepareSpawnEvidence(opts, opts.registry);
@@ -5677,7 +5789,9 @@ function spawnRun(opts) {
     // Effective tool policy, captured for record.json and re-applied on
     // resume. Same inputs planSpawnPiArgs reads from opts.persona below.
     tools: opts.persona.tools,
-    excludeTools: effectiveExcludeTools(opts.persona.excludeTools),
+    excludeTools: effectiveExcludeTools(opts.persona.excludeTools, scope),
+    depth: scope.depth,
+    delegateAllow: [...scope.delegateAllow],
     // Item 15: per-invocation markers. Initial spawn IS the start of
     // the (sole, so far) invocation, so:
     //   - thisInvocationStartedAt mirrors startTime
@@ -5802,7 +5916,7 @@ function spawnRun(opts) {
       cwd: effectiveCwd,
       requestedCwd: opts.cwd,
       worktree: worktreeFence
-    });
+    }, scope);
     const sessionDir = join16(dir, "session");
     mkdirSync9(sessionDir, { recursive: true });
     const plan = planSpawnPiArgs({
@@ -5840,7 +5954,8 @@ function spawnRun(opts) {
       // planSpawnPiArgs can auto-downgrade filtered_compact → none when
       // the chain is deep. Excludes the run we just registered (it is
       // already in the registry at this point) to count only siblings.
-      siblingRunCount: opts.registry.list().length - 1
+      siblingRunCount: opts.registry.list().length - 1,
+      scope
     });
     if (plan.seededSessionPath) run.sessionPath = plan.seededSessionPath;
     const done = createRunPipeline(run, plan.piArgs, {
@@ -6041,6 +6156,10 @@ function runActionError(run, action, observed) {
   if (action === "focus") return observed.canFocus ? void 0 : "Focused stream requires terminal UI (TUI mode).";
   const unsupported = unsupportedRuntimeReason(run.runtime);
   if (unsupported && !(run.runtime === "herdr" && run.transport?.kind === "herdr")) return unsupported;
+  if (action === "send") {
+    const scopeError = runScopeError(run);
+    if (scopeError) return scopeError;
+  }
   if (run.runtime === "herdr") {
     if (!ownsHerdrRun(run)) return "herdr owner generation fenced; action refused";
     if (run.transport?.kind !== "herdr") return "herdr runtime unavailable here: stream is not attached";
@@ -6943,16 +7062,15 @@ var HERDR_FORWARD_ENV = [
   "HTTP_PROXY",
   "NO_PROXY"
 ];
-var ownedNames = ["CONDUCTOR_SUBAGENT", "CONDUCTOR_RUNTIME", "CONDUCTOR_RUN_ID", "CONDUCTOR_RUN_DIR", "CONDUCTOR_CONFIG_CWD", "CONDUCTOR_DEPTH", "TMPDIR"];
+var ownedNames = ["CONDUCTOR_SUBAGENT", "CONDUCTOR_RUNTIME", "CONDUCTOR_RUN_ID", "CONDUCTOR_CONFIG_CWD", ...CHILD_SCOPE_ENV, "TMPDIR"];
 function buildHerdrEnv(source, owned) {
   return {
     ...Object.fromEntries(HERDR_FORWARD_ENV.flatMap((key) => source[key] === void 0 ? [] : [[key, source[key]]])),
     CONDUCTOR_SUBAGENT: "1",
     CONDUCTOR_RUNTIME: "herdr",
     CONDUCTOR_RUN_ID: owned.runId,
-    CONDUCTOR_RUN_DIR: owned.runDir,
     CONDUCTOR_CONFIG_CWD: owned.configCwd,
-    CONDUCTOR_DEPTH: "1",
+    ...childScopeEnv(owned.runDir, owned.scope),
     ...owned.tmpDir === void 0 ? {} : { TMPDIR: owned.tmpDir }
   };
 }
@@ -7344,6 +7462,7 @@ var HerdrRuntime = class {
         return { binding, request: request2, launchOffset: launchOffset2 };
       }
       if (run.runtime !== "herdr" || !core || !initialPrompt?.trim()) throw failure("missing typed launch specification");
+      const scope = childToolScope(run);
       if (run.pendingAsk && (core.kind !== "resume" || core.sessionPath !== run.sessionPath)) throw failure("answer requires the original session");
       if (core.kind === "resume" && run.sessionPath && core.sessionPath !== run.sessionPath) throw failure("resume session mismatch");
       const sessionDir = join17(dir, "session");
@@ -7356,7 +7475,7 @@ var HerdrRuntime = class {
       const promptPath = join17(dir, `system-prompt-${nonce}.md`);
       writeFileSync5(promptPath, core.systemPrompt ?? "", { flag: "wx", mode: 384 });
       const args = [
-        ...buildPiCoreArgs({ ...core, kind: "resume", sessionPath: sessionFile, systemPrompt: promptPath }),
+        ...buildPiCoreArgs({ ...core, scope, kind: "resume", sessionPath: sessionFile, systemPrompt: promptPath }),
         ...(options.trustArgs ?? projectTrustArgs)(cwd, env.PI_CODING_AGENT_DIR),
         "--conductor-launch",
         nonce
@@ -7383,6 +7502,7 @@ var HerdrRuntime = class {
           runId: run.id,
           runDir: dir,
           configCwd: run.cwd,
+          scope,
           ...run.effort ? { tmpDir: join17(dir, "tmp") } : {}
         }) }, { timeoutMs: 5e3, signal: abort.signal });
         fresh = true;
@@ -8533,6 +8653,12 @@ async function buildDoctorReport(opts) {
   lines.push("");
   lines.push("## Sub-agent tool exclusions");
   lines.push(...spawnToolLines(opts.loadedToolNames));
+  lines.push("");
+  lines.push("## Delegation allowlists");
+  const delegators = [...resolved.personas.values()].filter((p) => (p.agents ?? []).length > 0);
+  if (delegators.length === 0) lines.push("  \xB7 none (opt in with `agents:` frontmatter or personaOverrides.<name>.agents)");
+  for (const p of delegators) lines.push(`  ${p.name}: ${p.agents.join(", ")}`);
+  lines.push("  \xB7 validated and frozen on depth-1 runs only; no delegate tool is registered yet");
   {
     const runsRoot2 = opts.runsRoot ?? join21(opts.homeDir ?? homedir8(), ".pi", "agent", "conductor", "runs");
     lines.push("");
@@ -11186,7 +11312,7 @@ function installPostDetachCompletionListener(run, registry, pushNotification) {
 var FOREGROUND_STREAM_INTERVAL_MS = 50;
 function registerTools(pi, opts, env = process.env) {
   if (env.CONDUCTOR_SUBAGENT === "1") {
-    if (env.CONDUCTOR_DEPTH !== "2") registerAskOwner(pi, opts.getRegistry, env);
+    if (env.CONDUCTOR_DEPTH === void 0 || env.CONDUCTOR_DEPTH === "1") registerAskOwner(pi, opts.getRegistry, env);
     return;
   }
   registerListTool(pi, opts);
@@ -12336,7 +12462,8 @@ function personaSummary(p) {
     timeoutMinutes: p.timeoutMinutes,
     source: p.source,
     tools: p.tools ?? "<default>",
-    excludeTools: p.excludeTools ?? []
+    excludeTools: p.excludeTools ?? [],
+    agents: p.agents ?? []
   };
 }
 function formatPersonaListForLLM(personas) {
@@ -12358,6 +12485,7 @@ function formatPersonaListForLLM(personas) {
     if (p.excludeTools && p.excludeTools.length > 0) {
       cfg.push(`exclude_tools=${p.excludeTools.join(",")}`);
     }
+    if (p.agents && p.agents.length > 0) cfg.push(`agents=${p.agents.join(",")}`);
     lines.push(`  ${p.name.padEnd(14)} \u2014 ${p.description}`);
     lines.push(`  ${" ".repeat(14)}   [${cfg.join(", ")}]`);
   }

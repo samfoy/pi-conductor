@@ -3,7 +3,8 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { RpcStdinQueue } from "./rpc-stdin.ts";
-import type { Run } from "./types.ts";
+import { CHILD_SCOPE_ENV, childScopeEnv, type Run } from "./types.ts";
+import { childToolScope } from "./personas.ts";
 import { assertSupportedRuntime, unsupportedRuntimeReason, runtimeFor } from "./runtime.ts";
 import type { RunRuntime, RunSink, SubprocessTransport, Signaler, Delivery } from "./runtime.ts";
 
@@ -19,7 +20,8 @@ export class SubprocessRuntime implements RunRuntime {
       shell: false,
       stdio: [rpc ? "pipe" : "ignore", "pipe", "pipe"],
       // Worktrees may not contain the spawning project's untracked config.
-      env: { ...buildSubagentEnv(), CONDUCTOR_CONFIG_CWD: run.cwd, CONDUCTOR_RUN_ID: run.id, ...(tmp ? { TMPDIR: tmp } : {}) },
+      env: buildSubagentEnv(process.env, { CONDUCTOR_CONFIG_CWD: run.cwd, CONDUCTOR_RUN_ID: run.id,
+        ...childScopeEnv(dirname(run.recordPath), childToolScope(run)), ...(tmp ? { TMPDIR: tmp } : {}) }),
     });
     const closed = new Promise<void>(resolve => proc.once("close", () => resolve()));
     const stdoutLines = createLineDecoder(line => sink.line(line));
@@ -115,10 +117,14 @@ export function capabilitiesFor(run: Run) {
   return run.runtime !== "herdr" && unsupportedRuntimeReason(run.runtime) ? { pause: false, liveSend: false } : runtimeFor(run).capabilities(run);
 }
 
+/** The parent's env minus inherited scope names, then conductor-owned values. */
 export function buildSubagentEnv(
   baseEnv: NodeJS.ProcessEnv = process.env,
+  owned: Record<string, string> = {},
 ): NodeJS.ProcessEnv {
-  return { ...baseEnv, CONDUCTOR_SUBAGENT: "1" };
+  const env = { ...baseEnv };
+  for (const name of CHILD_SCOPE_ENV) delete env[name];
+  return { ...env, CONDUCTOR_SUBAGENT: "1", ...owned };
 }
 
 function getPiInvocation(args: string[]): { command: string; args: string[] } {

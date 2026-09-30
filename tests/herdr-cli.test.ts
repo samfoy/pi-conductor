@@ -8,11 +8,12 @@ import { createHerdrCli, resolveHerdrBin } from "../src/herdr/cli.js";
 import { buildHerdrEnv, tabCreateArgs, createRunTab, closeEmptyPane } from "../src/herdr/placement.js";
 import { tmpDir } from "./helpers/tmp.js";
 import { invocation, pane, livePane } from "./fixtures/herdr-evidence.js";
+import { LEGACY_CHILD_SCOPE } from "../src/types.js";
 
 const fakeBin = fileURLToPath(new URL("./fixtures/fake-herdr.mjs", import.meta.url));
 const secret = "SENTINEL-secret-DO-NOT-LOG";
 const proxy = `https://user:${secret}@proxy.invalid`;
-const owned = {...invocation, runDir: "/private/fake/run", configCwd: "/requested/cwd", tmpDir: "/private/effort/tmp"};
+const owned = {...invocation, runDir: "/private/fake/run", configCwd: "/requested/cwd", tmpDir: "/private/effort/tmp", scope: LEGACY_CHILD_SCOPE};
 const forwarded = buildHerdrEnv({AWS_PROFILE: "fake-profile", HTTPS_PROXY: proxy}, owned);
 function fixture(extra: Record<string, unknown> = {}, execute?: Parameters<typeof createHerdrCli>[0]["execute"]) {
   const root = tmpDir("conductor-herdr-fake-");

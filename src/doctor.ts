@@ -256,6 +256,13 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
   lines.push("## Sub-agent tool exclusions");
   lines.push(...spawnToolLines(opts.loadedToolNames));
 
+  lines.push("");
+  lines.push("## Delegation allowlists");
+  const delegators = [...resolved.personas.values()].filter((p) => (p.agents ?? []).length > 0);
+  if (delegators.length === 0) lines.push("  · none (opt in with `agents:` frontmatter or personaOverrides.<name>.agents)");
+  for (const p of delegators) lines.push(`  ${p.name}: ${p.agents!.join(", ")}`);
+  lines.push("  · validated and frozen on depth-1 runs only; no delegate tool is registered yet");
+
   // v0.9 Slice 7: Run-record disk usage + next-eviction preview.
   // Reads the runs/ directory once via walkInventory, then runs a
   // dry-run plan via planReclaim. No I/O beyond stat()s. Slice 5

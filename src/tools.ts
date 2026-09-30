@@ -137,7 +137,9 @@ export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts, env: No
   // outer builder fanned out instead of executing its brief; this
   // gate closes that channel.
   if (env.CONDUCTOR_SUBAGENT === "1") {
-    if (env.CONDUCTOR_DEPTH !== "2") registerAskOwner(pi, opts.getRegistry, env);
+    // Only a depth-1 child asks its owner; an unset depth is a legacy depth-1 child.
+    // Any other value, including a depth-2 leaf, registers nothing. No delegate before its broker.
+    if (env.CONDUCTOR_DEPTH === undefined || env.CONDUCTOR_DEPTH === "1") registerAskOwner(pi, opts.getRegistry, env);
     return;
   }
 
@@ -1559,6 +1561,7 @@ function personaSummary(p: Persona): Record<string, unknown> {
     source: p.source,
     tools: p.tools ?? "<default>",
     excludeTools: p.excludeTools ?? [],
+    agents: p.agents ?? [],
   };
 }
 
@@ -1581,6 +1584,7 @@ export function formatPersonaListForLLM(personas: Persona[]): string {
     if (p.excludeTools && p.excludeTools.length > 0) {
       cfg.push(`exclude_tools=${p.excludeTools.join(",")}`);
     }
+    if (p.agents && p.agents.length > 0) cfg.push(`agents=${p.agents.join(",")}`);
     lines.push(`  ${p.name.padEnd(14)} — ${p.description}`);
     lines.push(`  ${" ".repeat(14)}   [${cfg.join(", ")}]`);
   }

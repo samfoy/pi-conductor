@@ -12,6 +12,7 @@ import { HerdrTail } from "./tail.ts";
 import { HerdrMonitor } from "./monitor.ts";
 import { buildPiCoreArgs, validateSendable, writeRecord, type PiCoreArgsOptions } from "../runs.ts";
 import { seedSessionFile } from "../session-seed.ts";
+import { childToolScope } from "../personas.ts";
 import { readProcessStartTime } from "../reconcile-startup.ts";
 import { createLineDecoder, terminateHook } from "../subprocess-runtime.ts";
 import { boundStallText, redactPaneEvidence } from "../stall-evidence.ts";
@@ -273,6 +274,8 @@ export class HerdrRuntime implements RunRuntime {
         return { binding, request, launchOffset };
       }
       if (run.runtime !== "herdr" || !core || !initialPrompt?.trim()) throw failure("missing typed launch specification");
+      // The run's frozen scope, not the caller's core, decides both pane env and argv.
+      const scope = childToolScope(run);
       if (run.pendingAsk && (core.kind !== "resume" || core.sessionPath !== run.sessionPath)) throw failure("answer requires the original session");
       if (core.kind === "resume" && run.sessionPath && core.sessionPath !== run.sessionPath) throw failure("resume session mismatch");
       const sessionDir = join(dir, "session");
@@ -284,7 +287,7 @@ export class HerdrRuntime implements RunRuntime {
       const invocation = { runId: run.id, launchNonce: nonce, sessionId: session.getSessionId(), sessionFile };
       const promptPath = join(dir, `system-prompt-${nonce}.md`);
       writeFileSync(promptPath, core.systemPrompt ?? "", { flag: "wx", mode: 0o600 });
-      const args = [...buildPiCoreArgs({ ...core, kind: "resume", sessionPath: sessionFile, systemPrompt: promptPath }),
+      const args = [...buildPiCoreArgs({ ...core, scope, kind: "resume", sessionPath: sessionFile, systemPrompt: promptPath }),
         ...(options.trustArgs ?? projectTrustArgs)(cwd, env.PI_CODING_AGENT_DIR), "--conductor-launch", nonce];
       if (previous) {
         try {
@@ -302,7 +305,7 @@ export class HerdrRuntime implements RunRuntime {
         const targetWorkspace = typeof workspace === "string" ? workspace : isRecord(workspace) ? workspace.workspace_id : undefined;
         if (typeof targetWorkspace !== "string") throw failure("parent workspace unavailable");
         check();
-        binding = await createRunTab(cli, { workspaceId: targetWorkspace, cwd, invocation, env: buildHerdrEnv(env, { runId: run.id, runDir: dir, configCwd: run.cwd,
+        binding = await createRunTab(cli, { workspaceId: targetWorkspace, cwd, invocation, env: buildHerdrEnv(env, { runId: run.id, runDir: dir, configCwd: run.cwd, scope,
           ...(run.effort ? { tmpDir: join(dir, "tmp") } : {}) }) }, { timeoutMs: 5000, signal: abort.signal });
         fresh = true;
       }
