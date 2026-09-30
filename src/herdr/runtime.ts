@@ -377,14 +377,14 @@ export class HerdrRuntime implements RunRuntime {
       return { kind: "queued", ack };
     };
     let paneReleased = false;
-    const releasePane = async (signal?: AbortSignal) => {
+    const releasePane = async (signal?: AbortSignal, isCurrent: () => boolean = () => true) => {
       cleanupSignal = signal;
-      if (!childExited || !binding || run.herdr !== binding || signal?.aborted) return false;
+      if (!isCurrent() || !childExited || !binding || run.herdr !== binding || signal?.aborted) return false;
       if (paneReleased) return true;
       const state = proof(provenPane);
       if (state.ok || state.state !== "gone") { diagnostic("pane/worktree preserved: child exit unconfirmed"); return false; }
       const status = run.status;
-      const result = await closeEmptyPane(cli, binding, () => run.status === status ? current() : undefined, { timeoutMs: 2000, signal });
+      const result = await closeEmptyPane(cli, binding, () => isCurrent() && run.status === status ? current() : undefined, { timeoutMs: 2000, signal });
       if (!result.ok) diagnostic(`worktree kept: ${result.reason}`);
       paneReleased = result.ok;
       return result.ok;

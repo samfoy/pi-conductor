@@ -1,5 +1,8 @@
 import { runtimeFor } from "./runtime.ts";
 import { herdrChildAbsent, releaseRecordedPane } from "./herdr/runtime.ts";
+import { sameHerdrBinding } from "./herdr/identity.ts";
+import { isRecord } from "./herdr/cli.ts";
+import { readControlRecord } from "./herdr/inbox.ts";
 import { formatOwnerAnswer } from "./ask-owner.ts";
 /**
  * pi-conductor — Run registry and subprocess spawning.
@@ -2556,18 +2559,50 @@ function keptWorktreeHint(worktreePath: string, branch: string): string {
   );
 }
 
+/** Manual commands fence their immutable ownership snapshot against both live and durable state. */
+export function worktreeCleanupGuard(run: Run, currentRun: () => Run | undefined): () => boolean {
+  if (run.runtime !== "herdr") return () => run.runtime === undefined || run.runtime === "subprocess";
+  const keys = ["id", "runtime", "status", "recordPath", "cwd", "worktreePath", "worktreeBranch",
+    "worktreeBaseBranch", "mergeStrategy", "sessionPath", "parentPid", "parentSessionId"] as const;
+  const expected = Object.fromEntries(keys.map(key => [key, run[key]]));
+  const binding = run.herdr && { ...run.herdr };
+  const recordPath = run.recordPath;
+  const valid = ["id", "recordPath", "cwd", "worktreePath", "worktreeBranch"].every(key =>
+    typeof expected[key] === "string" && expected[key].length > 0 && !expected[key].includes("\0")) &&
+    ["worktreeBaseBranch", "sessionPath"].every(key => expected[key] === undefined ||
+      (typeof expected[key] === "string" && expected[key].length > 0 && !expected[key].includes("\0"))) &&
+    (expected.mergeStrategy === undefined || (typeof expected.mergeStrategy === "string" && ["none", "squash", "merge"].includes(expected.mergeStrategy))) &&
+    isTerminal(run.status) && binding?.runId === run.id &&
+    Number.isSafeInteger(binding.childPid) && Number(binding.childPid) > 1 &&
+    (binding.childStartTime === undefined || (Number.isSafeInteger(binding.childStartTime) && binding.childStartTime > 0)) &&
+    typeof binding.createdTab === "boolean" &&
+    (["runId", "launchNonce", "sessionId", "sessionFile", "socketPath", "workspaceId", "tabId", "paneId", "terminalId"] as const).every(key => {
+      const value = binding[key];
+      return typeof value === "string" && value.length > 0 && !value.includes("\0");
+    });
+  const matches = (value: unknown) => valid && isRecord(value) && value.effort === undefined &&
+    keys.every(key => value[key] === expected[key]) && isRecord(value.herdr) && value.herdr.createdTab === binding?.createdTab &&
+    sameHerdrBinding(binding, value.herdr as unknown as NonNullable<Run["herdr"]>);
+  return () => {
+    try { return matches(run) && matches(currentRun()) && matches(readControlRecord(recordPath)); }
+    catch { return false; }
+  };
+}
+
 /** Explicit cleanup uses the same proof for attached and durable-only resources. */
-export async function releaseRunPane(run: Run): Promise<boolean> {
+export async function releaseRunPane(run: Run, isCurrent: () => boolean = () => true): Promise<boolean> {
+  if (!isCurrent()) return false;
   if (run.runtime !== "herdr") return true;
   const binding = run.herdr, status = run.status;
-  return run.transport?.kind === "herdr" ? run.transport.releasePane()
-    : releaseRecordedPane(run, () => run.herdr === binding && run.status === status ? run.herdr : undefined);
+  return run.transport?.kind === "herdr" ? run.transport.releasePane(undefined, isCurrent)
+    : releaseRecordedPane(run, () => isCurrent() && run.herdr === binding && run.status === status ? run.herdr : undefined);
 }
 
 /** Remove only clean, released worktrees; preserve failed-removal fields for recovery. */
-export async function releaseWorktree(run: Run, opts: { keepBranch: boolean }): Promise<void> {
-  if (run.effort) return;
-  if (!run.worktreePath || !run.worktreeBranch) return;
+export async function releaseWorktree(run: Run, opts: { keepBranch: boolean; isCurrent?: () => boolean }): Promise<boolean> {
+  if (opts.isCurrent && !opts.isCurrent()) { run.worktreeKept = "worktree kept: current ownership unconfirmed"; return false; }
+  if (run.effort) return false;
+  if (!run.worktreePath || !run.worktreeBranch) return false;
   const wtSpec = {
     // Reconstruct gitRoot: <gitRoot>/.worktrees/conductor-wt/<run-id> → 3 levels up
     gitRoot: dirname(dirname(dirname(run.worktreePath))),
@@ -2578,19 +2613,22 @@ export async function releaseWorktree(run: Run, opts: { keepBranch: boolean }): 
     run.worktreeKept =
       `worktree kept: uncommitted changes in ${wtSpec.worktreePath}; commit them to ${wtSpec.branch} ` +
       `or discard them, then git worktree remove ${wtSpec.worktreePath}`;
-    return;
+    return false;
   }
   const binding = run.herdr, status = run.status;
-  if (run.runtime === "herdr" && (!await releaseRunPane(run) || run.herdr !== binding || run.status !== status ||
+  if (run.runtime === "herdr" && (!await releaseRunPane(run, opts.isCurrent) || run.herdr !== binding || run.status !== status ||
       run.worktreePath !== wtSpec.worktreePath || run.worktreeBranch !== wtSpec.branch)) {
     run.worktreeKept = `worktree kept: pane ${run.herdr?.paneId ?? "unknown"} not proven ours and empty`;
-    return;
+    return false;
   }
+  if (opts.isCurrent && !opts.isCurrent()) { run.worktreeKept = "worktree kept: current ownership unconfirmed"; return false; }
   if (removeWorktree(wtSpec, opts)) {
     run.worktreePath = undefined;
     if (!opts.keepBranch) run.worktreeBranch = undefined;
+    return true;
   } else {
     process.stderr.write(`[conductor] worktree removal failed for ${run.id}; GC will clean up\n`);
+    return false;
   }
 }
 

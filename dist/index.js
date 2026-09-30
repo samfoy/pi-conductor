@@ -724,18 +724,191 @@ var HerdrMonitor = class {
   }
 };
 
+// src/herdr/identity.ts
+var text = (v) => typeof v === "string" && v.length > 0 && !v.includes("\0");
+var positiveInteger = (v) => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
+function isHerdrPane(value) {
+  if (!isRecord(value) || ![value.pane_id, value.terminal_id, value.workspace_id, value.tab_id].every(text)) return false;
+  const session = value.agent_session;
+  return (value.agent === null || text(value.agent)) && (session === null || isRecord(session) && (session.kind === "path" || session.kind === "id") && [session.value, session.agent, session.source].every(text));
+}
+var unknown = (reason) => ({ ok: false, state: "unknown", reason });
+function sameHerdrBinding(a, b) {
+  return !!a && !!b && ["runId", "launchNonce", "sessionId", "sessionFile", "socketPath", "workspaceId", "tabId", "paneId", "terminalId", "childPid", "childStartTime"].every((key) => a[key] === b[key]);
+}
+function provePaneOurs(ev) {
+  const { binding: b, current, pane } = ev;
+  if (!isRecord(b) || !isRecord(current) || !isHerdrPane(pane)) return unknown("missing pane evidence");
+  for (const key of ["runId", "launchNonce", "sessionId", "sessionFile"]) {
+    if (!text(b[key]) || b[key] !== current[key]) return unknown("invocation mismatch");
+  }
+  if (!text(b.socketPath) || b.socketPath !== ev.socketPath) return unknown("socket mismatch");
+  if (pane.pane_id !== b.paneId || pane.terminal_id !== b.terminalId || pane.workspace_id !== b.workspaceId || pane.tab_id !== b.tabId) return unknown("pane identity mismatch");
+  if (ev.requireNoAgent && (pane.agent !== null || pane.agent_session !== null)) return unknown("pane not empty");
+  return { ok: true };
+}
+function proveChildProcess(ev) {
+  const paneProof = provePaneOurs({ ...ev, requireNoAgent: false });
+  if (!paneProof.ok) return paneProof;
+  const { binding: b, hello: h, pane, process: proc } = ev;
+  if (!isRecord(b) || !isRecord(h) || !isHerdrPane(pane) || !isRecord(proc)) return unknown("missing child evidence");
+  if (h.v !== 1 || !positiveInteger(ev.bridgeProtocol) || h.bridgeProtocol !== ev.bridgeProtocol || !text(h.piVersion) || !text(h.conductorVersion) || typeof h.at !== "number" || !Number.isFinite(h.at) || h.at < 0) return unknown("malformed hello");
+  for (const key of ["runId", "launchNonce", "sessionId", "sessionFile"]) {
+    if (h[key] !== b[key]) return unknown("hello invocation mismatch");
+  }
+  if (h.paneId !== b.paneId || !positiveInteger(h.pid) || h.pid <= 1 || h.pid !== b.childPid || proc.pid !== h.pid) return unknown("child pid mismatch");
+  if (pane.agent !== "pi" || pane.agent_session?.kind !== "path" || pane.agent_session.agent !== "pi" || pane.agent_session.value !== h.sessionFile) return unknown("Pi session mismatch");
+  if (!text(ev.platform) || h.pidStartTime !== void 0 && !positiveInteger(h.pidStartTime) || h.pidStartTime !== b.childStartTime) return unknown("malformed start identity");
+  if (ev.platform === "linux" && !positiveInteger(h.pidStartTime)) return unknown("missing start identity");
+  if (proc.state === "gone") return { ok: false, state: "gone", reason: "child absent" };
+  if (proc.state !== "alive") return unknown("child liveness unknown");
+  if (ev.platform === "linux" && proc.startTime !== h.pidStartTime) return unknown("child start mismatch");
+  return { ok: true, pid: h.pid };
+}
+
+// src/herdr/inbox.ts
+import { closeSync as closeSync2, constants as constants2, fstatSync as fstatSync2, lstatSync, mkdirSync as mkdirSync2, openSync as openSync2, readdirSync, readSync as readSync2, realpathSync, renameSync, writeSync } from "node:fs";
+import { basename, isAbsolute as isAbsolute2, join as join2, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+var CONTROL_PREFIX = "__CONDUCTOR_CTL_V1__:";
+var MAX_INBOX_TEXT_BYTES = 8 * 1048576;
+var MAX_RECORD_BYTES = 32 * 1048576;
+var token = (v) => typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(v);
+var kinds = ["initial", "reply", "steer", "follow_up", "grace"];
+function validRequest(v) {
+  return isRecord(v) && v.v === 1 && token(v.launchNonce) && token(v.requestId) && Number.isSafeInteger(v.sequence) && Number(v.sequence) > 0 && Number(v.sequence) <= 999999 && kinds.includes(v.kind) && typeof v.text === "string" && !!v.text.trim() && !v.text.includes("\0") && Buffer.byteLength(v.text) <= MAX_INBOX_TEXT_BYTES && (v.kind === "reply" ? typeof v.askId === "string" && v.askId.length > 0 && v.askId.length <= 512 && !/[\0\r\n]/.test(v.askId) : v.askId === void 0);
+}
+function directory(runDir2, nonce, create = false) {
+  if (!token(nonce) || !isAbsolute2(runDir2) || resolve(runDir2) !== runDir2 || realpathSync(runDir2) !== runDir2) throw new Error("invalid inbox identity/path");
+  if (create) {
+    const record = read(join2(runDir2, "record.json"));
+    if (!isRecord(record) || record.id !== basename(runDir2) || record.runtime !== "herdr" || !isRecord(record.herdr) || record.herdr.runId !== record.id || record.herdr.launchNonce !== nonce) throw new Error("inbox invocation mismatch");
+  }
+  for (const path2 of [join2(runDir2, "inbox"), join2(runDir2, "inbox", nonce)]) {
+    if (create) {
+      try {
+        mkdirSync2(path2, { mode: 448 });
+      } catch (e) {
+        if (e.code !== "EEXIST") throw e;
+      }
+    }
+    if (!lstatSync(path2).isDirectory() || realpathSync(path2) !== path2) throw new Error("invalid inbox directory");
+  }
+  return join2(runDir2, "inbox", nonce);
+}
+function read(file) {
+  const fd = openSync2(file, constants2.O_RDONLY | constants2.O_NONBLOCK | constants2.O_NOFOLLOW);
+  try {
+    const stat6 = fstatSync2(fd);
+    if (!stat6.isFile() || stat6.nlink !== 1 || stat6.size > MAX_RECORD_BYTES) throw new Error("invalid inbox record");
+    const buffer = Buffer.alloc(stat6.size + 1);
+    let n = 0, count = 0;
+    while (n < buffer.length && (count = readSync2(fd, buffer, n, buffer.length - n, n)) > 0) n += count;
+    if (n !== stat6.size) throw new Error("inbox record changed during read");
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, n)));
+  } finally {
+    closeSync2(fd);
+  }
+}
+function absent(file) {
+  try {
+    lstatSync(file);
+  } catch (e) {
+    if (e.code === "ENOENT") return;
+    throw e;
+  }
+  throw new Error("inbox record already exists");
+}
+function publish(file, value) {
+  const buffer = Buffer.from(JSON.stringify(value) + "\n");
+  if (buffer.length > MAX_RECORD_BYTES) throw new Error("inbox record exceeds byte cap");
+  absent(file);
+  const tmp = `${file}.${randomUUID()}.tmp`;
+  const fd = openSync2(tmp, "wx", 384);
+  try {
+    for (let offset = 0; offset < buffer.length; ) {
+      const count = writeSync(fd, buffer, offset, buffer.length - offset);
+      if (count <= 0) throw new Error("incomplete inbox write");
+      offset += count;
+    }
+  } finally {
+    closeSync2(fd);
+  }
+  absent(file);
+  renameSync(tmp, file);
+}
+var name = (r) => `${String(r.sequence).padStart(6, "0")}-${r.requestId}`;
+function writeInboxRequest(runDir2, request) {
+  if (!validRequest(request) || Buffer.byteLength(JSON.stringify(request)) >= MAX_RECORD_BYTES) throw new Error("invalid inbox request");
+  const dir = directory(runDir2, request.launchNonce, true);
+  if (readInbox(runDir2, request.launchNonce).some((e) => e.request.requestId === request.requestId || e.request.sequence === request.sequence)) throw new Error("duplicate inbox request identity");
+  absent(join2(dir, `${name(request)}.sending.json`));
+  absent(join2(dir, `${request.requestId}.ack.json`));
+  publish(join2(dir, `${name(request)}.json`), request);
+}
+function readInbox(runDir2, nonce) {
+  let dir;
+  try {
+    dir = directory(runDir2, nonce);
+  } catch (e) {
+    if (e.code === "ENOENT") return [];
+    throw e;
+  }
+  const files = readdirSync(dir);
+  if (files.length > 1024) throw new Error("inbox entry cap exceeded; preserve for inspection");
+  const entries = [];
+  for (const file of files) {
+    if (!/^\d{6}-[A-Za-z0-9][A-Za-z0-9_-]{0,127}(\.sending)?\.json$/.test(file)) continue;
+    try {
+      const request = read(join2(dir, file));
+      if (!validRequest(request) || request.launchNonce !== nonce) continue;
+      const dispatched = file.endsWith(".sending.json");
+      if (file !== `${name(request)}${dispatched ? ".sending" : ""}.json`) continue;
+      entries.push({ request, dispatched });
+    } catch {
+    }
+  }
+  return entries.filter((e) => entries.filter((other) => other.request.requestId === e.request.requestId || other.request.sequence === e.request.sequence).length === 1).sort((a, b) => a.request.sequence - b.request.sequence);
+}
+function readInboxAck(runDir2, request) {
+  if (!validRequest(request)) throw new Error("invalid ack request identity");
+  let value;
+  try {
+    value = read(join2(directory(runDir2, request.launchNonce), `${request.requestId}.ack.json`));
+  } catch (e) {
+    if (e.code === "ENOENT") return;
+    throw e;
+  }
+  if (!isRecord(value) || value.v !== 1 || value.launchNonce !== request.launchNonce || value.requestId !== request.requestId || value.sequence !== request.sequence || value.kind !== request.kind || typeof value.accepted !== "boolean" || typeof value.at !== "number" || !Number.isFinite(value.at) || value.at < 0 || (value.accepted ? value.code !== void 0 : value.code !== "busy" && value.code !== "stale-ask")) throw new Error("invalid inbox ack");
+  return value;
+}
+function writeInboxAck(runDir2, request, code) {
+  if (!validRequest(request)) throw new Error("invalid ack request identity");
+  const { v, launchNonce, requestId, sequence, kind } = request;
+  publish(join2(directory(runDir2, launchNonce), `${requestId}.ack.json`), { v, launchNonce, requestId, sequence, kind, accepted: code === void 0, ...code ? { code } : {}, at: Date.now() });
+}
+var inboxMarker = (r) => `${CONTROL_PREFIX}${r.launchNonce}:${r.sequence}:${r.requestId}`;
+function dispatchInboxRequest(runDir2, request) {
+  if (!validRequest(request)) throw new Error("invalid dispatch request identity");
+  const dir = directory(runDir2, request.launchNonce);
+  const source = join2(dir, `${name(request)}.json`), target = join2(dir, `${name(request)}.sending.json`);
+  if (JSON.stringify(read(source)) !== JSON.stringify(request)) throw new Error("inbox request changed before dispatch");
+  absent(target);
+  renameSync(source, target);
+}
+
 // src/ask-owner.ts
 import { Type } from "@sinclair/typebox";
 
 // src/config.ts
 import { existsSync as existsSync2, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join as join2 } from "node:path";
+import { join as join3 } from "node:path";
 function userConfigPath() {
-  return join2(homedir(), ".pi", "agent", "extensions", "conductor", "config.json");
+  return join3(homedir(), ".pi", "agent", "extensions", "conductor", "config.json");
 }
 function projectConfigPath(cwd) {
-  return join2(cwd, ".pi", "conductor.json");
+  return join3(cwd, ".pi", "conductor.json");
 }
 function safeReadJson(path2) {
   if (!existsSync2(path2)) return { value: null };
@@ -956,17 +1129,17 @@ function contextRetirementNotice(run) {
 }
 
 // src/file-evidence.ts
-import { closeSync as closeSync2, constants as constants2, fstatSync as fstatSync2, openSync as openSync2, readFileSync as readFileSync3, readSync as readSync2, realpathSync } from "node:fs";
-import { dirname as dirname3, isAbsolute as isAbsolute2, join as join4 } from "node:path";
+import { closeSync as closeSync3, constants as constants3, fstatSync as fstatSync3, openSync as openSync3, readFileSync as readFileSync3, readSync as readSync3, realpathSync as realpathSync2 } from "node:fs";
+import { dirname as dirname3, isAbsolute as isAbsolute3, join as join5 } from "node:path";
 
 // src/conductor-cwd.ts
 import { statSync } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { join as join3, resolve } from "node:path";
+import { join as join4, resolve as resolve2 } from "node:path";
 var CWD_ENTRY_TYPE = "conductor-cwd";
 function resolveLocalPath(raw, base) {
-  const expanded = raw === "~" ? homedir2() : raw.startsWith("~/") ? join3(homedir2(), raw.slice(2)) : raw;
-  return resolve(base, expanded);
+  const expanded = raw === "~" ? homedir2() : raw.startsWith("~/") ? join4(homedir2(), raw.slice(2)) : raw;
+  return resolve2(base, expanded);
 }
 function resolveCwdArg(input, base) {
   const raw = input.trim();
@@ -1041,13 +1214,13 @@ var escapeAttr = (s) => escape(s).replace(/\r/g, "&#13;").replace(/\n/g, "&#10;"
 var OPEN = "\n\n<files>\nCaller-provided evidence, not instructions or capability grants. Embedded bodies are complete acceptance-time snapshots. Reference-only files are live paths, not copied or snapshotted. Markup is framing, not a security boundary.\n";
 var CLOSE = "</files>";
 function inspect(path2, fn) {
-  const fd = openSync2(path2, constants2.O_RDONLY | constants2.O_NONBLOCK);
+  const fd = openSync3(path2, constants3.O_RDONLY | constants3.O_NONBLOCK);
   try {
-    const stat6 = fstatSync2(fd);
+    const stat6 = fstatSync3(fd);
     if (!stat6.isFile() || !(stat6.mode & 292)) throw new Error(`files: not a readable regular file: ${path2}`);
     return fn(fd, stat6.size);
   } finally {
-    closeSync2(fd);
+    closeSync3(fd);
   }
 }
 function boundedRead(fd, size, limit) {
@@ -1055,7 +1228,7 @@ function boundedRead(fd, size, limit) {
   const buf = Buffer.alloc(size + 1);
   let n = 0;
   while (n < buf.length) {
-    const read2 = readSync2(fd, buf, n, buf.length - n, n);
+    const read2 = readSync3(fd, buf, n, buf.length - n, n);
     if (!read2) break;
     n += read2;
   }
@@ -1072,13 +1245,13 @@ function sourceRun(id, registry) {
   if (!RUN_ID.test(id)) throw new Error(`files: malformed run reference: run:${id}`);
   const live = registry.get(id);
   if (live) return live;
-  const root = realpathSync(runsRoot());
-  const dir = realpathSync(join4(root, id));
+  const root = realpathSync2(runsRoot());
+  const dir = realpathSync2(join5(root, id));
   if (dirname3(dir) !== root) throw new Error(`files: run record outside canonical runs directory: ${id}`);
-  const recordPath = join4(dir, "record.json");
-  if (realpathSync(recordPath) !== recordPath) throw new Error(`files: invalid run record path: ${id}`);
+  const recordPath = join5(dir, "record.json");
+  if (realpathSync2(recordPath) !== recordPath) throw new Error(`files: invalid run record path: ${id}`);
   const r = inspect(recordPath, (fd) => JSON.parse(readFileSync3(fd, "utf8")));
-  if (!r || r.id !== id || typeof r.persona !== "string" || !r.persona || typeof r.cwd !== "string" || !isAbsolute2(r.cwd) || !(isTerminal(r.status) || r.status === "running" || r.status === "paused" || r.status === "queued") || typeof r.finalPath !== "string" || realpathSync(r.finalPath) !== realpathSync(join4(dir, "final.md")) || typeof r.recordPath !== "string" || realpathSync(r.recordPath) !== recordPath || r.sessionPath !== void 0 && typeof r.sessionPath !== "string") {
+  if (!r || r.id !== id || typeof r.persona !== "string" || !r.persona || typeof r.cwd !== "string" || !isAbsolute3(r.cwd) || !(isTerminal(r.status) || r.status === "running" || r.status === "paused" || r.status === "queued") || typeof r.finalPath !== "string" || realpathSync2(r.finalPath) !== realpathSync2(join5(dir, "final.md")) || typeof r.recordPath !== "string" || realpathSync2(r.recordPath) !== recordPath || r.sessionPath !== void 0 && typeof r.sessionPath !== "string") {
     throw new Error(`files: invalid run record: ${id}`);
   }
   return r;
@@ -1102,7 +1275,7 @@ function appendFileEvidence(task, files, options) {
     try {
       const run = input.startsWith("run:") ? sourceRun(input.slice(4), options.registry) : void 0;
       if (run && (run.herdrExitUnconfirmed || run.herdrResultUnavailable || !usableResult(run.finalPath))) throw new Error(`no usable final result: ${input}`);
-      const path2 = realpathSync(run ? run.finalPath : resolveLocalPath(input, options.cwd));
+      const path2 = realpathSync2(run ? run.finalPath : resolveLocalPath(input, options.cwd));
       const size = inspect(path2, (_fd, size2) => size2);
       if (seen.has(path2)) return void 0;
       seen.add(path2);
@@ -1183,9 +1356,9 @@ import { matchesGlob as matchesGlob2 } from "node:path";
 
 // src/personas.ts
 import { readdir, readFile, stat } from "node:fs/promises";
-import { existsSync as existsSync3, realpathSync as realpathSync2 } from "node:fs";
+import { existsSync as existsSync3, realpathSync as realpathSync3 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { basename, dirname as dirname4, join as join5, resolve as resolve2 } from "node:path";
+import { basename as basename2, dirname as dirname4, join as join6, resolve as resolve3 } from "node:path";
 import { fileURLToPath } from "node:url";
 var WRITE_CAPABLE_PERSONAS2 = /* @__PURE__ */ new Set([
   "builder",
@@ -1195,17 +1368,17 @@ function isWriteCapable(personaName) {
   return WRITE_CAPABLE_PERSONAS2.has(personaName);
 }
 function resolveBuiltinPersonasDir(metaUrl) {
-  const here = realpathSync2(fileURLToPath(metaUrl));
-  return resolve2(dirname4(here), "..", "personas");
+  const here = realpathSync3(fileURLToPath(metaUrl));
+  return resolve3(dirname4(here), "..", "personas");
 }
 function builtinPersonasDir() {
   return resolveBuiltinPersonasDir(import.meta.url);
 }
 function userPersonasDir() {
-  return join5(homedir3(), ".pi", "agent", "conductor", "personas");
+  return join6(homedir3(), ".pi", "agent", "conductor", "personas");
 }
 function projectPersonasDir(cwd) {
-  return join5(cwd, ".pi", "conductor", "personas");
+  return join6(cwd, ".pi", "conductor", "personas");
 }
 var FRONTMATTER_FENCE = "---";
 function parseFrontmatter(text3) {
@@ -1441,7 +1614,7 @@ async function loadPersonasFromDir(dir, source) {
   }
   for (const entry of entries) {
     if (!entry.endsWith(".md") || entry.startsWith("_")) continue;
-    const filePath = join5(dir, entry);
+    const filePath = join6(dir, entry);
     let raw;
     try {
       const st = await stat(filePath);
@@ -1468,7 +1641,7 @@ async function resolvePersonas(opts) {
   for (const layer of [builtin, user, project]) {
     for (const name2 of layer.blockedNames) {
       for (const p of personas.values()) {
-        if (p.name === name2 || basename(p.sourcePath, ".md") === name2) personas.delete(p.name);
+        if (p.name === name2 || basename2(p.sourcePath, ".md") === name2) personas.delete(p.name);
       }
     }
     for (const p of layer.personas) {
@@ -1516,18 +1689,18 @@ async function resolvePersonas(opts) {
 
 // src/effort/generated.ts
 import { createHash as createHash2 } from "node:crypto";
-import { lstatSync, readdirSync as readdirSync3, readFileSync as readFileSync8, readlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { join as join9 } from "node:path";
+import { lstatSync as lstatSync2, readdirSync as readdirSync4, readFileSync as readFileSync8, readlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { join as join10 } from "node:path";
 
 // src/effort/open.ts
 import { execFileSync } from "node:child_process";
-import { realpathSync as realpathSync4 } from "node:fs";
+import { realpathSync as realpathSync5 } from "node:fs";
 
 // src/worktree.ts
 import { execSync } from "node:child_process";
-import { existsSync as existsSync4, appendFileSync, readFileSync as readFileSync4, realpathSync as realpathSync3 } from "node:fs";
-import { mkdirSync as mkdirSync2 } from "node:fs";
-import { join as join6, dirname as dirname5, isAbsolute as isAbsolute3, relative, sep } from "node:path";
+import { existsSync as existsSync4, appendFileSync, readFileSync as readFileSync4, realpathSync as realpathSync4 } from "node:fs";
+import { mkdirSync as mkdirSync3 } from "node:fs";
+import { join as join7, dirname as dirname5, isAbsolute as isAbsolute4, relative, sep } from "node:path";
 function gitEnv() {
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
@@ -1552,23 +1725,23 @@ function resolveWorktreeSpec(cwd, runId) {
   if (rawRoot === null) return null;
   let gitRoot2;
   try {
-    gitRoot2 = realpathSync3(rawRoot);
+    gitRoot2 = realpathSync4(rawRoot);
   } catch {
     gitRoot2 = rawRoot;
   }
   const branch = `conductor-wt/${runId}`;
-  const worktreePath = join6(gitRoot2, ".worktrees", "conductor-wt", runId);
+  const worktreePath = join7(gitRoot2, ".worktrees", "conductor-wt", runId);
   return { gitRoot: gitRoot2, worktreePath, branch };
 }
 function worktreeCwd(spec, cwd) {
   let real = cwd;
   try {
-    real = realpathSync3(cwd);
+    real = realpathSync4(cwd);
   } catch {
   }
   const rel = relative(spec.gitRoot, real);
-  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute3(rel)) return spec.worktreePath;
-  const mapped = join6(spec.worktreePath, rel);
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute4(rel)) return spec.worktreePath;
+  const mapped = join7(spec.worktreePath, rel);
   return existsSync4(mapped) ? mapped : spec.worktreePath;
 }
 function createWorktree(spec, opts = {}) {
@@ -1587,7 +1760,7 @@ function refExists(gitRoot2, ref) {
   return tryGitExec(`git rev-parse --verify --quiet ${JSON.stringify(`${ref}^{commit}`)}`, gitRoot2) !== null;
 }
 function addWorktree(spec, target) {
-  mkdirSync2(dirname5(spec.worktreePath), { recursive: true });
+  mkdirSync3(dirname5(spec.worktreePath), { recursive: true });
   try {
     execSync(
       `git worktree add ${JSON.stringify(spec.worktreePath)} ${target}`,
@@ -1638,7 +1811,7 @@ function worktreeHasUncommittedChanges(worktreePath) {
   return status === null || status !== "";
 }
 function ensureWorktreeGitignore(gitRoot2) {
-  const ignorePath = join6(gitRoot2, ".gitignore");
+  const ignorePath = join7(gitRoot2, ".gitignore");
   const pattern = ".worktrees/";
   if (existsSync4(ignorePath)) {
     const content = readFileSync4(ignorePath, "utf-8");
@@ -1656,7 +1829,7 @@ function ensureWorktreeGitignore(gitRoot2) {
 function detectBrazilWorkspaceRoot(cwd) {
   let dir = cwd;
   for (let i = 0; i < 32; i++) {
-    if (existsSync4(join6(dir, ".brazil"))) return dir;
+    if (existsSync4(join7(dir, ".brazil"))) return dir;
     const parent = dirname5(dir);
     if (parent === dir) return null;
     dir = parent;
@@ -1792,7 +1965,7 @@ function shellQuote(s) {
 // src/reconcile-startup.ts
 import { readFile as readFile2, readdir as readdir2, stat as stat2, writeFile } from "node:fs/promises";
 import { readFileSync as readFileSync5 } from "node:fs";
-import { join as join7 } from "node:path";
+import { join as join8 } from "node:path";
 function classifyRecord(record, isAlive, _now, selfPid = process.pid, isParentAlive = (pid, startTime) => defaultParentLivenessProbe(pid, startTime), selfSessionId = void 0) {
   if (unsupportedRuntimeReason(record.runtime)) return "skip-unsupported-runtime";
   const status = record.status;
@@ -1881,7 +2054,7 @@ async function reconcileOrphansAtStartup(deps) {
     return result;
   }
   for (const id of entries) {
-    const recordPath = join7(deps.runsRoot, id, "record.json");
+    const recordPath = join8(deps.runsRoot, id, "record.json");
     try {
       let raw;
       try {
@@ -2176,17 +2349,17 @@ function resolveEffortPolicy(config = {}, overrides = {}) {
 }
 
 // src/effort/store.ts
-import { createHash, randomUUID } from "node:crypto";
-import { closeSync as closeSync3, existsSync as existsSync5, fsyncSync, linkSync, mkdirSync as mkdirSync3, openSync as openSync3, readFileSync as readFileSync7, readdirSync as readdirSync2, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID as randomUUID2 } from "node:crypto";
+import { closeSync as closeSync4, existsSync as existsSync5, fsyncSync, linkSync, mkdirSync as mkdirSync4, openSync as openSync4, readFileSync as readFileSync7, readdirSync as readdirSync3, renameSync as renameSync2, unlinkSync, writeFileSync } from "node:fs";
 import { homedir as homedir4 } from "node:os";
-import { dirname as dirname6, join as join8 } from "node:path";
+import { dirname as dirname6, join as join9 } from "node:path";
 
 // src/effort/process-group.ts
-import { readdirSync, readFileSync as readFileSync6 } from "node:fs";
+import { readdirSync as readdirSync2, readFileSync as readFileSync6 } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 function linuxProcesses() {
   if (process.platform !== "linux") throw new Error("live group teardown requires readable Linux procfs identity evidence");
-  return readdirSync("/proc").filter((name2) => /^\d+$/.test(name2)).flatMap((name2) => {
+  return readdirSync2("/proc").filter((name2) => /^\d+$/.test(name2)).flatMap((name2) => {
     let raw;
     try {
       raw = readFileSync6(`/proc/${name2}/stat`, "utf8");
@@ -2280,14 +2453,14 @@ function processIdentityState(owner, deps = {}) {
 
 // src/effort/store.ts
 function effortsRoot() {
-  return join8(homedir4(), ".pi", "agent", "conductor", "efforts");
+  return join9(homedir4(), ".pi", "agent", "conductor", "efforts");
 }
 function effortDir(gitRoot2, name2) {
   validateEffortName(name2);
-  return join8(effortsRoot(), `${name2}-${createHash("sha256").update(gitRoot2).digest("hex")}`);
+  return join9(effortsRoot(), `${name2}-${createHash("sha256").update(gitRoot2).digest("hex")}`);
 }
 function readEffort(gitRoot2, name2) {
-  const path2 = join8(effortDir(gitRoot2, name2), "effort.json");
+  const path2 = join9(effortDir(gitRoot2, name2), "effort.json");
   if (!existsSync5(path2)) return void 0;
   const r = JSON.parse(readFileSync7(path2, "utf8"));
   if (r.schema !== 1 || r.gitRoot !== gitRoot2 || r.name !== name2 || r.intRef !== `refs/heads/conductor-int/${name2}` || !Array.isArray(r.members)) {
@@ -2298,7 +2471,7 @@ function readEffort(gitRoot2, name2) {
 function sameOwner(a, b) {
   return a.sessionId === b.sessionId && a.pid === b.pid && a.startTime === b.startTime && (a.generation ?? 0) === (b.generation ?? 0);
 }
-var claimPath = (root, name2) => join8(effortDir(root, name2), "effort.lock");
+var claimPath = (root, name2) => join9(effortDir(root, name2), "effort.lock");
 var generationPath = (path2, generation) => generation ? `${path2}.${generation}` : path2;
 function readClaim(path2) {
   let owner;
@@ -2357,24 +2530,24 @@ function adoptEffort(record, identity) {
   return updated;
 }
 function publishJson(path2, value, fence) {
-  mkdirSync3(dirname6(path2), { recursive: true });
-  const temp = `${path2}-${randomUUID()}.claim`;
+  mkdirSync4(dirname6(path2), { recursive: true });
+  const temp = `${path2}-${randomUUID2()}.claim`;
   try {
     fence();
-    const file = openSync3(temp, "wx");
+    const file = openSync4(temp, "wx");
     try {
       writeFileSync(file, JSON.stringify(value));
       fsyncSync(file);
     } finally {
-      closeSync3(file);
+      closeSync4(file);
     }
     fence();
     linkSync(temp, path2);
-    const fd = openSync3(dirname6(path2), "r");
+    const fd = openSync4(dirname6(path2), "r");
     try {
       fsyncSync(fd);
     } finally {
-      closeSync3(fd);
+      closeSync4(fd);
     }
   } finally {
     if (existsSync5(temp)) unlinkSync(temp);
@@ -2384,28 +2557,28 @@ function writeDurableJson(path2, value, fence) {
   writeDurableFile(path2, JSON.stringify(value, null, 2), fence);
 }
 function writeDurableFile(path2, contents, fence) {
-  const temp = `${path2}-${randomUUID()}.tmp`;
+  const temp = `${path2}-${randomUUID2()}.tmp`;
   let fd;
   try {
     fence();
-    fd = openSync3(temp, "wx");
+    fd = openSync4(temp, "wx");
     writeFileSync(fd, contents);
     fsyncSync(fd);
-    closeSync3(fd);
+    closeSync4(fd);
     fd = void 0;
     fence();
-    renameSync(temp, path2);
-    fd = openSync3(dirname6(path2), "r");
+    renameSync2(temp, path2);
+    fd = openSync4(dirname6(path2), "r");
     fsyncSync(fd);
-    closeSync3(fd);
+    closeSync4(fd);
     fd = void 0;
   } finally {
-    if (fd !== void 0) closeSync3(fd);
+    if (fd !== void 0) closeSync4(fd);
     if (existsSync5(temp)) unlinkSync(temp);
   }
 }
 function writeEffort(record) {
-  writeDurableJson(join8(effortDir(record.gitRoot, record.name), "effort.json"), record, () => assertEffortOwner(record, record.owner));
+  writeDurableJson(join9(effortDir(record.gitRoot, record.name), "effort.json"), record, () => assertEffortOwner(record, record.owner));
 }
 function addEffortMember(record, id) {
   const current = readEffort(record.gitRoot, record.name);
@@ -2416,8 +2589,8 @@ function addEffortMember(record, id) {
 function listEfforts(gitRoot2) {
   if (!existsSync5(effortsRoot())) return [];
   const result = [];
-  for (const dir of readdirSync2(effortsRoot())) {
-    const path2 = join8(effortsRoot(), dir, "effort.json");
+  for (const dir of readdirSync3(effortsRoot())) {
+    const path2 = join9(effortsRoot(), dir, "effort.json");
     if (!existsSync5(path2)) continue;
     const r = JSON.parse(readFileSync7(path2, "utf8"));
     if (r.gitRoot === gitRoot2) result.push(readEffort(gitRoot2, r.name));
@@ -2439,10 +2612,10 @@ function effortGit(cwd, ...args) {
 }
 function effortRepository(cwd) {
   try {
-    const requestedRoot = realpathSync4(effortGit(cwd, "rev-parse", "--show-toplevel"));
+    const requestedRoot = realpathSync5(effortGit(cwd, "rev-parse", "--show-toplevel"));
     const first = effortGit(cwd, "worktree", "list", "--porcelain", "-z").split("\0")[0];
     if (!first.startsWith("worktree ")) throw new Error("missing main worktree");
-    return { gitRoot: realpathSync4(first.slice(9)), requestedRoot };
+    return { gitRoot: realpathSync5(first.slice(9)), requestedRoot };
   } catch {
     throw new Error("efforts require a non-bare git repository");
   }
@@ -2565,9 +2738,9 @@ function changedPaths(cwd, before, after) {
   return effortGit(cwd, "diff-tree", "-r", "--no-renames", "--name-only", "-z", before, after).split("\0").filter(Boolean);
 }
 function snapshot(cwd, prefix2 = "") {
-  return Object.fromEntries(readdirSync3(join9(cwd, prefix2)).flatMap((name2) => {
+  return Object.fromEntries(readdirSync4(join10(cwd, prefix2)).flatMap((name2) => {
     const path2 = prefix2 ? `${prefix2}/${name2}` : name2;
-    const file = join9(cwd, path2), stat6 = lstatSync(file);
+    const file = join10(cwd, path2), stat6 = lstatSync2(file);
     if (stat6.isDirectory() && path2 !== ".git") return Object.entries(snapshot(cwd, path2));
     if (stat6.isSymbolicLink()) return [[path2, `link:${readlinkSync(file)}`]];
     if (!stat6.isFile()) throw new Error(`generated candidate contains unsupported file type: ${JSON.stringify(path2)}`);
@@ -2989,9 +3162,9 @@ function shouldRetry(cls, attempt, policy) {
 }
 
 // src/memory.ts
-import { existsSync as existsSync6, mkdirSync as mkdirSync4, readFileSync as readFileSync9, appendFileSync as appendFileSync2 } from "node:fs";
+import { existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync9, appendFileSync as appendFileSync2 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { join as join10, dirname as dirname7 } from "node:path";
+import { join as join11, dirname as dirname7 } from "node:path";
 import { createHash as createHash3 } from "node:crypto";
 var STOPWORDS = /* @__PURE__ */ new Set([
   "the",
@@ -3060,11 +3233,11 @@ function scoreOutcomes(records2, shape, now) {
 function memoryPath() {
   const override = process.env.CONDUCTOR_MEMORY_PATH;
   if (override && override.trim()) return override;
-  return join10(homedir5(), ".pi", "agent", "conductor", "memory", "outcomes.jsonl");
+  return join11(homedir5(), ".pi", "agent", "conductor", "memory", "outcomes.jsonl");
 }
 function appendOutcome(rec, path2 = memoryPath()) {
   try {
-    mkdirSync4(dirname7(path2), { recursive: true });
+    mkdirSync5(dirname7(path2), { recursive: true });
     appendFileSync2(path2, JSON.stringify(rec) + "\n", "utf-8");
   } catch {
   }
@@ -3563,15 +3736,15 @@ async function settleRunEffects(run, terminal, exitCode, opts, transport = { std
 }
 
 // src/effort/driver.ts
-import { randomUUID as randomUUID2 } from "node:crypto";
-import { copyFileSync, mkdirSync as mkdirSync6, writeFileSync as writeFileSync3 } from "node:fs";
-import { dirname as dirname9, join as join11 } from "node:path";
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { copyFileSync, mkdirSync as mkdirSync7, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname9, join as join12 } from "node:path";
 
 // src/hook-runner.ts
 import {
   spawn as childProcessSpawn
 } from "node:child_process";
-import { mkdirSync as mkdirSync5, createWriteStream } from "node:fs";
+import { mkdirSync as mkdirSync6, createWriteStream } from "node:fs";
 import { dirname as dirname8 } from "node:path";
 var DEFAULT_HOOK_MAX_LOG_BYTES = 10 * 1024 * 1024;
 var SIGKILL_GRACE_MS = 2e3;
@@ -3600,7 +3773,7 @@ function runHook(opts) {
   const startedAt = now();
   const logPath = opts.logPath ?? `${opts.runDir}/hook.log`;
   try {
-    mkdirSync5(dirname8(logPath), { recursive: true });
+    mkdirSync6(dirname8(logPath), { recursive: true });
   } catch {
   }
   const { CONDUCTOR_WORKTREE_PATH: _inherited, ...inheritedEnv } = process.env;
@@ -3932,12 +4105,12 @@ var EffortDriver = class {
   }
   async drain(root) {
     const lockDir = effortDir(root, "integration-driver");
-    const lock = join11(lockDir, "driver.lock");
+    const lock = join12(lockDir, "driver.lock");
     let claim;
     let claimed = false;
     try {
-      mkdirSync6(lockDir, { recursive: true });
-      claim = acquireClaim(lock, effortOwner(randomUUID2()));
+      mkdirSync7(lockDir, { recursive: true });
+      claim = acquireClaim(lock, effortOwner(randomUUID3()));
       claimed = true;
       for (const job of this.queues.get(root) ?? []) {
         if (job.finished || job.suspended || job.cancelled) continue;
@@ -3993,8 +4166,8 @@ var EffortDriver = class {
     const run = job.run;
     const entry = run.integration;
     entry.logPath = logPath;
-    const tmpDir = join11(dirname9(logPath), "tmp");
-    mkdirSync6(tmpDir, { recursive: true });
+    const tmpDir = join12(dirname9(logPath), "tmp");
+    mkdirSync7(tmpDir, { recursive: true });
     entry.commandPending = true;
     entry.process = void 0;
     await this.persist(job);
@@ -4092,16 +4265,16 @@ var EffortDriver = class {
     entry.attempts = 0;
     entry.verify = void 0;
     await this.persist(job);
-    const dir = join11(effortDir(root, record.name), "verify", `${run.id}-${randomUUID2()}`);
-    mkdirSync6(dir, { recursive: true });
-    const candidate = join11(root, ".worktrees", "conductor-cand", record.name, `${run.id}-${randomUUID2()}`);
+    const dir = join12(effortDir(root, record.name), "verify", `${run.id}-${randomUUID3()}`);
+    mkdirSync7(dir, { recursive: true });
+    const candidate = join12(root, ".worktrees", "conductor-cand", record.name, `${run.id}-${randomUUID3()}`);
     entry.candidatePath = candidate;
     entry.candidates = [.../* @__PURE__ */ new Set([...entry.candidates ?? [], candidate])];
     await this.persist(job);
     this.fence(job);
     effortGit(root, "worktree", "add", "--detach", candidate, expected);
     if (record.gatedTip !== expected) {
-      const result = entry.verifyIdentity.command ? await this.command(job, candidate, entry.verifyIdentity.command, join11(dir, "baseline.log")) : void 0;
+      const result = entry.verifyIdentity.command ? await this.command(job, candidate, entry.verifyIdentity.command, join12(dir, "baseline.log")) : void 0;
       assertCandidate(candidate, expected);
       record = this.fence(job);
       writeEffort({ ...record, baseline: { oid: expected, result, disabled: !result }, ...result?.passed === false ? {} : { gatedTip: expected }, updatedAt: Date.now() });
@@ -4120,12 +4293,12 @@ var EffortDriver = class {
     if (generated) {
       entry.mergeTree = merged.tree;
       entry.conflicts = merged.kind === "conflict" ? [...merged.conflicts] : [];
-      entry.mergeEvidencePath = join11(dir, "merge-tree.z");
+      entry.mergeEvidencePath = join12(dir, "merge-tree.z");
       writeFileSync3(entry.mergeEvidencePath, merged.output);
       this.fence(job);
       assertCandidate(candidate, expected);
       effortGit(candidate, "read-tree", "--reset", "-u", merged.tree);
-      copyFileSync(effortGit(candidate, "rev-parse", "--git-path", "index"), join11(dir, "merge.index"));
+      copyFileSync(effortGit(candidate, "rev-parse", "--git-path", "index"), join12(dir, "merge.index"));
       await this.persist(job);
     }
     if (merged.kind === "conflict" && (!generated || !merged.conflicts.every((path2) => isGeneratedPath(path2, generated)))) {
@@ -4154,8 +4327,8 @@ var EffortDriver = class {
       entry.preGenerationTree = effortGit(candidate, "write-tree");
       entry.state = "generating";
       await this.persist(job);
-      const result = await regenerateCandidate(candidate, expected, generated, join11(dir, "generation-before.json"), async () => {
-        entry.generation = await this.command(job, candidate, generated.command, join11(dir, "generate.log"));
+      const result = await regenerateCandidate(candidate, expected, generated, join12(dir, "generation-before.json"), async () => {
+        entry.generation = await this.command(job, candidate, generated.command, join12(dir, "generate.log"));
         return entry.generation;
       }, () => {
         this.fence(job);
@@ -4166,13 +4339,13 @@ var EffortDriver = class {
       }
       entry.state = "merging";
     }
-    const message = join11(dir, "commit-message");
+    const message = join12(dir, "commit-message");
     writeFileSync3(message, `${buildMergeCommitMessage(run.persona, run.id, run.task)}
 
 Conductor-Effort: ${record.name}
 Conductor-Run: ${run.id}
 `);
-    entry.commitHook = await this.command(job, candidate, `git commit -F ${shellQuote2(message)}`, join11(dir, "commit.log"));
+    entry.commitHook = await this.command(job, candidate, `git commit -F ${shellQuote2(message)}`, join12(dir, "commit.log"));
     if (!entry.commitHook.passed) {
       this.pause(job, `candidate commit hooks failed: ${entry.commitHook.logPath}: ${entry.commitHook.tailText}`);
       return;
@@ -4188,7 +4361,7 @@ Conductor-Run: ${run.id}
     if (entry.verifyIdentity.command) {
       for (; ; ) {
         entry.attempts++;
-        entry.verify = await this.command(job, candidate, entry.verifyIdentity.command, join11(dir, `verify-${entry.attempts}.log`));
+        entry.verify = await this.command(job, candidate, entry.verifyIdentity.command, join12(dir, `verify-${entry.attempts}.log`));
         assertCandidate(candidate, entry.candidateOid);
         const action = nextIntegration(entry.verify, entry.attempts, entry.verifyIdentity.retries);
         await this.persist(job);
@@ -4218,10 +4391,10 @@ Conductor-Run: ${run.id}
 };
 
 // src/runs.ts
-import { existsSync as existsSync8, mkdirSync as mkdirSync8, readFileSync as readFileSync11, readdirSync as readdirSync4, statSync as statSync3 } from "node:fs";
+import { existsSync as existsSync8, mkdirSync as mkdirSync9, readFileSync as readFileSync11, readdirSync as readdirSync5, statSync as statSync3 } from "node:fs";
 import { mkdir, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir as homedir7 } from "node:os";
-import { dirname as dirname12, join as join13, resolve as resolve4, sep as sep3 } from "node:path";
+import { dirname as dirname12, join as join14, resolve as resolve5, sep as sep3 } from "node:path";
 
 // src/gc/id-reuse.ts
 var recentlyDeletedIds = /* @__PURE__ */ new Set();
@@ -4434,7 +4607,7 @@ function resolveInheritContext(perCall, persona) {
 
 // src/session-seed.ts
 import { randomBytes } from "node:crypto";
-import { mkdirSync as mkdirSync7, writeFileSync as writeFileSync4 } from "node:fs";
+import { mkdirSync as mkdirSync8, writeFileSync as writeFileSync4 } from "node:fs";
 import { dirname as dirname10 } from "node:path";
 function newEntryId() {
   return randomBytes(4).toString("hex");
@@ -4443,7 +4616,7 @@ function newSessionId() {
   return randomBytes(16).toString("hex");
 }
 function seedSessionFile(path2, messages, cwd) {
-  mkdirSync7(dirname10(path2), { recursive: true });
+  mkdirSync8(dirname10(path2), { recursive: true });
   const lines = [];
   const now = (/* @__PURE__ */ new Date()).toISOString();
   lines.push(
@@ -4623,15 +4796,15 @@ ${diag}
 // src/workspace-doctrine.ts
 import { existsSync as existsSync7, readFileSync as readFileSync10, statSync as statSync2 } from "node:fs";
 import { homedir as homedir6, tmpdir } from "node:os";
-import { dirname as dirname11, join as join12, relative as relative2, resolve as resolve3, sep as sep2 } from "node:path";
+import { dirname as dirname11, join as join13, relative as relative2, resolve as resolve4, sep as sep2 } from "node:path";
 var MAX_WALK_DEPTH = 6;
 var MAX_DOCTRINE_CHARS = 24e3;
 var DOCTRINE_HEADING = "## Workspace doctrine";
 function walkDirs(start) {
-  const home = resolve3(homedir6());
-  const temp = resolve3(tmpdir());
+  const home = resolve4(homedir6());
+  const temp = resolve4(tmpdir());
   const dirs = [];
-  let current = resolve3(start);
+  let current = resolve4(start);
   for (let depth = 0; depth <= MAX_WALK_DEPTH; depth++) {
     if (current !== home && current !== temp) dirs.push(current);
     const parent = dirname11(current);
@@ -4642,7 +4815,7 @@ function walkDirs(start) {
 }
 function findAgentsMd(start) {
   for (const dir of walkDirs(start)) {
-    const candidate = join12(dir, "AGENTS.md");
+    const candidate = join13(dir, "AGENTS.md");
     try {
       if (statSync2(candidate).isFile()) return candidate;
     } catch {
@@ -4651,16 +4824,16 @@ function findAgentsMd(start) {
   return void 0;
 }
 function gitRoot(start) {
-  let current = resolve3(start);
+  let current = resolve4(start);
   while (true) {
-    if (existsSync7(join12(current, ".git"))) return current;
+    if (existsSync7(join13(current, ".git"))) return current;
     const parent = dirname11(current);
     if (parent === current) return void 0;
     current = parent;
   }
 }
 function childNativeAgentsDirs(workdir) {
-  const start = resolve3(workdir);
+  const start = resolve4(workdir);
   const root = gitRoot(start);
   if (!root || root === start) return [start];
   const rel = relative2(root, start);
@@ -4668,7 +4841,7 @@ function childNativeAgentsDirs(workdir) {
   const dirs = [root];
   let current = root;
   for (const part of rel.split(sep2).filter(Boolean)) {
-    current = join12(current, part);
+    current = join13(current, part);
     dirs.push(current);
   }
   return dirs;
@@ -4684,7 +4857,7 @@ function truncateDoctrine(text3, path2) {
 function loadWorkspaceDoctrine(workdir) {
   try {
     if (!workdir || !statSync2(workdir).isDirectory()) return "";
-    const start = resolve3(workdir);
+    const start = resolve4(workdir);
     const path2 = findAgentsMd(start);
     if (!path2 || childNativeAgentsDirs(start).includes(dirname11(path2))) return "";
     let text3 = readFileSync10(path2, "utf8").trim();
@@ -4702,17 +4875,17 @@ ${text3}`;
 
 // src/runs.ts
 function runsRoot() {
-  return join13(homedir7(), ".pi", "agent", "conductor", "runs");
+  return join14(homedir7(), ".pi", "agent", "conductor", "runs");
 }
 function runDir(id) {
-  return join13(runsRoot(), id);
+  return join14(runsRoot(), id);
 }
 function collectInheritedSkillPaths(opts) {
   const home = opts.homeDir ?? homedir7();
   const exists = opts.existsFn ?? existsSync8;
   const candidates = [
-    join13(home, ".pi", "agent", "skills"),
-    join13(opts.cwd, ".pi", "skills")
+    join14(home, ".pi", "agent", "skills"),
+    join14(opts.cwd, ".pi", "skills")
   ];
   return candidates.filter((p) => exists(p));
 }
@@ -4723,7 +4896,7 @@ function resolveTimeoutMs(persona, ov, cfg) {
 function findSessionFile(sessionDir) {
   let entries;
   try {
-    entries = readdirSync4(sessionDir);
+    entries = readdirSync5(sessionDir);
   } catch {
     return void 0;
   }
@@ -4731,7 +4904,7 @@ function findSessionFile(sessionDir) {
   let bestMtime = -Infinity;
   for (const name2 of entries) {
     if (!name2.endsWith(".jsonl")) continue;
-    const full = join13(sessionDir, name2);
+    const full = join14(sessionDir, name2);
     let st;
     try {
       st = statSync3(full);
@@ -4794,7 +4967,7 @@ var READ_ONLY_PERSONA_ENFORCER = [
 function assemblePersonaSystemPrompt(persona, cwd) {
   const blocks = persona.readOnly === true ? [READ_ONLY_PERSONA_ENFORCER, persona.systemPrompt] : [persona.systemPrompt];
   try {
-    const preamble = readFileSync11(join13(builtinPersonasDir(), "_preamble.md"), "utf8").trim();
+    const preamble = readFileSync11(join14(builtinPersonasDir(), "_preamble.md"), "utf8").trim();
     if (preamble) blocks.push(preamble);
   } catch {
   }
@@ -4806,8 +4979,8 @@ function assemblePersonaSystemPrompt(persona, cwd) {
 }
 function resolveDefaultReads(reads, childCwd, requestedCwd) {
   return reads.map((f) => {
-    const own = resolve4(childCwd, f);
-    return existsSync8(own) ? own : resolve4(requestedCwd, f);
+    const own = resolve5(childCwd, f);
+    return existsSync8(own) ? own : resolve5(requestedCwd, f);
   });
 }
 function buildSubAgentPrompt(persona, task, place) {
@@ -4971,7 +5144,7 @@ function planSpawnPiArgs(opts) {
     seedMessages = [filteredHistorySentinel(), ...seedMessages];
   }
   if (seedMessages) {
-    const seededSessionPath = join13(sessionDir, "seeded.jsonl");
+    const seededSessionPath = join14(sessionDir, "seeded.jsonl");
     seedSessionFile(seededSessionPath, seedMessages, cwd);
     return {
       mode: "resume",
@@ -5132,7 +5305,7 @@ function spawnRun(opts) {
   const id = opts.preAllocatedId ?? allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
   if (effort) addEffortMember(effort, id);
   const dir = runDir(id);
-  mkdirSync8(dir, { recursive: true });
+  mkdirSync9(dir, { recursive: true });
   const run = {
     id,
     runtime: opts.runtime,
@@ -5150,9 +5323,9 @@ function spawnRun(opts) {
     messages: [],
     usage: emptyUsage(),
     cwd: opts.cwd,
-    recordPath: join13(dir, "record.json"),
-    transcriptPath: join13(dir, "transcript.jsonl"),
-    finalPath: join13(dir, "final.md"),
+    recordPath: join14(dir, "record.json"),
+    transcriptPath: join14(dir, "transcript.jsonl"),
+    finalPath: join14(dir, "final.md"),
     sessionPath: void 0,
     // Capture the persona body now so future ensemble_send calls can
     // re-pass it on resume. Pi doesn't persist system prompts to disk.
@@ -5289,8 +5462,8 @@ function spawnRun(opts) {
       requestedCwd: opts.cwd,
       worktree: worktreeFence
     });
-    const sessionDir = join13(dir, "session");
-    mkdirSync8(sessionDir, { recursive: true });
+    const sessionDir = join14(dir, "session");
+    mkdirSync9(sessionDir, { recursive: true });
     const plan = planSpawnPiArgs({
       persona: opts.persona,
       parentMessages: opts.parentMessages,
@@ -5401,7 +5574,7 @@ function failBeforeSpawn(opts, errorMessage) {
   const runtime = prepareSpawnRuntime(opts).runtime;
   const id = allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
   const dir = runDir(id);
-  mkdirSync8(dir, { recursive: true });
+  mkdirSync9(dir, { recursive: true });
   const now = Date.now();
   const run = {
     id,
@@ -5418,9 +5591,9 @@ function failBeforeSpawn(opts, errorMessage) {
     messages: [],
     usage: emptyUsage(),
     cwd: opts.cwd,
-    recordPath: join13(dir, "record.json"),
-    transcriptPath: join13(dir, "transcript.jsonl"),
-    finalPath: join13(dir, "final.md"),
+    recordPath: join14(dir, "record.json"),
+    transcriptPath: join14(dir, "transcript.jsonl"),
+    finalPath: join14(dir, "final.md"),
     parentPid: process.pid,
     parentStartTime: readProcessStartTime(process.pid),
     parentSessionId: opts.parentSessionId,
@@ -5649,7 +5822,7 @@ function restoreResumeWorktree(run, readSession) {
     return void 0;
   }
   if (!path2 || existsSync8(path2)) return void 0;
-  const layout = `${sep3}${join13(".worktrees", "conductor-wt", run.id)}`;
+  const layout = `${sep3}${join14(".worktrees", "conductor-wt", run.id)}`;
   const at = `${path2}${sep3}`.lastIndexOf(`${layout}${sep3}`);
   if (at < 0) return void 0;
   const gitRoot2 = path2.slice(0, at);
@@ -5902,14 +6075,51 @@ function keptWorktreeHint(worktreePath, branch) {
   const gitRoot2 = dirname12(dirname12(dirname12(worktreePath)));
   return `worktree kept with any partial work: ${worktreePath} (branch ${branch}); keep it with cd ${gitRoot2} && git merge ${branch}, or discard it (with every other kept worktree) via /conductor worktree clean`;
 }
-async function releaseRunPane(run) {
+function worktreeCleanupGuard(run, currentRun) {
+  if (run.runtime !== "herdr") return () => run.runtime === void 0 || run.runtime === "subprocess";
+  const keys = [
+    "id",
+    "runtime",
+    "status",
+    "recordPath",
+    "cwd",
+    "worktreePath",
+    "worktreeBranch",
+    "worktreeBaseBranch",
+    "mergeStrategy",
+    "sessionPath",
+    "parentPid",
+    "parentSessionId"
+  ];
+  const expected = Object.fromEntries(keys.map((key) => [key, run[key]]));
+  const binding = run.herdr && { ...run.herdr };
+  const recordPath = run.recordPath;
+  const valid = ["id", "recordPath", "cwd", "worktreePath", "worktreeBranch"].every((key) => typeof expected[key] === "string" && expected[key].length > 0 && !expected[key].includes("\0")) && ["worktreeBaseBranch", "sessionPath"].every((key) => expected[key] === void 0 || typeof expected[key] === "string" && expected[key].length > 0 && !expected[key].includes("\0")) && (expected.mergeStrategy === void 0 || typeof expected.mergeStrategy === "string" && ["none", "squash", "merge"].includes(expected.mergeStrategy)) && isTerminal(run.status) && binding?.runId === run.id && Number.isSafeInteger(binding.childPid) && Number(binding.childPid) > 1 && (binding.childStartTime === void 0 || Number.isSafeInteger(binding.childStartTime) && binding.childStartTime > 0) && typeof binding.createdTab === "boolean" && ["runId", "launchNonce", "sessionId", "sessionFile", "socketPath", "workspaceId", "tabId", "paneId", "terminalId"].every((key) => {
+    const value = binding[key];
+    return typeof value === "string" && value.length > 0 && !value.includes("\0");
+  });
+  const matches = (value) => valid && isRecord(value) && value.effort === void 0 && keys.every((key) => value[key] === expected[key]) && isRecord(value.herdr) && value.herdr.createdTab === binding?.createdTab && sameHerdrBinding(binding, value.herdr);
+  return () => {
+    try {
+      return matches(run) && matches(currentRun()) && matches(read(recordPath));
+    } catch {
+      return false;
+    }
+  };
+}
+async function releaseRunPane(run, isCurrent = () => true) {
+  if (!isCurrent()) return false;
   if (run.runtime !== "herdr") return true;
   const binding = run.herdr, status = run.status;
-  return run.transport?.kind === "herdr" ? run.transport.releasePane() : releaseRecordedPane(run, () => run.herdr === binding && run.status === status ? run.herdr : void 0);
+  return run.transport?.kind === "herdr" ? run.transport.releasePane(void 0, isCurrent) : releaseRecordedPane(run, () => isCurrent() && run.herdr === binding && run.status === status ? run.herdr : void 0);
 }
 async function releaseWorktree(run, opts) {
-  if (run.effort) return;
-  if (!run.worktreePath || !run.worktreeBranch) return;
+  if (opts.isCurrent && !opts.isCurrent()) {
+    run.worktreeKept = "worktree kept: current ownership unconfirmed";
+    return false;
+  }
+  if (run.effort) return false;
+  if (!run.worktreePath || !run.worktreeBranch) return false;
   const wtSpec = {
     // Reconstruct gitRoot: <gitRoot>/.worktrees/conductor-wt/<run-id> → 3 levels up
     gitRoot: dirname12(dirname12(dirname12(run.worktreePath))),
@@ -5918,19 +6128,25 @@ async function releaseWorktree(run, opts) {
   };
   if (worktreeHasUncommittedChanges(wtSpec.worktreePath)) {
     run.worktreeKept = `worktree kept: uncommitted changes in ${wtSpec.worktreePath}; commit them to ${wtSpec.branch} or discard them, then git worktree remove ${wtSpec.worktreePath}`;
-    return;
+    return false;
   }
   const binding = run.herdr, status = run.status;
-  if (run.runtime === "herdr" && (!await releaseRunPane(run) || run.herdr !== binding || run.status !== status || run.worktreePath !== wtSpec.worktreePath || run.worktreeBranch !== wtSpec.branch)) {
+  if (run.runtime === "herdr" && (!await releaseRunPane(run, opts.isCurrent) || run.herdr !== binding || run.status !== status || run.worktreePath !== wtSpec.worktreePath || run.worktreeBranch !== wtSpec.branch)) {
     run.worktreeKept = `worktree kept: pane ${run.herdr?.paneId ?? "unknown"} not proven ours and empty`;
-    return;
+    return false;
+  }
+  if (opts.isCurrent && !opts.isCurrent()) {
+    run.worktreeKept = "worktree kept: current ownership unconfirmed";
+    return false;
   }
   if (removeWorktree(wtSpec, opts)) {
     run.worktreePath = void 0;
     if (!opts.keepBranch) run.worktreeBranch = void 0;
+    return true;
   } else {
     process.stderr.write(`[conductor] worktree removal failed for ${run.id}; GC will clean up
 `);
+    return false;
   }
 }
 function applyChainIfPresent(run, terminal, onChain) {
@@ -5955,7 +6171,7 @@ function applyRetryIfNeeded(run, onRetry) {
 }
 async function applyHookToTerminal(run, resolvedHook, terminal, deps = {}) {
   try {
-    if (run.effort) await writeFile2(join13(dirname12(run.recordPath), "gate-final.md"), getFinalText(run.messages) || "(no output)");
+    if (run.effort) await writeFile2(join14(dirname12(run.recordPath), "gate-final.md"), getFinalText(run.messages) || "(no output)");
     else await writeFinal(run);
   } catch {
   }
@@ -5967,12 +6183,12 @@ async function applyHookToTerminal(run, resolvedHook, terminal, deps = {}) {
       runId: run.id,
       persona: run.persona,
       runDir: dirname12(run.finalPath),
-      finalPath: run.effort ? join13(dirname12(run.recordPath), "gate-final.md") : run.finalPath,
+      finalPath: run.effort ? join14(dirname12(run.recordPath), "gate-final.md") : run.finalPath,
       transcriptPath: run.transcriptPath,
       parentCwd: run.cwd,
       cwd: run.effort?.cwd,
       extraEnv: run.effort ? effortEnv() : void 0,
-      tmpDir: run.effort ? join13(dirname12(run.recordPath), "tmp") : void 0,
+      tmpDir: run.effort ? join14(dirname12(run.recordPath), "tmp") : void 0,
       worktreePath: run.worktreePath,
       onProc: (proc) => {
         run.hookProc = proc;
@@ -6146,7 +6362,7 @@ async function reconcileRecord(run, status, errorMessage, finishedAt) {
   run.errorMessage = errorMessage;
   await writeRecord(run);
 }
-function findRunSessionFile(run, sessionDir = join13(dirname12(run.recordPath), "session")) {
+function findRunSessionFile(run, sessionDir = join14(dirname12(run.recordPath), "session")) {
   return run.sessionPath ?? findSessionFile(sessionDir);
 }
 function discoverContextRetirement(run, sessionDir) {
@@ -6333,48 +6549,6 @@ ${boundStallText(part.text, ITEM_BYTES - 11)}` : part.type === "toolCall" ? `too
   }
 }
 
-// src/herdr/identity.ts
-var text = (v) => typeof v === "string" && v.length > 0 && !v.includes("\0");
-var positiveInteger = (v) => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
-function isHerdrPane(value) {
-  if (!isRecord(value) || ![value.pane_id, value.terminal_id, value.workspace_id, value.tab_id].every(text)) return false;
-  const session = value.agent_session;
-  return (value.agent === null || text(value.agent)) && (session === null || isRecord(session) && (session.kind === "path" || session.kind === "id") && [session.value, session.agent, session.source].every(text));
-}
-var unknown = (reason) => ({ ok: false, state: "unknown", reason });
-function sameHerdrBinding(a, b) {
-  return !!a && !!b && ["runId", "launchNonce", "sessionId", "sessionFile", "socketPath", "workspaceId", "tabId", "paneId", "terminalId", "childPid", "childStartTime"].every((key) => a[key] === b[key]);
-}
-function provePaneOurs(ev) {
-  const { binding: b, current, pane } = ev;
-  if (!isRecord(b) || !isRecord(current) || !isHerdrPane(pane)) return unknown("missing pane evidence");
-  for (const key of ["runId", "launchNonce", "sessionId", "sessionFile"]) {
-    if (!text(b[key]) || b[key] !== current[key]) return unknown("invocation mismatch");
-  }
-  if (!text(b.socketPath) || b.socketPath !== ev.socketPath) return unknown("socket mismatch");
-  if (pane.pane_id !== b.paneId || pane.terminal_id !== b.terminalId || pane.workspace_id !== b.workspaceId || pane.tab_id !== b.tabId) return unknown("pane identity mismatch");
-  if (ev.requireNoAgent && (pane.agent !== null || pane.agent_session !== null)) return unknown("pane not empty");
-  return { ok: true };
-}
-function proveChildProcess(ev) {
-  const paneProof = provePaneOurs({ ...ev, requireNoAgent: false });
-  if (!paneProof.ok) return paneProof;
-  const { binding: b, hello: h, pane, process: proc } = ev;
-  if (!isRecord(b) || !isRecord(h) || !isHerdrPane(pane) || !isRecord(proc)) return unknown("missing child evidence");
-  if (h.v !== 1 || !positiveInteger(ev.bridgeProtocol) || h.bridgeProtocol !== ev.bridgeProtocol || !text(h.piVersion) || !text(h.conductorVersion) || typeof h.at !== "number" || !Number.isFinite(h.at) || h.at < 0) return unknown("malformed hello");
-  for (const key of ["runId", "launchNonce", "sessionId", "sessionFile"]) {
-    if (h[key] !== b[key]) return unknown("hello invocation mismatch");
-  }
-  if (h.paneId !== b.paneId || !positiveInteger(h.pid) || h.pid <= 1 || h.pid !== b.childPid || proc.pid !== h.pid) return unknown("child pid mismatch");
-  if (pane.agent !== "pi" || pane.agent_session?.kind !== "path" || pane.agent_session.agent !== "pi" || pane.agent_session.value !== h.sessionFile) return unknown("Pi session mismatch");
-  if (!text(ev.platform) || h.pidStartTime !== void 0 && !positiveInteger(h.pidStartTime) || h.pidStartTime !== b.childStartTime) return unknown("malformed start identity");
-  if (ev.platform === "linux" && !positiveInteger(h.pidStartTime)) return unknown("missing start identity");
-  if (proc.state === "gone") return { ok: false, state: "gone", reason: "child absent" };
-  if (proc.state !== "alive") return unknown("child liveness unknown");
-  if (ev.platform === "linux" && proc.startTime !== h.pidStartTime) return unknown("child start mismatch");
-  return { ok: true, pid: h.pid };
-}
-
 // src/herdr/placement.ts
 var HERDR_FORWARD_ENV = [
   "AWS_PROFILE",
@@ -6444,137 +6618,6 @@ async function closeEmptyPane(cli, binding, current, limits) {
   } catch {
     return { ok: false, state: "unknown", reason: "pane cleanup unconfirmed" };
   }
-}
-
-// src/herdr/inbox.ts
-import { closeSync as closeSync4, constants as constants3, fstatSync as fstatSync3, lstatSync as lstatSync2, mkdirSync as mkdirSync9, openSync as openSync4, readdirSync as readdirSync5, readSync as readSync3, realpathSync as realpathSync5, renameSync as renameSync2, writeSync } from "node:fs";
-import { basename as basename2, isAbsolute as isAbsolute4, join as join14, resolve as resolve5 } from "node:path";
-import { randomUUID as randomUUID3 } from "node:crypto";
-var CONTROL_PREFIX = "__CONDUCTOR_CTL_V1__:";
-var MAX_INBOX_TEXT_BYTES = 8 * 1048576;
-var MAX_RECORD_BYTES = 32 * 1048576;
-var token = (v) => typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(v);
-var kinds = ["initial", "reply", "steer", "follow_up", "grace"];
-function validRequest(v) {
-  return isRecord(v) && v.v === 1 && token(v.launchNonce) && token(v.requestId) && Number.isSafeInteger(v.sequence) && Number(v.sequence) > 0 && Number(v.sequence) <= 999999 && kinds.includes(v.kind) && typeof v.text === "string" && !!v.text.trim() && !v.text.includes("\0") && Buffer.byteLength(v.text) <= MAX_INBOX_TEXT_BYTES && (v.kind === "reply" ? typeof v.askId === "string" && v.askId.length > 0 && v.askId.length <= 512 && !/[\0\r\n]/.test(v.askId) : v.askId === void 0);
-}
-function directory(runDir2, nonce, create = false) {
-  if (!token(nonce) || !isAbsolute4(runDir2) || resolve5(runDir2) !== runDir2 || realpathSync5(runDir2) !== runDir2) throw new Error("invalid inbox identity/path");
-  if (create) {
-    const record = read(join14(runDir2, "record.json"));
-    if (!isRecord(record) || record.id !== basename2(runDir2) || record.runtime !== "herdr" || !isRecord(record.herdr) || record.herdr.runId !== record.id || record.herdr.launchNonce !== nonce) throw new Error("inbox invocation mismatch");
-  }
-  for (const path2 of [join14(runDir2, "inbox"), join14(runDir2, "inbox", nonce)]) {
-    if (create) {
-      try {
-        mkdirSync9(path2, { mode: 448 });
-      } catch (e) {
-        if (e.code !== "EEXIST") throw e;
-      }
-    }
-    if (!lstatSync2(path2).isDirectory() || realpathSync5(path2) !== path2) throw new Error("invalid inbox directory");
-  }
-  return join14(runDir2, "inbox", nonce);
-}
-function read(file) {
-  const fd = openSync4(file, constants3.O_RDONLY | constants3.O_NONBLOCK | constants3.O_NOFOLLOW);
-  try {
-    const stat6 = fstatSync3(fd);
-    if (!stat6.isFile() || stat6.nlink !== 1 || stat6.size > MAX_RECORD_BYTES) throw new Error("invalid inbox record");
-    const buffer = Buffer.alloc(stat6.size + 1);
-    let n = 0, count = 0;
-    while (n < buffer.length && (count = readSync3(fd, buffer, n, buffer.length - n, n)) > 0) n += count;
-    if (n !== stat6.size) throw new Error("inbox record changed during read");
-    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, n)));
-  } finally {
-    closeSync4(fd);
-  }
-}
-function absent(file) {
-  try {
-    lstatSync2(file);
-  } catch (e) {
-    if (e.code === "ENOENT") return;
-    throw e;
-  }
-  throw new Error("inbox record already exists");
-}
-function publish(file, value) {
-  const buffer = Buffer.from(JSON.stringify(value) + "\n");
-  if (buffer.length > MAX_RECORD_BYTES) throw new Error("inbox record exceeds byte cap");
-  absent(file);
-  const tmp = `${file}.${randomUUID3()}.tmp`;
-  const fd = openSync4(tmp, "wx", 384);
-  try {
-    for (let offset = 0; offset < buffer.length; ) {
-      const count = writeSync(fd, buffer, offset, buffer.length - offset);
-      if (count <= 0) throw new Error("incomplete inbox write");
-      offset += count;
-    }
-  } finally {
-    closeSync4(fd);
-  }
-  absent(file);
-  renameSync2(tmp, file);
-}
-var name = (r) => `${String(r.sequence).padStart(6, "0")}-${r.requestId}`;
-function writeInboxRequest(runDir2, request) {
-  if (!validRequest(request) || Buffer.byteLength(JSON.stringify(request)) >= MAX_RECORD_BYTES) throw new Error("invalid inbox request");
-  const dir = directory(runDir2, request.launchNonce, true);
-  if (readInbox(runDir2, request.launchNonce).some((e) => e.request.requestId === request.requestId || e.request.sequence === request.sequence)) throw new Error("duplicate inbox request identity");
-  absent(join14(dir, `${name(request)}.sending.json`));
-  absent(join14(dir, `${request.requestId}.ack.json`));
-  publish(join14(dir, `${name(request)}.json`), request);
-}
-function readInbox(runDir2, nonce) {
-  let dir;
-  try {
-    dir = directory(runDir2, nonce);
-  } catch (e) {
-    if (e.code === "ENOENT") return [];
-    throw e;
-  }
-  const files = readdirSync5(dir);
-  if (files.length > 1024) throw new Error("inbox entry cap exceeded; preserve for inspection");
-  const entries = [];
-  for (const file of files) {
-    if (!/^\d{6}-[A-Za-z0-9][A-Za-z0-9_-]{0,127}(\.sending)?\.json$/.test(file)) continue;
-    try {
-      const request = read(join14(dir, file));
-      if (!validRequest(request) || request.launchNonce !== nonce) continue;
-      const dispatched = file.endsWith(".sending.json");
-      if (file !== `${name(request)}${dispatched ? ".sending" : ""}.json`) continue;
-      entries.push({ request, dispatched });
-    } catch {
-    }
-  }
-  return entries.filter((e) => entries.filter((other) => other.request.requestId === e.request.requestId || other.request.sequence === e.request.sequence).length === 1).sort((a, b) => a.request.sequence - b.request.sequence);
-}
-function readInboxAck(runDir2, request) {
-  if (!validRequest(request)) throw new Error("invalid ack request identity");
-  let value;
-  try {
-    value = read(join14(directory(runDir2, request.launchNonce), `${request.requestId}.ack.json`));
-  } catch (e) {
-    if (e.code === "ENOENT") return;
-    throw e;
-  }
-  if (!isRecord(value) || value.v !== 1 || value.launchNonce !== request.launchNonce || value.requestId !== request.requestId || value.sequence !== request.sequence || value.kind !== request.kind || typeof value.accepted !== "boolean" || typeof value.at !== "number" || !Number.isFinite(value.at) || value.at < 0 || (value.accepted ? value.code !== void 0 : value.code !== "busy" && value.code !== "stale-ask")) throw new Error("invalid inbox ack");
-  return value;
-}
-function writeInboxAck(runDir2, request, code) {
-  if (!validRequest(request)) throw new Error("invalid ack request identity");
-  const { v, launchNonce, requestId, sequence, kind } = request;
-  publish(join14(directory(runDir2, launchNonce), `${requestId}.ack.json`), { v, launchNonce, requestId, sequence, kind, accepted: code === void 0, ...code ? { code } : {}, at: Date.now() });
-}
-var inboxMarker = (r) => `${CONTROL_PREFIX}${r.launchNonce}:${r.sequence}:${r.requestId}`;
-function dispatchInboxRequest(runDir2, request) {
-  if (!validRequest(request)) throw new Error("invalid dispatch request identity");
-  const dir = directory(runDir2, request.launchNonce);
-  const source = join14(dir, `${name(request)}.json`), target = join14(dir, `${name(request)}.sending.json`);
-  if (JSON.stringify(read(source)) !== JSON.stringify(request)) throw new Error("inbox request changed before dispatch");
-  absent(target);
-  renameSync2(source, target);
 }
 
 // src/herdr/runtime.ts
@@ -7079,9 +7122,9 @@ var HerdrRuntime = class {
       return { kind: "queued", ack };
     };
     let paneReleased = false;
-    const releasePane = async (signal2) => {
+    const releasePane = async (signal2, isCurrent = () => true) => {
       cleanupSignal = signal2;
-      if (!childExited || !binding || run.herdr !== binding || signal2?.aborted) return false;
+      if (!isCurrent() || !childExited || !binding || run.herdr !== binding || signal2?.aborted) return false;
       if (paneReleased) return true;
       const state = proof(provenPane);
       if (state.ok || state.state !== "gone") {
@@ -7089,7 +7132,7 @@ var HerdrRuntime = class {
         return false;
       }
       const status = run.status;
-      const result = await closeEmptyPane(cli, binding, () => run.status === status ? current() : void 0, { timeoutMs: 2e3, signal: signal2 });
+      const result = await closeEmptyPane(cli, binding, () => isCurrent() && run.status === status ? current() : void 0, { timeoutMs: 2e3, signal: signal2 });
       if (!result.ok) diagnostic(`worktree kept: ${result.reason}`);
       paneReleased = result.ok;
       return result.ok;
@@ -9817,8 +9860,8 @@ async function runWorktreeCmd(opts, ctx, subRest) {
         );
         return;
       }
-      const binding = run.herdr, status = run.status;
-      if (!await herdrChildGone(run) || !await releaseRunPane(run) || run.herdr !== binding || run.status !== status) {
+      const isCurrent = worktreeCleanupGuard(run, () => opts.getRegistry().get(runId));
+      if (!isCurrent() || !await herdrChildGone(run) || !await releaseRunPane(run, isCurrent) || !isCurrent()) {
         run.worktreeKept ??= "worktree kept: pane release or current invocation unconfirmed";
         ctx.ui.notify(run.worktreeKept, "warning");
         return;
@@ -9832,16 +9875,24 @@ async function runWorktreeCmd(opts, ctx, subRest) {
         "info"
       );
       try {
+        if (!isCurrent()) {
+          ctx.ui.notify("Merge refused: current ownership unconfirmed; work preserved.", "warning");
+          return;
+        }
         const result = await mergeWorktree(
           { gitRoot: gitRoot2, worktreePath: run.worktreePath, branch: run.worktreeBranch },
           { strategy, baseBranch, commitMessage }
         );
         if (result.success) {
+          if (!isCurrent()) {
+            ctx.ui.notify("Cleanup refused: ownership changed after merge; work preserved.", "warning");
+            return;
+          }
+          run.worktreeKept = void 0;
+          await releaseWorktree(run, { keepBranch: false, isCurrent });
           run.status = "completed";
           run.mergeResult = result;
           run.errorMessage = void 0;
-          run.worktreeKept = void 0;
-          await releaseWorktree(run, { keepBranch: false });
           ctx.ui.notify(
             `\u2714 Merged ${run.id} \u2192 ${baseBranch}. Run is now completed.` + (run.worktreeKept ? `
 ${run.worktreeKept}` : ""),
@@ -9874,8 +9925,9 @@ Resolve manually in the worktree and run /conductor worktree merge ${runId} agai
       }
       let cleaned = 0;
       for (const r of toClean) {
-        await releaseWorktree(r, { keepBranch: false });
-        if (!r.worktreePath) cleaned++;
+        const id = r.id;
+        const isCurrent = worktreeCleanupGuard(r, () => opts.getRegistry().get(id));
+        if (await releaseWorktree(r, { keepBranch: false, isCurrent })) cleaned++;
       }
       ctx.ui.notify(
         `Cleaned ${cleaned} worktree${cleaned !== 1 ? "s" : ""}.`,

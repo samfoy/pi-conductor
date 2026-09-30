@@ -77,7 +77,7 @@ export interface HerdrTransport extends TransportLifecycle {
   observe(): void;
   readonly childExited: boolean;
   waitForExit(): Promise<boolean>;
-  releasePane(signal?: AbortSignal): Promise<boolean>;
+  releasePane(signal?: AbortSignal, isCurrent?: () => boolean): Promise<boolean>;
   shutdown?(signal: AbortSignal): Promise<void>;
 }
 export type RunTransport = SubprocessTransport | HerdrTransport;

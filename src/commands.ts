@@ -40,6 +40,7 @@ import {
   releaseWorktree,
   herdrChildGone,
   releaseRunPane,
+  worktreeCleanupGuard,
   resumeRun,
   runDir,
   runsRoot,
@@ -1392,8 +1393,8 @@ export async function runWorktreeCmd(
         return;
       }
 
-      const binding = run.herdr, status = run.status;
-      if (!await herdrChildGone(run) || !await releaseRunPane(run) || run.herdr !== binding || run.status !== status) {
+      const isCurrent = worktreeCleanupGuard(run, () => opts.getRegistry().get(runId));
+      if (!isCurrent() || !await herdrChildGone(run) || !await releaseRunPane(run, isCurrent) || !isCurrent()) {
         run.worktreeKept ??= "worktree kept: pane release or current invocation unconfirmed";
         ctx.ui.notify(run.worktreeKept!, "warning");
         return;
@@ -1411,17 +1412,18 @@ export async function runWorktreeCmd(
       );
 
       try {
+        if (!isCurrent()) { ctx.ui.notify("Merge refused: current ownership unconfirmed; work preserved.", "warning"); return; }
         const result = await mergeWorktree(
           { gitRoot, worktreePath: run.worktreePath, branch: run.worktreeBranch },
           { strategy, baseBranch, commitMessage },
         );
         if (result.success) {
+          if (!isCurrent()) { ctx.ui.notify("Cleanup refused: ownership changed after merge; work preserved.", "warning"); return; }
+          run.worktreeKept = undefined;
+          await releaseWorktree(run, { keepBranch: false, isCurrent });
           run.status = "completed";
           run.mergeResult = result;
           run.errorMessage = undefined;
-          run.worktreeKept = undefined;
-          // Same removal as finalize's auto-merge, so the worktree doesn't leak.
-          await releaseWorktree(run, { keepBranch: false });
           ctx.ui.notify(
             `✔ Merged ${run.id} → ${baseBranch}. Run is now completed.` +
               (run.worktreeKept ? `\n${run.worktreeKept}` : ""),
@@ -1459,8 +1461,9 @@ export async function runWorktreeCmd(
       }
       let cleaned = 0;
       for (const r of toClean) {
-        await releaseWorktree(r, { keepBranch: false });
-        if (!r.worktreePath) cleaned++;
+        const id = r.id;
+        const isCurrent = worktreeCleanupGuard(r, () => opts.getRegistry().get(id));
+        if (await releaseWorktree(r, { keepBranch: false, isCurrent })) cleaned++;
       }
       ctx.ui.notify(
         `Cleaned ${cleaned} worktree${cleaned !== 1 ? "s" : ""}.`,
