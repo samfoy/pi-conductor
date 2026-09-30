@@ -39,6 +39,7 @@ import {
   pauseRun,
   releaseWorktree,
   herdrChildGone,
+  releaseRunPane,
   resumeRun,
   runDir,
   runsRoot,
@@ -370,7 +371,9 @@ function runStop(
       n++;
     }
   }
-  ctx.ui.notify(`stopped ${n} sub-agent(s)`, "info");
+  ctx.ui.notify(targets.some(run => run.runtime === "herdr")
+    ? `stop requested for ${n} sub-agent(s); herdr child exit requires proof, panes/worktrees retained until explicit cleanup.`
+    : `stopped ${n} sub-agent(s)`, "info");
 }
 
 function runPause(
@@ -1389,7 +1392,9 @@ export async function runWorktreeCmd(
         return;
       }
 
-      if (!await herdrChildGone(run)) {
+      const binding = run.herdr, status = run.status;
+      if (!await herdrChildGone(run) || !await releaseRunPane(run) || run.herdr !== binding || run.status !== status) {
+        run.worktreeKept ??= "worktree kept: pane release or current invocation unconfirmed";
         ctx.ui.notify(run.worktreeKept!, "warning");
         return;
       }

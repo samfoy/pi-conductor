@@ -23,8 +23,9 @@
  * Spec: oracle-3l2e (v0.8.2 backlog P0 #1 — parent-reload contract).
  */
 
-import { subprocessRuntime } from "./subprocess-runtime.ts";
+import { runtimeFor } from "./runtime.ts";
 import type { Run } from "./types.ts";
+import { writeRecord } from "./runs.ts";
 
 /**
  * Subset of the upstream `SessionShutdownEvent` we actually consume.
@@ -54,6 +55,7 @@ export interface ShutdownDeps {
    * symmetry with the "leave reload alone" invariant.
    */
   resetSanitizer: () => void;
+  terminateHerdr?: (run: Run) => void;
   /**
    * Reconcile the on-disk `record.json` of each running/paused run
    * after SIGTERM. Closes the orphan-creation window flagged by
@@ -109,16 +111,36 @@ export async function handleSessionShutdown(
     if (r.status === "running" || r.status === "paused") {
       stillActive.push(r);
       try {
-        subprocessRuntime.stopProcess(r);
+        if (r.runtime === "herdr") deps.terminateHerdr?.(r);
+        else runtimeFor(r).stopProcess(r);
       } catch {
         // already dead — non-fatal
       }
     }
   }
+  // The pane budget starts only after verifier suspension and terminal I/O are quiescent.
+  const panes = deps.runs.filter(run => run.runtime === "herdr");
+  if (panes.length) {
+    const abort = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<void>(resolve => { timer = setTimeout(() => { abort.abort(); resolve(); }, 5000); });
+    const cleanup = Promise.allSettled(panes.map(async run => {
+      const transport = run.transport;
+      if (transport?.kind === "herdr" && transport.shutdown) await transport.shutdown(abort.signal);
+    }));
+    try { await Promise.race([cleanup, expired]); } finally { clearTimeout(timer); }
+    for (const run of panes) {
+      if (run.transport?.kind !== "herdr" || !run.transport.childExited) run.herdrExitUnconfirmed = true;
+      if (abort.signal.aborted) run.worktreeKept = "pane shutdown budget expired; pane/worktree and ownership evidence preserved";
+      else if (run.transport?.stderr) run.worktreeKept = run.transport.stderr;
+      else if (run.transport?.kind !== "herdr") run.worktreeKept = "pane shutdown unavailable: unattached herdr run; ownership evidence preserved";
+    }
+    await Promise.all(panes.map(run => writeRecord(run)));
+  }
   let reconciliation: void | Promise<void> = undefined;
   if (stillActive.length > 0 && deps.reconcileRunning) {
     try {
-      reconciliation = deps.reconcileRunning(stillActive, event.reason);
+      reconciliation = deps.reconcileRunning(stillActive.filter(run => run.status !== "integrating" && run.status !== "completed"), event.reason);
     } catch {
       // best-effort — orphan sweep on next session_start picks up
       // anything we missed

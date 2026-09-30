@@ -67,6 +67,9 @@ export interface HerdrTransport extends TransportLifecycle {
   readonly cancelled: boolean;
   readonly runtime?: RunRuntime;
   readonly initialAccepted?: boolean;
+  readonly observable?: boolean;
+  readonly paneReleased?: boolean;
+  readStallEvidence?(): Promise<string>;
   liveSend?(): boolean;
   deliver?(type: "steer" | "follow_up" | "grace", text: string, sessionId?: string): Delivery;
   readonly ready: Promise<{ binding: HerdrBinding; request: InboxRequest; launchOffset: number }>;
@@ -74,7 +77,8 @@ export interface HerdrTransport extends TransportLifecycle {
   observe(): void;
   readonly childExited: boolean;
   waitForExit(): Promise<boolean>;
-  releasePane(): Promise<boolean>;
+  releasePane(signal?: AbortSignal): Promise<boolean>;
+  shutdown?(signal: AbortSignal): Promise<void>;
 }
 export type RunTransport = SubprocessTransport | HerdrTransport;
 
@@ -100,7 +104,9 @@ export interface RunRuntime {
 
 /** Readopted records have no event source owned by this module instance. */
 export function isObservableHere(run: Run): boolean {
-  return run.proc !== undefined;
+  return run.runtime === "herdr"
+    ? run.transport?.kind === "herdr" && run.transport.observable === true
+    : run.proc !== undefined;
 }
 
 /** Recorded backend selects effects. Only a fresh spawn supplies launch routing. */

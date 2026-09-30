@@ -380,7 +380,14 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
       ? `  ${p.name}: ${selected.kind} [${selected.source}]`
       : `  ${p.name}: ${selected.reason}`);
   }
-  for (const r of opts.registry.list()) lines.push(`  ${r.id}: saved=${r.runtime === undefined ? "subprocess (legacy)" : r.runtime}`);
+  for (const r of opts.registry.list()) {
+    lines.push(`  ${r.id}: saved=${r.runtime === undefined ? "subprocess (legacy)" : r.runtime}`);
+    if (r.runtime === "herdr") {
+      lines.push(`    pane=${r.herdr?.paneId ?? "unknown"} nonce=${r.herdr?.launchNonce ?? "unknown"} cleanup=${r.transport?.kind === "herdr" && r.transport.paneReleased ? "released" : "retained/unconfirmed"}`);
+      if (r.worktreeKept || r.herdrExitUnconfirmed) lines.push(`    ${r.worktreeKept ?? "child exit unconfirmed; resources preserved"}`);
+      if (r.transport?.stderr && r.transport.stderr !== r.worktreeKept) lines.push(`    ${r.transport.stderr}`);
+    }
+  }
   lines.push(`  active:        ${opts.registry.countActive()}`);
   lines.push(`  queued:        ${opts.queue.size()}`);
   lines.push(`  total tracked: ${opts.registry.list().length}`);

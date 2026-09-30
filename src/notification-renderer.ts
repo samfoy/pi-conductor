@@ -120,7 +120,7 @@ function headerLine(d: EnsembleNotificationDetails): CardLine {
   const slot: ThemeColor = stalled
     ? d.severity === "hard" ? "warning" : "muted"
     : statusColorSlot(d.status);
-  const verb = stalled ? `${d.severity}-stalled` : statusVerb(d.status);
+  const verb = d.kind === "dialog" ? "waiting for human UI" : stalled ? `${d.severity}-stalled` : statusVerb(d.status);
 
   const line: CardLine = [
     { text: glyph, slot },

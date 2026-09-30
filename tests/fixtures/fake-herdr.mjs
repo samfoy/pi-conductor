@@ -34,6 +34,11 @@ else if (args[0] === "tab" && args[1] === "create") {
   state.tab = {tab_id: state.pane.tab_id, workspace_id: state.pane.workspace_id, label: flag("--label"), number: 1, focused: false, pane_count: 1, agent_status: "unknown"};
   save(); output({type: "tab_created", root_pane: state.pane, tab: state.tab});
 } else if (args[0] === "pane" && args[1] === "get") {
+  if (state.rewriteRecord) {
+    if (!state.rewriteRecord.path.startsWith(`${process.env.HOME}/`)) process.exit(95);
+    writeFileSync(state.rewriteRecord.path, JSON.stringify(state.rewriteRecord.value));
+    delete state.rewriteRecord; save();
+  }
   if (state.childPid && state.pane.agent) {
     try { process.kill(state.childPid, 0); } catch (e) {
       if (e.code === "ESRCH") { state.pane.agent = null; state.pane.agent_session = null; save(); }

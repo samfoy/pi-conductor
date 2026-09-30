@@ -32,6 +32,7 @@ import {
   buildCompletionMessage,
   buildCompletionSendMessageOptions,
   buildStallMessage,
+  buildDialogMessage,
   type StallNoticeArgs,
 } from "./notifications.ts";
 import { registerNotificationRenderer } from "./notification-renderer.ts";
@@ -579,6 +580,10 @@ export default function (pi: ExtensionAPI): void {
             console.error(`watchdog: ${msg}`);
           },
         },
+        dialog: run => {
+          try { pi.sendMessage(buildDialogMessage(run), { triggerTurn: false, deliverAs: "followUp" }); }
+          catch { console.error(`herdr: ${run.id} waiting for human UI`); }
+        },
         now: () => Date.now(),
         // The run's own onComplete posts its card: the close handler skips
         // onComplete once forceTerminate has settled the run.
@@ -673,6 +678,7 @@ export default function (pi: ExtensionAPI): void {
     await handleSessionShutdown(event, {
       runs: registry.list(),
       resetSanitizer: () => sanitizerHook.reset(),
+      terminateHerdr: run => forceTerminate(run, "killed", registry),
       // A1: close the orphan-creation window. SIGTERM races the runtime
       // teardown; without this the on-disk record stays "running" until
       // the next session_start runs the GC orphan sweep.

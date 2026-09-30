@@ -136,8 +136,9 @@ export async function runGc(opts: RunGcOptions): Promise<RunGcResult> {
   const reclaimResult = await executeReclaim(
     plan.actions,
     opts.runsRoot,
-    activeIdSet(opts.registry),
+    () => activeIdSet(opts.registry),
     now,
+    { currentRun: id => opts.registry.get(id) },
   );
 
   // R10: track ids that were just freed so the next allocator can warn.

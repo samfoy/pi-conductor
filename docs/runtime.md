@@ -7,6 +7,16 @@ runtime or improve its UX. Not a user-facing introduction. For that, see
 HEAD at the time of writing: `876f421`. Current shipped version: v0.10
 (see `AGENTS.md:36`).
 
+## Current H9 ownership and cleanup addendum
+
+The remainder of this document is a historical v0.10 map, not current line-number or lifecycle authority. Current runtime selection and controls are described in README.
+
+- `HerdrRuntime` retains one invocation binding, hello, tail and monitor. Positive child PID/start proof is distinct from an empty-pane proof and from M5 verifier-group quiescence. A replaced binding cannot authorize either TERM or the two-second KILL chase; no shell/CLI PID or negative child PID is a target. The extracted `terminateHook` retains existing hook-group semantics for both backends.
+- Kill does not delete scrollback. Quit retains the full M5 suspension and terminal-I/O barriers, then gives pane shutdown five seconds with cancellation checked before later effects. This is not a timeout on verifier safety. Failure retains resource ownership evidence/diagnostics; integrating remains integrating. Reload is still preservation, not adoption or quit.
+- `closeEmptyPane` re-reads exact socket/pane/terminal/tab/workspace and invocation evidence immediately before pane-only close. No tab-close fallback exists: siblings are never a target. `releaseRunPane` is shared by worktree commands and release; GC uses the same close primitive with fresh durable-record and live-registry guards. Child-gone ordinary file cleanup can proceed without a server, but uncertain pane release cannot reclaim a bound worktree or its ownership record. M9 effort destruction is not implemented.
+- `applyEvent` tracks matching UI prompt start/end occurrences for the current nonce. Continuous overlapping waits yield one nonwaking dialog card and suppress both watchdog evaluator and renderer. Settlement/new invocation clears prompt state. No prompt is auto-answered. First stall evidence optionally appends one redacted 2s/40-line/4-KiB CLI read; pending reads cannot dispatch a stale notice after a dialog, new invocation or settlement, and reminders do not poll.
+- Evidence uses executable fake herdr plus private owned processes and the approved offline native 0.87.1 harness. Actual herdr/TUI, human visual acceptance, global 0.99.1 parity, H10 readoption and live rollout remain unverified/deferred. CLI metadata proof and a subsequent close are separate server operations, not an atomic server-side compare-and-close transaction.
+
 ## 1. Overview
 
 The runtime is the delivery vehicle for the persona library and the

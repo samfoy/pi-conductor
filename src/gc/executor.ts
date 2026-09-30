@@ -38,8 +38,11 @@
 
 import { readFile, rm, stat, unlink, utimes, writeFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { readFileSync } from "node:fs";
+import { herdrChildAbsent, releaseRecordedPane } from "../herdr/runtime.ts";
+import { sameHerdrBinding } from "../herdr/identity.ts";
 
-import { isTerminal, type RunRecord } from "../types.ts";
+import { isTerminal, type Run, type RunRecord } from "../types.ts";
 import type { ReclaimAction } from "./policy.ts";
 import { worktreeSpecFromRun, removeWorktree, deleteBranch, holdsKeptWorktree } from "../worktree.ts";
 
@@ -65,8 +68,9 @@ export interface ReclaimResult {
 export async function executeReclaim(
   actions: readonly ReclaimAction[],
   runsRoot: string,
-  registryActive: ReadonlySet<string>,
+  registryActive: ReadonlySet<string> | (() => ReadonlySet<string>),
   now: number,
+  options: { currentRun?: (id: string) => Run | undefined; env?: NodeJS.ProcessEnv } = {},
 ): Promise<ReclaimResult> {
   const archived: ReclaimResult["archived"] = [];
   const deleted: ReclaimResult["deleted"] = [];
@@ -80,7 +84,8 @@ export async function executeReclaim(
     const actionKind = action.kind;
 
     // Gate 1 — active in registry?
-    if (registryActive.has(agentId)) {
+    const active = () => (typeof registryActive === "function" ? registryActive() : registryActive).has(agentId);
+    if (active()) {
       failed.push({
         agentId,
         action: actionKind,
@@ -137,9 +142,37 @@ export async function executeReclaim(
       continue;
     }
 
+    const assertCurrent = () => {
+      if (active()) throw new Error("active during reclaim");
+      const latest = JSON.parse(readFileSync(recordPath, "utf8")) as RunRecord;
+      if (!isTerminal(latest.status) || latest.effort) throw new Error("status/effort changed during reclaim");
+      if (record.runtime === "herdr" || latest.runtime === "herdr") {
+        const live = options.currentRun?.(agentId);
+        if (record.runtime !== "herdr" || latest.runtime !== "herdr" || latest.id !== agentId ||
+            latest.status !== record.status || (action.herdrStatus !== undefined && latest.status !== action.herdrStatus) || !sameHerdrBinding(action.herdr, latest.herdr) ||
+            !sameHerdrBinding(record.herdr, latest.herdr) || !herdrChildAbsent({ ...latest, recordPath }) ||
+            latest.worktreePath !== record.worktreePath || latest.worktreeBranch !== record.worktreeBranch ||
+            (live && (live.status !== latest.status || live.effort || !sameHerdrBinding(latest.herdr, live.herdr))))
+          throw new Error("herdr current invocation/child unconfirmed; evidence preserved");
+      }
+    };
+    try {
+      assertCurrent();
+      if (record.runtime === "herdr") {
+        const released = await releaseRecordedPane({ ...record, recordPath }, () => {
+          try { assertCurrent(); return record.herdr; } catch { return undefined; }
+        }, options.env);
+        assertCurrent();
+        if (actionKind === "delete" && record.worktreePath && !released) throw new Error("pane release unconfirmed; worktree and ownership evidence preserved");
+      }
+    } catch (e) {
+      failed.push({ agentId, action: actionKind, error: (e as Error).message });
+      continue;
+    }
+
     if (actionKind === "cold-archive") {
       try {
-        const bytes = await coldArchive(runDir, now);
+        const bytes = await coldArchive(runDir, now, assertCurrent);
         archived.push({ agentId, bytesReclaimed: bytes });
       } catch (e: unknown) {
         failed.push({
@@ -150,7 +183,7 @@ export async function executeReclaim(
       }
     } else {
       try {
-        const bytes = await fullDelete(runDir, record);
+        const bytes = await fullDelete(runDir, record, assertCurrent);
         deleted.push({ agentId, bytesReclaimed: bytes });
       } catch (e: unknown) {
         failed.push({
@@ -170,7 +203,7 @@ export async function executeReclaim(
  * Preserves `record.json`, `final.md`, `session/`, `.pinned`.
  * Returns bytes reclaimed (0 if transcript was already absent).
  */
-async function coldArchive(runDir: string, now: number): Promise<number> {
+async function coldArchive(runDir: string, now: number, assertCurrent: () => void): Promise<number> {
   const transcriptPath = join(runDir, "transcript.jsonl");
   let bytes = 0;
   try {
@@ -182,6 +215,7 @@ async function coldArchive(runDir: string, now: number): Promise<number> {
 
   if (bytes > 0) {
     try {
+      assertCurrent();
       await unlink(transcriptPath);
     } catch (e: unknown) {
       const err = e as NodeJS.ErrnoException;
@@ -194,9 +228,11 @@ async function coldArchive(runDir: string, now: number): Promise<number> {
   // Sidecar: write empty file then utimes to `now`. `writeFile` truncates
   // any existing sidecar to size 0, which is what we want (advisory marker).
   const sidecarPath = join(runDir, ".archived");
+  assertCurrent();
   await writeFile(sidecarPath, "");
   // utimes wants seconds, not ms.
   const nowSec = now / 1000;
+  assertCurrent();
   await utimes(sidecarPath, nowSec, nowSec);
 
   return bytes;
@@ -206,7 +242,7 @@ async function coldArchive(runDir: string, now: number): Promise<number> {
  * Walk runDir summing all file sizes BEFORE the recursive remove.
  * Returns bytes reclaimed; 0 if the dir is missing.
  */
-async function fullDelete(runDir: string, record?: RunRecord): Promise<number> {
+async function fullDelete(runDir: string, record: RunRecord, assertCurrent: () => void): Promise<number> {
   // v0.13 worktree-per-persona: clean up any orphaned worktree before
   // removing the run directory. `finalize` already removes the worktree
   // on healthy runs; this path handles crash/force-kill survivors, and a
@@ -214,7 +250,11 @@ async function fullDelete(runDir: string, record?: RunRecord): Promise<number> {
   // Best-effort: a failure does not block the delete.
   if (record && holdsKeptWorktree(record)) {
     const spec = worktreeSpecFromRun(record);
-    if (spec) removeWorktree(spec);
+    assertCurrent();
+    if (spec) {
+      const removed = removeWorktree(spec);
+      if (!removed && record.runtime === "herdr") throw new Error("worktree removal unconfirmed; ownership evidence preserved");
+    }
     else if (record.worktreeBranch) deleteBranch(record.cwd, record.worktreeBranch);
   }
 
@@ -227,6 +267,7 @@ async function fullDelete(runDir: string, record?: RunRecord): Promise<number> {
     throw e;
   }
 
+  assertCurrent();
   await rm(runDir, { recursive: true, force: true });
   return bytes;
 }

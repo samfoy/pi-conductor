@@ -49,11 +49,12 @@ export async function createRunTab(cli: HerdrCli, opts: {
 }
 
 export async function closeEmptyPane(cli: HerdrCli, binding: HerdrBinding,
-  current: () => HerdrInvocation, limits?: CliLimits) {
+  current: () => HerdrInvocation | undefined, limits?: CliLimits) {
   try {
     const observed = await cli.json(["pane", "get", binding.paneId], limits);
     const proof = provePaneOurs({binding, current: current(), socketPath: cli.socketPath, pane: observed.pane, requireNoAgent: true});
     if (!proof.ok) return proof;
+    if (limits?.signal?.aborted) return { ok: false as const, state: "unknown" as const, reason: "pane cleanup cancelled" };
     // Close only this pane, never its tab: siblings may have been added since creation.
     await cli.json(["pane", "close", binding.paneId], limits);
     return {ok: true as const};

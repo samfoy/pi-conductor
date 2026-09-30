@@ -16,11 +16,11 @@ import { isTerminal, type GcConfig } from "../types.ts";
 import type { InventoryEntry } from "./inventory.ts";
 
 /** One action per inventory entry. */
-export type ReclaimAction =
+export type ReclaimAction = { herdr?: InventoryEntry["herdr"]; herdrStatus?: InventoryEntry["status"] } & (
   | { kind: "keep"; id: string; reason: string }
   | { kind: "cold-archive"; id: string; reason: string; bytesReclaimed: number }
   | { kind: "delete"; id: string; reason: string; bytesReclaimed: number; losesResume: boolean }
-  | { kind: "reconcile-orphan"; id: string; reason: string };
+  | { kind: "reconcile-orphan"; id: string; reason: string });
 
 export interface ReclaimPlan {
   actions: ReclaimAction[];
@@ -102,7 +102,7 @@ export function planReclaim(
 
   for (const entry of inventory) {
     const action = decideForEntry(entry, config, now, orphanThresholdMs);
-    actions.push(action);
+    actions.push(entry.herdr ? { ...action, herdr: { ...entry.herdr }, herdrStatus: entry.status } : action);
 
     if (action.kind === "keep" && action.reason === "within thresholds") {
       eligibleForBudget.push(entry);
@@ -133,6 +133,7 @@ export function planReclaim(
         kind: "cold-archive",
         id: entry.id,
         reason: "size-budget eviction (largest-first)",
+        ...(entry.herdr ? { herdr: { ...entry.herdr }, herdrStatus: entry.status } : {}),
         bytesReclaimed: reclaim,
       };
       projectedBytes -= reclaim;
@@ -167,7 +168,11 @@ function decideForEntry(
   now: number,
   orphanThresholdMs: number,
 ): ReclaimAction {
-  if (unsupportedRuntimeReason(entry.runtime) || unsupportedRuntimeReason(entry.inMemory?.runtime)) return { kind: "keep", id: entry.id, reason: "unsupported runtime; evidence preserved" };
+  if (entry.runtime === "herdr") {
+    if (!entry.herdrChildAbsent)
+      return { kind: "keep", id: entry.id, reason: "herdr child live or unknown; evidence preserved" };
+    if (!isTerminal(entry.status)) return { kind: "keep", id: entry.id, reason: "herdr status unresolved" };
+  } else if (unsupportedRuntimeReason(entry.runtime) || unsupportedRuntimeReason(entry.inMemory?.runtime)) return { kind: "keep", id: entry.id, reason: "unsupported runtime; evidence preserved" };
   if (entry.effort || entry.inMemory?.effort) return { kind: "keep", id: entry.id, reason: "unresolved effort ownership" };
   // Rule 1: active-in-memory gate (load-bearing per slice 1 acceptance).
   if (entry.inMemory) {

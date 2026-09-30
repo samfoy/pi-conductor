@@ -46,7 +46,7 @@ export interface NotificationNote {
  * never drift from the numbers in the envelope.
  */
 export interface EnsembleNotificationDetails {
-  kind: "completed" | "stalled" | "asked" | "answer_failed";
+  kind: "completed" | "stalled" | "asked" | "answer_failed" | "dialog";
   /** Absent only on historical persisted cards. */
   available_actions?: RunAction[];
   id: string;
@@ -476,6 +476,14 @@ export function buildCompletionMessage(run: Run, canFocus = false, sessionId?: s
       notes,
     },
   };
+}
+
+export function buildDialogMessage(run: Run): NotificationMessage {
+  const body = "Waiting for a human UI response in the managed herdr pane. This is not a stall. Inspect the pane; conductor does not auto-answer dialogs.";
+  return { customType: "ensemble-notification", display: true,
+    content: `<sub-agent-dialog><agent-id>${escapeXml(run.id)}</agent-id>${body}</sub-agent-dialog>`,
+    details: { kind: "dialog", id: run.id, persona: run.persona, status: run.status, stats: [run.id],
+      body, transcriptPath: run.transcriptPath, notes: [] } };
 }
 
 /** {@link buildCompletionMessage} for a watchdog stall advisory. */

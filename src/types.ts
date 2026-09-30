@@ -886,6 +886,8 @@ export interface Run {
   herdrExitUnconfirmed?: boolean;
   /** No usable output belongs to the current herdr invocation; any final is historical. */
   herdrResultUnavailable?: boolean;
+  /** Session-local blocking UI waits; matching ends pop one occurrence, never another prompt. */
+  herdrPrompts?: { nonce: string; active: string[]; notified?: boolean };
   /**
    * Absolute path to the pi session JSONL for this sub-agent. Populated when
    * the spawn finalizes (pi creates the file under <runDir>/session/). Used

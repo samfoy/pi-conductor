@@ -53,6 +53,6 @@ export function herdrFixture(mode = "healthy") {
   const runtime = new HerdrRuntime({ cli, workspaceId: "workspace", env: {}, trustArgs: () => [], piVersion: "0.87.1", platform: "linux", now: () => time,
     sleep: async ms => { time += ms; onSleep(); }, probe: pid => ({ pid, state: unknown ? "unknown" : gone ? "gone" : "alive", startTime: 77 }),
     signal: (_pid, signal) => { signals.push(signal); if (mode !== "stubborn") exit(); } });
-  return { run, registry, runtime, pane, calls, signals, emit, exit, setMode: (value: string) => { mode = value; }, advance: (ms: number) => { time += ms; }, gone: () => gone, unknown: () => { unknown = true; }, onSleep: (fn: () => void) => { onSleep = fn; },
+  return { run, registry, runtime, cli, pane, calls, signals, emit, exit, setMode: (value: string) => { mode = value; }, advance: (ms: number) => { time += ms; }, gone: () => gone, unknown: () => { unknown = true; }, onSleep: (fn: () => void) => { onSleep = fn; },
     opts: { registry, runtime, cwd, steerable: false, timeoutMs: 4000, initialPrompt: "probe", core: { kind: "fresh" as const, sessionDir: join(dir, "session"), systemPrompt: "probe" } } };
 }

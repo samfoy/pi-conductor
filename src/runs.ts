@@ -1,4 +1,5 @@
 import { runtimeFor } from "./runtime.ts";
+import { herdrChildAbsent, releaseRecordedPane } from "./herdr/runtime.ts";
 import { formatOwnerAnswer } from "./ask-owner.ts";
 /**
  * pi-conductor — Run registry and subprocess spawning.
@@ -2491,10 +2492,10 @@ export async function applyMergeToTerminal(
   return "merge_conflict";
 }
 
-/** Saved records alone never prove a herdr child exited; recovery stays fail-closed. */
+/** Detached cleanup requires the exact durable hello and a fresh positive-PID absence probe. */
 export async function herdrChildGone(run: Run): Promise<boolean> {
   if (run.runtime !== "herdr") return true;
-  if (run.transport?.kind === "herdr" && run.transport.childExited) return true;
+  if (run.transport?.kind === "herdr" ? run.transport.childExited : herdrChildAbsent(run)) return true;
   run.worktreeKept = "worktree kept: herdr child exit unconfirmed";
   return false;
 }
@@ -2555,13 +2556,15 @@ function keptWorktreeHint(worktreePath: string, branch: string): string {
   );
 }
 
-/**
- * Remove a settled run's worktree directory and, unless `keepBranch`, its
- * branch, clearing the fields that no longer point anywhere. Shared by
- * finalize and `/conductor worktree merge`. A directory with uncommitted
- * changes is never force-removed: both stay, with a hint in `run.worktreeKept`.
- * Best-effort: on failure the fields stay set so GC can find the orphan.
- */
+/** Explicit cleanup uses the same proof for attached and durable-only resources. */
+export async function releaseRunPane(run: Run): Promise<boolean> {
+  if (run.runtime !== "herdr") return true;
+  const binding = run.herdr, status = run.status;
+  return run.transport?.kind === "herdr" ? run.transport.releasePane()
+    : releaseRecordedPane(run, () => run.herdr === binding && run.status === status ? run.herdr : undefined);
+}
+
+/** Remove only clean, released worktrees; preserve failed-removal fields for recovery. */
 export async function releaseWorktree(run: Run, opts: { keepBranch: boolean }): Promise<void> {
   if (run.effort) return;
   if (!run.worktreePath || !run.worktreeBranch) return;
@@ -2577,7 +2580,9 @@ export async function releaseWorktree(run: Run, opts: { keepBranch: boolean }): 
       `or discard them, then git worktree remove ${wtSpec.worktreePath}`;
     return;
   }
-  if (run.runtime === "herdr" && !(run.transport?.kind === "herdr" && await run.transport.releasePane())) {
+  const binding = run.herdr, status = run.status;
+  if (run.runtime === "herdr" && (!await releaseRunPane(run) || run.herdr !== binding || run.status !== status ||
+      run.worktreePath !== wtSpec.worktreePath || run.worktreeBranch !== wtSpec.branch)) {
     run.worktreeKept = `worktree kept: pane ${run.herdr?.paneId ?? "unknown"} not proven ours and empty`;
     return;
   }

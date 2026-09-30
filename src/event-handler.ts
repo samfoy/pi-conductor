@@ -49,6 +49,24 @@ export function applyEvent(run: Run, event: unknown): EventEffect {
   const e = event as Record<string, any>;
   if (typeof e.type !== "string") return NONE;
 
+  if (e.type === "conductor_child" && e.event === "ui_prompt") {
+    if (run.runtime !== "herdr" || !run.herdr || e._c?.n !== run.herdr.launchNonce || typeof e.kind !== "string") return NONE;
+    const nonce = run.herdr.launchNonce;
+    const key = JSON.stringify([e.kind, typeof e.title === "string" ? e.title : null]);
+    const prompts = run.herdrPrompts?.nonce === nonce ? run.herdrPrompts : undefined;
+    if (e.state === "start") {
+      run.herdrPrompts = { nonce, active: [...(prompts?.active ?? []), key], notified: prompts?.notified };
+      run.stalledSince = undefined;
+      return UPDATED;
+    }
+    const index = prompts?.active.lastIndexOf(key) ?? -1;
+    if (e.state !== "end" || !prompts || index < 0) return NONE;
+    const active = prompts.active.filter((_, i) => i !== index);
+    run.herdrPrompts = active.length ? { ...prompts, active } : undefined;
+    if (!active.length) run.lastEventAt = Date.now();
+    return UPDATED;
+  }
+
   // ── v0.12 slice 5 — RPC `lastEventAt` bump policy (oracle fix #2) ──
   //
   // Print-mode short-circuit: only RPC runs route through bumpOnRpcLine.
@@ -113,6 +131,7 @@ export function applyEvent(run: Run, event: unknown): EventEffect {
 
   // turn_end and agent_end precede overflow recovery and queued work.
   if (e.type === "agent_settled") {
+    run.herdrPrompts = undefined;
     const failed = run.stopReason === "error" || run.stopReason === "aborted";
     return { kind: "finalize", status: failed ? "failed" : "completed", exitCode: failed ? 1 : 0 };
   }

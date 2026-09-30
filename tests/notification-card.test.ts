@@ -332,7 +332,7 @@ test("W15: every pi.sendMessage in index.ts routes through a message builder", (
   const firstArgs = [...src.matchAll(/pi\.sendMessage\(\s*([A-Za-z]+)/g)].map((m) => m[1]);
   assert.ok(firstArgs.length >= 3, `expected the 3 known send sites, found ${firstArgs.length}`);
   for (const fn of firstArgs) {
-    assert.match(fn, /^build(Completion|Stall)Message$/);
+    assert.match(fn, /^build(Completion|Stall|Dialog)Message$/);
   }
 });
 

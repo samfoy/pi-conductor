@@ -194,22 +194,25 @@ var SubprocessRuntime = class {
         }
       }, 2e3).unref();
     }
-    if (run.hookProc?.pid !== void 0) {
-      const hookPid = run.hookProc.pid;
-      try {
-        killGroup(hookPid, "SIGTERM");
-      } catch {
-      }
-      setTimeout(() => {
-        try {
-          killGroup(hookPid, "SIGKILL");
-        } catch {
-        }
-      }, 2e3).unref();
-      run.hookProc = void 0;
-    }
+    terminateHook(run, killGroup);
   }
 };
+function terminateHook(run, killGroup) {
+  if (run.hookProc?.pid !== void 0) {
+    const hookPid = run.hookProc.pid;
+    try {
+      killGroup(hookPid, "SIGTERM");
+    } catch {
+    }
+    setTimeout(() => {
+      try {
+        killGroup(hookPid, "SIGKILL");
+      } catch {
+      }
+    }, 2e3).unref();
+    run.hookProc = void 0;
+  }
+}
 var subprocessRuntime = new SubprocessRuntime();
 function capabilitiesFor(run) {
   return run.runtime !== "herdr" && unsupportedRuntimeReason(run.runtime) ? { pause: false, liveSend: false } : runtimeFor(run).capabilities(run);
@@ -309,7 +312,7 @@ function enqueueRpcSendWithAck(run, type, message) {
 // src/herdr/runtime.ts
 import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
 import { closeSync as closeSync5, constants as constants4, fstatSync as fstatSync4, openSync as openSync5, readSync as readSync4, statSync as statSync4, writeFileSync as writeFileSync5, mkdirSync as mkdirSync10 } from "node:fs";
-import { dirname as dirname13, join as join15 } from "node:path";
+import { dirname as dirname13, isAbsolute as isAbsolute5, join as join15 } from "node:path";
 import { setTimeout as delay2 } from "node:timers/promises";
 import { getAgentDir, hasTrustRequiringProjectResources, ProjectTrustStore, SessionManager, SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
 
@@ -2710,6 +2713,23 @@ function applyEvent(run, event) {
   if (!event || typeof event !== "object") return NONE;
   const e = event;
   if (typeof e.type !== "string") return NONE;
+  if (e.type === "conductor_child" && e.event === "ui_prompt") {
+    if (run.runtime !== "herdr" || !run.herdr || e._c?.n !== run.herdr.launchNonce || typeof e.kind !== "string") return NONE;
+    const nonce = run.herdr.launchNonce;
+    const key = JSON.stringify([e.kind, typeof e.title === "string" ? e.title : null]);
+    const prompts = run.herdrPrompts?.nonce === nonce ? run.herdrPrompts : void 0;
+    if (e.state === "start") {
+      run.herdrPrompts = { nonce, active: [...prompts?.active ?? [], key], notified: prompts?.notified };
+      run.stalledSince = void 0;
+      return UPDATED;
+    }
+    const index = prompts?.active.lastIndexOf(key) ?? -1;
+    if (e.state !== "end" || !prompts || index < 0) return NONE;
+    const active = prompts.active.filter((_, i) => i !== index);
+    run.herdrPrompts = active.length ? { ...prompts, active } : void 0;
+    if (!active.length) run.lastEventAt = Date.now();
+    return UPDATED;
+  }
   if (run.streamingMode === "rpc" && bumpOnRpcLine(run, Date.now(), e.type)) {
     run.lastEventAt = Date.now();
   }
@@ -2744,6 +2764,7 @@ function applyEvent(run, event) {
     return NONE;
   }
   if (e.type === "agent_settled") {
+    run.herdrPrompts = void 0;
     const failed = run.stopReason === "error" || run.stopReason === "aborted";
     return { kind: "finalize", status: failed ? "failed" : "completed", exitCode: failed ? 1 : 0 };
   }
@@ -5847,7 +5868,7 @@ async function applyMergeToTerminal(run, gitRoot2, terminal) {
 }
 async function herdrChildGone(run) {
   if (run.runtime !== "herdr") return true;
-  if (run.transport?.kind === "herdr" && run.transport.childExited) return true;
+  if (run.transport?.kind === "herdr" ? run.transport.childExited : herdrChildAbsent(run)) return true;
   run.worktreeKept = "worktree kept: herdr child exit unconfirmed";
   return false;
 }
@@ -5881,6 +5902,11 @@ function keptWorktreeHint(worktreePath, branch) {
   const gitRoot2 = dirname12(dirname12(dirname12(worktreePath)));
   return `worktree kept with any partial work: ${worktreePath} (branch ${branch}); keep it with cd ${gitRoot2} && git merge ${branch}, or discard it (with every other kept worktree) via /conductor worktree clean`;
 }
+async function releaseRunPane(run) {
+  if (run.runtime !== "herdr") return true;
+  const binding = run.herdr, status = run.status;
+  return run.transport?.kind === "herdr" ? run.transport.releasePane() : releaseRecordedPane(run, () => run.herdr === binding && run.status === status ? run.herdr : void 0);
+}
 async function releaseWorktree(run, opts) {
   if (run.effort) return;
   if (!run.worktreePath || !run.worktreeBranch) return;
@@ -5894,7 +5920,8 @@ async function releaseWorktree(run, opts) {
     run.worktreeKept = `worktree kept: uncommitted changes in ${wtSpec.worktreePath}; commit them to ${wtSpec.branch} or discard them, then git worktree remove ${wtSpec.worktreePath}`;
     return;
   }
-  if (run.runtime === "herdr" && !(run.transport?.kind === "herdr" && await run.transport.releasePane())) {
+  const binding = run.herdr, status = run.status;
+  if (run.runtime === "herdr" && (!await releaseRunPane(run) || run.herdr !== binding || run.status !== status || run.worktreePath !== wtSpec.worktreePath || run.worktreeBranch !== wtSpec.branch)) {
     run.worktreeKept = `worktree kept: pane ${run.herdr?.paneId ?? "unknown"} not proven ours and empty`;
     return;
   }
@@ -6227,6 +6254,10 @@ function boundStallText(text3, bytes) {
   const budget = bytes - Buffer.byteLength(escapeStallEvidence(OMITTED));
   return take(false, Math.ceil(budget / 2)) + OMITTED + take(true, Math.floor(budget / 2));
 }
+function redactPaneEvidence(text3, env) {
+  for (const value of Object.values(env)) if (value) text3 = text3.split(value).join("[redacted]");
+  return boundStallText(text3.replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/g, "[redacted private key]").replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@").replace(/(Bearer\s+)[^\s]+/gi, "$1[redacted]").replace(/((?:password|secret|token|api[_-]?key|authorization|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)[\w-]*[\"\']?\s*[:=]\s*)[^\s,}]+/gi, "$1[redacted]").replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, "[redacted]"), 4096);
+}
 function toolSummary(name2, args = {}) {
   const bounded = {};
   let count = 0;
@@ -6311,6 +6342,9 @@ function isHerdrPane(value) {
   return (value.agent === null || text(value.agent)) && (session === null || isRecord(session) && (session.kind === "path" || session.kind === "id") && [session.value, session.agent, session.source].every(text));
 }
 var unknown = (reason) => ({ ok: false, state: "unknown", reason });
+function sameHerdrBinding(a, b) {
+  return !!a && !!b && ["runId", "launchNonce", "sessionId", "sessionFile", "socketPath", "workspaceId", "tabId", "paneId", "terminalId", "childPid", "childStartTime"].every((key) => a[key] === b[key]);
+}
 function provePaneOurs(ev) {
   const { binding: b, current, pane } = ev;
   if (!isRecord(b) || !isRecord(current) || !isHerdrPane(pane)) return unknown("missing pane evidence");
@@ -6404,6 +6438,7 @@ async function closeEmptyPane(cli, binding, current, limits) {
     const observed = await cli.json(["pane", "get", binding.paneId], limits);
     const proof = provePaneOurs({ binding, current: current(), socketPath: cli.socketPath, pane: observed.pane, requireNoAgent: true });
     if (!proof.ok) return proof;
+    if (limits?.signal?.aborted) return { ok: false, state: "unknown", reason: "pane cleanup cancelled" };
     await cli.json(["pane", "close", binding.paneId], limits);
     return { ok: true };
   } catch {
@@ -6557,6 +6592,44 @@ function probeProcess(pid) {
   }
 }
 var failure = (message) => new Error(`herdr: ${message}`);
+function herdrChildAbsent(run) {
+  const b = run.herdr;
+  if (!b || b.runId !== run.id || typeof b.sessionFile !== "string" || typeof b.socketPath !== "string" || !isAbsolute5(b.socketPath) || !/^[A-Za-z0-9_-]+$/.test(b.launchNonce) || dirname13(b.sessionFile) !== join15(dirname13(run.recordPath), "session")) return false;
+  try {
+    const hello = read(join15(dirname13(run.recordPath), "launch", `${b.launchNonce}.json`));
+    const proof = proveChildProcess({
+      binding: b,
+      current: b,
+      socketPath: b.socketPath,
+      hello,
+      pane: {
+        pane_id: b.paneId,
+        terminal_id: b.terminalId,
+        tab_id: b.tabId,
+        workspace_id: b.workspaceId,
+        agent: "pi",
+        agent_session: { kind: "path", value: b.sessionFile, agent: "pi", source: "launch" }
+      },
+      platform: process.platform,
+      bridgeProtocol: 1,
+      process: probeProcess(b.childPid)
+    });
+    return !proof.ok && proof.state === "gone";
+  } catch {
+    return false;
+  }
+}
+async function releaseRecordedPane(run, current, env = process.env, signal) {
+  const binding = run.herdr && { ...run.herdr };
+  if (!binding || !sameHerdrBinding(binding, current()) || !herdrChildAbsent(run) || signal?.aborted) return false;
+  try {
+    const cli = createHerdrCli({ env, socketPath: binding.socketPath });
+    const result = await closeEmptyPane(cli, binding, () => !signal?.aborted && sameHerdrBinding(binding, current()) && herdrChildAbsent(run) ? binding : void 0, { timeoutMs: 2e3, signal });
+    return result.ok;
+  } catch {
+    return false;
+  }
+}
 var HerdrRuntime = class {
   constructor(options) {
     this.options = options;
@@ -6574,7 +6647,8 @@ var HerdrRuntime = class {
   stopProcess(run) {
     return run.transport?.kind === "herdr" ? run.transport.stop() : void 0;
   }
-  terminate(run) {
+  terminate(run, killGroup) {
+    terminateHook(run, killGroup);
     return this.stopProcess(run);
   }
   launch(run, _args, cwd, sink, initialPrompt, core) {
@@ -6586,8 +6660,10 @@ var HerdrRuntime = class {
     const probe = options.probe ?? probeProcess;
     const signal = options.signal ?? process.kill;
     const abort = new AbortController();
+    let cleanupSignal;
     const nonce = randomUUID4(), dir = dirname13(run.recordPath);
     const previous = run.herdr;
+    run.herdrPrompts = void 0;
     const alias = /^[a-z][a-z0-9_-]{0,31}$/.test(run.id) ? run.id : `c${createHash4("sha256").update(run.id).digest("hex").slice(0, 16)}`;
     let binding, hello, provenPane;
     let fresh = false, accepted = false, initialAccepted = false, startAttempted = false, stderr = "", stopWork;
@@ -6601,12 +6677,12 @@ var HerdrRuntime = class {
     const diagnostic = (message) => {
       stderr = boundStallText(`${stderr}${stderr ? "\n" : ""}${message}`, 4096);
     };
-    const current = () => run.herdr;
+    const current = () => run.herdr === binding ? run.herdr : void 0;
     const check = () => {
       if (abort.signal.aborted) throw failure("launch cancelled");
       if (binding && run.herdr !== binding) throw failure("launch binding replaced; preserving resources");
     };
-    const proof = (pane) => proveChildProcess({
+    const proof = (pane) => cleanupSignal?.aborted ? { ok: false, state: "unknown", reason: "current invocation changed or cleanup cancelled" } : proveChildProcess({
       binding: binding && { ...binding, childPid: binding.childPid ?? hello?.pid, childStartTime: binding.childStartTime ?? hello?.pidStartTime },
       current: current(),
       socketPath: cli.socketPath,
@@ -6616,18 +6692,21 @@ var HerdrRuntime = class {
       bridgeProtocol: 1,
       process: hello ? probe(hello.pid) : void 0
     });
-    const getPane = async (signal2) => (await cli.json(["pane", "get", binding.paneId], { timeoutMs: 2e3, signal: signal2 })).pane;
+    const getPane = async (signal2) => (await cli.json(["pane", "get", binding.paneId], { timeoutMs: 2e3, signal: signal2 ?? cleanupSignal })).pane;
     const finishObservation = () => {
       tail?.close();
       monitor?.close();
+      observing = false;
+      if (run.herdr === binding) run.herdrPrompts = void 0;
     };
     const gone = () => {
       tail?.drain();
       childExited = true;
       resolveClosed();
       tail?.drain();
+      const wasObserving = observing;
       finishObservation();
-      if (observing && !nativeSettled) sink.gone?.(`herdr: pi exited before settling (pane ${binding?.paneId})`);
+      if (wasObserving && !nativeSettled) sink.gone?.(`herdr: pi exited before settling (pane ${binding?.paneId})`);
     };
     const readHello = () => {
       try {
@@ -6660,7 +6739,7 @@ var HerdrRuntime = class {
           signal(state.pid, "SIGTERM");
           provenPane = pane;
           const end = now() + 2e3;
-          while (now() < end && proof(provenPane).ok) await sleep(50);
+          while (now() < end && proof(provenPane).ok) await sleep(50, cleanupSignal);
           state = proof(provenPane);
           if (state.ok) {
             pane = await getPane();
@@ -6668,7 +6747,7 @@ var HerdrRuntime = class {
             if (state.ok) {
               signal(state.pid, "SIGKILL");
               const end2 = now() + 2e3;
-              while (now() < end2 && proof(pane).ok) await sleep(50);
+              while (now() < end2 && proof(pane).ok) await sleep(50, cleanupSignal);
               state = proof(pane);
             }
           }
@@ -6679,22 +6758,23 @@ var HerdrRuntime = class {
         }
         gone();
         if (rollback && fresh) {
-          const result = await closeEmptyPane(cli, binding, () => current(), { timeoutMs: 2e3 });
+          const result = await closeEmptyPane(cli, binding, () => current(), { timeoutMs: 2e3, signal: cleanupSignal });
           if (!result.ok) diagnostic(`pane/worktree preserved: ${result.reason}`);
         }
       } catch {
         diagnostic("pane/worktree preserved: child stop unconfirmed");
       }
     })();
-    const capture = async () => {
-      if (!binding) return;
+    const readStallEvidence = async () => {
+      if (!binding || run.herdr !== binding || cleanupSignal?.aborted) return "Live pane diagnostic unavailable.";
       try {
-        let text3 = await cli.text(["agent", "read", alias, "--source", "recent-unwrapped", "--lines", "40"], { timeoutMs: HERDR_LAUNCH_BUDGET.diagnostic, maxBuffer: 4096 });
-        for (const value of Object.values(env)) if (value) text3 = text3.split(value).join("[redacted]");
-        text3 = text3.replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@").replace(/(Bearer\s+)[^\s]+/gi, "$1[redacted]").replace(/((?:password|secret|token|api[_-]?key|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)\s*[:=]\s*)[^\s]+/gi, "$1[redacted]");
-        diagnostic(text3.split("\n").slice(-40).join("\n"));
+        const text3 = await cli.text(
+          ["agent", "read", alias, "--source", "recent-unwrapped", "--lines", "40"],
+          { timeoutMs: HERDR_LAUNCH_BUDGET.diagnostic, maxBuffer: 4096, signal: cleanupSignal }
+        );
+        return redactPaneEvidence(text3.split("\n").slice(-40).join("\n"), env);
       } catch {
-        diagnostic("startup diagnostic unavailable; unknown dialogs are not answered automatically");
+        return "Live pane diagnostic unavailable; unknown dialogs are not answered automatically.";
       }
     };
     const ready = Promise.resolve().then(async () => {
@@ -6878,7 +6958,7 @@ var HerdrRuntime = class {
       if (!startAttempted) childExited = true;
       await stopOwned(true);
       finishObservation();
-      await capture();
+      diagnostic(await readStallEvidence());
       throw failure(stderr);
     });
     const stop = async () => {
@@ -6998,15 +7078,33 @@ var HerdrRuntime = class {
       deliveryTail = ack;
       return { kind: "queued", ack };
     };
-    const releasePane = async () => {
-      if (!childExited || !binding || run.herdr !== binding) return false;
-      const result = await closeEmptyPane(cli, binding, () => current(), { timeoutMs: 2e3 });
+    let paneReleased = false;
+    const releasePane = async (signal2) => {
+      cleanupSignal = signal2;
+      if (!childExited || !binding || run.herdr !== binding || signal2?.aborted) return false;
+      if (paneReleased) return true;
+      const state = proof(provenPane);
+      if (state.ok || state.state !== "gone") {
+        diagnostic("pane/worktree preserved: child exit unconfirmed");
+        return false;
+      }
+      const status = run.status;
+      const result = await closeEmptyPane(cli, binding, () => run.status === status ? current() : void 0, { timeoutMs: 2e3, signal: signal2 });
       if (!result.ok) diagnostic(`worktree kept: ${result.reason}`);
+      paneReleased = result.ok;
       return result.ok;
+    };
+    const shutdown = async (signal2) => {
+      cleanupSignal = signal2;
+      await stop();
+      if (!signal2.aborted) await releasePane(signal2);
+      if (!paneReleased) diagnostic("pane shutdown incomplete; ownership evidence preserved");
     };
     return {
       kind: "herdr",
       runtime: this,
+      shutdown,
+      readStallEvidence,
       liveSend,
       deliver,
       ready,
@@ -7014,6 +7112,12 @@ var HerdrRuntime = class {
       observe,
       waitForExit,
       releasePane,
+      get paneReleased() {
+        return paneReleased && run.herdr === binding;
+      },
+      get observable() {
+        return observing && run.herdr === binding && !childExited && !abort.signal.aborted && (run.parentPid === void 0 || run.parentPid === process.pid);
+      },
       get initialAccepted() {
         return initialAccepted && run.herdr === binding;
       },
@@ -7067,7 +7171,7 @@ function describeDelivery(ack) {
   return ack.definite ? `input rejected: ${ack.reason}` : `delivery unconfirmed: ${ack.reason}; do not resend blindly.`;
 }
 function isObservableHere(run) {
-  return run.proc !== void 0;
+  return run.runtime === "herdr" ? run.transport?.kind === "herdr" && run.transport.observable === true : run.proc !== void 0;
 }
 function runtimeFor(run, env) {
   if (run.runtime === "herdr" && run.transport?.kind === "herdr" && run.transport.runtime) return run.transport.runtime;
@@ -7399,7 +7503,7 @@ import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
 
 // src/commands.ts
-import { existsSync as existsSync14, readdirSync as readdirSync7, readFileSync as readFileSync13, statSync as statSync6 } from "node:fs";
+import { existsSync as existsSync14, readdirSync as readdirSync7, readFileSync as readFileSync14, statSync as statSync6 } from "node:fs";
 import { join as join23, dirname as dirname16 } from "node:path";
 
 // src/status-glyph.ts
@@ -7560,7 +7664,9 @@ async function buildEntry(id, runDir2, registry) {
     malformed: false,
     holdsWorktree: holdsKeptWorktree(record),
     effort: record.effort,
-    runtime: record.runtime
+    runtime: record.runtime,
+    herdr: record.herdr && { ...record.herdr },
+    herdrChildAbsent: record.runtime === "herdr" ? herdrChildAbsent({ ...record, recordPath: join18(runDir2, "record.json") }) : void 0
   };
 }
 
@@ -7597,7 +7703,7 @@ function planReclaim(inventory, config, now) {
   const eligibleForBudget = [];
   for (const entry of inventory) {
     const action = decideForEntry(entry, config, now, orphanThresholdMs);
-    actions.push(action);
+    actions.push(entry.herdr ? { ...action, herdr: { ...entry.herdr }, herdrStatus: entry.status } : action);
     if (action.kind === "keep" && action.reason === "within thresholds") {
       eligibleForBudget.push(entry);
     }
@@ -7623,6 +7729,7 @@ function planReclaim(inventory, config, now) {
         kind: "cold-archive",
         id: entry.id,
         reason: "size-budget eviction (largest-first)",
+        ...entry.herdr ? { herdr: { ...entry.herdr }, herdrStatus: entry.status } : {},
         bytesReclaimed: reclaim
       };
       projectedBytes -= reclaim;
@@ -7649,7 +7756,11 @@ function planReclaim(inventory, config, now) {
   };
 }
 function decideForEntry(entry, config, now, orphanThresholdMs) {
-  if (unsupportedRuntimeReason(entry.runtime) || unsupportedRuntimeReason(entry.inMemory?.runtime)) return { kind: "keep", id: entry.id, reason: "unsupported runtime; evidence preserved" };
+  if (entry.runtime === "herdr") {
+    if (!entry.herdrChildAbsent)
+      return { kind: "keep", id: entry.id, reason: "herdr child live or unknown; evidence preserved" };
+    if (!isTerminal(entry.status)) return { kind: "keep", id: entry.id, reason: "herdr status unresolved" };
+  } else if (unsupportedRuntimeReason(entry.runtime) || unsupportedRuntimeReason(entry.inMemory?.runtime)) return { kind: "keep", id: entry.id, reason: "unsupported runtime; evidence preserved" };
   if (entry.effort || entry.inMemory?.effort) return { kind: "keep", id: entry.id, reason: "unresolved effort ownership" };
   if (entry.inMemory) {
     const mem = entry.inMemory;
@@ -7966,7 +8077,14 @@ async function buildDoctorReport(opts) {
     const selected = resolveRuntime({ persona: p.runtime, project: project.runtime, user: user.runtime, env: opts.env ?? process.env });
     lines.push(selected.ok ? `  ${p.name}: ${selected.kind} [${selected.source}]` : `  ${p.name}: ${selected.reason}`);
   }
-  for (const r of opts.registry.list()) lines.push(`  ${r.id}: saved=${r.runtime === void 0 ? "subprocess (legacy)" : r.runtime}`);
+  for (const r of opts.registry.list()) {
+    lines.push(`  ${r.id}: saved=${r.runtime === void 0 ? "subprocess (legacy)" : r.runtime}`);
+    if (r.runtime === "herdr") {
+      lines.push(`    pane=${r.herdr?.paneId ?? "unknown"} nonce=${r.herdr?.launchNonce ?? "unknown"} cleanup=${r.transport?.kind === "herdr" && r.transport.paneReleased ? "released" : "retained/unconfirmed"}`);
+      if (r.worktreeKept || r.herdrExitUnconfirmed) lines.push(`    ${r.worktreeKept ?? "child exit unconfirmed; resources preserved"}`);
+      if (r.transport?.stderr && r.transport.stderr !== r.worktreeKept) lines.push(`    ${r.transport.stderr}`);
+    }
+  }
   lines.push(`  active:        ${opts.registry.countActive()}`);
   lines.push(`  queued:        ${opts.queue.size()}`);
   lines.push(`  total tracked: ${opts.registry.list().length}`);
@@ -8201,7 +8319,8 @@ async function reconcileOrphans(actions, runsRoot2, now) {
 // src/gc/executor.ts
 import { readFile as readFile5, rm, stat as stat5, unlink as unlink2, utimes, writeFile as writeFile5, readdir as readdir4 } from "node:fs/promises";
 import { join as join22 } from "node:path";
-async function executeReclaim(actions, runsRoot2, registryActive, now) {
+import { readFileSync as readFileSync13 } from "node:fs";
+async function executeReclaim(actions, runsRoot2, registryActive, now, options = {}) {
   const archived = [];
   const deleted = [];
   const failed = [];
@@ -8210,7 +8329,8 @@ async function executeReclaim(actions, runsRoot2, registryActive, now) {
     const agentId = action.id;
     const runDir2 = join22(runsRoot2, agentId);
     const actionKind = action.kind;
-    if (registryActive.has(agentId)) {
+    const active = () => (typeof registryActive === "function" ? registryActive() : registryActive).has(agentId);
+    if (active()) {
       failed.push({
         agentId,
         action: actionKind,
@@ -8256,9 +8376,37 @@ async function executeReclaim(actions, runsRoot2, registryActive, now) {
       });
       continue;
     }
+    const assertCurrent = () => {
+      if (active()) throw new Error("active during reclaim");
+      const latest = JSON.parse(readFileSync13(recordPath, "utf8"));
+      if (!isTerminal(latest.status) || latest.effort) throw new Error("status/effort changed during reclaim");
+      if (record.runtime === "herdr" || latest.runtime === "herdr") {
+        const live = options.currentRun?.(agentId);
+        if (record.runtime !== "herdr" || latest.runtime !== "herdr" || latest.id !== agentId || latest.status !== record.status || action.herdrStatus !== void 0 && latest.status !== action.herdrStatus || !sameHerdrBinding(action.herdr, latest.herdr) || !sameHerdrBinding(record.herdr, latest.herdr) || !herdrChildAbsent({ ...latest, recordPath }) || latest.worktreePath !== record.worktreePath || latest.worktreeBranch !== record.worktreeBranch || live && (live.status !== latest.status || live.effort || !sameHerdrBinding(latest.herdr, live.herdr)))
+          throw new Error("herdr current invocation/child unconfirmed; evidence preserved");
+      }
+    };
+    try {
+      assertCurrent();
+      if (record.runtime === "herdr") {
+        const released = await releaseRecordedPane({ ...record, recordPath }, () => {
+          try {
+            assertCurrent();
+            return record.herdr;
+          } catch {
+            return void 0;
+          }
+        }, options.env);
+        assertCurrent();
+        if (actionKind === "delete" && record.worktreePath && !released) throw new Error("pane release unconfirmed; worktree and ownership evidence preserved");
+      }
+    } catch (e) {
+      failed.push({ agentId, action: actionKind, error: e.message });
+      continue;
+    }
     if (actionKind === "cold-archive") {
       try {
-        const bytes = await coldArchive(runDir2, now);
+        const bytes = await coldArchive(runDir2, now, assertCurrent);
         archived.push({ agentId, bytesReclaimed: bytes });
       } catch (e) {
         failed.push({
@@ -8269,7 +8417,7 @@ async function executeReclaim(actions, runsRoot2, registryActive, now) {
       }
     } else {
       try {
-        const bytes = await fullDelete(runDir2, record);
+        const bytes = await fullDelete(runDir2, record, assertCurrent);
         deleted.push({ agentId, bytesReclaimed: bytes });
       } catch (e) {
         failed.push({
@@ -8282,7 +8430,7 @@ async function executeReclaim(actions, runsRoot2, registryActive, now) {
   }
   return { archived, deleted, failed };
 }
-async function coldArchive(runDir2, now) {
+async function coldArchive(runDir2, now, assertCurrent) {
   const transcriptPath = join22(runDir2, "transcript.jsonl");
   let bytes = 0;
   try {
@@ -8292,6 +8440,7 @@ async function coldArchive(runDir2, now) {
   }
   if (bytes > 0) {
     try {
+      assertCurrent();
       await unlink2(transcriptPath);
     } catch (e) {
       const err = e;
@@ -8300,16 +8449,21 @@ async function coldArchive(runDir2, now) {
     }
   }
   const sidecarPath = join22(runDir2, ".archived");
+  assertCurrent();
   await writeFile5(sidecarPath, "");
   const nowSec = now / 1e3;
+  assertCurrent();
   await utimes(sidecarPath, nowSec, nowSec);
   return bytes;
 }
-async function fullDelete(runDir2, record) {
+async function fullDelete(runDir2, record, assertCurrent) {
   if (record && holdsKeptWorktree(record)) {
     const spec = worktreeSpecFromRun(record);
-    if (spec) removeWorktree(spec);
-    else if (record.worktreeBranch) deleteBranch(record.cwd, record.worktreeBranch);
+    assertCurrent();
+    if (spec) {
+      const removed = removeWorktree(spec);
+      if (!removed && record.runtime === "herdr") throw new Error("worktree removal unconfirmed; ownership evidence preserved");
+    } else if (record.worktreeBranch) deleteBranch(record.cwd, record.worktreeBranch);
   }
   let bytes = 0;
   try {
@@ -8319,6 +8473,7 @@ async function fullDelete(runDir2, record) {
     if (err?.code === "ENOENT") return 0;
     throw e;
   }
+  assertCurrent();
   await rm(runDir2, { recursive: true, force: true });
   return bytes;
 }
@@ -8378,8 +8533,9 @@ async function runGc(opts) {
   const reclaimResult = await executeReclaim(
     plan.actions,
     opts.runsRoot,
-    activeIdSet(opts.registry),
-    now
+    () => activeIdSet(opts.registry),
+    now,
+    { currentRun: (id) => opts.registry.get(id) }
   );
   for (const d of reclaimResult.deleted) noteDeletedId(d.agentId);
   const totalBytesReclaimed = reclaimResult.archived.reduce((s, a) => s + a.bytesReclaimed, 0) + reclaimResult.deleted.reduce((s, a) => s + a.bytesReclaimed, 0);
@@ -8447,7 +8603,7 @@ async function maybeAutoRunGc(opts) {
 // src/watchdog.ts
 function evaluateRun(run, state, config, now) {
   const current = state ?? { kind: "fresh" };
-  if (run.status !== "running") {
+  if (run.status !== "running" || waitingForDialog(run)) {
     return { transition: { kind: "none" }, nextState: current };
   }
   if (run.pausedAt !== void 0) {
@@ -8501,6 +8657,9 @@ function evaluateRun(run, state, config, now) {
   }
   return { transition: { kind: "none" }, nextState: current };
 }
+function waitingForDialog(run) {
+  return run.runtime === "herdr" && run.herdrPrompts?.nonce === run.herdr?.launchNonce && !!run.herdrPrompts?.active.length;
+}
 var DEFAULT_TICK_INTERVAL_MS = 3e4;
 function effectiveConfig(run, defaults) {
   const overrideSoft = run.softStallSeconds;
@@ -8525,7 +8684,7 @@ function resolveKillOnStallForPersona(run, defaultKillOnStall, isWriteCapablePer
   return isWriteCapablePersona;
 }
 function classifyStall(run, nowMs, defaults) {
-  if (run.status !== "running") return null;
+  if (run.status !== "running" || waitingForDialog(run)) return null;
   if (run.pausedAt !== void 0) return null;
   if (run.hookExecuting === true) return null;
   if (!isObservableHere(run)) return null;
@@ -8606,12 +8765,16 @@ var Watchdog = class {
    */
   tick() {
     if (process.env.CONDUCTOR_SUBAGENT === "1") return;
-    if (this.deps.isEnabled && !this.deps.isEnabled()) return;
     const now = this.deps.now();
     const runs = this.deps.registry.list();
     const ids = new Set(runs.map((run) => run.id));
     for (const id of this.states.keys()) if (!ids.has(id)) this.states.delete(id);
     for (const run of runs) {
+      if (run.status === "running" && isObservableHere(run) && waitingForDialog(run) && !run.herdrPrompts.notified) {
+        run.herdrPrompts.notified = true;
+        this.deps.dialog?.(run);
+      }
+      if (this.deps.isEnabled && !this.deps.isEnabled()) continue;
       if (classifyStall(run, now, this.deps.config) === null) {
         this.states.delete(run.id);
         run.stalledSince = void 0;
@@ -8619,13 +8782,15 @@ var Watchdog = class {
       }
       const invocationStartedAt = run.thisInvocationStartedAt ?? run.startTime;
       const resumeCount = run.resumeCount ?? 0;
+      const herdrNonce = run.herdr?.launchNonce;
       let episode = this.states.get(run.id);
-      if (episode && (episode.lastEventAt !== run.lastEventAt || episode.invocationStartedAt !== invocationStartedAt || episode.resumeCount !== resumeCount)) {
+      if (episode && (episode.lastEventAt !== run.lastEventAt || episode.herdrNonce !== herdrNonce || episode.invocationStartedAt !== invocationStartedAt || episode.resumeCount !== resumeCount)) {
         if (episode.state.kind !== "fresh") {
           this.dispatch(run, { kind: "recovered", previousKind: episode.state.kind }, this.deps.config);
         }
         episode = void 0;
       }
+      if (episode?.pending) continue;
       const prev = episode?.state;
       const effective = effectiveConfig(run, this.deps.config);
       let { transition, nextState } = evaluateRun(run, prev, effective, now);
@@ -8656,6 +8821,7 @@ var Watchdog = class {
       }
       this.states.set(run.id, {
         state: nextState,
+        herdrNonce,
         noticeAt: episode?.noticeAt ?? (attention ? now : void 0),
         actions,
         lastEventAt: run.lastEventAt,
@@ -8664,7 +8830,19 @@ var Watchdog = class {
         nextReminderAt: transition.kind === "soft" ? now + interval : episode?.nextReminderAt ?? Infinity,
         reminderIntervalMs: transition.kind === "soft" ? interval : episode?.reminderIntervalMs ?? interval
       });
-      this.dispatch(run, transition, effective, notice);
+      const read2 = run.transport?.kind === "herdr" ? run.transport.readStallEvidence : void 0;
+      if (attention && episode?.noticeAt === void 0 && read2) {
+        const saved = this.states.get(run.id);
+        saved.pending = true;
+        void read2().catch(() => "Live pane diagnostic unavailable.").then((evidence) => {
+          saved.pending = false;
+          if (this.disposed || this.states.get(run.id) !== saved || run.lastEventAt !== saved.lastEventAt || run.herdr?.launchNonce !== saved.herdrNonce || classifyStall(run, this.deps.now(), this.deps.config) === null) return;
+          this.dispatch(run, transition, effective, { ...notice, evidence: boundStallText(`${notice.evidence}
+
+Live pane (untrusted):
+${evidence}`, 16 * 1024 - 64) });
+        });
+      } else this.dispatch(run, transition, effective, notice);
     }
   }
   /**
@@ -8712,7 +8890,7 @@ var Watchdog = class {
         }
         const nowAfter = this.deps.now();
         const stillStaleMs = nowAfter - run.lastEventAt;
-        if (stillStaleMs < effective.hardThresholdSeconds * 1e3) {
+        if (stillStaleMs < effective.hardThresholdSeconds * 1e3 || classifyStall(run, nowAfter, effective) === null) {
           run.stalledSince = void 0;
           this.states.delete(run.id);
           this.deps.log.info(
@@ -9006,7 +9184,7 @@ function runStop(opts, ctx, arg) {
       n++;
     }
   }
-  ctx.ui.notify(`stopped ${n} sub-agent(s)`, "info");
+  ctx.ui.notify(targets.some((run) => run.runtime === "herdr") ? `stop requested for ${n} sub-agent(s); herdr child exit requires proof, panes/worktrees retained until explicit cleanup.` : `stopped ${n} sub-agent(s)`, "info");
 }
 function runPause(opts, ctx, arg) {
   const registry = opts.getRegistry();
@@ -9209,7 +9387,7 @@ function runHistory(_opts, ctx, arg) {
       readRecord: (id) => {
         const p = join23(runDir(id), "record.json");
         try {
-          return JSON.parse(readFileSync13(p, "utf8"));
+          return JSON.parse(readFileSync14(p, "utf8"));
         } catch {
           return void 0;
         }
@@ -9217,7 +9395,7 @@ function runHistory(_opts, ctx, arg) {
       readFinalText: (id) => {
         const p = join23(runDir(id), "final.md");
         try {
-          return readFileSync13(p, "utf8");
+          return readFileSync14(p, "utf8");
         } catch {
           return void 0;
         }
@@ -9639,7 +9817,9 @@ async function runWorktreeCmd(opts, ctx, subRest) {
         );
         return;
       }
-      if (!await herdrChildGone(run)) {
+      const binding = run.herdr, status = run.status;
+      if (!await herdrChildGone(run) || !await releaseRunPane(run) || run.herdr !== binding || run.status !== status) {
+        run.worktreeKept ??= "worktree kept: pane release or current invocation unconfirmed";
         ctx.ui.notify(run.worktreeKept, "warning");
         return;
       }
@@ -9713,11 +9893,11 @@ Resolve manually in the worktree and run /conductor worktree merge ${runId} agai
 
 // src/tools.ts
 import { Type as Type2 } from "@sinclair/typebox";
-import { readFileSync as readFileSync15, existsSync as existsSync16 } from "node:fs";
+import { readFileSync as readFileSync16, existsSync as existsSync16 } from "node:fs";
 import { dirname as dirname17 } from "node:path";
 
 // src/chain.ts
-import { readFileSync as readFileSync14, existsSync as existsSync15 } from "node:fs";
+import { readFileSync as readFileSync15, existsSync as existsSync15 } from "node:fs";
 var DEFAULT_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nOriginal task:\n{task}\n\n---\nFinal output:\n{final}";
 var WORKTREE_CHAIN_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nThe work is on branch `{worktreeBranch}` (not yet merged to `{baseBranch}`).\nRun the following to inspect the changes:\n\n```bash\ngit diff {baseBranch}...{worktreeBranch}\n```\n\nOriginal task:\n{task}";
 var FINAL_PLACEHOLDER = "(no final output)";
@@ -9739,7 +9919,7 @@ function buildChainTask(taskTemplate, context) {
   let finalContent = FINAL_PLACEHOLDER;
   if (existsSync15(context.finalPath)) {
     try {
-      finalContent = readFileSync14(context.finalPath, "utf-8");
+      finalContent = readFileSync15(context.finalPath, "utf-8");
     } catch {
     }
   }
@@ -11483,7 +11663,7 @@ function registerKillTool(pi, opts) {
         forceTerminate(run, "killed", registry);
       }
       return {
-        content: [{ type: "text", text: `killed: ${run.id}` }],
+        content: [{ type: "text", text: run.runtime === "herdr" ? `termination requested: ${run.id}; logical status=${run.status}. Child exit requires proof; pane/worktree cleanup is not implied. Inspect conductor doctor for retained resources.` : `killed: ${run.id}` }],
         details: { status: "killed", agent_id: run.id, persona: run.persona }
       };
     }
@@ -11771,7 +11951,7 @@ function buildOnChainCallback(args) {
       let parentFinal = "";
       if (existsSync16(parentRun.finalPath)) {
         try {
-          parentFinal = readFileSync15(parentRun.finalPath, "utf-8");
+          parentFinal = readFileSync16(parentRun.finalPath, "utf-8");
         } catch {
         }
       }
@@ -12549,6 +12729,24 @@ Answer via ensemble_send; the original assignment remains unresolved.` : getComp
     }
   };
 }
+function buildDialogMessage(run) {
+  const body = "Waiting for a human UI response in the managed herdr pane. This is not a stall. Inspect the pane; conductor does not auto-answer dialogs.";
+  return {
+    customType: "ensemble-notification",
+    display: true,
+    content: `<sub-agent-dialog><agent-id>${escapeXml(run.id)}</agent-id>${body}</sub-agent-dialog>`,
+    details: {
+      kind: "dialog",
+      id: run.id,
+      persona: run.persona,
+      status: run.status,
+      stats: [run.id],
+      body,
+      transcriptPath: run.transcriptPath,
+      notes: []
+    }
+  };
+}
 function buildStallMessage(run, args, canFocus = false, sessionId) {
   const actions = args.availableActions ?? availableActions(run, canFocus, sessionId);
   const evidence = args.evidenceReference ? void 0 : args.evidence ?? recentStallEvidence(run);
@@ -12621,7 +12819,7 @@ function headerLine2(d) {
   const stalled = d.kind === "stalled";
   const glyph = stalled ? d.severity === "hard" ? "\u26A0" : "\xB7" : STATUS_GLYPH[d.status];
   const slot = stalled ? d.severity === "hard" ? "warning" : "muted" : statusColorSlot(d.status);
-  const verb = stalled ? `${d.severity}-stalled` : statusVerb(d.status);
+  const verb = d.kind === "dialog" ? "waiting for human UI" : stalled ? `${d.severity}-stalled` : statusVerb(d.status);
   const line = [
     { text: glyph, slot },
     { text: " " },
@@ -13031,8 +13229,8 @@ If your reason isn't on this list, default back to the canonical chain. "I think
 }
 
 // src/child-bridge.ts
-import { closeSync as closeSync6, constants as constants6, fstatSync as fstatSync5, lstatSync as lstatSync3, mkdirSync as mkdirSync13, openSync as openSync6, readFileSync as readFileSync16, realpathSync as realpathSync7, writeSync as writeSync2 } from "node:fs";
-import { basename as basename3, dirname as dirname18, isAbsolute as isAbsolute5, join as join25, resolve as resolve6 } from "node:path";
+import { closeSync as closeSync6, constants as constants6, fstatSync as fstatSync5, lstatSync as lstatSync3, mkdirSync as mkdirSync13, openSync as openSync6, readFileSync as readFileSync17, realpathSync as realpathSync7, writeSync as writeSync2 } from "node:fs";
+import { basename as basename3, dirname as dirname18, isAbsolute as isAbsolute6, join as join25, resolve as resolve6 } from "node:path";
 import { VERSION as VERSION2 } from "@earendil-works/pi-coding-agent";
 
 // package.json
@@ -13108,7 +13306,7 @@ var package_default = {
 var PROTOCOL = 1;
 var token2 = (value) => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value);
 var text2 = (value) => typeof value === "string" && !!value.trim() && !/[\0\r\n]/.test(value);
-var path = (value) => text2(value) && isAbsolute5(value) && resolve6(value) === value;
+var path = (value) => text2(value) && isAbsolute6(value) && resolve6(value) === value;
 var faultKey = /* @__PURE__ */ Symbol.for("pi-conductor.child-bridge.tee-faults.v1");
 var turnKey = /* @__PURE__ */ Symbol.for("pi-conductor.child-bridge.turn-phases.v2");
 var processState = globalThis;
@@ -13124,7 +13322,7 @@ function readJson(file) {
   const fd = openSync6(file, constants6.O_RDONLY | constants6.O_NOFOLLOW);
   try {
     if (!fstatSync5(fd).isFile()) throw new Error("invalid identity file");
-    return JSON.parse(readFileSync16(fd, "utf8"));
+    return JSON.parse(readFileSync17(fd, "utf8"));
   } finally {
     closeSync6(fd);
   }
@@ -14520,15 +14718,43 @@ async function handleSessionShutdown(event, deps) {
     if (r.status === "running" || r.status === "paused") {
       stillActive.push(r);
       try {
-        subprocessRuntime.stopProcess(r);
+        if (r.runtime === "herdr") deps.terminateHerdr?.(r);
+        else runtimeFor(r).stopProcess(r);
       } catch {
       }
     }
   }
+  const panes = deps.runs.filter((run) => run.runtime === "herdr");
+  if (panes.length) {
+    const abort = new AbortController();
+    let timer;
+    const expired = new Promise((resolve7) => {
+      timer = setTimeout(() => {
+        abort.abort();
+        resolve7();
+      }, 5e3);
+    });
+    const cleanup = Promise.allSettled(panes.map(async (run) => {
+      const transport = run.transport;
+      if (transport?.kind === "herdr" && transport.shutdown) await transport.shutdown(abort.signal);
+    }));
+    try {
+      await Promise.race([cleanup, expired]);
+    } finally {
+      clearTimeout(timer);
+    }
+    for (const run of panes) {
+      if (run.transport?.kind !== "herdr" || !run.transport.childExited) run.herdrExitUnconfirmed = true;
+      if (abort.signal.aborted) run.worktreeKept = "pane shutdown budget expired; pane/worktree and ownership evidence preserved";
+      else if (run.transport?.stderr) run.worktreeKept = run.transport.stderr;
+      else if (run.transport?.kind !== "herdr") run.worktreeKept = "pane shutdown unavailable: unattached herdr run; ownership evidence preserved";
+    }
+    await Promise.all(panes.map((run) => writeRecord(run)));
+  }
   let reconciliation = void 0;
   if (stillActive.length > 0 && deps.reconcileRunning) {
     try {
-      reconciliation = deps.reconcileRunning(stillActive, event.reason);
+      reconciliation = deps.reconcileRunning(stillActive.filter((run) => run.status !== "integrating" && run.status !== "completed"), event.reason);
     } catch {
     }
   }
@@ -15044,6 +15270,13 @@ function index_default(pi) {
             console.error(`watchdog: ${msg}`);
           }
         },
+        dialog: (run) => {
+          try {
+            pi.sendMessage(buildDialogMessage(run), { triggerTurn: false, deliverAs: "followUp" });
+          } catch {
+            console.error(`herdr: ${run.id} waiting for human UI`);
+          }
+        },
         now: () => Date.now(),
         // The run's own onComplete posts its card: the close handler skips
         // onComplete once forceTerminate has settled the run.
@@ -15105,6 +15338,7 @@ function index_default(pi) {
     await handleSessionShutdown(event, {
       runs: registry.list(),
       resetSanitizer: () => sanitizerHook.reset(),
+      terminateHerdr: (run) => forceTerminate(run, "killed", registry),
       // A1: close the orphan-creation window. SIGTERM races the runtime
       // teardown; without this the on-disk record stays "running" until
       // the next session_start runs the GC orphan sweep.

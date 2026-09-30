@@ -38,6 +38,16 @@ export function boundStallText(text: string, bytes: number): string {
   return take(false, Math.ceil(budget / 2)) + OMITTED + take(true, Math.floor(budget / 2));
 }
 
+export function redactPaneEvidence(text: string, env: NodeJS.ProcessEnv): string {
+  for (const value of Object.values(env)) if (value) text = text.split(value).join("[redacted]");
+  return boundStallText(text
+    .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/g, "[redacted private key]")
+    .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted]@")
+    .replace(/(Bearer\s+)[^\s]+/gi, "$1[redacted]")
+    .replace(/((?:password|secret|token|api[_-]?key|authorization|AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)[\w-]*[\"\']?\s*[:=]\s*)[^\s,}]+/gi, "$1[redacted]")
+    .replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, "[redacted]"), 4096);
+}
+
 function toolSummary(name: string, args: Record<string, unknown> = {}): string {
   const bounded: Record<string, unknown> = {};
   let count = 0;

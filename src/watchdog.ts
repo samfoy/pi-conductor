@@ -14,7 +14,7 @@ import { isObservableHere } from "./runtime.ts";
 import type { Run } from "./types.ts";
 import type { TerminationReason, RunRegistry, RunAction } from "./runs.ts";
 import type { StallNoticeArgs } from "./notifications.ts";
-import { recentStallEvidence } from "./stall-evidence.ts";
+import { boundStallText, recentStallEvidence } from "./stall-evidence.ts";
 
 // ── Public API ────────────────────────────────────────────────────────
 
@@ -115,7 +115,7 @@ export function evaluateRun(
   const current: WatchdogState = state ?? { kind: "fresh" };
 
   // (1) Non-running statuses never stall.
-  if (run.status !== "running") {
+  if (run.status !== "running" || waitingForDialog(run)) {
     return { transition: { kind: "none" }, nextState: current };
   }
 
@@ -246,6 +246,7 @@ export interface WatchdogDeps {
   readonly isKillOnStall: (run: Run) => boolean;
   /** Snapshot once per episode; reminders reuse it, and action effects revalidate. */
   readonly observeActions?: (run: Run) => RunAction[];
+  readonly dialog?: (run: Run) => void;
   /**
    * Master enable switch. Mirrors the v0.9 GC pattern: `enabled=false`
    * makes every code path a no-op without changing wiring. Defaults to
@@ -258,6 +259,10 @@ export interface WatchdogDeps {
   readonly setInterval?: (fn: () => void, ms: number) => NodeJS.Timeout;
   /** Injectable for tests. Default: globalThis.clearInterval. */
   readonly clearInterval?: (t: NodeJS.Timeout) => void;
+}
+
+export function waitingForDialog(run: Run): boolean {
+  return run.runtime === "herdr" && run.herdrPrompts?.nonce === run.herdr?.launchNonce && !!run.herdrPrompts?.active.length;
 }
 
 const DEFAULT_TICK_INTERVAL_MS = 30_000;
@@ -362,7 +367,7 @@ export function classifyStall(
   softThresholdSeconds: number;
   hardThresholdSeconds: number;
 } | null {
-  if (run.status !== "running") return null;
+  if (run.status !== "running" || waitingForDialog(run)) return null;
   if (run.pausedAt !== undefined) return null;
   // v0.11 on_complete_hook (slice 2): hook execution masks classification
   // for the same reason as `evaluateRun` — the pi subprocess is gone and
@@ -417,6 +422,8 @@ export class Watchdog {
     reminderIntervalMs: number;
     noticeAt?: number;
     actions?: RunAction[];
+    pending?: boolean;
+    herdrNonce?: string;
   }>();
   private timer: NodeJS.Timeout | null = null;
   private unsub: (() => void) | null = null;
@@ -489,13 +496,17 @@ export class Watchdog {
    */
   tick(): void {
     if (process.env.CONDUCTOR_SUBAGENT === "1") return;
-    if (this.deps.isEnabled && !this.deps.isEnabled()) return;
 
     const now = this.deps.now();
     const runs = this.deps.registry.list();
     const ids = new Set(runs.map(run => run.id));
     for (const id of this.states.keys()) if (!ids.has(id)) this.states.delete(id);
     for (const run of runs) {
+      if (run.status === "running" && isObservableHere(run) && waitingForDialog(run) && !run.herdrPrompts!.notified) {
+        run.herdrPrompts!.notified = true;
+        this.deps.dialog?.(run);
+      }
+      if (this.deps.isEnabled && !this.deps.isEnabled()) continue;
       if (classifyStall(run, now, this.deps.config) === null) {
         this.states.delete(run.id);
         run.stalledSince = undefined;
@@ -503,14 +514,16 @@ export class Watchdog {
       }
       const invocationStartedAt = run.thisInvocationStartedAt ?? run.startTime;
       const resumeCount = run.resumeCount ?? 0;
+      const herdrNonce = run.herdr?.launchNonce;
       let episode = this.states.get(run.id);
       if (episode && (episode.lastEventAt !== run.lastEventAt
-        || episode.invocationStartedAt !== invocationStartedAt || episode.resumeCount !== resumeCount)) {
+        || episode.herdrNonce !== herdrNonce || episode.invocationStartedAt !== invocationStartedAt || episode.resumeCount !== resumeCount)) {
         if (episode.state.kind !== "fresh") {
           this.dispatch(run, { kind: "recovered", previousKind: episode.state.kind }, this.deps.config);
         }
         episode = undefined;
       }
+      if (episode?.pending) continue;
       const prev = episode?.state;
       // v0.10 Slice 3: per-run effective config so a spawn that overrode
       // `stall_threshold_seconds` gets its own thresholds. Pure helper;
@@ -540,6 +553,7 @@ export class Watchdog {
       }
       this.states.set(run.id, {
         state: nextState,
+        herdrNonce,
         noticeAt: episode?.noticeAt ?? (attention ? now : undefined),
         actions,
         lastEventAt: run.lastEventAt,
@@ -549,7 +563,16 @@ export class Watchdog {
         reminderIntervalMs: transition.kind === "soft" ? interval : episode?.reminderIntervalMs ?? interval,
       });
 
-      this.dispatch(run, transition, effective, notice);
+      const read = run.transport?.kind === "herdr" ? run.transport.readStallEvidence : undefined;
+      if (attention && episode?.noticeAt === undefined && read) {
+        const saved = this.states.get(run.id)!; saved.pending = true;
+        void read().catch(() => "Live pane diagnostic unavailable.").then(evidence => {
+          saved.pending = false;
+          if (this.disposed || this.states.get(run.id) !== saved || run.lastEventAt !== saved.lastEventAt || run.herdr?.launchNonce !== saved.herdrNonce ||
+              classifyStall(run, this.deps.now(), this.deps.config) === null) return;
+          this.dispatch(run, transition, effective, { ...notice, evidence: boundStallText(`${notice.evidence}\n\nLive pane (untrusted):\n${evidence}`, 16 * 1024 - 64) });
+        });
+      } else this.dispatch(run, transition, effective, notice);
     }
   }
 
@@ -607,7 +630,7 @@ export class Watchdog {
         // the corresponding test flip from "recovered" to "killed".
         const nowAfter = this.deps.now();
         const stillStaleMs = nowAfter - run.lastEventAt;
-        if (stillStaleMs < effective.hardThresholdSeconds * 1000) {
+        if (stillStaleMs < effective.hardThresholdSeconds * 1000 || classifyStall(run, nowAfter, effective) === null) {
           // Recovered between detector and kill. Treat as recovered:
           // clear stalledSince, reset state, log info.
           run.stalledSince = undefined;

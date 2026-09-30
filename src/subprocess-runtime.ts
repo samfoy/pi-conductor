@@ -83,25 +83,29 @@ export class SubprocessRuntime implements RunRuntime {
         }
       }, 2000).unref();
     }
-    if (run.hookProc?.pid !== undefined) {
-      const hookPid = run.hookProc.pid;
-      try {
-        killGroup(hookPid, "SIGTERM");
-      } catch {
-        // defaultKillGroup already swallows ESRCH/EPERM; this guards
-        // against test stubs that throw unexpectedly.
-      }
-      setTimeout(() => {
-        try {
-          killGroup(hookPid, "SIGKILL");
-        } catch {
-          // already dead / test stub
-        }
-      }, 2000).unref();
-      // Clear immediately so the close handler's `finally` block in
-      // `applyHookToTerminal` is a no-op and W5's assertion holds.
-      run.hookProc = undefined;
+    terminateHook(run, killGroup);
+  }
+}
+
+export function terminateHook(run: Run, killGroup: (pid: number, signal: NodeJS.Signals) => void): void {
+  if (run.hookProc?.pid !== undefined) {
+    const hookPid = run.hookProc.pid;
+    try {
+      killGroup(hookPid, "SIGTERM");
+    } catch {
+      // defaultKillGroup already swallows ESRCH/EPERM; this guards
+      // against test stubs that throw unexpectedly.
     }
+    setTimeout(() => {
+      try {
+        killGroup(hookPid, "SIGKILL");
+      } catch {
+        // already dead / test stub
+      }
+    }, 2000).unref();
+    // Clear immediately so the close handler's `finally` block in
+    // `applyHookToTerminal` is a no-op and W5's assertion holds.
+    run.hookProc = undefined;
   }
 }
 

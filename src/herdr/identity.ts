@@ -52,6 +52,10 @@ interface PaneEvidence {
 type Refusal = {ok: false; state: "unknown" | "gone"; reason: string};
 const unknown = (reason: string): Refusal => ({ok: false, state: "unknown", reason});
 
+export function sameHerdrBinding(a: HerdrBinding | undefined, b: HerdrBinding | undefined): boolean {
+  return !!a && !!b && (["runId", "launchNonce", "sessionId", "sessionFile", "socketPath", "workspaceId", "tabId", "paneId", "terminalId", "childPid", "childStartTime"] as const).every(key => a[key] === b[key]);
+}
+
 export function provePaneOurs(ev: PaneEvidence): {ok: true} | Refusal {
   const {binding: b, current, pane} = ev;
   if (!isRecord(b) || !isRecord(current) || !isHerdrPane(pane)) return unknown("missing pane evidence");

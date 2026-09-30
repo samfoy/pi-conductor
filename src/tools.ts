@@ -1431,7 +1431,9 @@ function registerKillTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         forceTerminate(run, "killed", registry);
       }
       return {
-        content: [{ type: "text" as const, text: `killed: ${run.id}` }],
+        content: [{ type: "text" as const, text: run.runtime === "herdr"
+          ? `termination requested: ${run.id}; logical status=${run.status}. Child exit requires proof; pane/worktree cleanup is not implied. Inspect conductor doctor for retained resources.`
+          : `killed: ${run.id}` }],
         details: { status: "killed", agent_id: run.id, persona: run.persona } as KillDetails,
       };
     },

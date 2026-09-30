@@ -23,6 +23,7 @@ import {
   isTerminal,
 } from "../types.ts";
 import type { RunRegistry } from "../runs.ts";
+import { herdrChildAbsent } from "../herdr/runtime.ts";
 import { holdsKeptWorktree } from "../worktree.ts";
 
 /**
@@ -71,6 +72,8 @@ export interface InventoryEntry {
   holdsWorktree?: boolean;
   effort?: RunRecord["effort"];
   runtime?: RunRecord["runtime"];
+  herdr?: RunRecord["herdr"];
+  herdrChildAbsent?: boolean;
 }
 
 interface SafeStat {
@@ -205,6 +208,8 @@ async function buildEntry(
     holdsWorktree: holdsKeptWorktree(record),
     effort: record.effort,
     runtime: record.runtime,
+    herdr: record.herdr && { ...record.herdr },
+    herdrChildAbsent: record.runtime === "herdr" ? herdrChildAbsent({ ...record, recordPath: join(runDir, "record.json") }) : undefined,
   };
 }
 

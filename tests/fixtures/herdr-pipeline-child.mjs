@@ -6,6 +6,7 @@ import { readInbox, writeInboxAck } from "../../src/herdr/inbox.ts";
 const manifest = process.argv[2];
 while (!existsSync(manifest)) await delay(10);
 const { runDir, mode } = JSON.parse(readFileSync(manifest, "utf8"));
+if (mode === "stubborn") process.on("SIGTERM", () => {});
 const b = JSON.parse(readFileSync(join(runDir, "record.json"), "utf8")).herdr;
 const request = readInbox(runDir, b.launchNonce)[0].request;
 const hello = { v: 1, bridgeProtocol: 1, runId: b.runId, launchNonce: b.launchNonce,
@@ -26,5 +27,5 @@ const bytes = Buffer.from(JSON.stringify({ type: "message_end", message: { role:
 const split = bytes.indexOf(Buffer.from("🙂")) + 2;
 appendFileSync(path, bytes.subarray(0, split)); await delay(25); appendFileSync(path, bytes.subarray(split));
 appendFileSync(path, '{"type":"agent_settled","_c":{"n":"foreign"}}\n');
-if (mode !== "crash") emit({ type: "agent_settled" });
-if (mode === "held") while (!existsSync(`${manifest}.exit`)) await delay(10);
+if (!["crash", "running", "stubborn"].includes(mode)) emit({ type: "agent_settled" });
+if (["held", "running", "stubborn"].includes(mode)) while (!existsSync(`${manifest}.exit`)) await delay(10);
