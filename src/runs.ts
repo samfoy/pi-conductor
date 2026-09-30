@@ -28,7 +28,7 @@ import { EffortDriver } from "./effort/driver.ts";
 import { addEffortMember, assertEffortOwner, assertRunEffortOwner, readEffort, listEfforts, writeDurableJson, writeDurableFile, type EffortRecord } from "./effort/store.ts";
 import { admitEffortWriter, consumesSlot, type AdmissionLimits } from "./effort/admit.ts";
 import { EFFORT_NOTICE, effortSummary, validateTouches } from "./effort/policy.ts";
-import { resolveRuntime, assertSupportedRuntime, unsupportedRuntimeReason, type RuntimeKind, type RuntimeChoice, type RuntimeEnvironment, type Signaler } from "./runtime.ts";
+import { resolveRuntime, unsupportedRuntimeReason, type RuntimeKind, type RuntimeChoice, type RuntimeEnvironment, type Signaler } from "./runtime.ts";
 export type { Signaler } from "./runtime.ts";
 export { buildSubagentEnv, capabilitiesFor, createLineDecoder, RPC_ACK_TIMEOUT_MS } from "./subprocess-runtime.ts";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
@@ -1242,7 +1242,6 @@ export function prepareSpawnRuntime<T extends Pick<SpawnOptions, "runtime" | "ru
     persona: personaRuntime === undefined ? opts.persona.runtime : personaRuntime,
     project: layers.project.runtime, user: layers.user.runtime, env: opts.runtimeEnv ?? process.env });
   if (!resolved.ok) throw new Error(resolved.reason);
-  assertSupportedRuntime(resolved.kind);
   return { ...opts, runtime: resolved.kind };
 }
 
@@ -1516,6 +1515,13 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
 
     const done = createRunPipeline(run, plan.piArgs, {
       registry: opts.registry,
+      runtime: runtimeFor(run, opts.runtimeEnv ?? process.env),
+      core: {
+        ...(plan.seededSessionPath ? { kind: "resume", sessionPath: plan.seededSessionPath } : { kind: "fresh", sessionDir }),
+        systemPrompt: run.systemPrompt!, model: opts.model, thinking: opts.thinking,
+        tools: run.tools, excludeTools: run.excludeTools,
+        skillPaths: opts.persona.inheritSkills ? collectInheritedSkillPaths({ cwd: opts.cwd }) : undefined,
+      },
       cwd: effectiveCwd, // v0.13: opts.cwd's counterpart in the worktree when one was created
       timeoutMs: opts.timeoutMs,
       onUpdate: opts.onUpdate,
@@ -2472,6 +2478,14 @@ export async function applyMergeToTerminal(
   return "merge_conflict";
 }
 
+/** Saved records alone never prove a herdr child exited; recovery stays fail-closed. */
+export async function herdrChildGone(run: Run): Promise<boolean> {
+  if (run.runtime !== "herdr") return true;
+  if (run.transport?.kind === "herdr" && run.transport.childExited) return true;
+  run.worktreeKept = "worktree kept: herdr child exit unconfirmed";
+  return false;
+}
+
 /**
  * Finalize's worktree step: merge back (v0.14), then {@link releaseWorktree}.
  * `merge_conflict` keeps the worktree and branch for manual resolution.
@@ -2486,6 +2500,7 @@ export async function applyMergeToTerminal(
  * 5b (v0.20 W2). Exported for tests.
  */
 export async function settleWorktree(run: Run, terminal: RunStatus): Promise<RunStatus> {
+  if (!await herdrChildGone(run)) return terminal;
   if (run.effort) {
     run.worktreeKept = `${effortSummary(run)}. Worktree ${run.worktreePath ?? "unavailable"}; branch ${run.worktreeBranch ?? "unavailable"} preserved.`;
     return terminal;
@@ -2505,7 +2520,7 @@ export async function settleWorktree(run: Run, terminal: RunStatus): Promise<Run
   const keepBranch =
     noMergeBack ||
     (terminal !== "completed" && branchHasUnmergedCommits(gitRoot, run.worktreeBaseBranch ?? "master", branch));
-  releaseWorktree(run, { keepBranch });
+  await releaseWorktree(run, { keepBranch });
   if (terminal !== "completed" && keepBranch && !run.worktreePath) {
     run.worktreeKept = keptBranchHint(gitRoot, branch);
   }
@@ -2534,7 +2549,7 @@ function keptWorktreeHint(worktreePath: string, branch: string): string {
  * changes is never force-removed: both stay, with a hint in `run.worktreeKept`.
  * Best-effort: on failure the fields stay set so GC can find the orphan.
  */
-export function releaseWorktree(run: Run, opts: { keepBranch: boolean }): void {
+export async function releaseWorktree(run: Run, opts: { keepBranch: boolean }): Promise<void> {
   if (run.effort) return;
   if (!run.worktreePath || !run.worktreeBranch) return;
   const wtSpec = {
@@ -2547,6 +2562,10 @@ export function releaseWorktree(run: Run, opts: { keepBranch: boolean }): void {
     run.worktreeKept =
       `worktree kept: uncommitted changes in ${wtSpec.worktreePath}; commit them to ${wtSpec.branch} ` +
       `or discard them, then git worktree remove ${wtSpec.worktreePath}`;
+    return;
+  }
+  if (run.runtime === "herdr" && !(run.transport?.kind === "herdr" && await run.transport.releasePane())) {
+    run.worktreeKept = `worktree kept: pane ${run.herdr?.paneId ?? "unknown"} not proven ours and empty`;
     return;
   }
   if (removeWorktree(wtSpec, opts)) {

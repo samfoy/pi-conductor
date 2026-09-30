@@ -4,7 +4,9 @@ import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { getAgentDir, hasTrustRequiringProjectResources, ProjectTrustStore, SessionManager, SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
 import type { HerdrTransport, RunRuntime, RunSink } from "../runtime.ts";
-import type { Run } from "../types.ts";
+import { isTerminal, type Run } from "../types.ts";
+import { HerdrTail } from "./tail.ts";
+import { HerdrMonitor } from "./monitor.ts";
 import { buildPiCoreArgs, writeRecord, type PiCoreArgsOptions } from "../runs.ts";
 import { seedSessionFile } from "../session-seed.ts";
 import { readProcessStartTime } from "../reconcile-startup.ts";
@@ -27,7 +29,7 @@ function probeProcess(pid: number): ProcessEvidence {
   catch (e) { return { pid, state: (e as NodeJS.ErrnoException).code === "ESRCH" ? "gone" : "unknown" }; }
 }
 interface Options {
-  cli: HerdrCli; workspaceId: string; env: NodeJS.ProcessEnv;
+  cli: HerdrCli; workspaceId?: string; env: NodeJS.ProcessEnv;
   trustArgs?: (cwd: string, agentDir?: string) => string[];
   piVersion?: string; platform?: string; now?: () => number;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
@@ -36,7 +38,7 @@ interface Options {
 }
 const failure = (message: string) => new Error(`herdr: ${message}`);
 
-/** H6 observes readiness only. H7 will own the sole event tail and post-ready monitor. */
+/** Readiness correlates input; only the attached tail delivers pipeline events. */
 export class HerdrRuntime implements RunRuntime {
   constructor(private readonly options?: Options) {}
   capabilities() { return { pause: false, liveSend: false }; }
@@ -45,7 +47,7 @@ export class HerdrRuntime implements RunRuntime {
   stopProcess(run: Run) { return run.transport?.kind === "herdr" ? run.transport.stop() : undefined; }
   terminate(run: Run) { return this.stopProcess(run); }
 
-  launch(run: Run, _args: string[], cwd: string, _sink: RunSink, initialPrompt?: string, core?: PiCoreArgsOptions): HerdrTransport {
+  launch(run: Run, _args: string[], cwd: string, sink: RunSink, initialPrompt?: string, core?: PiCoreArgsOptions): HerdrTransport {
     if (!this.options) throw failure("launch requires an explicitly injected CLI");
     const options = this.options;
     const { cli, env, workspaceId } = options;
@@ -59,6 +61,9 @@ export class HerdrRuntime implements RunRuntime {
     const alias = /^[a-z][a-z0-9_-]{0,31}$/.test(run.id) ? run.id : `c${createHash("sha256").update(run.id).digest("hex").slice(0, 16)}`;
     let binding: HerdrBinding | undefined, hello: LaunchHello | undefined, provenPane: unknown;
     let fresh = false, accepted = false, stderr = "", stopWork: Promise<void> | undefined;
+    let tail: HerdrTail | undefined, monitor: HerdrMonitor | undefined;
+    let childExited = false, observing = false, nativeSettled = false;
+    let observation: { launchOffset: number; requestId: string } | undefined;
     let resolveClosed!: () => void;
     const closed = new Promise<void>(resolve => { resolveClosed = resolve; });
     const diagnostic = (message: string) => { stderr = boundStallText(`${stderr}${stderr ? "\n" : ""}${message}`, 4096); };
@@ -70,6 +75,14 @@ export class HerdrRuntime implements RunRuntime {
     const proof = (pane: unknown) => proveChildProcess({ binding: binding && { ...binding, childPid: binding.childPid ?? hello?.pid, childStartTime: binding.childStartTime ?? hello?.pidStartTime }, current: current(), socketPath: cli.socketPath, pane, hello,
       platform: options.platform ?? process.platform, bridgeProtocol: 1, process: hello ? probe(hello.pid) : undefined });
     const getPane = async (signal?: AbortSignal) => (await cli.json(["pane", "get", binding!.paneId], { timeoutMs: 2000, signal })).pane;
+    const finishObservation = () => { tail?.close(); monitor?.close(); };
+    const gone = () => {
+      tail?.drain();
+      childExited = true; resolveClosed();
+      tail?.drain();
+      finishObservation();
+      if (observing && !nativeSettled) sink.gone?.(`herdr: pi exited before settling (pane ${binding?.paneId})`);
+    };
     const readHello = () => {
       try { return readControlRecord(join(dir, "launch", `${nonce}.json`)); }
       catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return; throw failure("invalid launch hello"); }
@@ -101,7 +114,7 @@ export class HerdrRuntime implements RunRuntime {
           }
         }
         if (state.ok || state.state !== "gone") { diagnostic("pane/worktree preserved: child exit unconfirmed"); return; }
-        resolveClosed();
+        gone();
         if (rollback && fresh) {
           const result = await closeEmptyPane(cli, binding, () => current()!, { timeoutMs: 2000 });
           if (!result.ok) diagnostic(`pane/worktree preserved: ${result.reason}`);
@@ -147,7 +160,11 @@ export class HerdrRuntime implements RunRuntime {
       if (run.herdr !== previous) throw failure("launch binding replaced; preserving resources");
       if (run.effort) mkdirSync(join(dir, "tmp"), { recursive: true });
       if (!binding) {
-        binding = await createRunTab(cli, { workspaceId, cwd, invocation, env: buildHerdrEnv(env, { runId: run.id, runDir: dir, configCwd: run.cwd,
+        const workspace = workspaceId ?? (await cli.json(["pane", "get", env.HERDR_PANE_ID!], { timeoutMs: 2000, signal: abort.signal })).pane;
+        const targetWorkspace = typeof workspace === "string" ? workspace : isRecord(workspace) ? workspace.workspace_id : undefined;
+        if (typeof targetWorkspace !== "string") throw failure("parent workspace unavailable");
+        check();
+        binding = await createRunTab(cli, { workspaceId: targetWorkspace, cwd, invocation, env: buildHerdrEnv(env, { runId: run.id, runDir: dir, configCwd: run.cwd,
           ...(run.effort ? { tmpDir: join(dir, "tmp") } : {}) }) }, { timeoutMs: 5000, signal: abort.signal });
         fresh = true;
       }
@@ -228,18 +245,70 @@ export class HerdrRuntime implements RunRuntime {
       if (!finalIdentity.ok && probe(hello.pid).state === "gone") finalIdentity = proof(provenPane);
       if (!finalIdentity.ok && finalIdentity.state !== "gone") throw failure("child identity changed before readiness");
       accepted = true;
-      if (!finalIdentity.ok && finalIdentity.state === "gone") resolveClosed();
+      observation = { launchOffset, requestId: request.requestId };
+      if (!finalIdentity.ok && finalIdentity.state === "gone") { childExited = true; resolveClosed(); }
       return { binding, request, launchOffset };
     }).catch(async (e: unknown) => {
       diagnostic(e instanceof Error && e.message.startsWith("herdr:") ? e.message : "herdr: launch failed");
-      await stopOwned(true); await capture();
+      await stopOwned(true); finishObservation(); await capture();
       throw failure(stderr);
     });
     const stop = async () => {
       abort.abort();
       if (!accepted) { await ready.catch(() => {}); return; }
-      await stopOwned(false);
+      if (childExited) { finishObservation(); return; }
+      await stopOwned(false); finishObservation();
+      if (!childExited) sink.gone?.("herdr: child exit unconfirmed; pane/worktree preserved");
     };
-    return { kind: "herdr", ready, closed, get cancelled() { return abort.signal.aborted; }, get stderr() { return stderr; }, drain: () => "", stop, cancel: stop };
+    const waitForExit = async (): Promise<boolean> => {
+      monitor?.close();
+      if (!accepted || run.herdr !== binding) return false;
+      const end = now() + 10000;
+      while (!childExited && now() < end) {
+        tail?.drain();
+        const state = proof(provenPane);
+        if (!state.ok) { if (state.state === "gone") gone(); break; }
+        await sleep(50);
+      }
+      if (!childExited) await stopOwned(false);
+      tail?.drain(); finishObservation();
+      return childExited;
+    };
+    const observe = () => {
+      if (observing || !accepted || !observation) return;
+      observing = true;
+      let started = false;
+      tail = new HerdrTail({ path: run.transcriptPath, offset: observation.launchOffset, nonce,
+        line: line => {
+          const event = JSON.parse(line);
+          if (!started) {
+            if (event.type !== "agent_start" || event.initialRequestId !== observation!.requestId) return;
+            started = true;
+          }
+          if (event.type === "agent_settled") nativeSettled = true;
+          sink.line(line);
+        }, error: error => { diagnostic(error.message); sink.gone?.(error.message); } });
+      monitor = new HerdrMonitor({ now, active: () => run.herdr === binding && !nativeSettled && !isTerminal(run.status) && run.status !== "integrating" && run.status !== "blocked",
+        probe: () => { const state = proof(provenPane); return state.ok ? "alive" : state.state; },
+        scan: async () => {
+          try {
+            const pane = await getPane();
+            if (run.herdr !== binding || nativeSettled || isTerminal(run.status) || run.status === "integrating" || run.status === "blocked") return;
+            const state = proof(pane);
+            if (state.ok) provenPane = pane;
+            else diagnostic(`pane observation: ${state.reason}; evidence retained`);
+          } catch { diagnostic("pane observation unavailable; evidence retained"); }
+        }, drain: () => tail?.drain(), gone });
+      tail.start();
+      if (childExited) gone(); else if (!nativeSettled) monitor.start();
+    };
+    const releasePane = async () => {
+      if (!childExited || !binding || run.herdr !== binding) return false;
+      const result = await closeEmptyPane(cli, binding, () => current()!, { timeoutMs: 2000 });
+      if (!result.ok) diagnostic(`worktree kept: ${result.reason}`);
+      return result.ok;
+    };
+    return { kind: "herdr", ready, closed, observe, waitForExit, releasePane, get childExited() { return childExited && run.herdr === binding; },
+      get cancelled() { return abort.signal.aborted; }, get stderr() { return stderr; }, drain: () => { tail?.drain(); return ""; }, stop, cancel: stop };
   }
 }

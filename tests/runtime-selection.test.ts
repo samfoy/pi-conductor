@@ -90,14 +90,14 @@ test("H2 config and frontmatter use existing field-level persona precedence; inv
   } finally { rmSync(userConfigPath()); }
 });
 
-for (const queued of [false, true]) test(`H2 unavailable herdr rejects before ${queued ? "queue" : "direct spawn"} or effort/worktree effects`, t => {
+for (const queued of [false, true]) test(`H7 herdr passes runtime selection but invalid effort rejects before ${queued ? "queue" : "direct spawn"} effects`, t => {
   const child = fakeChild(t);
   for (const selection of ["herdr", "auto"] as const) {
     const opts = options({ runtime: selection, runtimeEnv: herdr, worktree: true, effort: "must-not-open", persona: { ...persona, readOnly: false } });
     const queue = new SpawnQueue(opts.registry, 1);
     if (queued) opts.registry.register(run({ status: "running" }));
     const before = existsSync(runsRoot()) ? readdirSync(runsRoot()).sort() : [];
-    assert.throws(() => queued ? queue.enqueueOrSpawn(opts) : spawnRun(opts), /herdr.*unavailable.*subprocess/i);
+    assert.throws(() => queued ? queue.enqueueOrSpawn(opts) : spawnRun(opts), /efforts require a non-bare git repository/);
     assert.equal(child.launches(), 0); assert.equal(queue.size(), 0);
     assert.equal(opts.registry.list().length, queued ? 1 : 0);
     assert.deepEqual(readdirSync(opts.cwd), [], "no effort or worktree created");
@@ -186,9 +186,9 @@ test("H2 tool spawn and every auto step preflight runtime before the queue or ef
   assert.ok(registered.get("ensemble_spawn").parameters.properties.runtime);
   assert.ok(registered.get("ensemble_auto").parameters.properties.steps.items.properties.runtime);
   const spawn = await registered.get("ensemble_spawn").execute("s", { persona: "builder", task: "probe", effort: "no-open", foreground: false });
-  assert.match(spawn.content[0].text, /herdr.*unavailable/i);
-  const auto = await registered.get("ensemble_auto").execute("a", { goal: "probe", max_steps: 2, steps: [{ persona: "inspector", task: "first", runtime: "subprocess" }, { persona: "inspector", task: "second" }] });
-  assert.equal(auto.details.status, "halted"); assert.match(auto.details.haltReason, /herdr.*unavailable/i);
+  assert.match(spawn.content[0].text, /efforts require a non-bare git repository/);
+  const auto = await registered.get("ensemble_auto").execute("a", { goal: "probe", max_steps: 2, steps: [{ persona: "inspector", task: "first", runtime: "subprocess" }, { persona: "inspector", task: "second", runtime: "future" }] });
+  assert.equal(auto.details.status, "halted"); assert.match(auto.details.haltReason, /runtime/);
   assert.equal(child.launches(), 0); assert.equal(queue.size(), 0); assert.deepEqual(opts.registry.list(), []); assert.deepEqual(readdirSync(opts.cwd), []);
 });
 
@@ -200,7 +200,7 @@ test("H2 doctor reports configured/effective/source and legacy runtime without p
   mkdirSync(join(opts.cwd, ".pi")); writeFileSync(join(opts.cwd, ".pi/conductor.json"), JSON.stringify({ personaOverrides: { inspector: { onCompleteHook: "echo checked" } } }));
   const report = await buildDoctorReport({ cwd: opts.cwd, registry: opts.registry, queue: new SpawnQueue(opts.registry, 1), conductorMode: false, env: herdr });
   assert.equal(effects, 0, "doctor checks must not launch processes");
-  assert.match(report, /configured.*auto/); assert.match(report, /inspector.*herdr.*auto.*unavailable/i); assert.match(report, /legacy.*subprocess/i);
+  assert.match(report, /configured.*auto/); assert.match(report, /inspector.*herdr.*auto/i); assert.doesNotMatch(report, /inspector.*herdr.*unavailable/i); assert.match(report, /legacy.*subprocess/i);
 });
 
 
@@ -241,7 +241,7 @@ test("H2 retry preserves concrete selection; fresh chains resolve current succes
   writeFileSync(join(cwd, ".pi/conductor.json"), '{"runtime":"subprocess"}');
   await chain(run({ cwd, runtime: "herdr" })); assert.equal(calls.pop()!.runtime, "subprocess", "fresh successor resolves current config, not parent backend");
   writeFileSync(join(cwd, ".pi/conductor.json"), '{"runtime":"herdr"}');
-  await chain(run({ cwd, runtime: "subprocess" })); assert.equal(calls.length, 0, "unsupported successor creates no failed Run or queue entry");
+  await chain(run({ cwd, runtime: "subprocess" })); assert.equal(calls.pop()!.runtime, "herdr", "H7 fresh successor can select the herdr backend");
   assert.deepEqual(registry.list(), []);
 });
 
@@ -282,7 +282,7 @@ test("H2 refused chain successors retain runtime metadata and cannot create unav
   const failed = failBeforeSpawn({ ...opts, runtime: "subprocess" }, "kept parent branch");
   assert.equal(failed.runtime, "subprocess"); assert.equal(toRunRecord(failed).runtime, "subprocess");
   const before = opts.registry.list().length;
-  assert.throws(() => failBeforeSpawn({ ...opts, runtime: "herdr", runtimeEnv: herdr }, "kept parent branch"), /herdr.*unavailable/);
+  assert.throws(() => failBeforeSpawn({ ...opts, runtime: "herdr", runtimeEnv: {} }, "kept parent branch"), /HERDR_ENV/);
   assert.equal(opts.registry.list().length, before);
 });
 

@@ -93,6 +93,15 @@ export function createRunPipeline(
       clearTimeout(run.timeoutTimer);
       run.timeoutTimer = undefined;
     }
+    if (transport.kind === "herdr") {
+      const exited = await transport.waitForExit();
+      if (!exited) {
+        run.errorMessage = "herdr: child exit unconfirmed; pane/worktree preserved";
+        if (awaitingAnswer && !isTerminal(run.status)) { await restoreAnswer(run.errorMessage); donePromiseResolve(run); return; }
+        await settle("failed", 1);
+        return;
+      }
+    }
     const rest = transport.drain();
     if (rest.trim()) processLine(rest);
     if (opts.answer) await answerRecord;
@@ -134,7 +143,7 @@ export function createRunPipeline(
       terminal = "failed";
       run.errorMessage = "Owner question cannot be resumed: session missing, retired, or subprocess failed. Use a fresh child with the transcript.";
     }
-    if (run.effort) {
+    if (run.effort && transport.kind === "subprocess") {
       try { transport.stop(); } catch { /* already exited */ }
       const escalation = setTimeout(() => { try { transport.stop("SIGKILL"); } catch { /* already exited */ } }, 2000);
       await transport.closed;
@@ -227,7 +236,7 @@ export function createRunPipeline(
     if (!trimmed) return;
 
     // Append every parseable JSON line to the transcript (fire-and-forget I/O).
-    void appendFile(run.transcriptPath, line + "\n").catch(() => {});
+    if (run.runtime !== "herdr") void appendFile(run.transcriptPath, line + "\n").catch(() => {});
 
     let event: any;
     try {
@@ -238,7 +247,7 @@ export function createRunPipeline(
 
     opts.onEvent?.(run, event);
 
-    if (!finalized && awaitingAnswer && ((!rpc && event.type === "agent_start") ||
+    if (run.runtime !== "herdr" && !finalized && awaitingAnswer && ((!rpc && event.type === "agent_start") ||
         (rpc && event.type === "response" && event.command === "prompt" && event.id === `init-${run.id}` && event.success === true))) {
       // Pi 0.87.1 emits agent_start only after print prompt preflight; RPC has an explicit ack.
       awaitingAnswer = false;
@@ -282,6 +291,11 @@ export function createRunPipeline(
   try {
     transport = runtime.launch(run, piArgs, opts.cwd, {
       line: line => receive(() => processLine(line)),
+      gone: reason => receive(() => {
+        if (finalized) return;
+        run.errorMessage = reason;
+        void finalize("failed", 1);
+      }),
       close: code => receive(() => {
         if (finalized) return;
         if ((code ?? 0) === 0) void finalize("completed", 0);
@@ -344,6 +358,7 @@ export function createRunPipeline(
         answerRecord = answerRecord.then(() => writeRecord(run));
         await answerRecord;
       }
+      launch.observe();
     }, launchFailed);
     if (awaitingAnswer) run.rejectAnswerDelivery = reason => {
       void launch.cancel().then(() => launchFailed(new Error(reason)));

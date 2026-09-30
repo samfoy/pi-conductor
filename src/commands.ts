@@ -37,6 +37,7 @@ import {
   modelRegistryPredicate,
   pauseRun,
   releaseWorktree,
+  herdrChildGone,
   resumeRun,
   runDir,
   runsRoot,
@@ -61,7 +62,7 @@ import { runGc, type RunGcResult } from "./gc/index.ts";
 import { walkInventory } from "./gc/inventory.ts";
 import { planReclaim, type ReclaimAction } from "./gc/policy.ts";
 import { classifyStall, resolveKillOnStall } from "./watchdog.ts";
-import { worktreeSpecFromRun, mergeWorktree, buildMergeCommitMessage } from "./worktree.ts";
+import { mergeWorktree, buildMergeCommitMessage } from "./worktree.ts";
 import { isTerminal } from "./types.ts";
 import { formatCwdInfo, type CwdController } from "./conductor-cwd.ts";
 
@@ -1387,6 +1388,10 @@ export async function runWorktreeCmd(
         return;
       }
 
+      if (!await herdrChildGone(run)) {
+        ctx.ui.notify(run.worktreeKept!, "warning");
+        return;
+      }
       const gitRoot = dirname(dirname(dirname(run.worktreePath)));
       const baseBranch = run.worktreeBaseBranch ?? "master";
       const strategy = (run.mergeStrategy && run.mergeStrategy !== "none")
@@ -1410,7 +1415,7 @@ export async function runWorktreeCmd(
           run.errorMessage = undefined;
           run.worktreeKept = undefined;
           // Same removal as finalize's auto-merge, so the worktree doesn't leak.
-          releaseWorktree(run, { keepBranch: false });
+          await releaseWorktree(run, { keepBranch: false });
           ctx.ui.notify(
             `✔ Merged ${run.id} → ${baseBranch}. Run is now completed.` +
               (run.worktreeKept ? `\n${run.worktreeKept}` : ""),
@@ -1448,15 +1453,8 @@ export async function runWorktreeCmd(
       }
       let cleaned = 0;
       for (const r of toClean) {
-        const spec = worktreeSpecFromRun(r);
-        if (!spec) continue;
-        const { removeWorktree } = await import("./worktree.ts");
-        const removed = removeWorktree(spec);
-        if (removed) {
-          r.worktreePath = undefined;
-          r.worktreeBranch = undefined;
-          cleaned++;
-        }
+        await releaseWorktree(r, { keepBranch: false });
+        if (!r.worktreePath) cleaned++;
       }
       ctx.ui.notify(
         `Cleaned ${cleaned} worktree${cleaned !== 1 ? "s" : ""}.`,

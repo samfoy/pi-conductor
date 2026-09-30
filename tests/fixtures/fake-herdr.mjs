@@ -28,8 +28,28 @@ else if (args[0] === "tab" && args[1] === "create") {
   state.pane = {...state.pane, cwd: flag("--cwd"), workspace_id: flag("--workspace")};
   state.tab = {tab_id: state.pane.tab_id, workspace_id: state.pane.workspace_id, label: flag("--label"), number: 1, focused: false, pane_count: 1, agent_status: "unknown"};
   save(); output({type: "tab_created", root_pane: state.pane, tab: state.tab});
-} else if (args[0] === "pane" && args[1] === "get") output({type: "pane_info", pane: state.getPane ?? state.pane});
+} else if (args[0] === "pane" && args[1] === "get") {
+  if (state.childPid && state.pane.agent) {
+    try { process.kill(state.childPid, 0); } catch (e) {
+      if (e.code === "ESRCH") { state.pane.agent = null; state.pane.agent_session = null; save(); }
+    }
+  }
+  output({type: "pane_info", pane: state.getPane ?? state.pane});
+}
 else if (args[0] === "agent" && args[1] === "start") {
+  if (state.childPid) {
+    const sessionFile = args[args.indexOf("--session") + 1];
+    state.sessionFile = sessionFile;
+    const { dirname } = await import("node:path");
+    writeFileSync(state.manifest, JSON.stringify({ runDir: dirname(dirname(sessionFile)), mode: state.mode }));
+    const { existsSync } = await import("node:fs");
+    const { setTimeout: delay } = await import("node:timers/promises");
+    const end = Date.now() + 10000;
+    while (!existsSync(`${state.manifest}.ready`)) {
+      if (Date.now() > end) process.exit(94);
+      await delay(10);
+    }
+  }
   state.pane.agent = "pi";
   state.pane.agent_session = {kind: "path", value: state.sessionFile, source: "integration", agent: "pi"};
   save(); output({type: "agent_started", agent: {...state.pane, name: args[2], interactive_ready: true}, argv: args.slice(args.indexOf("--") + 1)});

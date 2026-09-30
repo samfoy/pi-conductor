@@ -783,6 +783,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts, env: Runti
 
       // Wire abort signal to cancel a running sub-agent.
       const result = queue.enqueueOrSpawn({
+        runtimeEnv: env,
         runtime,
         effort: params.effort,
         touches: params.touches,

@@ -79,6 +79,8 @@ export const PROBES: readonly Probe[] = [
   {
     cls: "environment",
     test: has(
+      "herdr: pi exited before settling",
+      "herdr: child exit unconfirmed",
       "command not found",
       "no such file or directory",
       "enoent",

@@ -5,7 +5,7 @@
  * ExtensionCommandContext.notify pipe.
  */
 
-import { resolveRuntime, unsupportedRuntimeReason, type RuntimeEnvironment } from "./runtime.ts";
+import { resolveRuntime, type RuntimeEnvironment } from "./runtime.ts";
 import { existsSync, accessSync, constants } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -377,7 +377,7 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
   for (const p of resolved.personas.values()) {
     const selected = resolveRuntime({ persona: p.runtime, project: project.runtime, user: user.runtime, env: opts.env ?? process.env });
     lines.push(selected.ok
-      ? `  ${p.name}: ${selected.kind} [${selected.source}]${unsupportedRuntimeReason(selected.kind) ? " — unavailable; use runtime: subprocess" : ""}`
+      ? `  ${p.name}: ${selected.kind} [${selected.source}]`
       : `  ${p.name}: ${selected.reason}`);
   }
   for (const r of opts.registry.list()) lines.push(`  ${r.id}: saved=${r.runtime === undefined ? "subprocess (legacy)" : r.runtime}`);

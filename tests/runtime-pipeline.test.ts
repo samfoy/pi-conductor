@@ -126,7 +126,7 @@ for (const scenario of ["rejected", "late-ready-cancelled", "user-kill"]) test(`
   let resolve!: (value: never) => void, reject!: (error: Error) => void;
   const ready = new Promise<never>((res, rej) => { resolve = res; reject = rej; });
   const runtime = new HerdrRuntime();
-  const transport = { kind: "herdr" as const, ready, closed: new Promise<void>(() => {}), stderr: "herdr: pane/worktree preserved: no proven child hello", drain: () => "", get cancelled() { return cancelled; },
+  const transport = { observe() {}, childExited: false, async waitForExit() { return false; }, async releasePane() { return false; }, kind: "herdr" as const, ready, closed: new Promise<void>(() => {}), stderr: "herdr: pane/worktree preserved: no proven child hello", drain: () => "", get cancelled() { return cancelled; },
     async cancel() { cancelled = true; resolve(undefined as never); }, async stop() { await this.cancel(); } };
   t.mock.method(runtime, "launch", () => transport);
   const done = createRunPipeline(run, [], { registry, runtime, cwd, steerable: false, timeoutMs: 4000, answer: { ask, cwd }, onComplete: () => completed++ });

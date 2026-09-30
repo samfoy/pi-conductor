@@ -1,5 +1,6 @@
 import { subprocessRuntime } from "./subprocess-runtime.ts";
 import { HerdrRuntime } from "./herdr/runtime.ts";
+import { createHerdrCli } from "./herdr/cli.ts";
 import type { ChildProcess } from "node:child_process";
 import type { Run } from "./types.ts";
 import type { PiCoreArgsOptions } from "./runs.ts";
@@ -48,6 +49,7 @@ export interface RunSink {
   close(code: number | null): void;
   error(): void;
   initialDeliveryFailed(error: Error): void;
+  gone?(reason: string): void;
 }
 
 interface TransportLifecycle {
@@ -65,6 +67,10 @@ export interface HerdrTransport extends TransportLifecycle {
   readonly cancelled: boolean;
   readonly ready: Promise<{ binding: HerdrBinding; request: InboxRequest; launchOffset: number }>;
   cancel(): Promise<void>;
+  observe(): void;
+  readonly childExited: boolean;
+  waitForExit(): Promise<boolean>;
+  releasePane(): Promise<boolean>;
 }
 export type RunTransport = SubprocessTransport | HerdrTransport;
 
@@ -87,9 +93,12 @@ export function isObservableHere(run: Run): boolean {
   return run.proc !== undefined;
 }
 
-/** Recorded-backend effects only; the H2 public-launch gate remains unchanged. */
-export function runtimeFor(run: Run): RunRuntime {
-  if (run.runtime === "herdr") return new HerdrRuntime();
+/** Recorded backend selects effects. Only a fresh spawn supplies launch routing. */
+export function runtimeFor(run: Run, env?: RuntimeEnvironment): RunRuntime {
+  if (run.runtime === "herdr") return new HerdrRuntime(env ? {
+    cli: createHerdrCli({ env: { ...env }, socketPath: env.HERDR_SOCKET_PATH! }),
+    workspaceId: env.HERDR_WORKSPACE_ID, env: { ...env },
+  } : undefined);
   assertSupportedRuntime(run.runtime);
   return subprocessRuntime;
 }
