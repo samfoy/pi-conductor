@@ -42,7 +42,7 @@ pi-conductor closes that gap. The parent pi session is the conductor, sub-agents
 - **Per-spawn `cwd`** on `ensemble_spawn` and on each `ensemble_auto` step sets where the sub-agent runs and where personas, config, and the git root for `worktree: true` isolation resolve. `~` and relative paths resolve against the conductor's default cwd; a missing directory is rejected before any run starts. `ensemble_send` resumes and chain successors keep the original run's cwd. A chain successor gets the same worktree decision as `ensemble_spawn`, branching from the current HEAD; a write-capable successor after a parent whose branch was kept unmerged fails instead of starting without that work.
 - **Conductor default cwd.** pi can't change a session's cwd, so the conductor keeps its own: `/conductor cwd [<path>|--reset]` or the `ensemble_cwd` tool (`{ path?, reset? }`) sets or clears an override for later spawns. With no argument, both report the effective cwd and its source. The override is saved as a `conductor-cwd` session entry, so it survives `/reload` and resume.
 
-### Runtime selection, herdr controls and recovery (H10; not rolled out)
+### Runtime selection, herdr controls and recovery (H11 automated acceptance; not rolled out)
 
 `runtime: "auto" | "subprocess" | "herdr"` is accepted on `ensemble_spawn`,
 each `ensemble_auto` step, persona frontmatter, and config (top-level or
@@ -54,9 +54,10 @@ field-level project-over-user merge, above frontmatter.
 `HERDR_PANE_ID` are nonempty; otherwise it selects subprocess. Explicit herdr
 outside that environment fails without silent fallback. H7/H8 implement managed
 pane launch, observation, live inbox controls and saved-session relaunch. This is
-**fake-CLI and offline native Pi 0.87.1 evidence, not real-herdr/TUI acceptance or
-a live rollout**. Global Pi 0.99.1 remains unchanged and is not parity-certified.
-Keep using **`runtime: "subprocess"`** until the later acceptance/rollout gates.
+backed by fake-CLI and offline native Pi 0.87.1 tests plus the H11 automated
+real-herdr matrix below (herdr 0.9.1 with Pi 0.87.1 and 0.99.1). That is **not a
+rollout**: independent review and human TUI acceptance are still outstanding. Keep
+using **`runtime: "subprocess"`** until then.
 
 For an owned, attached, ready and running herdr child, `steer`/`follow_up` use
 the nonce inbox; automatic turn-limit grace uses steer delivery. No RPC mode or
@@ -128,43 +129,68 @@ A5's automatic large-prompt RPC both remain subprocess, and automatic RPC does
 not grant steering. A6 answers and M5 integration verification retain their existing
 subprocess semantics; verification commands are independent of the agent selector.
 
-### Isolated real-herdr acceptance (H11; blocked, not rolled out)
+### Isolated real-herdr acceptance (H11; automated only, not rolled out)
 
 `tests/herdr-live.test.ts` is opt-in. With `CONDUCTOR_LIVE_TESTS=1` and
 `CONDUCTOR_H11_PI_ROOTS=<pi-coding-agent root>[:<root>...]` it starts one uniquely
-named private `herdr --session conductor-h11-<id> server` per listed Pi root, with a
-temporary HOME/XDG/agent directory, `/bin/sh` non-login panes, an offline faux model
-and no credentials. The harness refuses inherited `HERDR_*` targets and name
-collisions, proves the socket is held by its own server before every control and
-cleanup call, stops only that session, waits for every captured process, and
-preserves evidence (failing the test) if teardown is incomplete. The default suite
-runs only its fake-effect guard tests.
+named private `herdr --session conductor-h11-<id> server` per listed Pi root. Each
+server gets a temporary HOME/XDG/agent directory, `/bin/sh` non-login panes, the
+package's declared `pi` bin entry, an offline faux model and no credentials. The
+harness refuses inherited `HERDR_*` targets and name collisions, and proves the
+socket is held by its own server before every control and cleanup call. It stops
+only that session, waits for every captured process, and preserves evidence (and
+fails) if teardown is incomplete. `CONDUCTOR_H11_ALT_PI_ROOT` names the Pi used for
+the version-mismatch lead. The default suite runs only the fake-effect guard tests.
 
-Measured against herdr 0.9.1 with interactive Pi 0.87.1 and 0.99.1 as the pane
-child (conductor's own `@earendil-works/pi-coding-agent` imports still resolve to
-the package's installed copy, so the child hello reports that copy's version, not
-the host Pi's):
+**Launch contract, per real herdr 0.9.1.** `agent start` succeeds only for an idle
+agent, and herdr keeps an exited agent's name on its terminal. So conductor writes
+the task durably but out of the pump's view (`inbox/<nonce>/<seq>-<id>.prepared.json`)
+and publishes it only after `agent start` returned and the child's hello and identity
+are proven. It still requires ack plus a correlated native `agent_start`. If the
+launch fails before publication, the prepared task and any pending owner question
+stay, and the task is not retried or replayed. Every launch uses a fresh physical
+agent name (`<run>-<8 hex of the nonce>`), stored as `herdr.agentName`. The logical
+run id and Pi session stay the same, and stall reads use only the current name.
 
-- **Works:** proof-backed kill (child only, shell and scrollback kept); lead
-  `/reload` and lead crash with a fresh lead reattaching the held child and
-  publishing one completion; herdr's omission of absent optional pane agent fields
-  (fixed in `src/herdr/identity.ts`).
-- **Blocks rollout:** `herdr agent start` succeeds only when the started agent is
-  idle. The child begins its inbox task at startup, so a working child times out
-  after 60 s and a fast child exits first; the launch fails and the alias is never
-  registered. Herdr also keeps an exited agent's name on its terminal, so a
-  same-pane relaunch (owner reply, resume) fails with `agent_name_taken`. Spawn,
-  live controls, owner answers and resume are therefore not usable on real herdr.
-  Resolving either needs a launch-handshake decision; none is shipped.
-- **Unverified:** context retirement (the fixture did not trigger Pi's threshold
-  compaction in either runtime), effort writers on herdr, and human TUI use:
-  regular-mode scrollback, foreground Esc-detach and Ctrl+G, Esc in a child and
-  resume, trust-prompt refusal, and the dialog card. Delivery remains at most
-  once; one observed notification per run is evidence, not an exactly-once
-  guarantee.
+**Automated results, herdr 0.9.1, Pi 0.87.1 and 0.99.1, the same on both:**
 
-Prior art: pi-herdsman's herdr-pane sub-agents informed these ideas; no
-herdsman code is copied.
+| Scenario | Result |
+|---|---|
+| spawn → stream → `agent_settled` → child exit → shell scrollback | pass |
+| semantic parity (final text, usage, assistant content) with a subprocess faux run | pass |
+| live steer then follow-up: input accepted, then executed in order | pass |
+| owner ask → child exits → reply relaunches the same session in the proven pane, fresh alias | pass |
+| kill signals only the proven child; pane shell and scrollback kept | pass |
+| own idle pane closed by hand, then resume in a new tab | pass |
+| native automatic (threshold) compaction retires the context under exit-at-settle; later send refused | pass |
+| lead `/reload` fences the old owner; one completion | pass |
+| lead SIGKILL; a fresh lead takes over and settles once | pass |
+| effort writer: persona hook → generated-artifact regeneration → repository hook → verify → CAS | pass |
+| effort writer survives a lead SIGKILL; the fresh lead integrates it once | pass |
+| restarts keep a requested kill as killed and keep every run's pane | pass |
+| lead on the other Pi version: mismatch persisted and shown on the completion card | pass |
+
+The child hello's `piVersion` is the executing host Pi, taken from host module
+identity or the package's declared CLI entry, otherwise `unknown`. Conductor's own
+import (0.84.3 from its package `node_modules` in these runs) is reported separately
+as `piLibraryVersion`. A lead/child difference is persisted as `herdr.versionWarning`
+and appears as a `<warning reason="pi-version">`. An unprovable version reads as
+"unverified", never as a match.
+
+**Limits:**
+- Delivery is at most once. One observed notification per run is evidence, not an
+  exactly-once guarantee.
+- The retirement run exercised threshold compaction (A2 cancels it). Overflow
+  compaction was not reached.
+- Completed and failed herdr records are still re-adopted and re-finalized on every
+  lead restart. The ledger stopped any duplicate notification, but each restart does
+  that CLI work again.
+- **Human TUI acceptance is unverified.** Nobody has looked at regular-mode
+  scrollback, foreground Esc-detach and Ctrl+G, Esc in a child followed by resume,
+  trust-prompt refusal, or the dialog card.
+
+Prior art: pi-herdsman's herdr-pane sub-agents informed these ideas; no herdsman
+code is copied.
 
 ### Available actions (Phase A A3)
 
@@ -772,9 +798,10 @@ hooks and worktree safety still apply. Settlement uses Pi's `agent_settled` even
 (JSON and RPC), not `agent_end`, which can precede overflow recovery; process exit
 is the fallback. Supported host: **Pi 0.87.1 or newer** (`@earendil-works/pi-coding-agent >=0.87.1`);
 0.87.1 is the verified floor for the required `agent_settled` API.
-Phase A **A2–A6** and H7–H10 are implemented. Herdr real-TUI acceptance and rollout
-remain H11/later gates; see the runtime section. Offline recovery tests use executable
-fake herdr and the approved native Pi 0.87.1 harness, never personal panes.
+Phase A **A2–A6** and H7–H11 are implemented. H11 automated real-herdr acceptance
+passes in private sessions. Human TUI acceptance and rollout are still open; see the
+runtime section. Offline recovery tests use executable fake herdr and the approved
+native Pi 0.87.1 harness, never personal panes.
 
 `~/.pi/agent/extensions/conductor/config.json` (user) or `<project>/.pi/conductor.json` (project, overrides user):
 
