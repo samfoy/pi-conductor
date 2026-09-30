@@ -74,6 +74,7 @@ import { TERMINAL_STATUSES, emptyUsage } from "./types.ts";
  *    GC path owns these; reconcile is a no-op.
  */
 export type ClassifyResult =
+  | "readopt-herdr"
   | "readopt"
   | "reclassify-killed"
   | "reclassify-failed-queued"
@@ -136,7 +137,13 @@ export function classifyRecord(
     startTime,
   ) => defaultParentLivenessProbe(pid, startTime),
   selfSessionId: string | undefined = undefined,
+  herdrProbe: "alive" | "settled" | "gone" | "unknown" | "other-socket" = "unknown",
 ): ClassifyResult {
+  if (record.runtime === "herdr") {
+    if (herdrProbe === "other-socket" || herdrProbe === "unknown") return "skip-foreign";
+    if (record.status === "integrating" || (record.effort && record.integration)) return "restore-integrating";
+    return "readopt-herdr";
+  }
   if (unsupportedRuntimeReason(record.runtime)) return "skip-unsupported-runtime";
   const status = record.status;
 
@@ -326,6 +333,9 @@ export interface RegistryLike {
 
 /** Dependencies for `reconcileOrphansAtStartup`. All injectable for tests. */
 export interface PostStartupReconcileDeps {
+  herdrProbe?: (record: RunRecord) => Promise<"alive" | "settled" | "gone" | "unknown" | "other-socket">;
+  attachHerdr?: (record: RunRecord) => void | Promise<void>;
+  admit?: () => boolean;
   /** Root containing per-run dirs (e.g. `~/.pi/agent/conductor/runs`). */
   runsRoot: string;
   /** Registry to mutate. */
@@ -501,6 +511,9 @@ export async function reconcileOrphansAtStartup(
         continue;
       }
 
+      if (record.runtime === "herdr" && deps.admit && !deps.admit()) continue;
+      const herdrProbe = record.runtime === "herdr" ? await deps.herdrProbe?.(record) : undefined;
+      if (record.runtime === "herdr" && deps.admit && !deps.admit()) continue;
       const verdict = classifyRecord(
         record,
         deps.isAlive,
@@ -508,10 +521,17 @@ export async function reconcileOrphansAtStartup(
         deps.selfPid ?? process.pid,
         deps.isParentAlive ?? defaultParentLivenessProbe,
         deps.selfSessionId,
+        herdrProbe,
       );
       const dryRun = deps.dryRun === true;
 
       switch (verdict) {
+        case "readopt-herdr":
+          if (!deps.attachHerdr) { result.errors.push({ id, message: "herdr attachment unavailable; preserved" }); break; }
+          if (record.id !== id || record.recordPath !== recordPath || record.transcriptPath !== join(deps.runsRoot, id, "transcript.jsonl") || record.finalPath !== join(deps.runsRoot, id, "final.md")) throw new Error("noncanonical herdr run record");
+          if (!dryRun) await deps.attachHerdr(record);
+          result.readopted.push(id);
+          break;
         case "skip-unsupported-runtime":
           result.errors.push({ id: record.id, message: unsupportedRuntimeReason(record.runtime)! });
           break;
@@ -671,6 +691,7 @@ export function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
     id: record.id,
     runtime: record.runtime === undefined ? "subprocess" : record.runtime,
     herdr: record.herdr,
+    herdrUsageBaseline: record.herdrUsageBaseline,
     persona: record.persona,
     task: record.task,
     model: record.model,

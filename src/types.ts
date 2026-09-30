@@ -542,9 +542,16 @@ export interface RunIntegration {
 
 export interface Run {
   transport?: import("./runtime.ts").RunTransport;
+  herdrOwnership?: import("./herdr/ownership.ts").HerdrOwnership;
+  herdrPipeline?: { suspend(): void; quiesce(): Promise<void> };
+  herdrShutdown?: Promise<void>;
+  herdrDelivery?: Promise<void>;
+  herdrEffortAuthorized?: boolean;
+  herdrResumeSettlement?: () => void;
   /** Concrete backend, fixed at acceptance. Missing legacy tags mean subprocess. */
   readonly runtime?: import("./runtime.ts").RuntimeKind;
   herdr?: import("./herdr/identity.ts").HerdrBinding;
+  herdrUsageBaseline?: { launchNonce: string; usage: Usage };
   waitReason?: string;
   /** Owned integration effects; never restored from a saved record. */
   integrationControl?: { cancel(): void; suspend(): Promise<void> };
@@ -1020,6 +1027,7 @@ export interface RunRecord {
   /** Concrete backend, fixed at acceptance. Missing legacy tags mean subprocess. */
   readonly runtime?: import("./runtime.ts").RuntimeKind;
   herdr?: import("./herdr/identity.ts").HerdrBinding;
+  herdrUsageBaseline?: { launchNonce: string; usage: Usage };
   effort?: RunEffort;
   integration?: RunIntegration;
   landedCommit?: string;
@@ -1203,6 +1211,7 @@ export function toRunRecord(r: Run): RunRecord {
     excludeTools: r.excludeTools,
     runtime: r.runtime === undefined ? "subprocess" : r.runtime,
     herdr: r.herdr,
+    herdrUsageBaseline: r.herdrUsageBaseline,
     steerable: r.steerable,
     streamingMode: r.streamingMode,
     hookResult: r.hookResult,

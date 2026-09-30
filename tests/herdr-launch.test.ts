@@ -141,7 +141,8 @@ test("H6 persisted binding roundtrips without process/transport adoption", async
   assert.deepEqual(record.herdr, h.run.herdr); assert.equal(record.transport, undefined); assert.equal(record.pid, undefined);
   const restored = buildOrphanRun(record, "running"); assert.deepEqual(restored.herdr, h.run.herdr);
   assert.equal(restored.proc, undefined); assert.equal(restored.transport, undefined);
-  assert.match(unsupportedRuntimeReason(restored.runtime)!, /unavailable/);
+  assert.equal(unsupportedRuntimeReason(restored.runtime), undefined);
+  assert.equal(restored.herdrOwnership, undefined, "record alone does not confer stream ownership");
   await transport.stop();
 });
 

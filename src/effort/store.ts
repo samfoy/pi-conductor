@@ -98,7 +98,7 @@ export function adoptEffort(record: EffortRecord, identity: EffortOwner): Effort
   return updated;
 }
 /** Link publishes complete fsynced bytes create-only, unlike writing directly into a wx claim. */
-function publishJson(path: string, value: unknown, fence: () => void): void {
+export function publishJson(path: string, value: unknown, fence: () => void): void {
   mkdirSync(dirname(path), { recursive: true });
   const temp = `${path}-${randomUUID()}.claim`;
   try {

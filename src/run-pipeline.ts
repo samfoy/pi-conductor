@@ -1,3 +1,5 @@
+import { assertHerdrOwner, ownsHerdrRun, herdrEffectFence } from "./herdr/ownership.ts";
+import { emptyUsage } from "./types.ts";
 import { measureEffortFootprint } from "./effort/admit.ts";
 import { effortGit } from "./effort/open.ts";
 import { assertRunEffortOwner, readEffort } from "./effort/store.ts";
@@ -20,6 +22,7 @@ import {
 
 export interface RunPipelineOpts {
   registry: RunRegistry;
+  reattach?: boolean;
   runtime?: RunRuntime;
   /** Invoked once per parsed event, before state application, including the decoded tail. */
   onEvent?: (run: Run, event: unknown) => void;
@@ -45,20 +48,32 @@ export function createRunPipeline(
   piArgs: string[],
   opts: RunPipelineOpts,
 ): Promise<Run> {
+  if (opts.reattach && run.integration) throw new Error("durable integration belongs to M5 recovery, not stream attachment");
+  if (run.runtime === "herdr" && !opts.registry.herdrAdmissionOpen) throw new Error("herdr runtime shutting down; launch/attach refused");
   const runtime = opts.runtime ?? runtimeFor(run);
   if (run.runtime === "herdr") run.herdrResultUnavailable = true;
+  if (opts.reattach) {
+    run.messages = []; run.usage = { ...(run.herdrUsageBaseline?.launchNonce === run.herdr?.launchNonce ? run.herdrUsageBaseline!.usage : emptyUsage()) };
+    run.herdrEffortAuthorized = !run.effort;
+  }
   const messageOffset = run.messages.length;
+  let suspended = false;
+  let pipeline: Run["herdrPipeline"];
+  let finalizing: Promise<void> | undefined;
+  const current = () => run.runtime !== "herdr" || (!suspended && (!pipeline || run.herdrPipeline === pipeline) && opts.registry.get(run.id) === run && ownsHerdrRun(run));
+  const check = () => { if (!current()) throw new Error("herdr pipeline fenced"); };
 
   // The argv builder owns transport selection; steering remains an independent opt-in.
   const rpc = piArgs[1] === "rpc";
   run.onComplete = opts.onComplete;
   const recoveredAnswer = !!opts.answer && !!run.reconciledAtStartup && !!run.effort && run.effort.gate !== undefined;
-  if (run.effort && (!run.reconciledAtStartup || run.effort.gate !== undefined)) run.effort.gate = opts.resolvedHook ?? null;
+  if (!opts.reattach && run.effort && (!run.reconciledAtStartup || run.effort.gate !== undefined)) run.effort.gate = opts.resolvedHook ?? null;
 
   let awaitingAnswer = opts.answer !== undefined;
   let answerRecord = Promise.resolve();
   const restoreAnswer = async (reason: string): Promise<Run> => {
     await answerRecord;
+    check();
     if (isTerminal(run.status)) return run;
     run.rejectAnswerDelivery = undefined;
     run.pendingAsk = opts.answer!.ask;
@@ -82,7 +97,19 @@ export function createRunPipeline(
     donePromiseResolve = resolve;
   });
 
-  const finalize = async (terminal: RunStatus, exitCode?: number) => {
+  const finalize = (terminal: RunStatus, exitCode?: number) => {
+    if (!current() || finalized) return;
+    if (opts.reattach && run.effort && !run.herdrEffortAuthorized) {
+      run.herdrResumeSettlement = () => { run.herdrResumeSettlement = undefined; finalize(terminal, exitCode); };
+      return;
+    }
+    finalizing = finalizeEffects(terminal, exitCode).catch(error => {
+      if (!current()) return;
+      run.errorMessage = `herdr settlement preserved: ${(error as Error).message}`;
+      opts.registry.notify(run);
+    });
+  };
+  const finalizeEffects = async (terminal: RunStatus, exitCode?: number) => {
     if (finalized) return;
     finalized = true;
     run.rpcStdinQueue?.destroy("settled");
@@ -97,6 +124,7 @@ export function createRunPipeline(
     }
     if (transport.kind === "herdr") {
       const exited = await transport.waitForExit();
+      check();
       if (!exited) {
         run.herdrExitUnconfirmed = true;
         run.errorMessage = "herdr: child exit unconfirmed; pane/worktree preserved";
@@ -110,6 +138,7 @@ export function createRunPipeline(
     if (rest.trim()) processLine(rest);
     if (transport.kind === "herdr") run.herdrResultUnavailable = !getFinalText(run.messages.slice(messageOffset)) || undefined;
     if (opts.answer) await answerRecord;
+    check();
     discoverSessionPathIfMissing(run, opts.sessionDir);
     discoverContextRetirement(run, opts.sessionDir);
     if ((awaitingAnswer || run.pendingAsk) && !isTerminal(run.status)) {
@@ -117,6 +146,7 @@ export function createRunPipeline(
         try { transport.stop(); } catch { /* already exited */ }
         const killFallback = setTimeout(() => { try { transport.stop("SIGKILL"); } catch { /* already exited */ } }, 2000);
         await transport.closed;
+        check();
         clearTimeout(killFallback);
         // A user kill during teardown abandons the ask and owns its notification.
         if (isTerminal(run.status)) { donePromiseResolve(run); return; }
@@ -139,8 +169,10 @@ export function createRunPipeline(
         run.pid = undefined;
         run.failureClass = undefined;
         await writeRecord(run);
+        check();
         opts.registry.notify(run);
-        try { opts.onComplete?.(run); } catch { /* listener errors cannot wedge settlement */ }
+        if (run.runtime === "herdr" && !run.effort) await dispatchHerdrSettlement(run, () => opts.onComplete?.(run));
+        else if (!opts.reattach) { try { opts.onComplete?.(run); } catch { /* listener errors cannot wedge settlement */ } }
         donePromiseResolve(run);
         return;
       }
@@ -155,16 +187,17 @@ export function createRunPipeline(
       clearTimeout(escalation);
       await answerRecord;
     }
+    const resolvedHook = opts.resolvedHook ?? (opts.reattach ? run.effort?.gate ?? undefined : undefined);
     if (
       terminal === "completed" &&
       exitCode === 0 &&
-      opts.resolvedHook &&
+      resolvedHook &&
       !isTerminal(run.status)
     ) {
       try {
         terminal = await applyHookToTerminal(
           run,
-          opts.resolvedHook,
+          resolvedHook,
           terminal,
           { events: opts.events },
         );
@@ -175,7 +208,7 @@ export function createRunPipeline(
         // hook_failed so the lifecycle terminates cleanly.
         run.hookResult = {
           passed: false,
-          command: opts.resolvedHook.command,
+          command: resolvedHook.command,
           exitCode: null,
           durationMs: 0,
           logPath: "",
@@ -187,6 +220,7 @@ export function createRunPipeline(
         terminal = "hook_failed";
       }
     }
+    check();
     if (run.effort && terminal === "completed" && !isTerminal(run.status)) {
       run.proc = undefined;
       run.pid = undefined;
@@ -194,6 +228,7 @@ export function createRunPipeline(
         const record = readEffort(run.effort.gitRoot, run.effort.name);
         if (!record) throw new Error("effort record missing; integration refused");
         assertRunEffortOwner(run);
+        if (opts.reattach && run.effort.gate === undefined) throw new Error("original hook is unknown; integration refused");
         const policy = resolveEffortPolicy(record.policy);
         if (!run.worktreePath || !run.worktreeBranch) throw new Error("effort assignment workspace missing");
         if (effortGit(run.worktreePath, "status", "--porcelain", "--untracked-files=all")) throw new Error("writer has uncommitted work; integration refused and workspace preserved");
@@ -209,7 +244,8 @@ export function createRunPipeline(
           opts.registry.notify(run);
           return;
         }
-        const outcome = await opts.registry.integrations.enqueue(run, () => opts.registry.notify(run), recoveredAnswer);
+        const outcome = await opts.registry.integrations.enqueue(run, () => opts.registry.notify(run), recoveredAnswer || opts.reattach);
+        check();
         terminal = outcome.terminal;
         run.mergeResult = outcome.mergeResult;
         run.landedCommit = outcome.landedCommit;
@@ -220,12 +256,13 @@ export function createRunPipeline(
         run.mergeResult = { success: false, reason: "error", errorMessage: run.errorMessage };
       }
     }
+    check();
     await settle(terminal, exitCode);
   };
 
   let settled = false;
   const settle = async (terminal: RunStatus, exitCode?: number) => {
-    if (settled) return;
+    if (!current() || settled) return;
     settled = true;
     try { await settleRun(run, terminal, exitCode, opts, transport, donePromiseResolve); }
     catch (error) {
@@ -237,6 +274,7 @@ export function createRunPipeline(
   };
 
   const processLine = (line: string) => {
+    if (!current()) return;
     const trimmed = line.trim();
     if (!trimmed) return;
 
@@ -250,7 +288,7 @@ export function createRunPipeline(
       return;
     }
 
-    opts.onEvent?.(run, event);
+    if (!opts.reattach) opts.onEvent?.(run, event);
 
     if (run.runtime !== "herdr" && !finalized && awaitingAnswer && ((!rpc && event.type === "agent_start") ||
         (rpc && event.type === "response" && event.command === "prompt" && event.id === `init-${run.id}` && event.success === true))) {
@@ -275,7 +313,7 @@ export function createRunPipeline(
     }
     if (effect.kind === "compacted") {
       // v0.16-S4: delegate to the exported helper (also used by unit tests).
-      applyCompactionLine(run, opts.events);
+      if (!opts.reattach) applyCompactionLine(run, opts.events);
       opts.registry.notify(run);
       return;
     }
@@ -285,16 +323,16 @@ export function createRunPipeline(
     }
 
     // v0.17-S4: turn-limit enforcement — checked after every event.
-    checkTurnLimit(run, opts.registry, (r, reason) =>
+    if (!opts.reattach) checkTurnLimit(run, opts.registry, (r, reason) =>
       forceTerminate(r, reason, opts.registry, opts.onComplete),
     );
   };
 
   const early: (() => void)[] = [];
   let launching = true;
-  const receive = (callback: () => void) => { if (launching) early.push(callback); else callback(); };
+  const receive = (callback: () => void) => { if (!current()) return; if (launching) early.push(callback); else callback(); };
   try {
-    transport = runtime.launch(run, piArgs, opts.cwd, {
+    const sink: import("./runtime.ts").RunSink = {
       line: line => receive(() => processLine(line)),
       gone: reason => receive(() => {
         if (finalized) return;
@@ -315,8 +353,13 @@ export function createRunPipeline(
         run.errorMessage = `initial prompt delivery failed: ${error.message}`;
         void finalize("failed", 1);
       }),
-    }, opts.initialPrompt, opts.core);
+    };
+    if (opts.reattach) {
+      if (!runtime.attach) throw new Error("runtime attachment unavailable");
+      transport = runtime.attach(run, sink);
+    } else transport = runtime.launch(run, piArgs, opts.cwd, sink, opts.initialPrompt, opts.core);
   } catch (e) {
+    if (opts.reattach) throw e;
     if (awaitingAnswer) return restoreAnswer(`spawn failed: ${(e as Error).message}`);
     run.status = "failed";
     run.errorMessage = `spawn failed: ${(e as Error).message}`;
@@ -343,11 +386,23 @@ export function createRunPipeline(
     run.proc = undefined; run.pid = undefined; run.streamingMode = undefined;
     const launch = transport;
     const launchFailed = async (error: Error) => {
-      if (finalized || run.transport !== launch) return;
+      if (!current() || finalized || run.transport !== launch) return;
       finalized = true;
       if (run.timeoutTimer) clearTimeout(run.timeoutTimer);
       run.timeoutTimer = undefined;
       run.rejectAnswerDelivery = undefined;
+      if (opts.reattach) {
+        run.errorMessage = error.message; run.herdrResultUnavailable = true;
+        if (error.cause === "herdr-gone-before-start") {
+          const complete = () => settle("failed", 1);
+          if (run.effort && !run.herdrEffortAuthorized) run.herdrResumeSettlement = () => { void complete(); };
+          else await complete();
+        } else {
+          run.herdrExitUnconfirmed = true;
+          opts.registry.notify(run); // Observe uncertainty; never publish a guessed terminal record.
+        }
+        donePromiseResolve(run); return;
+      }
       if (isTerminal(run.status)) {
         if (launch.stderr) run.errorMessage = [run.errorMessage, launch.stderr].filter(Boolean).join("\n");
         await writeRecord(run);
@@ -363,6 +418,7 @@ export function createRunPipeline(
       donePromiseResolve(run);
     };
     void launch.ready.then(async () => {
+      if (!current()) return;
       if (launch.cancelled) { await launch.cancel(); await launchFailed(new Error("herdr: launch cancelled")); return; }
       if (finalized || isTerminal(run.status) || run.transport !== launch) return;
       run.herdrResultUnavailable = undefined;
@@ -370,6 +426,7 @@ export function createRunPipeline(
         awaitingAnswer = false; run.pendingAsk = undefined; run.rejectAnswerDelivery = undefined;
         answerRecord = answerRecord.then(() => writeRecord(run));
         await answerRecord;
+        if (!current()) return;
       }
       launch.observe();
     }, launchFailed);
@@ -378,9 +435,20 @@ export function createRunPipeline(
     };
   }
 
+  if (transport.kind === "herdr") {
+    const ownedTransport = transport;
+    run.herdrPipeline = pipeline = {
+      suspend() { opts.registry.herdrAdmissionOpen = false; suspended = true; clearTimeout(run.timeoutTimer); run.timeoutTimer = undefined; },
+      async quiesce() {
+        await ownedTransport.detach?.();
+        await Promise.allSettled([run.integration ? run.integrationSettlement : finalizing, answerRecord, run.recordWrite, run.herdrDelivery].filter((p): p is Promise<void> => !!p));
+      },
+    };
+  }
+
   // Hard timeout.
   run.timeoutTimer = setTimeout(() => {
-    if (run.status === "running" || run.status === "paused") {
+    if (current() && (run.status === "running" || run.status === "paused")) {
       forceTerminate(run, "timeout", opts.registry, opts.onComplete);
     }
   }, opts.timeoutMs);
@@ -414,11 +482,13 @@ async function settleRunEffects(
   transport: Pick<RunTransport, "stderr" | "stop"> = { stderr: "", stop() {} },
   donePromiseResolve: (run: Run) => void = () => {},
 ): Promise<void> {
+    if (!ownsHerdrRun(run)) return;
+    const fence = herdrEffectFence(run);
     // Forced termination already published its state; retain discovery without notifying twice.
     if (!applyCloseHandlerTerminal(run, terminal, exitCode)) {
       discoverSessionPathIfMissing(run, opts.sessionDir);
       if (run.runtime === "herdr" && !run.herdrExitUnconfirmed) await writeFinal(run);
-      await writeRecord(run);
+      await writeRecord(run); fence();
       run.proc = undefined;
       try {
         transport.stop();
@@ -427,14 +497,14 @@ async function settleRunEffects(
       }
       // v0.16-S3: emit lifecycle event for force-terminated runs (run.status
       // already set by forceTerminate; emit before resolving done).
-      emitFinalizeEvent(run, opts.events);
-      // v0.18 classified retry: forceTerminate-settled runs (stall/timeout/
-      // abort) never reach the normal `.finally` below, so dispatch retry
-      // here. failureClass was stamped by forceTerminate; retryPolicy at
-      // spawn. shouldRetry gates non-retryable classes (e.g. user kill).
-      applyRetryIfNeeded(run, opts.onRetry);
-      // v0.18 memory: record the (forceTerminate) outcome too.
-      recordRunOutcome(run);
+      const dispatch = () => {
+        fence();
+        emitFinalizeEvent(run, opts.events);
+        if (!run.reconciledAtStartup) applyRetryIfNeeded(run, opts.onRetry);
+        fence(); recordRunOutcome(run);
+      };
+      if (run.runtime === "herdr" && !run.effort) await dispatchHerdrSettlement(run, dispatch);
+      else dispatch();
       donePromiseResolve(run);
       return;
     }
@@ -446,6 +516,7 @@ async function settleRunEffects(
     run.proc = undefined;
     if (!run.effort) terminal = await settleWorktree(run, terminal);
     else run.worktreeKept = `${effortSummary(run)}. Branch ${run.worktreeBranch} and worktree ${run.worktreePath} preserved.`;
+    fence();
     // Re-apply the terminal to the run record now that merge may have flipped it.
     if (terminal === "merge_conflict") run.status = terminal;
     if (terminal !== "completed") {
@@ -468,16 +539,20 @@ async function settleRunEffects(
       // already dead
     }
     const dispatch = () => {
+      fence();
+      if (run.effort && run.reconciledAtStartup && !run.integration) return;
       try { opts.onComplete?.(run); } catch { /* local dispatch attempted, not receiver acknowledgement */ }
-      applyChainIfPresent(run, run.status as RunStatus, opts.onChain);
-      applyRetryIfNeeded(run, opts.onRetry);
+      if (!run.reconciledAtStartup) {
+        applyChainIfPresent(run, run.status as RunStatus, opts.onChain);
+        applyRetryIfNeeded(run, opts.onRetry);
+      }
       recordRunOutcome(run);
       emitFinalizeEvent(run, opts.events);
     };
     if (run.effort && run.integration) {
       const persist = () => writeRecord(run, () => assertRunEffortOwner(run));
       await persist();
-      await writeFinal(run, true);
+      await writeFinal(run, true); fence();
       if (!run.integration.delivery) {
         run.integration.delivery = "intent";
         await persist();
@@ -487,9 +562,35 @@ async function settleRunEffects(
         await persist();
       }
       donePromiseResolve(run);
+    } else if (run.runtime === "herdr" && run.herdr) {
+      await writeRecord(run, () => assertHerdrOwner(run));
+      await writeFinal(run, true); fence();
+      await dispatchHerdrSettlement(run, dispatch);
+      donePromiseResolve(run);
     } else {
       await Promise.all([writeRecord(run), writeFinal(run)]).catch(() => {}).finally(() => {
         dispatch(); donePromiseResolve(run);
       });
     }
+}
+
+/** A local dispatch attempt, never a consumer acknowledgement. Ambiguous intents are not replayed. */
+export function dispatchHerdrSettlement(run: Run, dispatch: () => void): Promise<void> {
+  if (run.effort || !run.herdr) throw new Error("ordinary herdr settlement required");
+  const binding = run.herdr, fence = herdrEffectFence(run);
+  return run.herdrDelivery ??= Promise.resolve().then(async () => {
+    fence();
+    const persist = () => writeRecord(run, () => { fence(); if (run.herdr !== binding) throw new Error("herdr invocation replaced"); });
+    if (binding.settlement && binding.settlement.launchNonce !== binding.launchNonce) throw new Error("herdr settlement nonce mismatch; preserve for inspection");
+    if (binding.settlement?.delivery === "intent") {
+      binding.settlement.delivery = "uncertain";
+      run.errorMessage = [run.errorMessage, "delivery uncertain: notification/events/memory may be missing; automatic replay suppressed"].filter(Boolean).join("\n");
+      await persist();
+    }
+    if (binding.settlement) return;
+    binding.settlement = { launchNonce: binding.launchNonce, delivery: "intent" };
+    await persist(); fence();
+    try { dispatch(); } catch { /* attempted locally; no consumer delivery acknowledgement */ }
+    fence(); binding.settlement.delivery = "attempted"; await persist();
+  });
 }

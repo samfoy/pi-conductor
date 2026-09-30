@@ -1,3 +1,5 @@
+import { claimHerdrOwner, herdrModuleEpoch, ownsHerdrRun, readHerdrOwner } from "./ownership.ts";
+import { readInbox } from "./inbox.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, openSync, readSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
@@ -44,6 +46,8 @@ export function herdrChildAbsent(run: Pick<Run, "id" | "herdr" | "recordPath">):
   if (!b || b.runId !== run.id || typeof b.sessionFile !== "string" || typeof b.socketPath !== "string" || !isAbsolute(b.socketPath) || !/^[A-Za-z0-9_-]+$/.test(b.launchNonce) ||
       dirname(b.sessionFile) !== join(dirname(run.recordPath), "session")) return false;
   try {
+    const owner = readHerdrOwner(dirname(run.recordPath));
+    if (owner && (owner.generation !== b.ownerGeneration || owner.launchNonce !== b.launchNonce || owner.runId !== run.id || owner.socketPath !== b.socketPath)) return false;
     const hello = readControlRecord(join(dirname(run.recordPath), "launch", `${b.launchNonce}.json`));
     const proof = proveChildProcess({ binding: b, current: b, socketPath: b.socketPath, hello,
       pane: { pane_id: b.paneId, terminal_id: b.terminalId, tab_id: b.tabId, workspace_id: b.workspaceId,
@@ -81,6 +85,66 @@ export class HerdrRuntime implements RunRuntime {
   }
 
   launch(run: Run, _args: string[], cwd: string, sink: RunSink, initialPrompt?: string, core?: PiCoreArgsOptions): HerdrTransport {
+    return this.connect(run, cwd, sink, false, initialPrompt, core);
+  }
+  attach(run: Run, sink: RunSink): HerdrTransport { return this.connect(run, run.cwd, sink, true); }
+  async inspect(run: Run) {
+    if (!this.options || !run.herdr || run.herdr.socketPath !== this.options.cli.socketPath) throw failure("other-socket");
+    const { cli } = this.options, probe = this.options.probe ?? probeProcess;
+    const binding = { ...run.herdr }, nonce = binding.launchNonce, dir = dirname(run.recordPath);
+    if (binding.runId !== run.id || !/^[A-Za-z0-9_-]+$/.test(nonce) || dirname(binding.sessionFile) !== join(dir, "session")) throw failure("reattach binding mismatch");
+    const claim = readControlRecord(join(dir, "launch", `${nonce}.json`));
+    if (!isRecord(claim)) throw failure("reattach missing child hello");
+    const hello = claim as unknown as LaunchHello;
+    binding.childPid ??= hello.pid; binding.childStartTime ??= hello.pidStartTime;
+    const pane = (await cli.json(["pane", "get", binding.paneId], { timeoutMs: 2000 })).pane;
+    const proof = (pane: unknown) => proveChildProcess({ binding, current: binding, socketPath: cli.socketPath, pane, hello, platform: this.options?.platform ?? process.platform, bridgeProtocol: 1, process: probe(hello.pid) });
+    const recordedPane = { pane_id: binding.paneId, terminal_id: binding.terminalId, tab_id: binding.tabId, workspace_id: binding.workspaceId,
+      agent: "pi", agent_session: { kind: "path", value: binding.sessionFile, agent: "pi", source: "launch" } };
+    let state = proof(pane);
+    if (!state.ok && probe(hello.pid).state === "gone") state = proof(recordedPane);
+    if (!state.ok && state.state !== "gone") throw failure(`reattach identity unknown: ${state.reason}`);
+    const provenPane = state.ok ? pane : recordedPane;
+    try {
+      const requests = readInbox(dir, nonce).filter(entry => entry.request.kind === "initial" || entry.request.kind === "reply");
+      if (requests.length !== 1) throw failure("reattach initial request missing/ambiguous");
+      const request = requests[0].request;
+      if (!readInboxAck(dir, request)?.accepted) throw failure("reattach initial input acceptance unknown");
+      // Find the exact launch boundary within the bounded, LF-aligned history window.
+      let launchOffset = -1, cursor = 0, boundary = false, nativeStart = false, settled = false;
+      const fd = openSync(run.transcriptPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      try {
+        const stat = fstatSync(fd);
+        if (!stat.isFile() || stat.nlink !== 1) throw failure("invalid recovery transcript");
+        const start = Math.max(0, stat.size - 32 * 1048576), buffer = Buffer.alloc(stat.size - start);
+        let bytes = 0;
+        while (bytes < buffer.length) { const n = readSync(fd, buffer, bytes, buffer.length - bytes, start + bytes); if (!n) throw failure("recovery transcript changed"); bytes += n; }
+        cursor = start ? buffer.indexOf(10) + 1 : 0;
+        if (start && !cursor) throw failure("recovery transcript has no complete boundary");
+        for (;;) {
+          const end = buffer.indexOf(10, cursor); if (end < 0) break;
+          let event: unknown; try { event = JSON.parse(buffer.subarray(cursor, end).toString("utf8")); } catch { cursor = end + 1; continue; }
+          if (isRecord(event) && isRecord(event._c) && event._c.n === nonce) {
+            if (!boundary && event.type === "conductor_child" && event.event === "launch" && Object.entries(hello).every(([key, value]) => event[key] === value)) { boundary = true; launchOffset = start + cursor; }
+            if (boundary && event.type === "agent_start" && event.initialRequestId === request.requestId) nativeStart = true;
+            if (nativeStart && event.type === "agent_settled") settled = true;
+          }
+          cursor = end + 1;
+        }
+      } finally { closeSync(fd); }
+      if (!nativeStart || launchOffset < 0) throw failure("reattach accepted native launch boundary unavailable");
+      return { binding, hello, provenPane, request, launchOffset, state: state.ok ? "alive" as const : "gone" as const, settled };
+    } catch (error) {
+      if (!state.ok && state.state === "gone") throw new Error("herdr: pi exited before accepted native launch evidence was complete; resources preserved", { cause: "herdr-gone-before-start" });
+      throw error;
+    }
+  }
+  async probeRecord(run: Run): Promise<"alive" | "settled" | "gone" | "unknown" | "other-socket"> {
+    if (!this.options || run.herdr?.socketPath !== this.options.cli.socketPath) return "other-socket";
+    try { const result = await this.inspect(run); return result.settled ? "settled" : result.state; }
+    catch (error) { return error instanceof Error && error.cause === "herdr-gone-before-start" ? "gone" : "unknown"; }
+  }
+  private connect(run: Run, cwd: string, sink: RunSink, reattach: boolean, initialPrompt?: string, core?: PiCoreArgsOptions): HerdrTransport {
     if (!this.options) throw failure("launch requires an explicitly injected CLI");
     const options = this.options;
     const { cli, env, workspaceId } = options;
@@ -90,7 +154,18 @@ export class HerdrRuntime implements RunRuntime {
     const signal = options.signal ?? process.kill;
     const abort = new AbortController();
     let cleanupSignal: AbortSignal | undefined;
-    const nonce = randomUUID(), dir = dirname(run.recordPath);
+    const nonce = reattach ? run.herdr!.launchNonce : randomUUID(), dir = dirname(run.recordPath);
+    if (!reattach) run.herdrUsageBaseline = { launchNonce: nonce, usage: { ...run.usage } };
+    let detached = false;
+    let ownership: import("./ownership.ts").HerdrOwnership | undefined;
+    const claimOwnership = () => {
+      if (run.herdrOwnership) run.herdrOwnership.release();
+      ownership = claimHerdrOwner(dir, { epoch: herdrModuleEpoch, sessionId: run.parentSessionId ?? herdrModuleEpoch,
+        pid: process.pid, startTime: readProcessStartTime(process.pid), socketPath: cli.socketPath, runId: run.id, launchNonce: nonce, at: Date.now() });
+      run.herdrOwnership = ownership;
+    };
+    if (reattach) claimOwnership();
+    const owned = () => !detached && !!ownership && run.herdrOwnership === ownership && ownsHerdrRun(run);
     const previous = run.herdr;
     run.herdrPrompts = undefined;
     const alias = /^[a-z][a-z0-9_-]{0,31}$/.test(run.id) ? run.id : `c${createHash("sha256").update(run.id).digest("hex").slice(0, 16)}`;
@@ -102,18 +177,20 @@ export class HerdrRuntime implements RunRuntime {
     let resolveClosed!: () => void;
     const closed = new Promise<void>(resolve => { resolveClosed = resolve; });
     const diagnostic = (message: string) => { stderr = boundStallText(`${stderr}${stderr ? "\n" : ""}${message}`, 4096); };
-    const current = (): HerdrInvocation | undefined => run.herdr === binding ? run.herdr : undefined;
+    const current = (): HerdrInvocation | undefined => owned() && run.herdr === binding ? run.herdr : undefined;
     const check = () => {
+      if (!owned()) throw failure("owner fenced");
       if (abort.signal.aborted) throw failure("launch cancelled");
       if (binding && run.herdr !== binding) throw failure("launch binding replaced; preserving resources");
     };
-    const proof = (pane: unknown) => cleanupSignal?.aborted
+    const proof = (pane: unknown) => !owned() || cleanupSignal?.aborted
       ? { ok: false as const, state: "unknown" as const, reason: "current invocation changed or cleanup cancelled" }
       : proveChildProcess({ binding: binding && { ...binding, childPid: binding.childPid ?? hello?.pid, childStartTime: binding.childStartTime ?? hello?.pidStartTime }, current: current(), socketPath: cli.socketPath, pane, hello,
       platform: options.platform ?? process.platform, bridgeProtocol: 1, process: hello ? probe(hello.pid) : undefined });
     const getPane = async (signal?: AbortSignal) => (await cli.json(["pane", "get", binding!.paneId], { timeoutMs: 2000, signal: signal ?? cleanupSignal })).pane;
     const finishObservation = () => { tail?.close(); monitor?.close(); observing = false; if (run.herdr === binding) run.herdrPrompts = undefined; };
     const gone = () => {
+      if (!owned()) return;
       tail?.drain();
       childExited = true; resolveClosed();
       tail?.drain();
@@ -160,7 +237,7 @@ export class HerdrRuntime implements RunRuntime {
       } catch { diagnostic("pane/worktree preserved: child stop unconfirmed"); }
     })();
     const readStallEvidence = async () => {
-      if (!binding || run.herdr !== binding || cleanupSignal?.aborted) return "Live pane diagnostic unavailable.";
+      if (!owned() || !binding || run.herdr !== binding || cleanupSignal?.aborted) return "Live pane diagnostic unavailable.";
       try {
         const text = await cli.text(["agent", "read", alias, "--source", "recent-unwrapped", "--lines", "40"],
           { timeoutMs: HERDR_LAUNCH_BUDGET.diagnostic, maxBuffer: 4096, signal: cleanupSignal });
@@ -168,7 +245,20 @@ export class HerdrRuntime implements RunRuntime {
       } catch { return "Live pane diagnostic unavailable; unknown dialogs are not answered automatically."; }
     };
     const ready = Promise.resolve().then(async () => {
+      if (detached) throw failure("owner detached");
+      if (!ownership) claimOwnership();
       check();
+      if (reattach) {
+        const evidence = await this.inspect(run); check();
+        binding = { ...evidence.binding, ownerGeneration: ownership!.identity.generation };
+        run.herdr = binding; hello = evidence.hello; provenPane = evidence.provenPane;
+        const { launchOffset, request } = evidence;
+        accepted = initialAccepted = true;
+        observation = { launchOffset, requestId: request.requestId };
+        if (request.kind === "reply") run.pendingAsk = undefined;
+        if (evidence.state === "gone") { childExited = true; resolveClosed(); }
+        return { binding, request, launchOffset };
+      }
       if (run.runtime !== "herdr" || !core || !initialPrompt?.trim()) throw failure("missing typed launch specification");
       if (run.pendingAsk && (core.kind !== "resume" || core.sessionPath !== run.sessionPath)) throw failure("answer requires the original session");
       if (core.kind === "resume" && run.sessionPath && core.sessionPath !== run.sessionPath) throw failure("resume session mismatch");
@@ -204,6 +294,8 @@ export class HerdrRuntime implements RunRuntime {
         fresh = true;
       }
       if (run.herdr !== previous) throw failure("launch binding replaced; preserving resources");
+      binding.ownerGeneration = ownership!.identity.generation;
+      delete binding.settlement; run.herdrDelivery = undefined;
       run.herdr = binding; run.sessionPath = sessionFile;
       check(); await writeRecord(run, check); check();
       const request: InboxRequest = { v: 1, launchNonce: nonce, requestId: randomUUID(), sequence: 1,
@@ -288,8 +380,9 @@ export class HerdrRuntime implements RunRuntime {
     }).catch(async (e: unknown) => {
       diagnostic(e instanceof Error && e.message.startsWith("herdr:") ? e.message : "herdr: launch failed");
       if (!startAttempted) childExited = true;
-      await stopOwned(true); finishObservation(); diagnostic(await readStallEvidence());
-      throw failure(stderr);
+      if (!detached && !reattach) await stopOwned(true);
+      finishObservation(); if (!detached) diagnostic(await readStallEvidence());
+      throw new Error(`herdr: ${stderr}`, { cause: e instanceof Error ? e.cause : undefined });
     });
     const stop = async () => {
       abort.abort();
@@ -300,24 +393,26 @@ export class HerdrRuntime implements RunRuntime {
     };
     const waitForExit = async (): Promise<boolean> => {
       monitor?.close();
-      if (!accepted || run.herdr !== binding) return false;
+      if (!owned() || !accepted || run.herdr !== binding) return false;
       const end = now() + 10000;
       while (!childExited && now() < end) {
         tail?.drain();
         const state = proof(provenPane);
         if (!state.ok) { if (state.state === "gone") gone(); break; }
         await sleep(50);
+        if (!owned()) return false;
       }
-      if (!childExited) await stopOwned(false);
+      if (!childExited && owned()) await stopOwned(false);
       tail?.drain(); finishObservation();
       return childExited;
     };
     const observe = () => {
-      if (observing || !accepted || !observation) return;
+      if (!owned() || observing || !accepted || !observation) return;
       observing = true;
       let started = false;
       tail = new HerdrTail({ path: run.transcriptPath, offset: observation.launchOffset, nonce,
         line: line => {
+          if (!owned()) return;
           const event = JSON.parse(line);
           if (!started) {
             if (event.type !== "agent_start" || event.initialRequestId !== observation!.requestId) return;
@@ -326,12 +421,12 @@ export class HerdrRuntime implements RunRuntime {
           if (event.type === "agent_settled") nativeSettled = true;
           sink.line(line);
         }, error: error => { diagnostic(error.message); sink.gone?.(error.message); } });
-      monitor = new HerdrMonitor({ now, active: () => run.herdr === binding && !nativeSettled && !isTerminal(run.status) && run.status !== "integrating" && run.status !== "blocked",
+      monitor = new HerdrMonitor({ now, active: () => owned() && run.herdr === binding && !nativeSettled && !isTerminal(run.status) && run.status !== "integrating" && run.status !== "blocked",
         probe: () => { const state = proof(provenPane); return state.ok ? "alive" : state.state; },
         scan: async () => {
           try {
             const pane = await getPane();
-            if (run.herdr !== binding || nativeSettled || isTerminal(run.status) || run.status === "integrating" || run.status === "blocked") return;
+            if (!owned() || run.herdr !== binding || nativeSettled || isTerminal(run.status) || run.status === "integrating" || run.status === "blocked") return;
             const state = proof(pane);
             if (state.ok) provenPane = pane;
             else diagnostic(`pane observation: ${state.reason}; evidence retained`);
@@ -340,9 +435,9 @@ export class HerdrRuntime implements RunRuntime {
       tail.start();
       if (childExited) gone(); else if (!nativeSettled) monitor.start();
     };
-    let sequence = 1;
+    let sequence = reattach ? Math.max(1, ...readInbox(dir, nonce).map(entry => entry.request.sequence)) : 1;
     let deliveryTail: Promise<unknown> = Promise.resolve();
-    const liveSend = () => run.runtime === "herdr" && run.herdr === binding && binding?.launchNonce === nonce &&
+    const liveSend = () => owned() && run.runtime === "herdr" && run.herdr === binding && binding?.launchNonce === nonce &&
       accepted && observing && !abort.signal.aborted && !nativeSettled && !childExited && run.status === "running" &&
       (run.parentPid === undefined || run.parentPid === process.pid) && !run.pendingAsk && !run.askExecution && proof(provenPane).ok;
     const deliver = (type: "steer" | "follow_up" | "grace", text: string, sessionId?: string): Delivery => {
@@ -362,7 +457,7 @@ export class HerdrRuntime implements RunRuntime {
           writeInboxRequest(dir, request);
           const deadline = now() + HERDR_LAUNCH_BUDGET.ack;
           for (;;) {
-            if (run.herdr !== binding || binding?.launchNonce !== nonce) return rejected("invocation changed; do not resend blindly", false);
+            if (!owned() || run.herdr !== binding || binding?.launchNonce !== nonce) return rejected("invocation changed; do not resend blindly", false);
             tail?.drain();
             const response = readInboxAck(dir, request);
             if (response) return response.accepted ? { delivered: true, deliveredAt: response.at } : rejected(response.code!, true);
@@ -379,7 +474,7 @@ export class HerdrRuntime implements RunRuntime {
     let paneReleased = false;
     const releasePane = async (signal?: AbortSignal, isCurrent: () => boolean = () => true) => {
       cleanupSignal = signal;
-      if (!isCurrent() || !childExited || !binding || run.herdr !== binding || signal?.aborted) return false;
+      if (!owned() || !isCurrent() || !childExited || !binding || run.herdr !== binding || signal?.aborted) return false;
       if (paneReleased) return true;
       const state = proof(provenPane);
       if (state.ok || state.state !== "gone") { diagnostic("pane/worktree preserved: child exit unconfirmed"); return false; }
@@ -395,9 +490,13 @@ export class HerdrRuntime implements RunRuntime {
       if (!signal.aborted) await releasePane(signal);
       if (!paneReleased) diagnostic("pane shutdown incomplete; ownership evidence preserved");
     };
-    return { kind: "herdr", runtime: this, shutdown, readStallEvidence, liveSend, deliver, ready, closed, observe, waitForExit, releasePane,
+    const detach = async () => {
+      detached = true; abort.abort(); finishObservation();
+      await Promise.allSettled([ready, deliveryTail]);
+    };
+    return { kind: "herdr", runtime: this, detach, shutdown, readStallEvidence, liveSend, deliver, ready, closed, observe, waitForExit, releasePane,
       get paneReleased() { return paneReleased && run.herdr === binding; },
-      get observable() { return observing && run.herdr === binding && !childExited && !abort.signal.aborted && (run.parentPid === undefined || run.parentPid === process.pid); }, get initialAccepted() { return initialAccepted && run.herdr === binding; },
+      get observable() { return owned() && observing && run.herdr === binding && !childExited && !abort.signal.aborted && (run.parentPid === undefined || run.parentPid === process.pid); }, get initialAccepted() { return initialAccepted && run.herdr === binding; },
       get childExited() { return childExited && (!binding || run.herdr === binding); },
       get cancelled() { return abort.signal.aborted; }, get stderr() { return stderr; }, drain: () => { tail?.drain(); return ""; }, stop, cancel: stop };
   }

@@ -59,7 +59,8 @@ To skip the hook for a true emergency (almost never appropriate), pass `--no-ver
 As of `1c72856` (`fix(lifecycle): preserve runs on /reload`), the conductor's `session_shutdown` handler is reload-aware:
 
 - **Preserved across `/reload`:** chat history, conductor brief, scratchpad notes (`note set`/`note get`), the `pi.on("context", ...)` sanitizer hook (re-registers cleanly on the new runtime).
-- **Not preserved:** in-flight sub-agent registry entries. Surviving sub-agents keep running as separate processes and write their `final.md` / `record.json` to disk, but the new runtime won't fire `<sub-agent-completed>` notifications for runs that started under the old one. Wait for them to finish naturally and read the on-disk record, or check `~/.pi/agent/conductor/runs/<persona>-<id>/`.
+- **Subprocess runs:** old pipelines continue; the new registry does not acquire their live stdout/RPC stream. Read their on-disk `final.md` / `record.json` when they settle.
+- **Herdr runs (H10, offline-tested):** reload quiesces and fences the old stream owner without stopping the child; same-socket startup can claim and reattach it. Completion dispatch is at most once and crash-ambiguous notification intents are not replayed. See README “Reattachment and delivery limits”; real-herdr/TUI acceptance remains H11.
 
 ### Recommended loop
 

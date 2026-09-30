@@ -23,6 +23,7 @@
  * Spec: oracle-3l2e (v0.8.2 backlog P0 #1 — parent-reload contract).
  */
 
+import { ownsHerdrRun } from "./herdr/ownership.ts";
 import { runtimeFor } from "./runtime.ts";
 import type { Run } from "./types.ts";
 import { writeRecord } from "./runs.ts";
@@ -90,6 +91,7 @@ export async function handleSessionShutdown(
   event: ShutdownEventLike,
   deps: ShutdownDeps,
 ): Promise<void> {
+  if (event.reason === "reload") for (const run of deps.runs) run.herdrPipeline?.suspend();
   for (const run of deps.runs) if (run.effort) run.integrationSuspended = true;
   const integrations = deps.runs.flatMap(run => {
     const transition = run.integrationSuspension ?? run.integrationControl?.suspend();
@@ -105,10 +107,13 @@ export async function handleSessionShutdown(
   if (settlements.length) await Promise.allSettled(settlements);
   const uncertain = deps.runs.find(run => run.status === "integrating" && run.integration?.teardownError);
   if (uncertain) throw new Error(uncertain.integration!.teardownError);
-  if (event.reason === "reload") return;
+  if (event.reason === "reload") {
+    await Promise.all(deps.runs.filter(run => run.runtime === "herdr").map(detachHerdrRun));
+    return;
+  }
   const stillActive: Run[] = [];
   for (const r of deps.runs) {
-    if (r.status === "running" || r.status === "paused") {
+    if (ownsHerdrRun(r) && (r.status === "running" || r.status === "paused")) {
       stillActive.push(r);
       try {
         if (r.runtime === "herdr") deps.terminateHerdr?.(r);
@@ -119,7 +124,7 @@ export async function handleSessionShutdown(
     }
   }
   // The pane budget starts only after verifier suspension and terminal I/O are quiescent.
-  const panes = deps.runs.filter(run => run.runtime === "herdr");
+  const panes = deps.runs.filter(run => run.runtime === "herdr" && ownsHerdrRun(run));
   if (panes.length) {
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -148,4 +153,15 @@ export async function handleSessionShutdown(
   }
   deps.resetSanitizer();
   try { await reconciliation; } catch { /* next startup retries best-effort reconciliation */ }
+  for (const run of panes) run.herdrPipeline?.suspend();
+  await Promise.all(panes.map(detachHerdrRun));
+}
+
+function detachHerdrRun(run: Run): Promise<void> {
+  return run.herdrShutdown ??= (async () => {
+    if (run.herdrPipeline) await run.herdrPipeline.quiesce();
+    else if (run.transport?.kind === "herdr") await run.transport.detach?.();
+    await run.recordWrite;
+    run.herdrOwnership?.release();
+  })();
 }

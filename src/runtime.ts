@@ -34,7 +34,7 @@ export function resolveRuntime(input: {
 
 /** Missing persisted tags are legacy subprocesses, not a new auto selection. */
 export function unsupportedRuntimeReason(kind: unknown): string | undefined {
-  if (kind === undefined || kind === "subprocess") return;
+  if (kind === undefined || kind === "subprocess" || kind === "herdr") return;
   return `runtime ${String(kind)} backend is unavailable; use runtime: subprocess for a fresh spawn. Saved runs cannot migrate backends.`;
 }
 
@@ -79,6 +79,7 @@ export interface HerdrTransport extends TransportLifecycle {
   waitForExit(): Promise<boolean>;
   releasePane(signal?: AbortSignal, isCurrent?: () => boolean): Promise<boolean>;
   shutdown?(signal: AbortSignal): Promise<void>;
+  detach?(): Promise<void>;
 }
 export type RunTransport = SubprocessTransport | HerdrTransport;
 
@@ -94,6 +95,7 @@ export type Delivery =
   | { kind: "epipe"; reason: string };
 
 export interface RunRuntime {
+  attach?(run: Run, sink: RunSink): HerdrTransport;
   launch(run: Run, args: string[], cwd: string, sink: RunSink, initialPrompt?: string, core?: PiCoreArgsOptions): RunTransport;
   capabilities(run: Run): { pause: boolean; liveSend: boolean };
   deliver(run: Run, type: "steer" | "follow_up" | "grace", text: string, sessionId?: string): Delivery;

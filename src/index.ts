@@ -1,3 +1,7 @@
+import { HerdrRuntime } from "./herdr/runtime.ts";
+import { createHerdrCli } from "./herdr/cli.ts";
+import { createRunPipeline } from "./run-pipeline.ts";
+import { buildOrphanRun } from "./reconcile-startup.ts";
 import { recoverEffort } from "./effort/reconcile.ts";
 import { listEfforts } from "./effort/store.ts";
 import { effortRepository } from "./effort/open.ts";
@@ -407,6 +411,7 @@ export default function (pi: ExtensionAPI): void {
   // ── Lifecycle ────────────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
+    registry.herdrAdmissionOpen = true;
     cwdControl.setSessionCwd(ctx.cwd);
     let branch: readonly unknown[] = [];
     try {
@@ -476,6 +481,7 @@ export default function (pi: ExtensionAPI): void {
       // sibling slots sharing this pid aren't readopted here. Read it now:
       // by the next tick a reload or print-mode exit can make ctx stale.
       const selfSessionId = opts.getSessionId();
+      const herdrRuntime = process.env.HERDR_SOCKET_PATH ? new HerdrRuntime({ cli: createHerdrCli({ env: process.env, socketPath: process.env.HERDR_SOCKET_PATH }), env: process.env }) : undefined;
       setImmediate(() =>
         // Promise.resolve().then turns a synchronous throw into the
         // rejection .catch reports; thrown from setImmediate, it kills pi.
@@ -486,6 +492,17 @@ export default function (pi: ExtensionAPI): void {
               registry,
               isAlive: defaultLivenessProbe,
               selfSessionId,
+              admit: () => registry.herdrAdmissionOpen,
+              herdrProbe: record => herdrRuntime?.probeRecord(buildOrphanRun(record, record.status)) ?? Promise.resolve("other-socket"),
+              attachHerdr: record => {
+                if (!herdrRuntime || !registry.herdrAdmissionOpen) throw new Error("herdr attachment unavailable");
+                const run = buildOrphanRun(record, "running");
+                run.parentPid = process.pid; run.parentSessionId = selfSessionId;
+                const done = createRunPipeline(run, [], { registry, runtime: herdrRuntime, reattach: true, cwd: run.cwd,
+                  timeoutMs: resolveTimeoutMs(undefined, undefined, loadConfig(run.cwd)), steerable: false, onComplete: opts.pushCompletionNotification, events: conductorEvents });
+                registry.register(run);
+                void done.catch(error => console.error(`herdr recovery: ${error.message}`));
+              },
               now: Date.now(),
             }),
           )
@@ -646,6 +663,7 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async (event) => {
+    registry.herdrAdmissionOpen = false;
     if (unsubFocusedShortcut) {
       unsubFocusedShortcut();
       unsubFocusedShortcut = null;

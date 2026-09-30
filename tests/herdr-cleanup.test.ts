@@ -109,15 +109,14 @@ test("H9 force kill synchronously settles once and also terminates the owned hoo
   assert.deepEqual(groups, [[45678, "SIGTERM"], [45678, "SIGKILL"]]);
   await h.transport.stop();
   forceTerminate(h.run, "stalled", h.registry, () => completed++);
+  await h.run.herdrDelivery;
   assert.equal(completed, 1); assert.deepEqual(h.signals, ["SIGTERM"]);
   assert.equal(h.calls.includes("pane close"), false);
 });
-test("H9 quit stops children and releases completed empty panes, but reload preserves both", async () => {
+test("H9 quit stops children and releases completed empty panes", async () => {
   const active = await attached(), completed = await attached("healthy");
   completed.run.status = "completed";
   const runs = [active.run, completed.run];
-  await handleSessionShutdown({ reason: "reload" }, { runs, resetSanitizer() {} });
-  assert.deepEqual(active.signals, []); assert.equal(completed.calls.includes("pane close"), false);
   await handleSessionShutdown({ reason: "quit" }, { runs, resetSanitizer() {} });
   assert.deepEqual(active.signals, ["SIGTERM"]);
   assert.equal(active.calls.filter(c => c === "pane close").length, 1);

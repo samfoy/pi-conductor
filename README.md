@@ -42,7 +42,7 @@ pi-conductor closes that gap. The parent pi session is the conductor, sub-agents
 - **Per-spawn `cwd`** on `ensemble_spawn` and on each `ensemble_auto` step sets where the sub-agent runs and where personas, config, and the git root for `worktree: true` isolation resolve. `~` and relative paths resolve against the conductor's default cwd; a missing directory is rejected before any run starts. `ensemble_send` resumes and chain successors keep the original run's cwd. A chain successor gets the same worktree decision as `ensemble_spawn`, branching from the current HEAD; a write-capable successor after a parent whose branch was kept unmerged fails instead of starting without that work.
 - **Conductor default cwd.** pi can't change a session's cwd, so the conductor keeps its own: `/conductor cwd [<path>|--reset]` or the `ensemble_cwd` tool (`{ path?, reset? }`) sets or clears an override for later spawns. With no argument, both report the effective cwd and its source. The override is saved as a `conductor-cwd` session entry, so it survives `/reload` and resume.
 
-### Runtime selection and herdr controls (H9; not rolled out)
+### Runtime selection, herdr controls and recovery (H10; not rolled out)
 
 `runtime: "auto" | "subprocess" | "herdr"` is accepted on `ensemble_spawn`,
 each `ensemble_auto` step, persona frontmatter, and config (top-level or
@@ -73,11 +73,11 @@ initial input acknowledgement **and a correlated native agent_start**; preaccept
 failure restores the question, while later model failure does not roll back an
 accepted answer. Failed launch never advertises a historical final as new output.
 `pause`/`resume` (SIGSTOP/SIGCONT) remain subprocess-only; use `send` for a
-saved-session relaunch. Reloaded/unattached herdr records cannot be signalled or resumed yet; proof-backed ordinary cleanup is available.
+saved-session relaunch. Only the current fenced attachment may use live controls; an unattached record is not control authority.
 
 **Kill, quit and cleanup.** Herdr kill preserves pane scrollback. It signals only the verified current positive child PID (never the pane shell or CLI), with TERM then a freshly proven KILL after two seconds. Synchronous kill classification, pending-delivery cancellation and owned hook-group termination remain unchanged. Unknown identity sends no signal and preserves resources. Foreground abort remains process-only.
 
-Quit first awaits M5 integration suspension, verifier-group safety and terminal I/O; **only then** does a five-second pane-cleanup budget start. Managed children stop and exact empty panes (including completed runs) are released. Budget expiry cannot bypass verifier safety or authorize deleting a child workspace. Unreleased bindings and diagnostics remain doctor-visible; integrating work is not reclassified killed. Reload keeps the existing preservation behavior until H10.
+Quit first awaits M5 integration suspension, verifier-group safety and terminal I/O; **only then** does a five-second pane-cleanup budget start. Managed children stop and exact empty panes (including completed runs) are released. Budget expiry cannot bypass verifier safety or authorize deleting a child workspace. Unreleased bindings and diagnostics remain doctor-visible; integrating work is not reclassified killed. Reload instead quiesces the old pipeline and M5 barriers, detaches its stream/monitor/inbox waits, and releases its owner generation without stopping the child. New herdr launches are refused during shutdown. Subprocess pipelines keep their existing reload behavior.
 
 Explicit cleanup and GC recheck invocation/status and exact socket/pane/terminal/tab/workspace evidence before pane-only close; no tab-wide close can take a sibling pane. Ordinary archived run files may be reclaimed after proven child absence even when the server is unavailable, but a bound worktree and its ownership record stay if pane release is uncertain. Existing ordinary TTL policy and effort protection remain; this adds no effort abandonment or destructive effort TTL.
 
@@ -94,7 +94,35 @@ if needed. Unsupported successors are reported without creating a run.
 `ensemble_status` reports `runtime` alongside the existing `available_actions`.
 Doctor reports configured selection, each persona's effective kind/source, saved
 kinds and legacy behaviour using read-only checks; it does not run a herdr health
-probe. Startup reconciliation preserves tagged herdr records; effort recovery/requeue still refuses them. Ordinary GC requires a matching current invocation and durable hello plus a fresh positive-child-PID absence probe. Live, reused-PID and unknown children retain their files. Effort resources remain protected from legacy GC.
+probe. Startup reconciliation reattaches proven same-socket herdr invocations as described below. Unreachable/foreign sockets and unknown identity are preserved without guessing at the record's legacy PID. Effort recovery retains its separate ownership checks. Ordinary GC requires a matching current invocation and durable hello plus a fresh positive-child-PID absence probe. Live, reused-PID and unknown children retain their files. Effort resources remain protected from legacy GC.
+**Reattachment and delivery limits.** Each run has append-only, exclusive-create owner
+generations with module epoch, session, PID/start identity, socket and launch nonce.
+A release leaves its generation in place; it never deletes and reuses a number.
+Only a released or proven-dead owner can be replaced. A live or unknown owner,
+including another module in the same PID, blocks takeover. Off Linux, dead PID
+evidence also needs an owner age of at least 90 seconds.
+
+The new owner reads bounded (32 MiB), LF-aligned history from the exact native
+launch boundary and current nonce. It does not send the task again. Usage and
+pending questions are reconstructed rather than added to saved totals. Per-launch usage baselines are independent of live-send markers; older records without that baseline report current-invocation usage only. A child
+that settled while the lead was absent is finalized only after proven exit;
+death without complete accepted native evidence is an orphan failure. Unknown
+identity preserves the workspace and does not publish a model result. Recovery
+never reconstructs chain/retry closures. An unknown original ordinary-run hook
+prevents auto-merge; inspect the kept branch and use the explicit worktree controls.
+
+Ordinary runs persist `herdr.settlement = {launchNonce, delivery}` before automatic
+completion dispatch. An interrupted `intent` becomes visible `uncertain` and is
+**not replayed**. `attempted` means the local call returned, not receiver delivery.
+Notifications, lifecycle events or memory outcomes can be missed after a crash;
+manually reposting may duplicate a previous delivery. Repairing final files never
+reruns the task to recreate a notification. Effort runs use **only** the existing
+`integration.delivery` ledger: a stream claim grants no effort authority, and a
+proc-less live writer is bound only after M5 ownership recovery succeeds. Durable
+integrating entries remain M5's responsibility; attachment cannot restart CAS or
+verification. Retired sessions still refuse sends, and owner answers retain A6's
+acceptance rules.
+
 Subprocess print and RPC are **transports, not runtimes**: explicit steering and
 A5's automatic large-prompt RPC both remain subprocess, and automatic RPC does
 not grant steering. A6 answers and M5 integration verification retain their existing
@@ -706,8 +734,9 @@ hooks and worktree safety still apply. Settlement uses Pi's `agent_settled` even
 (JSON and RPC), not `agent_end`, which can precede overflow recovery; process exit
 is the fallback. Supported host: **Pi 0.87.1 or newer** (`@earendil-works/pi-coding-agent >=0.87.1`);
 0.87.1 is the verified floor for the required `agent_settled` API.
-Phase A **A2–A6** and H7–H9 are implemented. Herdr real-TUI acceptance, rollout,
-and reload/adoption remain later gates; see the runtime section.
+Phase A **A2–A6** and H7–H10 are implemented. Herdr real-TUI acceptance and rollout
+remain H11/later gates; see the runtime section. Offline recovery tests use executable
+fake herdr and the approved native Pi 0.87.1 harness, never personal panes.
 
 `~/.pi/agent/extensions/conductor/config.json` (user) or `<project>/.pi/conductor.json` (project, overrides user):
 

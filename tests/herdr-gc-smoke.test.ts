@@ -9,10 +9,10 @@ import { executeReclaim } from "../src/gc/executor.ts";
 sandboxPi();
 for (const race of ["none", "nonce", "status", "memory"] as const) test(`H9 GC fake CLI effect-time proof and sibling preservation: ${race}`, { timeout: 10000 }, async () => {
   const h = herdrFixture("healthy");
+  const statePath = join(h.run.cwd, "fake.json"); h.cli.socketPath = `${statePath}.socket`;
   h.run.transport = h.runtime.launch(h.run, [], h.run.cwd, { line() {}, close() {}, error() {}, initialDeliveryFailed() {} }, "probe", h.opts.core);
   await h.run.transport.ready; h.run.status = "completed";
-  const statePath = join(h.run.cwd, "fake.json");
-  h.run.herdr!.socketPath = `${statePath}.socket`; h.run.herdr!.childPid = 2147483647;
+  h.run.herdr!.childPid = 2147483647;
   const helloPath = join(dirname(h.run.recordPath), "launch", `${h.run.herdr!.launchNonce}.json`);
   const hello = JSON.parse(readFileSync(helloPath, "utf8")); hello.pid = h.run.herdr!.childPid;
   writeFileSync(helloPath, JSON.stringify(hello));

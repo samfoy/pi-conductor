@@ -82,6 +82,7 @@ function uncertainDelivery(run: Run): void {
 export async function recoverEffort(original: EffortRecord, opts: RecoveryOptions): Promise<{ runs: Run[]; done: Promise<void> }> {
   if (process.env.CONDUCTOR_SUBAGENT === "1") return { runs: [], done: Promise.resolve() };
   for (const run of [...records(original), ...opts.registry.list().filter(r => r.effort?.gitRoot === original.gitRoot && r.effort.name === original.name)]) assertSupportedRuntime(run.runtime);
+  if (!readEffort(original.gitRoot, original.name)) throw new Error("effort record missing; ownership recovery refused");
   let record = adoptEffort(original, effortOwner(opts.sessionId));
   const active = opts.registry.list().filter(r => r.effort?.gitRoot === original.gitRoot && r.effort.name === original.name && r.integrationControl);
   if (active.length) {
@@ -109,6 +110,17 @@ export async function recoverEffort(original: EffortRecord, opts: RecoveryOption
     for (const savedRun of ordered) {
       const previous = opts.registry.get(savedRun.id);
       if (previous?.proc || previous?.integrationControl) continue;
+      if (previous?.runtime === "herdr" && !previous.integration && previous.herdrOwnership) {
+        previous.herdrOwnership.assert();
+        previous.effort = { ...previous.effort!, owner: record.owner };
+        previous.parentSessionId = record.owner.sessionId; previous.parentPid = record.owner.pid; previous.parentStartTime = record.owner.startTime;
+        previous.integrationSuspended = false; previous.herdrEffortAuthorized = true;
+        await writeRecord(previous, () => { previous.herdrOwnership!.assert(); assertRunEffortOwner(previous); });
+        previous.herdrResumeSettlement?.();
+        restored.push(previous); continue;
+      }
+      // A stream claim is not effort authority, and a missing proc handle is not a dead writer.
+      if (savedRun.runtime === "herdr" && !savedRun.integration) continue;
       const run = buildOrphanRun(savedRun, savedRun.status);
       run.recordWrite = previous?.recordWrite;
       run.effort = { ...run.effort!, owner: record.owner };

@@ -163,9 +163,9 @@ test("H2 reconcile preserves herdr records without probing or signalling guessed
     const dir = join(root, r.id); mkdirSync(dir); const path = join(dir, "record.json");
     const saved = JSON.stringify(toRunRecord(r)); writeFileSync(path, saved);
     const forbidden = () => { assert.fail("unsupported runtime must not probe or signal"); return false; };
-    assert.equal(classifyRecord(toRunRecord(r), forbidden, 1, 1, forbidden), "skip-unsupported-runtime");
+    assert.equal(classifyRecord(toRunRecord(r), forbidden, 1, 1, forbidden), "skip-foreign");
     const result = await reconcileOrphansAtStartup({ runsRoot: root, registry, now: 1, isAlive: forbidden, isParentAlive: forbidden, signal: forbidden });
-    assert.ok(result.errors.some(e => /herdr.*unavailable/i.test(e.message)));
+    assert.ok(result.skippedForeign.includes(r.id));
     assert.equal(readFileSync(path, "utf8"), saved); assert.deepEqual(registry.list(), []);
   }
 });
@@ -268,11 +268,11 @@ test("H2 herdr live-send and recovery refuse before stdin/ownership/integration 
   const sent = sendToRun(r, "steer", { registry, streamingBehavior: "steer", timeoutMs: 4000 });
   assert.equal(sent.kind, "rejected"); if (sent.kind === "rejected") assert.match(sent.reason, /herdr.*unavailable/);
   assert.deepEqual(availableActions(r), []);
-  await assert.rejects(requeueEffortRun(r, { registry, sessionId: "test" }), /herdr.*unavailable/);
+  await assert.rejects(requeueEffortRun(r, { registry, sessionId: "test" }), /stopped preserved writer/);
   const effort = { gitRoot: r.cwd, name: "probe" };
   const saved = { ...toRunRecord(r), effort };
   mkdirSync(join(runsRoot(), r.id), { recursive: true }); writeFileSync(join(runsRoot(), r.id, "record.json"), JSON.stringify({ ...saved, recordPath: join(runsRoot(), r.id, "record.json"), finalPath: join(runsRoot(), r.id, "final.md"), transcriptPath: join(runsRoot(), r.id, "transcript.jsonl") }));
-  await assert.rejects(recoverEffort(effort as never, { registry: new RunRegistry(), sessionId: "test" }), /herdr.*unavailable/);
+  await assert.rejects(recoverEffort(effort as never, { registry: new RunRegistry(), sessionId: "test" }), /effort record missing/);
   assert.equal(child.launches(), 0); assert.deepEqual(readdirSync(r.cwd), []);
 });
 

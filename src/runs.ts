@@ -1,3 +1,4 @@
+import { assertHerdrOwner, ownsHerdrRun, herdrEffectFence } from "./herdr/ownership.ts";
 import { runtimeFor } from "./runtime.ts";
 import { herdrChildAbsent, releaseRecordedPane } from "./herdr/runtime.ts";
 import { sameHerdrBinding } from "./herdr/identity.ts";
@@ -24,7 +25,7 @@ import { formatOwnerAnswer } from "./ask-owner.ts";
  */
 
 import type { ChildProcess } from "node:child_process";
-import { createRunPipeline } from "./run-pipeline.ts";
+import { createRunPipeline, dispatchHerdrSettlement } from "./run-pipeline.ts";
 import { capabilitiesFor, subprocessRuntime } from "./subprocess-runtime.ts";
 import { ownedEffort, effortOwner, effortRepository, effortTip } from "./effort/open.ts";
 import { effortEnv } from "./effort/git.ts";
@@ -907,6 +908,7 @@ export type RunListener = (run: Run) => void;
 export type TerminationReason = "killed" | "timeout" | "stalled" | "aborted";
 
 export class RunRegistry {
+  herdrAdmissionOpen = true;
   admissionLimits?: AdmissionLimits;
   readonly integrations = new EffortDriver();
   private runs = new Map<string, Run>();
@@ -1263,6 +1265,7 @@ export function prepareSpawnEffort(opts: Pick<SpawnOptions, "effort" | "touches"
 /** Spawn immediately; foreground/background callers await the same terminal promise. */
 export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
   opts = prepareSpawnRuntime(opts);
+  if (opts.runtime === "herdr" && !opts.registry.herdrAdmissionOpen) throw new Error("herdr runtime shutting down; launch refused");
   opts = prepareSpawnEvidence(opts, opts.registry);
   const effort = prepareSpawnEffort(opts);
   const id = opts.preAllocatedId ?? allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
@@ -1869,6 +1872,8 @@ export function runActionError(run: Run, action: RunAction, observed: ActionObse
   const unsupported = unsupportedRuntimeReason(run.runtime);
   if (unsupported && !(run.runtime === "herdr" && run.transport?.kind === "herdr")) return unsupported;
   if (run.runtime === "herdr") {
+    if (!ownsHerdrRun(run)) return "herdr owner generation fenced; action refused";
+    if (run.transport?.kind !== "herdr") return "herdr runtime unavailable here: stream is not attached";
     if (action === "pause" || action === "resume") return `${action} is subprocess-only; use send to relaunch a saved herdr session.`;
     if (action === "send" && (run.herdrExitUnconfirmed || run.transport?.kind !== "herdr" || !run.transport.childExited)) return "herdr: previous child exit is unconfirmed; preserve the session and workspace";
     if (!observed.owned) return `sub-agent ${run.id} is owned by another conductor (foreign run).`;
@@ -2132,6 +2137,7 @@ export function sendToRun(
   message: string,
   opts: SendToRunOptions,
 ): SendToRunResult {
+  if (run.runtime === "herdr" && !opts.registry.herdrAdmissionOpen) return { kind: "rejected", reason: "herdr runtime shutting down; send refused" };
   let trimmed = message.trim();
   if (!trimmed) {
     return {
@@ -2517,7 +2523,9 @@ export async function herdrChildGone(run: Run): Promise<boolean> {
  * 5b (v0.20 W2). Exported for tests.
  */
 export async function settleWorktree(run: Run, terminal: RunStatus): Promise<RunStatus> {
+  assertHerdrOwner(run);
   if (!await herdrChildGone(run)) return terminal;
+  assertHerdrOwner(run);
   if (run.effort) {
     run.worktreeKept = `${effortSummary(run)}. Worktree ${run.worktreePath ?? "unavailable"}; branch ${run.worktreeBranch ?? "unavailable"} preserved.`;
     return terminal;
@@ -2587,14 +2595,14 @@ export function worktreeCleanupGuard(run: Run, currentRun: () => Run | undefined
     sameHerdrBinding(binding, value.herdr as unknown as NonNullable<Run["herdr"]>);
   return (worktreeRemoved = false) => {
     // Removal clears live fields, not the durable ownership record or invocation identity.
-    try { return matches(run, worktreeRemoved) && matches(currentRun(), worktreeRemoved) && matches(readControlRecord(recordPath)); }
+    try { return ownsHerdrRun(run) && matches(run, worktreeRemoved) && matches(currentRun(), worktreeRemoved) && matches(readControlRecord(recordPath)); }
     catch { return false; }
   };
 }
 
 /** Explicit cleanup uses the same proof for attached and durable-only resources. */
 export async function releaseRunPane(run: Run, isCurrent: () => boolean = () => true): Promise<boolean> {
-  if (!isCurrent()) return false;
+  if (!ownsHerdrRun(run) || !isCurrent()) return false;
   if (run.runtime !== "herdr") return true;
   const binding = run.herdr, status = run.status;
   return run.transport?.kind === "herdr" ? run.transport.releasePane(undefined, isCurrent)
@@ -2625,6 +2633,7 @@ export async function releaseWorktree(run: Run, opts: { keepBranch: boolean; isC
     return false;
   }
   if (opts.isCurrent && !opts.isCurrent()) { run.worktreeKept = "worktree kept: current ownership unconfirmed"; return false; }
+  if (!ownsHerdrRun(run)) return false;
   if (removeWorktree(wtSpec, opts)) {
     run.worktreePath = undefined;
     if (!opts.keepBranch) run.worktreeBranch = undefined;
@@ -2724,6 +2733,8 @@ export async function applyHookToTerminal(
   terminal: RunStatus,
   deps: { runHookImpl?: typeof runHook; events?: ConductorEventEmitter } = {},
 ): Promise<RunStatus> {
+  const fence = herdrEffectFence(run);
+  fence();
   // Pre-write final.md so CONDUCTOR_FINAL_TEXT_PATH resolves at hook
   // spawn time. writeFinal is best-effort; a write failure is rare and
   // the hook can still introspect transcript via
@@ -2735,6 +2746,7 @@ export async function applyHookToTerminal(
     // best-effort
   }
 
+  fence();
   const runHookImpl = deps.runHookImpl ?? runHook;
   run.hookExecuting = true;
   try {
@@ -2754,6 +2766,7 @@ export async function applyHookToTerminal(
         run.hookProc = proc;
       },
       onStart: () => {
+        try { fence(); } catch { return; }
         deps.events?.emitHookStarted({
           id: run.id,
           persona: run.persona,
@@ -2761,6 +2774,7 @@ export async function applyHookToTerminal(
         });
       },
       onEnd: (result) => {
+        try { fence(); } catch { return; }
         if (result.passed) {
           deps.events?.emitHookCompleted({
             id: run.id,
@@ -2781,6 +2795,7 @@ export async function applyHookToTerminal(
         }
       },
     });
+    fence();
     // W7 idempotency guard: forceTerminate may have flipped status
     // during the hook's lifetime. Drop the result; the
     // forceTerminate-set terminal wins.
@@ -2883,7 +2898,7 @@ export function forceTerminate(
   onComplete?: (r: Run) => void,
   killGroup: (pid: number, signal: NodeJS.Signals) => void = defaultKillGroup,
 ): void {
-  if (isTerminal(run.status)) return;
+  if (!ownsHerdrRun(run) || isTerminal(run.status)) return;
   const blocker = validateRunAction(run, "kill");
   if (blocker) {
     console.warn(`forceTerminate: refusing to mutate foreign run id=${run.id}: ${blocker}`);
@@ -2970,12 +2985,10 @@ export function forceTerminate(
   registry.notify(run);
   void writeRecord(run);
   void writeFinal(run);
-  if (onComplete) {
-    try {
-      onComplete(run);
-    } catch {
-      // ignore
-    }
+  if (run.runtime === "herdr" && !run.effort && run.herdr) {
+    if (onComplete) void dispatchHerdrSettlement(run, () => onComplete(run)).catch(() => {});
+  } else if (onComplete) {
+    try { onComplete(run); } catch { /* ignore */ }
   }
 }
 
@@ -3055,12 +3068,14 @@ export function discoverContextRetirement(run: Run, sessionDir?: string): void {
 }
 
 export function writeRecord(run: Run, durableFence?: () => void): Promise<void> {
+  const ownership = run.herdrOwnership;
+  const fence = () => { ownership?.assert(); assertHerdrOwner(run); durableFence?.(); };
   const snapshot = structuredClone(toRunRecord(run));
   const writing = (run.recordWrite ?? Promise.resolve()).catch(() => {}).then(async () => {
     await mkdir(dirname(run.recordPath), { recursive: true });
-    if (durableFence || snapshot.effort) writeDurableJson(run.recordPath, snapshot, () => {
+    if (durableFence || snapshot.effort || snapshot.runtime === "herdr") writeDurableJson(run.recordPath, snapshot, () => {
       assertRunEffortOwner(snapshot);
-      durableFence?.();
+      fence();
     });
     else await writeFile(run.recordPath, JSON.stringify(snapshot, null, 2));
   });
@@ -3069,11 +3084,15 @@ export function writeRecord(run: Run, durableFence?: () => void): Promise<void> 
 }
 
 export async function writeFinal(run: Run, durable = false): Promise<void> {
+  const ownership = run.herdrOwnership, binding = run.herdr;
+  const text = getFinalText(run.messages) || run.integration?.resultText || "(no output)";
+  const fence = () => { ownership?.assert(); assertHerdrOwner(run); if (run.herdr !== binding) throw new Error("herdr invocation changed before final write"); };
   // Keep any prior invocation's artifact intact; it is not this invocation's result.
   if (run.herdrExitUnconfirmed || run.herdrResultUnavailable) return;
-  if (durable) {
+  if (durable || run.runtime === "herdr") {
+    if (!ownsHerdrRun(run)) return;
     await mkdir(dirname(run.finalPath), { recursive: true });
-    writeDurableFile(run.finalPath, getFinalText(run.messages) || run.integration?.resultText || "(no output)", () => assertRunEffortOwner(run));
+    writeDurableFile(run.finalPath, text, () => { assertRunEffortOwner(run); fence(); });
     return;
   }
   try {
