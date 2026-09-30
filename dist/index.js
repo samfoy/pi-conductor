@@ -1662,7 +1662,7 @@ var positiveInteger = (v) => typeof v === "number" && Number.isSafeInteger(v) &&
 function isHerdrPane(value) {
   if (!isRecord(value) || ![value.pane_id, value.terminal_id, value.workspace_id, value.tab_id].every(text)) return false;
   const session = value.agent_session;
-  return (value.agent === null || text(value.agent)) && (session === null || isRecord(session) && (session.kind === "path" || session.kind === "id") && [session.value, session.agent, session.source].every(text));
+  return (value.agent == null || text(value.agent)) && (session == null || isRecord(session) && (session.kind === "path" || session.kind === "id") && [session.value, session.agent, session.source].every(text));
 }
 var unknown = (reason) => ({ ok: false, state: "unknown", reason });
 function sameHerdrBinding(a, b) {
@@ -1676,7 +1676,7 @@ function provePaneOurs(ev) {
   }
   if (!text(b.socketPath) || b.socketPath !== ev.socketPath) return unknown("socket mismatch");
   if (pane.pane_id !== b.paneId || pane.terminal_id !== b.terminalId || pane.workspace_id !== b.workspaceId || pane.tab_id !== b.tabId) return unknown("pane identity mismatch");
-  if (ev.requireNoAgent && (pane.agent !== null || pane.agent_session !== null)) return unknown("pane not empty");
+  if (ev.requireNoAgent && (pane.agent != null || pane.agent_session != null)) return unknown("pane not empty");
   return { ok: true };
 }
 function proveChildProcess(ev) {

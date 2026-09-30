@@ -23,10 +23,19 @@ test("positive empty pane and Linux child proofs are distinct", () => {
   noSignal({...childEvidence, pane});
 });
 for (const field of ["pane_id", "terminal_id", "workspace_id", "tab_id", "agent", "agent_session"]) {
-  for (const value of [undefined, "foreign"]) test(`pane refuses ${field}=${value}`, () => {
+  // Real herdr 0.9.1 omits absent optional agent fields (schema: not required); omission is covered below.
+  for (const value of field.startsWith("agent") ? ["foreign"] : [undefined, "foreign"]) test(`pane refuses ${field}=${value}`, () => {
     assert.equal(provePaneOurs({...emptyEvidence, pane: {...pane, [field]: value}}).ok, false);
   });
 }
+test("real herdr omission of optional agent fields means no agent, never a proven Pi child", () => {
+  const {agent: _agent, agent_session: _session, ...omitted} = pane;
+  assert.deepEqual(provePaneOurs({...emptyEvidence, pane: omitted}), {ok: true});
+  noSignal({...childEvidence, pane: omitted});
+  const {agent: _liveAgent, ...sessionOnly} = livePane;
+  assert.equal(provePaneOurs({...emptyEvidence, pane: sessionOnly}).ok, false, "a reported session is not an empty pane");
+  noSignal({...childEvidence, pane: sessionOnly});
+});
 for (const field of ["runId", "launchNonce", "sessionId", "sessionFile"]) {
   test(`current invocation refuses ${field}`, () => {
     const current = {...invocation, [field]: "foreign"};

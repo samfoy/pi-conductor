@@ -79,6 +79,14 @@ test("fake create -> inspect -> persisted binding -> proof -> empty cleanup", {t
     assert.deepEqual(call.routingNames, ["HERDR_SOCKET_PATH"]);
   }
 });
+test("real herdr 0.9.1 tab create/pane get omit absent agent fields; create and empty cleanup still prove ownership", {timeout: 5000}, async () => {
+  // Exact serialization observed from a private herdr 0.9.1 server: PaneInfo.agent/agent_session are optional and omitted when absent.
+  const {agent: _agent, agent_session: _session, ...omitted} = pane;
+  const f = fixture({pane: omitted});
+  const binding = await f.create();
+  assert.deepEqual(await closeEmptyPane(f.cli, binding, () => invocation), {ok: true});
+  assert.equal(f.read().closed, true);
+});
 test("cleanup zero destructive calls for a shell with a valid non-null session", {timeout: 5000}, async () => {
   const f = fixture();
   const binding = await f.create();
@@ -131,7 +139,8 @@ test("creation refuses relocated or malformed observations without destructive r
 test("cleanup preserves pane on missing evidence, CLI failure or socket mismatch", {timeout: 5000}, async () => {
   const f = fixture();
   const binding = await f.create();
-  for (const patch of [{getPane: {...pane, agent: undefined}}, {fault: "invalid"}, {fault: "nonzero"}]) {
+  // Omitted agent fields are valid herdr 0.9.1 output; a missing required identity field is missing evidence.
+  for (const patch of [{getPane: {...pane, terminal_id: undefined}}, {fault: "invalid"}, {fault: "nonzero"}]) {
     f.patch(patch);
     assert.equal((await closeEmptyPane(f.cli, binding, () => invocation)).ok, false);
   }

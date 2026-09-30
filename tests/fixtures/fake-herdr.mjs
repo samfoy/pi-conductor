@@ -64,6 +64,6 @@ else if (args[0] === "agent" && args[1] === "start") {
   state.pane.agent_session = {kind: "path", value: state.sessionFile, source: "integration", agent: "pi"};
   save(); output({type: "agent_started", agent: {...state.pane, name: args[2], interactive_ready: true}, argv: args.slice(args.indexOf("--") + 1)});
 } else if (args[0] === "pane" && args[1] === "close") {
-  if (args[2] !== state.pane.pane_id || state.pane.agent !== null) process.exit(92);
+  if (args[2] !== state.pane.pane_id || state.pane.agent != null) process.exit(92); // real herdr omits an absent agent
   state.closed = true; save(); output({type: "ok"});
 } else process.exit(93);

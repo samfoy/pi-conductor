@@ -33,15 +33,16 @@ export interface HerdrPane {
   terminal_id: string;
   workspace_id: string;
   tab_id: string;
-  agent: string | null;
-  agent_session: {kind: "path" | "id"; value: string; agent: string; source: string} | null;
+  // Optional in herdr 0.9.1's schema and omitted when absent: omission means none.
+  agent?: string | null;
+  agent_session?: {kind: "path" | "id"; value: string; agent: string; source: string} | null;
 }
 const text = (v: unknown): v is string => typeof v === "string" && v.length > 0 && !v.includes("\0");
 const positiveInteger = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
 export function isHerdrPane(value: unknown): value is HerdrPane {
   if (!isRecord(value) || ![value.pane_id, value.terminal_id, value.workspace_id, value.tab_id].every(text)) return false;
   const session = value.agent_session;
-  return (value.agent === null || text(value.agent)) && (session === null || (isRecord(session) &&
+  return (value.agent == null || text(value.agent)) && (session == null || (isRecord(session) &&
     (session.kind === "path" || session.kind === "id") && [session.value, session.agent, session.source].every(text)));
 }
 interface PaneEvidence {
@@ -67,7 +68,7 @@ export function provePaneOurs(ev: PaneEvidence): {ok: true} | Refusal {
   if (!text(b.socketPath) || b.socketPath !== ev.socketPath) return unknown("socket mismatch");
   if (pane.pane_id !== b.paneId || pane.terminal_id !== b.terminalId ||
       pane.workspace_id !== b.workspaceId || pane.tab_id !== b.tabId) return unknown("pane identity mismatch");
-  if (ev.requireNoAgent && (pane.agent !== null || pane.agent_session !== null)) return unknown("pane not empty");
+  if (ev.requireNoAgent && (pane.agent != null || pane.agent_session != null)) return unknown("pane not empty");
   return {ok: true};
 }
 
