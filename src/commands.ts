@@ -65,7 +65,7 @@ import { runGc, type RunGcResult } from "./gc/index.ts";
 import { walkInventory } from "./gc/inventory.ts";
 import { planReclaim, type ReclaimAction } from "./gc/policy.ts";
 import { classifyStall, resolveKillOnStall } from "./watchdog.ts";
-import { awaitingDelegation } from "./delegation.ts";
+import { awaitingChildren } from "./delegation.ts";
 import { mergeWorktree, buildMergeCommitMessage } from "./worktree.ts";
 import { isTerminal } from "./types.ts";
 import { formatCwdInfo, type CwdController } from "./conductor-cwd.ts";
@@ -1254,7 +1254,7 @@ export function buildWatchdogStatusReport(args: {
       "action",
   );
   for (const r of active) {
-    const c = classifyStall(r, now, watchdogConfig, awaitingDelegation(r, registry.list()));
+    const c = classifyStall(r, now, watchdogConfig, awaitingChildren(r, registry.list()) > 0);
     const silent = c ? `${c.silentSeconds}s` : "—";
     const state = c ? c.severity : "fresh";
     const soft = c ? c.softThresholdSeconds : watchdogConfig.softThresholdSeconds;

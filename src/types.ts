@@ -981,8 +981,8 @@ export interface Run {
   delegateToolCallId?: string;
   /** In memory: `delegate` calls the lead broker has claimed and not yet answered. */
   pendingDelegations?: number;
-  /** In memory (N3): claimed calls whose leaf is not registered yet; a registered leaf carries the wait itself. */
-  provisionalDelegations?: number;
+  /** In memory (N3): the launched subprocess has not closed; its admission slot outlives a terminal status until it does. */
+  processOpen?: boolean;
   /** In memory: when the current invocation's hard-timeout timer fires. */
   deadlineAt?: number;
 

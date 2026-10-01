@@ -7,7 +7,7 @@
  */
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -188,9 +188,12 @@ function blockedOnDelegate(run: Run): boolean {
 
 /**
  * N3 barrier: four real delegators fill cap 4, each fans out two real leaves
- * that hold until released, and a lead-level run queued before any leaf must
- * not start on a lent slot. Every registry transition (and every poll) samples
- * live pids, slot holders and executing work measured from claim/response files.
+ * that hold their answers until released, and a lead-level run is queued before
+ * any leaf. Every N3 parent and leaf then holds its exit after settling (it
+ * ignores the settlement SIGTERM) until released, so a slot freed at settlement
+ * rather than at process close would show as extra live processes. Liveness is
+ * read from each run's own ChildProcess (exitCode/signalCode), sampled on every
+ * registry change and every poll; executing work is measured from claim/response files.
  */
 async function lentSlots(t: test.TestContext, bin: string, version: string) {
   process.env.PI_BIN = bin;
@@ -199,17 +202,23 @@ async function lentSlots(t: test.TestContext, bin: string, version: string) {
   const registry = new RunRegistry();
   const queue = new SpawnQueue(registry, 4, 1);
   registry.delegation = new DelegationBroker({ registry, queue, env: {} });
-  t.after(() => { for (const r of registry.list()) if (alive(r.pid)) process.kill(r.pid!, "SIGKILL"); });
-  // Slots free at agent_settled, before the process exits; live settled runs are counted apart as `exiting`.
-  const peak = { physical: 0, holders: 0, exiting: 0, active: 0, executing: 0, lead: 0 };
+  const proc = (r: Run) => (r.transport as { proc?: ChildProcess } | undefined)?.proc;
+  const live = (r: Run) => { const p = proc(r); return !!p && p.exitCode === null && p.signalCode === null; };
+  t.after(() => {
+    for (const p of [...queue.list()]) queue.removeQueued(p.id);
+    for (const r of registry.list()) if (live(r)) proc(r)!.kill("SIGKILL");
+  });
+  const peak = { physical: 0, lead: 0, executing: 0, heldLeaves: 0, heldParents: 0 };
+  const violations: string[] = [];
+  const answered = (leaf: Run) => existsSync(delegatePaths(dirname(registry.get(leaf.parentRunId!)!.recordPath), leaf.delegateToolCallId!).response);
   const sample = () => {
-    const runs = registry.list(), active = runs.filter(consumesSlot), live = runs.filter(r => alive(r.pid));
-    peak.physical = Math.max(peak.physical, live.length);
-    peak.holders = Math.max(peak.holders, live.filter(consumesSlot).length);
-    peak.exiting = Math.max(peak.exiting, live.filter(r => isTerminal(r.status)).length);
-    peak.active = Math.max(peak.active, active.length);
-    peak.executing = Math.max(peak.executing, active.filter(r => !blockedOnDelegate(r)).length);
-    peak.lead = Math.max(peak.lead, active.filter(r => r.depth !== 2).length);
+    const runs = registry.list(), alive = runs.filter(live), held = alive.filter(r => isTerminal(r.status));
+    peak.physical = Math.max(peak.physical, alive.length);
+    peak.lead = Math.max(peak.lead, alive.filter(r => r.depth !== 2).length);
+    peak.executing = Math.max(peak.executing, runs.filter(consumesSlot).filter(r => !blockedOnDelegate(r)).length);
+    peak.heldLeaves = Math.max(peak.heldLeaves, held.filter(r => r.depth === 2).length);
+    peak.heldParents = Math.max(peak.heldParents, held.filter(r => r.persona === "lead").length);
+    for (const l of held.filter(r => r.depth === 2 && answered(r))) violations.push(`${l.id} answered while its process was alive`);
   };
   registry.onChange(sample);
   const wait = async (cond: () => boolean, what: string) => until(() => { sample(); return cond(); }, what, 90000);
@@ -222,25 +231,33 @@ async function lentSlots(t: test.TestContext, bin: string, version: string) {
   const plain = spawn("N3-PLAIN", "plain");
   assert.equal(registry.get(plain)!.status, "queued", "the cap is full of delegators");
   const leaves = () => registry.list().filter(r => r.depth === 2);
-  const holding = () => readdirSync(fixture).filter(f => f.startsWith("n3-running-")).length;
-  await wait(() => leaves().length === 8 && holding() === 4, "eight leaves claimed and four holding");
+  const files = (prefix: string) => readdirSync(fixture).filter(f => f.startsWith(prefix));
+  await wait(() => leaves().length === 8 && files("n3-running-").length === 4, "eight leaves claimed and four holding");
   assert.deepEqual(leaves().map(l => l.status).sort(), ["queued", "queued", "queued", "queued", "running", "running", "running", "running"],
-    "four awaiting parents lend four slots; N2 queues every leaf behind them until the parents time out");
+    "each delegator's first leaf runs on its own slot; N2 queued every leaf behind the full pool until the parents timed out");
   for (const l of leaves().filter(l => l.status === "queued")) assert.match(l.waitReason ?? "", /lent slot/);
   assert.equal(registry.get(plain)!.status, "queued", "the earlier lead-level run never takes a lent slot");
   assert.match(registry.get(plain)!.waitReason ?? "", /maxConcurrent \(4\)/);
   writeFileSync(join(fixture, "n3-release"), "go");
-  await wait(() => [...parents, plain].every(id => isTerminal(registry.get(id)!.status)) && registry.list().every(r => isTerminal(r.status) && !alive(r.pid)), "every own run settled and exited");
+  await wait(() => peak.heldLeaves > 0, "a leaf settled while its process still held its exit");
+  writeFileSync(join(fixture, "n3-exit-leaf"), "go");
+  await wait(() => peak.heldParents > 0 && leaves().every(l => isTerminal(l.status) && !live(l)), "every leaf exited and a parent settled with its process held");
+  assert.equal(registry.get(plain)!.status, "queued", "settled parents whose processes live still hold their slots");
+  writeFileSync(join(fixture, "n3-exit-parent"), "go");
+  await wait(() => registry.list().every(r => isTerminal(r.status) && !live(r)), "every own run settled and exited");
   for (const id of [...parents, plain]) assert.equal(registry.get(id)!.status, "completed", registry.get(id)!.errorMessage);
-  assert.equal(holding(), 8, "all eight leaves ran");
+  assert.equal(files("n3-running-").length, 8, "all eight leaves ran");
   for (const [i, id] of parents.entries()) {
     const final = getFinalText(registry.get(id)!.messages);
     for (const c of ["a", "b"]) assert.match(final, new RegExp(`n3_${i + 1}_${c}: ## ✓ \`scout\` completed[\\s\\S]*?N3 LEAF ${i + 1}-${c} done`));
   }
-  t.diagnostic(`Pi ${version} N3 peaks: ${JSON.stringify(peak)}`);
-  const { physical, exiting, ...bounded } = peak;
-  assert.deepEqual(bounded, { holders: 8, active: 8, executing: 4, lead: 4 }, "live slot holders and A <= 2*max, executing <= max, lead-level <= max");
-  assert.ok(physical <= 8 + exiting, `every live pi beyond 2*max had already settled: ${physical} live, ${exiting} exiting`);
+  const sigterms = files("n3-sigterm-").map(f => readFileSync(join(fixture, f), "utf8"));
+  const exits = registry.list().map(r => proc(r)!).map(p => p.signalCode ?? `code ${p.exitCode}`);
+  t.diagnostic(`Pi ${version} N3 peaks: ${JSON.stringify(peak)}; held SIGTERMs: ${sigterms.length}; exits: ${JSON.stringify(exits)}`);
+  assert.deepEqual(violations, [], "a parent gets its leaf's answer only after the leaf's process closed");
+  assert.ok(sigterms.includes("n3-exit-leaf") && sigterms.includes("n3-exit-parent"), "the conductor asked held leaves and parents to exit, and they held");
+  assert.deepEqual(peak, { physical: 8, lead: 4, executing: 4, heldLeaves: peak.heldLeaves, heldParents: peak.heldParents },
+    "live pi processes <= 2*max, live lead-level <= max, executing <= max");
 }
 
 /** A delegator whose host also loads another extension's `delegate` fails Pi startup; a non-delegator with it starts. */

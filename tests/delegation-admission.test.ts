@@ -196,18 +196,19 @@ test("N3 drain offers capacity to depth-2 entries before earlier lead-level entr
   assert.ok(h.peak.executing <= 4 && h.peak.active <= 8);
 });
 
-test("N3 no lost wake-up: a claim's increment-then-notify drains queued leaves, and a settlement drains the next", async () => {
+test("N3 no lost wake-up: a full pool's delegator starts its first leaf on its own slot, a claim lends nothing, and a settlement drains the next leaf", async () => {
   const h = harness(2);
   const p1 = h.enqueue(), p2 = h.enqueue();
   h.call(p1, "c1"); await h.resolved(p1, "c1");
+  assert.equal(h.leaf("c1")!.status, "running", "the first leaf at a full parent pool runs on its parent's own slot");
   h.call(p1, "c2"); await h.resolved(p1, "c2");
   assert.equal(h.leaf("c2")!.status, "queued");
   h.call(p2, "c3");
-  assert.equal(h.leaf("c2")!.status, "running", "p2's claim lent its slot before its own leaf was even resolved");
+  assert.equal(h.leaf("c2")!.status, "queued", "p2's unresolved claim lends nothing to p1's leaf");
   await h.resolved(p2, "c3");
-  assert.equal(h.leaf("c3")!.status, "queued");
+  assert.equal(h.leaf("c3")!.status, "running", "p2's first leaf runs on p2's own slot");
   await h.finish(h.leaf("c1")!);
-  assert.equal(h.leaf("c3")!.status, "running", "the settlement's own notify drained the waiting leaf");
+  assert.equal(h.leaf("c2")!.status, "running", "c1's settlement notify drained p1's next leaf onto p1's slot");
   assert.ok(h.peak.executing <= 2, `executing peaked at ${h.peak.executing}`);
 });
 
@@ -246,23 +247,43 @@ for (const variant of ["ended during resolution", "rejected by validation"] as c
   });
 }
 
-test("N3 reported limit: a lender that resumes before its own leaf ran, while another parent's leaf holds its loan, executes max+1 until a leaf settles; nothing more is admitted", async () => {
-  const h = harness(2);
-  const p = h.enqueue(), q = h.enqueue();
+test("N3 provisional claims never lend: several parents' claims withdrawn together leave executing work within max at every transition", async () => {
+  const h = harness(3);
+  const p1 = h.enqueue(), p2 = h.enqueue(), q = h.enqueue();
   h.call(q, "q1"); await h.resolved(q, "q1");
   h.call(q, "q2"); await h.resolved(q, "q2");
-  assert.equal(h.leaf("q2")!.status, "queued");
-  h.call(p, "p1", { persona: "plain", task: "not allowed" });
-  assert.equal(h.leaf("q2")!.status, "running", "p's provisional claim lent its slot to q's waiting leaf");
-  assert.equal((await h.response(p, "p1")).ok, false);
-  assert.equal(h.peak.executing, 3, "counterexample: p, q1 and q2 execute while maxConcurrent is 2");
-  assert.equal(h.peak.active, 4, "slot holders stay within 2*max");
-  h.call(q, "q3"); await h.resolved(q, "q3");
-  assert.equal(h.leaf("q3")!.status, "queued", "no further admission while over");
+  assert.deepEqual([h.leaf("q1")!.status, h.leaf("q2")!.status], ["running", "queued"]);
+  // Sibling claims from two parents, all pending at once: one ends during resolution, two are rejected after it.
+  h.call(p1, "p1_x");
+  h.call(p2, "p2_x", { persona: "plain", task: "not allowed" });
+  h.call(p1, "p1_y", { persona: "plain", task: "not allowed" });
+  assert.equal(h.leaf("q2")!.status, "queued", "claims without a slot-holding leaf lend nothing");
+  h.broker.observe(h.get(p1), end("p1_x"), h.cwd);
+  for (const [p, c] of [[p1, "p1_x"], [p1, "p1_y"], [p2, "p2_x"]] as const) assert.equal((await h.response(p, c)).ok, false, c);
+  assert.equal(h.leaf("q2")!.status, "queued", "both parents resume; nothing they never lent is in use");
+  assert.deepEqual([h.get(p1).pendingDelegations, h.get(p2).pendingDelegations], [0, 0]);
+  assert.ok(h.peak.executing <= 3, `executing peaked at ${h.peak.executing} > maxConcurrent 3`);
   await h.finish(h.leaf("q1")!);
-  assert.equal(h.leaf("q3")!.status, "queued", "back at max: still no admission");
-  await h.finish(h.leaf("q2")!);
-  assert.equal(h.leaf("q3")!.status, "running", "heals: lending resumes under max");
+  assert.equal(h.leaf("q2")!.status, "running", "q's next leaf takes q's own slot");
+  assert.ok(h.peak.executing <= 3 && h.peak.active <= 6, JSON.stringify(h.peak));
+});
+
+test("N3 a queued leaf lends nothing: its parent's freed slot goes to that leaf, never to another parent's earlier waiting leaf", async () => {
+  const h = harness(2);
+  const p = h.enqueue(), q = h.enqueue();
+  h.call(p, "p1"); await h.resolved(p, "p1");
+  h.call(q, "q1"); await h.resolved(q, "q1");
+  h.call(q, "q2"); await h.resolved(q, "q2");
+  h.call(p, "p2"); await h.resolved(p, "p2");
+  assert.deepEqual(["p1", "q1", "q2", "p2"].map((c) => h.leaf(c)!.status), ["running", "running", "queued", "queued"]);
+  await h.finish(h.leaf("p1")!);
+  assert.equal(h.leaf("q2")!.status, "queued", "p is still blocked, but only on a queued leaf: its slot is not q's to borrow");
+  assert.equal(h.leaf("p2")!.status, "running", "p's own next leaf takes p's slot");
+  h.broker.observe(h.get(p), end("p2"), h.cwd);
+  await h.response(p, "p2");
+  assert.ok(h.peak.executing <= 2, `p resumed after cancelling p2: executing peaked at ${h.peak.executing} > maxConcurrent 2`);
+  await h.finish(h.leaf("q1")!);
+  assert.equal(h.leaf("q2")!.status, "running");
 });
 
 test("N3 failed launches release the call's credit once: immediate refusal, refusal at drain, and an asynchronous launch failure", async () => {
@@ -273,7 +294,7 @@ test("N3 failed launches release the call's credit once: immediate refusal, refu
   assert.equal(now.ok, false);
   assert.match(now.reason, /delegation failed: launch refused by test/);
   assert.equal(h.leaf("now"), undefined);
-  assert.deepEqual([h.get(p).pendingDelegations, h.get(p).provisionalDelegations ?? 0], [0, 0]);
+  assert.equal(h.get(p).pendingDelegations, 0);
 
   h.call(p, "first"); await h.resolved(p, "first");
   h.call(p, "later", { persona: "scout", task: "REFUSE at drain" }); await h.resolved(p, "later");
@@ -287,7 +308,7 @@ test("N3 failed launches release the call's credit once: immediate refusal, refu
   h.call(p, "async"); await h.resolved(p, "async");
   await h.finish(h.leaf("async")!, "failed");
   assert.equal((await h.response(p, "async")).status, "failed");
-  assert.deepEqual([h.get(p).pendingDelegations, h.get(p).provisionalDelegations ?? 0], [0, 0]);
+  assert.equal(h.get(p).pendingDelegations, 0);
   const status = statusTool(h.registry, h.queue);
   const row = (await status()).details.running.find((r: { id: string }) => r.id === p);
   assert.equal(row.awaiting_children, undefined, "nothing left to await");
@@ -431,6 +452,7 @@ test("N3 an awaiting effort writer keeps its maxParallel slot; lending admits it
   const h = effortHarness(t, 2, 1);
   const w1 = h.run(h.spawn(h.writer, { effort: "one", touches: ["src/a/**"] }));
   assert.equal(w1.status, "running");
+  w1.pendingDelegations = 2; // the broker's two claims, counted before enqueue
   const cwd = w1.effort!.cwd!;
   const leaf1 = h.run(h.spawn(SCOUT, { cwd, delegation: { parentRunId: w1.id, delegateToolCallId: "w_a" } }));
   assert.equal(leaf1.status, "running");
@@ -447,6 +469,7 @@ test("N3 an awaiting effort writer keeps its maxParallel slot; lending admits it
 test("N3 with lead capacity left, an awaiting effort writer still holds its maxParallel slot", { timeout: 15000 }, (t) => {
   const one = effortHarness(t, 4, 1);
   const w1 = one.run(one.spawn(one.writer, { effort: "one", touches: ["src/a/**"] }));
+  w1.pendingDelegations = 1;
   one.run(one.spawn(SCOUT, { cwd: w1.effort!.cwd!, delegation: { parentRunId: w1.id, delegateToolCallId: "w_a" } }));
   const disjoint = one.run(one.spawn(one.writer, { effort: "one", touches: ["src/b/**"] }));
   assert.match(disjoint.waitReason ?? "", /waits for effort maxParallel \(1\)/, "awaiting does not free the writer's effort slot");
@@ -455,6 +478,7 @@ test("N3 with lead capacity left, an awaiting effort writer still holds its maxP
 test("N3 with lead capacity left, an awaiting effort writer still holds its footprint", { timeout: 15000 }, (t) => {
   const two = effortHarness(t, 4, 2);
   const v1 = two.run(two.spawn(two.writer, { effort: "one", touches: ["src/a/**"] }));
+  v1.pendingDelegations = 1;
   two.run(two.spawn(SCOUT, { cwd: v1.effort!.cwd!, delegation: { parentRunId: v1.id, delegateToolCallId: "v_a" } }));
   const overlap = two.run(two.spawn(two.writer, { effort: "one", touches: ["src/a/file"] }));
   assert.match(overlap.waitReason ?? "", new RegExp(`waits on ${v1.id} \\(touches overlap\\)`), "awaiting does not release the writer's footprint");
@@ -485,7 +509,8 @@ test("N3 an awaiting parent shows ⇣N waiting in the panel and awaiting_childre
   assert.match(status.content[0].text, new RegExp(`${p}.*⇣3 waiting`));
   assert.deepEqual([h.get(p).lastEventAt, h.get(r).lastEventAt], [old, old], "status and panel reads never reset the event clock");
   await h.finish(h.leaf("s_a")!);
-  assert.match(formatRow(h.get(p), theme, Date.now(), CFG, h.registry.list()), /⇣2 waiting/, "a settled leaf lowers the count");
+  await h.response(p, "s_a");
+  assert.match(formatRow(h.get(p), theme, Date.now(), CFG, h.registry.list()), /⇣2 waiting/, "an answered call lowers the count");
 });
 
 test("N3 /conductor watchdog reports an awaiting parent as fresh and an ordinary silent run as stalled", async () => {

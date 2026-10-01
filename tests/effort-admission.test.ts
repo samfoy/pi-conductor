@@ -69,7 +69,8 @@ for (const cap of ["global", "effort"]) test(`M4 ${cap} cap applies at immediate
   const a = getRun(spawn(["a/**"])); spawn(["b/**"]);
   const c = spawn(["c/**"]), d = spawn(["d/**"]);
   assert.equal(c.kind, "queued"); assert.equal(d.kind, "queued");
-  a.status = "integrating"; registry.notify(a);
+  // Production integrates only after the writer's process closed (run-pipeline awaits transport.closed).
+  a.status = "integrating"; a.processOpen = undefined; registry.notify(a);
   assert.equal(getRun(c).status, "queued", "placeholder object is not the launched run");
   assert.equal(registry.get(getRun(c).id)!.status, "running"); assert.equal(registry.get(getRun(d).id)!.status, "queued");
   assert.equal(registry.countActive(), 2); assert.equal(queue.size(), 1);

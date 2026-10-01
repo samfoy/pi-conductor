@@ -188,19 +188,20 @@ export class SpawnQueue {
     return true;
   }
 
-  /** N3: a broker leaf of a current awaiting delegator; anything else takes the lead-level rules. */
-  private lent(opts: QueuedSpawnOptions, registry: RunRegistry): boolean {
+  /** N3: the awaiting delegator a broker leaf may borrow from; anything else takes the lead-level rules. */
+  private lender(opts: QueuedSpawnOptions, registry: RunRegistry): Run | undefined {
     const parent = opts.delegation && registry.get(opts.delegation.parentRunId);
-    return !!parent && awaitingChildren(parent, registry.list()) > 0;
+    return parent && awaitingChildren(parent, registry.list()) > 0 ? parent : undefined;
   }
 
   /** One predicate for immediate enqueue and drain alike. */
   private waitReason(opts: QueuedSpawnOptions, registry: RunRegistry, effort?: EffortRecord, id?: string): string | undefined {
     // Leaves are read-only and no effort members: only executing work (A - W) bounds them.
     const members = registry.list();
-    if (this.lent(opts, registry)) {
-      const { active, awaiting } = delegationLoad(members);
-      return active - awaiting < this.maxConcurrent ? undefined : `waits for a lent slot (${active - awaiting} executing, maxConcurrent ${this.maxConcurrent})`;
+    const parent = this.lender(opts, registry);
+    if (parent) {
+      const { active, lending } = delegationLoad(members, parent);
+      return active - lending < this.maxConcurrent ? undefined : `waits for a lent slot (${active - lending} executing or exiting, maxConcurrent ${this.maxConcurrent})`;
     }
     // Earlier waiters reserve scope, not slots; independent work may pass them.
     const preceding = new Set(this.pending.slice(0, id ? this.pending.findIndex(p => p.id === id) : undefined).map(p => p.id));
@@ -225,7 +226,7 @@ export class SpawnQueue {
       const next = this.pending[i]!;
       const placeholder = this.registry.get(next.id);
       if (!placeholder || placeholder.status !== "queued") { this.pending.splice(i, 1); continue; }
-      if (leavesOnly && !this.lent(next.spawn, this.registry)) { i++; continue; }
+      if (leavesOnly && !this.lender(next.spawn, this.registry)) { i++; continue; }
       try {
         const effort = placeholder.effort ? readEffort(placeholder.effort.gitRoot, placeholder.effort.name) : undefined;
         if (placeholder.effort && !effort) throw new Error("effort record missing");

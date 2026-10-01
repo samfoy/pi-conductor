@@ -30,8 +30,8 @@ interface Call {
   done: boolean;
   /** The parent's other outstanding calls when this one was claimed. */
   outstanding: number;
-  /** Counted in `provisionalDelegations` until its leaf is registered or it is answered. */
-  provisional: boolean;
+  /** Its leaf settled and closed; the answer is being written. */
+  finishing?: boolean;
   leafId?: string;
   limit?: number;
   timer?: NodeJS.Timeout;
@@ -79,10 +79,9 @@ export class DelegationBroker implements DelegationObserver {
       this.respond(parent, id, { ok: false, reason });
       return;
     }
-    const call: Call = { parent, id, done: false, outstanding: parent.pendingDelegations ?? 0, provisional: true };
+    const call: Call = { parent, id, done: false, outstanding: parent.pendingDelegations ?? 0 };
     this.calls.set(key, call);
     parent.pendingDelegations = (parent.pendingDelegations ?? 0) + 1;
-    parent.provisionalDelegations = (parent.provisionalDelegations ?? 0) + 1;
     this.deps.registry.notify(parent);
     if (this.closed) { this.reject(call, "lead /reload closed this run's delegation broker; resume this run with ensemble_send to delegate again"); return; }
     void this.resolve(call, args, cwd).catch((e) => this.reject(call, `delegation failed: ${(e as Error).message}`));
@@ -137,13 +136,10 @@ export class DelegationBroker implements DelegationObserver {
 
   private changed(run: Run): void {
     if (isTerminal(run.status)) for (const key of this.starts.keys()) if (key.startsWith(`${run.id}\0`)) this.starts.delete(key);
-    if (run.parentRunId !== undefined && run.delegateToolCallId !== undefined) {
+    if (run.parentRunId !== undefined && run.delegateToolCallId !== undefined && isTerminal(run.status) && !run.processOpen) {
+      // The parent stays blocked, and its slot stays lent, until the leaf's process has closed (N3).
       const call = this.calls.get(`${run.parentRunId}\0${run.delegateToolCallId}`);
-      if (call && !call.done) {
-        // From registration the leaf itself carries the wait, so its terminal flip lowers A and W together.
-        if (this.deps.registry.get(run.id) === run) { call.leafId = run.id; this.unprovision(call); }
-        if (isTerminal(run.status)) void this.finish(call, run);
-      }
+      if (call && !call.done && !call.finishing) { call.finishing = true; void this.finish(call, run); }
     }
     if (isTerminal(run.status) && (run.pendingDelegations ?? 0) > 0) {
       this.cancelAll([...this.calls.values()].filter((call) => call.parent === run), `parent ${run.id} ended (${run.status})`);
@@ -157,9 +153,10 @@ export class DelegationBroker implements DelegationObserver {
   }
 
   private async finish(call: Call, leaf: Run): Promise<void> {
-    this.settle(call);
     await leaf.recordWrite;
     await writeFinal(leaf); // resultRef needs the persisted final; same bytes as the pipeline's write
+    if (call.done) return; // cancelled meanwhile; that answer stands
+    this.settle(call);
     this.respond(call.parent, call.id, { ok: true, agentId: leaf.id, status: leaf.status, envelope: formatDelegateEnvelope(leaf, call.limit ?? 131072) });
   }
 
@@ -186,18 +183,11 @@ export class DelegationBroker implements DelegationObserver {
     call.done = true;
     clearTimeout(call.timer);
     this.calls.delete(`${call.parent.id}\0${call.id}`);
-    this.unprovision(call);
     const { parent } = call;
     parent.pendingDelegations = Math.max(0, (parent.pendingDelegations ?? 1) - 1);
     // Resume grace: the watchdog measures silence from the last handoff, not from before the wait.
     if (parent.pendingDelegations === 0 && parent.status === "running") parent.lastEventAt = Date.now();
     if (notify) this.deps.registry.notify(parent);
-  }
-
-  private unprovision(call: Call): void {
-    if (!call.provisional) return;
-    call.provisional = false;
-    call.parent.provisionalDelegations = Math.max(0, (call.parent.provisionalDelegations ?? 1) - 1);
   }
 
   /** Create-only: an existing response (EEXIST) is never replaced. */

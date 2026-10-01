@@ -15,7 +15,7 @@ import { STATUS_GLYPH } from "./status-glyph.ts";
 import { isTerminal } from "./types.ts";
 import type { Run, RunStatus } from "./types.ts";
 import { classifyStall, type WatchdogConfig } from "./watchdog.ts";
-import { awaitingChildren, awaitingDelegation } from "./delegation.ts";
+import { awaitingChildren } from "./delegation.ts";
 
 const WIDGET_KEY = "conductor-ensemble";
 const FINISHED_LINGER_MS = 8000;
@@ -176,7 +176,7 @@ export function formatRow(
   // v0.10 Slice 4: stall indicator. Sourced from classifyStall (pure)
   // so widget output stays deterministic and mutation-witness-able.
   // Soft → warning slot; hard → error slot with trailing `!`.
-  const stall = formatStallSegment(r, theme, nowMs, wdCfg, awaitingDelegation(r, runs));
+  const stall = formatStallSegment(r, theme, nowMs, wdCfg, awaitingChildren(r, runs) > 0);
   return `${glyph} ${name} ${elapsed}${activity}${stall}${usage}`;
 }
 

@@ -9,9 +9,9 @@ import { compactEnvelopeBlock, summarizeResultText } from "./compaction-hook.ts"
 import { resultRef } from "./file-evidence.ts";
 import { formatCompletionNotification } from "./notifications.ts";
 import { getCompletionText } from "./runs.ts";
-import { consumesSlot } from "./effort/admit.ts";
+import { consumesSlot, holdsSlot } from "./effort/admit.ts";
 import { childToolScope, runScopeError } from "./personas.ts";
-import { WRITE_CAPABLE_PERSONAS, isDelegating, isSettled, type Persona, type Run } from "./types.ts";
+import { WRITE_CAPABLE_PERSONAS, isDelegating, type Persona, type Run } from "./types.ts";
 
 export const MAX_DELEGATE_TASK_BYTES = 65536;
 export const MAX_OUTSTANDING_DELEGATIONS = 8;
@@ -94,25 +94,25 @@ export function validateDelegateRequest(input: DelegateRequestInput): { ok: true
 }
 
 /**
- * N3: the delegated work a current slot-holding depth-1 delegator is blocked
- * on: claims whose leaf is not registered yet plus its unsettled leaves. A
- * leaf's terminal flip lowers this and A in the same registry state. Zero for
- * A6-blocked, terminal, depth-2, invalid-scope or unregistered runs.
+ * N3: the unanswered `delegate` calls a current, slot-holding depth-1 delegator
+ * is blocked on. Zero for A6-blocked, terminal, depth-2, invalid-scope or
+ * replaced runs. The panel's ⇣N, ensemble_status and stall suppression read it.
  */
 export function awaitingChildren(parent: Run, runs: readonly Run[]): number {
   if (!consumesSlot(parent) || runScopeError(parent) || !isDelegating(childToolScope(parent)) || !runs.includes(parent)) return 0;
-  return (parent.provisionalDelegations ?? 0) + runs.filter((c) => c.depth === 2 && c.parentRunId === parent.id && !isSettled(c.status)).length;
+  return parent.pendingDelegations ?? 0;
 }
 
-/** Stall suppression also covers a settled leaf whose response the broker is still handing back. */
-export function awaitingDelegation(run: Run, runs: readonly Run[]): boolean {
-  return awaitingChildren(run, runs) > 0 || (run.pendingDelegations ?? 0) > 0;
-}
-
-/** N3 two-lane load: A slot holders and W the awaiting delegators among them; A - W is executing work. */
-export function delegationLoad(runs: readonly Run[]): { active: number; awaiting: number } {
-  const active = runs.filter(consumesSlot);
-  return { active: active.length, awaiting: active.filter((r) => awaitingChildren(r, runs) > 0).length };
+/**
+ * N3 admission load. `active` (A) counts slot reservations; `lending` (W) counts
+ * awaiting delegators whose own slot a leaf of theirs holds, plus `candidate`, the
+ * parent of a leaf about to run on that parent's slot. Executing work is A - W. A
+ * claim or a queued leaf lends nothing, so a parent that stops waiting before its
+ * leaf ran takes back no slot that another parent's leaf is using.
+ */
+export function delegationLoad(runs: readonly Run[], candidate?: Run): { active: number; lending: number } {
+  const lends = (p: Run) => awaitingChildren(p, runs) > 0 && (p === candidate || runs.some((l) => l.depth === 2 && l.parentRunId === p.id && holdsSlot(l)));
+  return { active: runs.filter(holdsSlot).length, lending: runs.filter(lends).length };
 }
 
 /** The child's own bound: the same clamp from its side, plus the response grace. */

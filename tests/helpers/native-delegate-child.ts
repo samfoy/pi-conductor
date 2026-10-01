@@ -15,6 +15,18 @@ const text = (m: Message | undefined): string => !m ? "" : typeof m.content === 
 /** Pi 0.99+ tools can call tools through ctx.executeTool(); those nested calls must never delegate. */
 const nested = VERSION !== "0.87.1";
 
+/**
+ * N3 roles hold their exit after settling until the test releases them, ignoring
+ * the conductor's settlement SIGTERM as a slow shutdown would; its SIGKILL
+ * escalation still ends them. Each SIGTERM is recorded as evidence.
+ */
+let holdExit: string | undefined;
+function holdAfterSettle(release: string) {
+  if (holdExit) return;
+  holdExit = release;
+  process.on("SIGTERM", () => writeFileSync(join(fixture, `n3-sigterm-${process.pid}`), release));
+}
+
 /** What Pi actually requested: the model id and the thinking level it sent (undefined is off). */
 type Served = { model: string; reasoning: string };
 
@@ -25,6 +37,7 @@ function parent(messages: Message[], served: Served) {
   if (task.includes("N3-PLAIN")) return fauxAssistantMessage("N3 plain done");
   if (results.length) return fauxAssistantMessage(`N2 parent model=${served.model} reasoning=${served.reasoning} saw ${results.length} results:\n` + results.map(r => `${r.toolCallId}: ${r.isError ? "ERROR " : ""}${text(r)}`).join("\n---\n"));
   const n3 = task.match(/N3-PARENT (\d+)/)?.[1];
+  if (n3) holdAfterSettle("n3-exit-parent");
   if (n3) {
     return fauxAssistantMessage(["a", "b"].map(c => fauxToolCall("delegate", { persona: "scout", task: `N3-LEAF ${n3}-${c}` }, { id: `n3_${n3}_${c}` })), { stopReason: "toolUse" });
   }
@@ -51,6 +64,7 @@ async function leaf(messages: Message[], served: Served) {
   // N3 barrier: every leaf holds until the test has seen the admission state, then answers.
   const n3 = task.match(/N3-LEAF (\S+)/)?.[1];
   if (n3) {
+    holdAfterSettle("n3-exit-leaf");
     writeFileSync(join(fixture, `n3-running-${process.pid}`), n3);
     while (!existsSync(join(fixture, "n3-release"))) await new Promise(r => setTimeout(r, 20));
     return fauxAssistantMessage(`N3 LEAF ${n3} done`);
@@ -106,3 +120,5 @@ await main(process.argv.slice(2), { extensionFactories: [
   { name: "n2-faux", factory: harness },
   ...(process.env.N2_FOREIGN_DELEGATE === "1" ? [{ name: "foreign-delegate", factory: foreign }] : []),
 ] as never });
+// Print mode's own SIGTERM handler is gone once main returns; the hold's listener keeps the process alive.
+while (holdExit && !existsSync(join(fixture, holdExit))) await new Promise(r => setTimeout(r, 20));

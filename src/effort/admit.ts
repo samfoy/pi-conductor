@@ -8,6 +8,8 @@ import { isGeneratedPath, type EffortPolicy } from "./policy.ts";
 
 export interface AdmissionLimits { maxConcurrent: number; maxConcurrentWriteCapable: number }
 export const consumesSlot = (run: Run): boolean => !isSettled(run.status) && run.status !== "queued" && run.status !== "integrating";
+/** The global cap's reservation: a live status, or a settled run whose owned process has not closed yet (N3). */
+export const holdsSlot = (run: Run): boolean => consumesSlot(run) || run.processOpen === true;
 const declared = (touches?: readonly string[]): readonly string[] => touches?.length ? touches : ["**"];
 // Whole literal segments only. Unknown glob syntax loses precision, never a collision.
 const prefix = (glob: string): string[] => {
@@ -33,7 +35,7 @@ function holdsFootprint(run: Run): boolean {
 export function admitEffortWriter(candidate: { id?: string; persona: string; effort?: RunEffort }, members: readonly Run[], limits: AdmissionLimits, record?: EffortRecord, efforts: readonly EffortRecord[] = [], waitingBehind: ReadonlySet<string> = new Set()): string | undefined {
   const others = members.filter(r => r.id !== candidate.id);
   const active = others.filter(consumesSlot);
-  if (active.length >= limits.maxConcurrent) return `waits for maxConcurrent (${limits.maxConcurrent})`;
+  if (others.filter(holdsSlot).length >= limits.maxConcurrent) return `waits for maxConcurrent (${limits.maxConcurrent})`;
   if (!candidate.effort) {
     if (WRITE_CAPABLE_PERSONAS.has(candidate.persona) && active.filter(r => !r.effort && WRITE_CAPABLE_PERSONAS.has(r.persona)).length >= limits.maxConcurrentWriteCapable) return `waits for maxConcurrentWriteCapable (${limits.maxConcurrentWriteCapable})`;
     return;

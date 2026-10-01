@@ -127,6 +127,9 @@ for (const queued of [false, true]) {
       const killed = await h.call("kill", { agent_id: blockers[0] });
       assert.equal(killed.details.status, "killed");
       assert.equal(h.messages.filter(m => m.details.id === blockers[0]).length, 0, "tool kill stays silent");
+      assert.equal(h.children.length, 4, "the killed blocker's slot is held until its process exits (N3)");
+      h.children[0].emit("exit", null, "SIGTERM"); h.children[0].emit("close", null, "SIGTERM");
+      await Promise.resolve();
       assert.equal(h.children.length, 5, "queued child actually starts");
     }
     const child = h.children.at(-1)!;

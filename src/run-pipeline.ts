@@ -270,6 +270,14 @@ export function createRunPipeline(
       run.status = "integrating"; run.integration.state = "paused";
       run.integration.reason = `terminal persistence uncertain: ${(error as Error).message}`;
       opts.registry.notify(run);
+    } finally {
+      // Settlement sent SIGTERM; one that is ignored ends in SIGKILL, so the slot reservation is bounded.
+      if (transport.kind === "subprocess") {
+        const launched = transport;
+        const kill = setTimeout(() => { try { launched.stop("SIGKILL"); } catch { /* already exited */ } }, 2000);
+        kill.unref();
+        void launched.closed.then(() => clearTimeout(kill));
+      }
     }
   };
 
@@ -384,6 +392,14 @@ export function createRunPipeline(
     answerRecord = attachSpawnedProc(run, transport.proc);
     stampSpawnStreamingMode(run, opts.steerable === true);
     run.streamingMode = rpc ? "rpc" : "print";
+    // N3: the admission slot is held until this process closes, not merely until the run settles.
+    const launched = transport;
+    run.processOpen = true;
+    void launched.closed.then(() => {
+      if (run.transport !== launched) return;
+      run.processOpen = undefined;
+      opts.registry.notify(run);
+    });
   } else {
     run.proc = undefined; run.pid = undefined; run.streamingMode = undefined;
     const launch = transport;

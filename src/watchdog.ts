@@ -15,7 +15,7 @@ import type { Run } from "./types.ts";
 import type { TerminationReason, RunRegistry, RunAction } from "./runs.ts";
 import type { StallNoticeArgs } from "./notifications.ts";
 import { boundStallText, recentStallEvidence } from "./stall-evidence.ts";
-import { awaitingDelegation } from "./delegation.ts";
+import { awaitingChildren } from "./delegation.ts";
 
 // ── Public API ────────────────────────────────────────────────────────
 
@@ -112,7 +112,7 @@ export function evaluateRun(
   state: WatchdogState | undefined,
   config: WatchdogConfig,
   now: number,
-  /** N3: blocked in `delegate` on its leaves (`awaitingDelegation`); silence is expected, as for a hook. */
+  /** N3: blocked in `delegate` on its leaves (`awaitingChildren`); silence is expected, as for a hook. */
   awaiting = false,
 ): { transition: WatchdogTransition; nextState: WatchdogState } {
   const current: WatchdogState = state ?? { kind: "fresh" };
@@ -504,7 +504,7 @@ export class Watchdog {
     const now = this.deps.now();
     const runs = this.deps.registry.list();
     const ids = new Set(runs.map(run => run.id));
-    const awaiting = (run: Run) => awaitingDelegation(run, runs);
+    const awaiting = (run: Run) => awaitingChildren(run, runs) > 0;
     for (const id of this.states.keys()) if (!ids.has(id)) this.states.delete(id);
     for (const run of runs) {
       if (run.status === "running" && isObservableHere(run) && waitingForDialog(run) && !run.herdrPrompts!.notified) {
@@ -574,7 +574,7 @@ export class Watchdog {
         void read().catch(() => "Live pane diagnostic unavailable.").then(evidence => {
           saved.pending = false;
           if (this.disposed || this.states.get(run.id) !== saved || run.lastEventAt !== saved.lastEventAt || run.herdr?.launchNonce !== saved.herdrNonce ||
-              classifyStall(run, this.deps.now(), this.deps.config, awaitingDelegation(run, this.deps.registry.list())) === null) return;
+              classifyStall(run, this.deps.now(), this.deps.config, awaitingChildren(run, this.deps.registry.list()) > 0) === null) return;
           this.dispatch(run, transition, effective, { ...notice, evidence: boundStallText(`${notice.evidence}\n\nLive pane (untrusted):\n${evidence}`, 16 * 1024 - 64) });
         });
       } else this.dispatch(run, transition, effective, notice);
@@ -635,7 +635,7 @@ export class Watchdog {
         // the corresponding test flip from "recovered" to "killed".
         const nowAfter = this.deps.now();
         const stillStaleMs = nowAfter - run.lastEventAt;
-        if (stillStaleMs < effective.hardThresholdSeconds * 1000 || classifyStall(run, nowAfter, effective, awaitingDelegation(run, this.deps.registry.list())) === null) {
+        if (stillStaleMs < effective.hardThresholdSeconds * 1000 || classifyStall(run, nowAfter, effective, awaitingChildren(run, this.deps.registry.list()) > 0) === null) {
           // Recovered between detector and kill. Treat as recovered:
           // clear stalledSince, reset state, log info.
           run.stalledSince = undefined;

@@ -3093,6 +3093,7 @@ async function regenerateCandidate(cwd, expectedHead, generated, evidencePath, c
 
 // src/effort/admit.ts
 var consumesSlot = (run) => !isSettled(run.status) && run.status !== "queued" && run.status !== "integrating";
+var holdsSlot = (run) => consumesSlot(run) || run.processOpen === true;
 var declared = (touches) => touches?.length ? touches : ["**"];
 var prefix = (glob) => {
   const parts = glob.split("/");
@@ -3115,7 +3116,7 @@ function holdsFootprint(run) {
 function admitEffortWriter(candidate, members, limits, record, efforts = [], waitingBehind = /* @__PURE__ */ new Set()) {
   const others = members.filter((r) => r.id !== candidate.id);
   const active = others.filter(consumesSlot);
-  if (active.length >= limits.maxConcurrent) return `waits for maxConcurrent (${limits.maxConcurrent})`;
+  if (others.filter(holdsSlot).length >= limits.maxConcurrent) return `waits for maxConcurrent (${limits.maxConcurrent})`;
   if (!candidate.effort) {
     if (WRITE_CAPABLE_PERSONAS2.has(candidate.persona) && active.filter((r) => !r.effort && WRITE_CAPABLE_PERSONAS2.has(r.persona)).length >= limits.maxConcurrentWriteCapable) return `waits for maxConcurrentWriteCapable (${limits.maxConcurrentWriteCapable})`;
     return;
@@ -3848,6 +3849,18 @@ function createRunPipeline(run, piArgs, opts) {
       run.integration.state = "paused";
       run.integration.reason = `terminal persistence uncertain: ${error.message}`;
       opts.registry.notify(run);
+    } finally {
+      if (transport.kind === "subprocess") {
+        const launched = transport;
+        const kill = setTimeout(() => {
+          try {
+            launched.stop("SIGKILL");
+          } catch {
+          }
+        }, 2e3);
+        kill.unref();
+        void launched.closed.then(() => clearTimeout(kill));
+      }
     }
   };
   const processLine = (line) => {
@@ -3950,6 +3963,13 @@ function createRunPipeline(run, piArgs, opts) {
     answerRecord = attachSpawnedProc(run, transport.proc);
     stampSpawnStreamingMode(run, opts.steerable === true);
     run.streamingMode = rpc ? "rpc" : "print";
+    const launched = transport;
+    run.processOpen = true;
+    void launched.closed.then(() => {
+      if (run.transport !== launched) return;
+      run.processOpen = void 0;
+      opts.registry.notify(run);
+    });
   } else {
     run.proc = void 0;
     run.pid = void 0;
@@ -9811,14 +9831,11 @@ function validateDelegateRequest(input) {
 }
 function awaitingChildren(parent, runs) {
   if (!consumesSlot(parent) || runScopeError(parent) || !isDelegating(childToolScope(parent)) || !runs.includes(parent)) return 0;
-  return (parent.provisionalDelegations ?? 0) + runs.filter((c) => c.depth === 2 && c.parentRunId === parent.id && !isSettled(c.status)).length;
+  return parent.pendingDelegations ?? 0;
 }
-function awaitingDelegation(run, runs) {
-  return awaitingChildren(run, runs) > 0 || (run.pendingDelegations ?? 0) > 0;
-}
-function delegationLoad(runs) {
-  const active = runs.filter(consumesSlot);
-  return { active: active.length, awaiting: active.filter((r) => awaitingChildren(r, runs) > 0).length };
+function delegationLoad(runs, candidate) {
+  const lends = (p) => awaitingChildren(p, runs) > 0 && (p === candidate || runs.some((l) => l.depth === 2 && l.parentRunId === p.id && holdsSlot(l)));
+  return { active: runs.filter(holdsSlot).length, lending: runs.filter(lends).length };
 }
 function delegateWaitDeadline(o) {
   const limits = [
@@ -10024,7 +10041,7 @@ var Watchdog = class {
     const now = this.deps.now();
     const runs = this.deps.registry.list();
     const ids = new Set(runs.map((run) => run.id));
-    const awaiting = (run) => awaitingDelegation(run, runs);
+    const awaiting = (run) => awaitingChildren(run, runs) > 0;
     for (const id of this.states.keys()) if (!ids.has(id)) this.states.delete(id);
     for (const run of runs) {
       if (run.status === "running" && isObservableHere(run) && waitingForDialog(run) && !run.herdrPrompts.notified) {
@@ -10093,7 +10110,7 @@ var Watchdog = class {
         saved.pending = true;
         void read2().catch(() => "Live pane diagnostic unavailable.").then((evidence) => {
           saved.pending = false;
-          if (this.disposed || this.states.get(run.id) !== saved || run.lastEventAt !== saved.lastEventAt || run.herdr?.launchNonce !== saved.herdrNonce || classifyStall(run, this.deps.now(), this.deps.config, awaitingDelegation(run, this.deps.registry.list())) === null) return;
+          if (this.disposed || this.states.get(run.id) !== saved || run.lastEventAt !== saved.lastEventAt || run.herdr?.launchNonce !== saved.herdrNonce || classifyStall(run, this.deps.now(), this.deps.config, awaitingChildren(run, this.deps.registry.list()) > 0) === null) return;
           this.dispatch(run, transition, effective, { ...notice, evidence: boundStallText(`${notice.evidence}
 
 Live pane (untrusted):
@@ -10147,7 +10164,7 @@ ${evidence}`, 16 * 1024 - 64) });
         }
         const nowAfter = this.deps.now();
         const stillStaleMs = nowAfter - run.lastEventAt;
-        if (stillStaleMs < effective.hardThresholdSeconds * 1e3 || classifyStall(run, nowAfter, effective, awaitingDelegation(run, this.deps.registry.list())) === null) {
+        if (stillStaleMs < effective.hardThresholdSeconds * 1e3 || classifyStall(run, nowAfter, effective, awaitingChildren(run, this.deps.registry.list()) > 0) === null) {
           run.stalledSince = void 0;
           this.states.delete(run.id);
           this.deps.log.info(
@@ -10969,7 +10986,7 @@ function buildWatchdogStatusReport(args) {
     "  " + "id".padEnd(idW) + "  " + "persona".padEnd(personaW) + "  " + "silent".padEnd(7) + "  " + "state".padEnd(7) + "  " + "threshold".padEnd(11) + "  action"
   );
   for (const r of active) {
-    const c = classifyStall(r, now, watchdogConfig, awaitingDelegation(r, registry.list()));
+    const c = classifyStall(r, now, watchdogConfig, awaitingChildren(r, registry.list()) > 0);
     const silent = c ? `${c.silentSeconds}s` : "\u2014";
     const state = c ? c.severity : "fresh";
     const soft = c ? c.softThresholdSeconds : watchdogConfig.softThresholdSeconds;
@@ -13588,17 +13605,18 @@ var SpawnQueue = class {
     }
     return true;
   }
-  /** N3: a broker leaf of a current awaiting delegator; anything else takes the lead-level rules. */
-  lent(opts, registry) {
+  /** N3: the awaiting delegator a broker leaf may borrow from; anything else takes the lead-level rules. */
+  lender(opts, registry) {
     const parent = opts.delegation && registry.get(opts.delegation.parentRunId);
-    return !!parent && awaitingChildren(parent, registry.list()) > 0;
+    return parent && awaitingChildren(parent, registry.list()) > 0 ? parent : void 0;
   }
   /** One predicate for immediate enqueue and drain alike. */
   waitReason(opts, registry, effort, id) {
     const members = registry.list();
-    if (this.lent(opts, registry)) {
-      const { active, awaiting } = delegationLoad(members);
-      return active - awaiting < this.maxConcurrent ? void 0 : `waits for a lent slot (${active - awaiting} executing, maxConcurrent ${this.maxConcurrent})`;
+    const parent = this.lender(opts, registry);
+    if (parent) {
+      const { active, lending } = delegationLoad(members, parent);
+      return active - lending < this.maxConcurrent ? void 0 : `waits for a lent slot (${active - lending} executing or exiting, maxConcurrent ${this.maxConcurrent})`;
     }
     const preceding = new Set(this.pending.slice(0, id ? this.pending.findIndex((p) => p.id === id) : void 0).map((p) => p.id));
     const waitingBehind = new Set(members.filter((r) => r.status === "queued" && !preceding.has(r.id)).map((r) => r.id));
@@ -13624,7 +13642,7 @@ var SpawnQueue = class {
         this.pending.splice(i, 1);
         continue;
       }
-      if (leavesOnly && !this.lent(next.spawn, this.registry)) {
+      if (leavesOnly && !this.lender(next.spawn, this.registry)) {
         i++;
         continue;
       }
@@ -13692,10 +13710,9 @@ var DelegationBroker = class {
       this.respond(parent, id, { ok: false, reason });
       return;
     }
-    const call = { parent, id, done: false, outstanding: parent.pendingDelegations ?? 0, provisional: true };
+    const call = { parent, id, done: false, outstanding: parent.pendingDelegations ?? 0 };
     this.calls.set(key, call);
     parent.pendingDelegations = (parent.pendingDelegations ?? 0) + 1;
-    parent.provisionalDelegations = (parent.provisionalDelegations ?? 0) + 1;
     this.deps.registry.notify(parent);
     if (this.closed) {
       this.reject(call, "lead /reload closed this run's delegation broker; resume this run with ensemble_send to delegate again");
@@ -13779,14 +13796,11 @@ var DelegationBroker = class {
     if (isTerminal(run.status)) {
       for (const key of this.starts.keys()) if (key.startsWith(`${run.id}\0`)) this.starts.delete(key);
     }
-    if (run.parentRunId !== void 0 && run.delegateToolCallId !== void 0) {
+    if (run.parentRunId !== void 0 && run.delegateToolCallId !== void 0 && isTerminal(run.status) && !run.processOpen) {
       const call = this.calls.get(`${run.parentRunId}\0${run.delegateToolCallId}`);
-      if (call && !call.done) {
-        if (this.deps.registry.get(run.id) === run) {
-          call.leafId = run.id;
-          this.unprovision(call);
-        }
-        if (isTerminal(run.status)) void this.finish(call, run);
+      if (call && !call.done && !call.finishing) {
+        call.finishing = true;
+        void this.finish(call, run);
       }
     }
     if (isTerminal(run.status) && (run.pendingDelegations ?? 0) > 0) {
@@ -13799,9 +13813,10 @@ var DelegationBroker = class {
     for (const call of [...queued, ...calls.filter((c) => !queued.includes(c))]) this.cancel(call, reason);
   }
   async finish(call, leaf) {
-    this.settle(call);
     await leaf.recordWrite;
     await writeFinal(leaf);
+    if (call.done) return;
+    this.settle(call);
     this.respond(call.parent, call.id, { ok: true, agentId: leaf.id, status: leaf.status, envelope: formatDelegateEnvelope(leaf, call.limit ?? 131072) });
   }
   /**
@@ -13825,16 +13840,10 @@ var DelegationBroker = class {
     call.done = true;
     clearTimeout(call.timer);
     this.calls.delete(`${call.parent.id}\0${call.id}`);
-    this.unprovision(call);
     const { parent } = call;
     parent.pendingDelegations = Math.max(0, (parent.pendingDelegations ?? 1) - 1);
     if (parent.pendingDelegations === 0 && parent.status === "running") parent.lastEventAt = Date.now();
     if (notify) this.deps.registry.notify(parent);
-  }
-  unprovision(call) {
-    if (!call.provisional) return;
-    call.provisional = false;
-    call.parent.provisionalDelegations = Math.max(0, (call.parent.provisionalDelegations ?? 1) - 1);
   }
   /** Create-only: an existing response (EEXIST) is never replaced. */
   respond(parent, id, body) {
@@ -13947,7 +13956,7 @@ function formatRow(r, theme, nowMs, wdCfg, runs = []) {
   const tokenPart = formatUsage({ turns: 0, input: r.usage.input, output: r.usage.output, cost: r.usage.cost });
   const usageStr = [turnPart, tokenPart].filter(Boolean).join(" ");
   const usage = usageStr ? theme.fg("muted", ` [${usageStr}]`) : "";
-  const stall = formatStallSegment(r, theme, nowMs, wdCfg, awaitingDelegation(r, runs));
+  const stall = formatStallSegment(r, theme, nowMs, wdCfg, awaitingChildren(r, runs) > 0);
   return `${glyph} ${name2} ${elapsed}${activity}${stall}${usage}`;
 }
 function formatStallSegment(r, theme, nowMs, wdCfg, awaiting = false) {
