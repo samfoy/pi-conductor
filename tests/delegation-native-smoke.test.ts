@@ -17,6 +17,7 @@ import { projectPersonasDir, resolvePersonas } from "../src/personas.ts";
 import { RunRegistry, buildPiArgs, buildSubagentEnv, getFinalText, spawnRun } from "../src/runs.ts";
 import { SpawnQueue } from "../src/queue.ts";
 import { DelegationBroker } from "../src/delegation-broker.ts";
+import { handleSessionShutdown } from "../src/shutdown.ts";
 import { delegatePaths } from "../src/delegation.ts";
 import { childScopeEnv, isTerminal, type ChildToolScope, type Run } from "../src/types.ts";
 
@@ -48,8 +49,10 @@ const doc = (name: string, fm: string) => `---\nname: ${name}\ndescription: prob
 function project(): string {
   const cwd = tmpDir("n2-native-project-");
   mkdirSync(projectPersonasDir(cwd), { recursive: true });
-  for (const [f, text] of Object.entries({ "lead.md": doc("lead", "agents:\n  - scout\n  - auditor\n"), "scout.md": doc("scout", "read_only: true\n"),
+  // scout's model comes from its frontmatter, auditor's from a project override; lead sets none and inherits faux-1.
+  for (const [f, text] of Object.entries({ "lead.md": doc("lead", "agents:\n  - scout\n  - auditor\n"), "scout.md": doc("scout", "read_only: true\nmodel: faux/faux-scout\nthinking: low\n"),
     "auditor.md": doc("auditor", "read_only: true\n"), "writer.md": doc("writer", "") })) writeFileSync(join(projectPersonasDir(cwd), f), text);
+  writeFileSync(join(cwd, ".pi", "conductor.json"), JSON.stringify({ personaOverrides: { auditor: { model: "faux/faux-auditor", thinking: "high" } } }));
   writeFileSync(join(cwd, "notes.md"), "N2-NOTES-EVIDENCE\n");
   return cwd;
 }
@@ -91,8 +94,10 @@ async function witness(t: test.TestContext, bin: string, version: string) {
   const final = getFinalText(run.messages);
   t.diagnostic(`Pi ${version} parent final:\n${final.replace(/```xml[\s\S]*?```/g, "<envelope>")}`);
   // The parent's next turn read both envelopes and every rejection as native tool results.
-  assert.match(final, /d_scout: ## ✓ `scout` completed[\s\S]*?<result>\nLEAF scout done; evidence=false; saw=Tool delegate not found/);
-  assert.match(final, /d_auditor: ## ✓ `auditor` completed[\s\S]*?<result>\nLEAF auditor done; evidence=true/);
+  // Pi served each leaf the target persona's configured model and thinking; the parent kept the agent default.
+  assert.match(final, /^N2 parent model=faux-1 reasoning=off saw/);
+  assert.match(final, /d_scout: ## ✓ `scout` completed[\s\S]*?<result>\nLEAF scout done; model=faux-scout; reasoning=low; evidence=false; saw=Tool delegate not found/);
+  assert.match(final, /d_auditor: ## ✓ `auditor` completed[\s\S]*?<result>\nLEAF auditor done; model=faux-auditor; reasoning=high; evidence=true/);
   assert.match(final, /d_denied: ERROR delegate rejected: persona writer is not in this run's delegation allowlist \(scout, auditor\)/);
   assert.match(final, /d_schema: ERROR Validation failed for tool "delegate"/);
   assert.match(final, /d_blocked: ERROR N2 test block/);
@@ -138,6 +143,40 @@ async function witness(t: test.TestContext, bin: string, version: string) {
   assert.match(JSON.stringify(end.result), /delegate aborted/);
 }
 
+/** Parse what has landed so far; the pipeline appends lines asynchronously. */
+function landed(run: Run): { type: string; toolCallId?: string; isError?: boolean }[] {
+  if (!existsSync(run.transcriptPath)) return [];
+  return readFileSync(run.transcriptPath, "utf8").split("\n").flatMap(l => { try { return [JSON.parse(l)]; } catch { return []; } });
+}
+
+/** R6 boundary: the call's start reaches the lead before /reload and its first update after; it must get a definite rejection. */
+async function reloadBoundary(t: test.TestContext, bin: string, version: string) {
+  process.env.PI_BIN = bin;
+  const cwd = project(), fixture = tmpDir("n2-native-fixture-");
+  process.env.N2_FIXTURE = fixture;
+  const registry = new RunRegistry();
+  const queue = new SpawnQueue(registry, 4, 1);
+  registry.delegation = new DelegationBroker({ registry, queue, env: {} });
+  const lead = (await resolvePersonas({ cwd })).personas.get("lead")!;
+  const { run, done } = spawnRun({ registry, persona: lead, task: "N2-PARENT reload", cwd, mode: "background", timeoutMs: 45000, runtimeEnv: {} });
+  t.after(() => { for (const r of registry.list()) if (alive(r.pid)) process.kill(r.pid!, "SIGKILL"); });
+  await until(() => landed(run).some(e => e.toolCallId === "d_reload" && e.type === "tool_execution_start"), "d_reload start reached the lead");
+  assert.ok(!landed(run).some(e => e.toolCallId === "d_reload" && e.type === "tool_execution_update"), "the child holds the call before execute");
+  await handleSessionShutdown({ reason: "reload" }, { runs: registry.list(), resetSanitizer: () => {}, delegation: registry.delegation });
+  assert.equal(run.status, "running", "a parent with nothing outstanding at reload keeps running");
+  writeFileSync(join(fixture, "release-reload"), "go");
+  const answer = delegatePaths(dirname(run.recordPath), "d_reload").response;
+  await until(() => existsSync(answer), "a post-reload first update is answered, not dropped", 15000);
+  assert.match(response(run, "d_reload").reason, /lead \/reload closed this run's delegation broker/);
+  await done;
+  assert.equal(run.status, "completed", run.errorMessage);
+  assert.equal(registry.list().filter(r => r.parentRunId === run.id).length, 0, "no leaf after reload");
+  assert.deepEqual(landed(run).filter(e => e.toolCallId === "d_reload" && /^tool_execution_/.test(e.type)).map(e => e.type.slice(15)), ["start", "update", "end"]);
+  const final = getFinalText(run.messages);
+  assert.match(final, /d_reload: ERROR delegate rejected: lead \/reload closed this run's delegation broker/);
+  t.diagnostic(`Pi ${version} reload boundary: start before reload, update after -> ${final.split("\n").at(-1)}`);
+}
+
 /** A delegator whose host also loads another extension's `delegate` fails Pi startup; a non-delegator with it starts. */
 function collision(t: test.TestContext, bin: string) {
   const run = (scope: ChildToolScope) => {
@@ -160,6 +199,7 @@ test("N2 native Pi 0.87.1: real delegate through spawnRun, pipeline, broker and 
   const { path, version } = await child(t, piRoot);
   assert.equal(version, "0.87.1");
   await witness(t, path, version);
+  await reloadBoundary(t, path, version);
   collision(t, path);
 });
 
@@ -168,6 +208,7 @@ for (const piRoot of (process.env.CONDUCTOR_H11_PI_ROOTS ?? "").split(":").filte
   test(`N2 native Pi ${version} (H11 matrix): real delegate and rejected nested ctx.executeTool delegate`, { timeout: 180000 }, async t => {
     const bundle = await child(t, piRoot);
     await witness(t, bundle.path, bundle.version);
+    await reloadBoundary(t, bundle.path, bundle.version);
     collision(t, bundle.path);
   });
 }

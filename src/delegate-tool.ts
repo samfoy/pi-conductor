@@ -102,7 +102,8 @@ export function waitForDelegateResponse(path: string, expect: { toolCallId: stri
     cleanup.push(() => watcher.close());
     const poll = setInterval(check, POLL_MS);
     cleanup.push(() => clearInterval(poll));
-    const timer = setTimeout(() => finish(new Error("delegate rejected: no broker response before the deadline")), Math.max(0, deadlineAt - Date.now()));
+    // No answer is not proof of rejection: a leaf may have run.
+    const timer = setTimeout(() => finish(new Error("delegate outcome unconfirmed: no broker response before the deadline; a leaf may have run")), Math.max(0, deadlineAt - Date.now()));
     cleanup.push(() => clearTimeout(timer));
     check();
   });

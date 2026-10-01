@@ -1,7 +1,7 @@
 // N2 native child: the real Pi CLI `main()` from one explicit installed root
 // (bundled with an esbuild alias), loading the real conductor extension plus an
 // offline faux model. Plays the depth-1 delegator or the depth-2 leaf by its env.
-import { readdirSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { VERSION, main, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -15,10 +15,16 @@ const text = (m: Message | undefined): string => !m ? "" : typeof m.content === 
 /** Pi 0.99+ tools can call tools through ctx.executeTool(); those nested calls must never delegate. */
 const nested = VERSION !== "0.87.1";
 
-function parent(messages: Message[]) {
+/** What Pi actually requested: the model id and the thinking level it sent (undefined is off). */
+type Served = { model: string; reasoning: string };
+
+function parent(messages: Message[], served: Served) {
   const task = text(messages.find(m => m.role === "user"));
   const results = messages.filter(m => m.role === "toolResult");
-  if (results.length) return fauxAssistantMessage(`N2 parent saw ${results.length} results:\n` + results.map(r => `${r.toolCallId}: ${r.isError ? "ERROR " : ""}${text(r)}`).join("\n---\n"));
+  if (results.length) return fauxAssistantMessage(`N2 parent model=${served.model} reasoning=${served.reasoning} saw ${results.length} results:\n` + results.map(r => `${r.toolCallId}: ${r.isError ? "ERROR " : ""}${text(r)}`).join("\n---\n"));
+  if (task.includes("N2-PARENT reload")) {
+    return fauxAssistantMessage([fauxToolCall("delegate", { persona: "scout", task: "N2-LEAF scout after reload must not run" }, { id: "d_reload" })], { stopReason: "toolUse" });
+  }
   if (task.includes("N2-PARENT abort")) {
     return fauxAssistantMessage([fauxToolCall("delegate", { persona: "scout", task: "N2-LEAF scout hold until killed" }, { id: "d_abort" })], { stopReason: "toolUse" });
   }
@@ -32,7 +38,7 @@ function parent(messages: Message[]) {
   ], { stopReason: "toolUse" });
 }
 
-async function leaf(messages: Message[]) {
+async function leaf(messages: Message[], served: Served) {
   const task = text(messages.find(m => m.role === "user"));
   const persona = task.match(/N2-LEAF (\w+)/)?.[1] ?? "unknown";
   const results = messages.filter(m => m.role === "toolResult");
@@ -42,16 +48,26 @@ async function leaf(messages: Message[]) {
   }
   // A leaf has no delegate: the call is unknown to Pi, so it starts and ends in error with no execution.
   if (persona === "scout" && !results.length) return fauxAssistantMessage([fauxToolCall("delegate", { persona: "auditor", task: "grandchild" }, { id: "leaf_delegate" })], { stopReason: "toolUse" });
-  return fauxAssistantMessage(`LEAF ${persona} done; evidence=${task.includes("N2-NOTES-EVIDENCE")}; saw=${results.map(r => text(r)).join("|")}`);
+  return fauxAssistantMessage(`LEAF ${persona} done; model=${served.model}; reasoning=${served.reasoning}; evidence=${task.includes("N2-NOTES-EVIDENCE")}; saw=${results.map(r => text(r)).join("|")}`);
 }
 
 function harness(pi: ExtensionAPI) {
-  const faux = fauxProvider({ tokensPerSecond: Infinity });
-  const next = async (context: { messages: Message[] }) => { faux.appendResponses([next]); return depth === "2" ? leaf(context.messages) : parent(context.messages); };
+  // faux-1 is the agent default; the leaf models exist only so a persona's configured model can be proven served.
+  const faux = fauxProvider({ tokensPerSecond: Infinity, models: [{ id: "faux-1" }, { id: "faux-scout", reasoning: true }, { id: "faux-auditor", reasoning: true }] });
+  const next = async (context: { messages: Message[] }, options?: { reasoning?: string }, _state?: unknown, model?: { id: string }) => {
+    faux.appendResponses([next]);
+    const served = { model: model?.id ?? "unknown", reasoning: options?.reasoning ?? "off" };
+    return depth === "2" ? leaf(context.messages, served) : parent(context.messages, served);
+  };
   faux.setResponses([next]);
   pi.registerProvider(faux.provider as never);
   // Pi's own permission seam: a blocked call starts and ends in error without executing.
-  pi.on("tool_call", (e: { toolCallId: string }) => e.toolCallId === "d_blocked" ? { block: true, reason: "N2 test block" } : undefined);
+  pi.on("tool_call", async (e: { toolCallId: string }) => {
+    if (e.toolCallId === "d_blocked") return { block: true, reason: "N2 test block" };
+    // Holds d_reload between its start (already on stdout) and execute, so the lead can /reload in that window.
+    if (e.toolCallId === "d_reload") while (!existsSync(join(fixture, "release-reload"))) await new Promise(r => setTimeout(r, 20));
+    return undefined;
+  });
   pi.on("tool_execution_update", (e: { toolCallId: string }, ctx: { abort(): void }) => {
     if (e.toolCallId !== "d_abort") return;
     // Never hold the event: the lead only spawns after this update reaches stdout.

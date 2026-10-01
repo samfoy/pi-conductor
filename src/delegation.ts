@@ -102,9 +102,10 @@ const escapeXml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").
 const escapeAttr = (s: string) => escapeXml(s).replace(/"/g, "&quot;");
 
 /**
- * The leaf's canonical completion envelope, within `limit` bytes. Over the
- * limit the result body is replaced by a summary plus where the whole
- * answer lives (`result-ref`, `final.md`), never a cut `<result>`.
+ * The leaf's canonical completion envelope, aiming for `limit` bytes. Over the
+ * limit the result body is replaced by a summary plus where the whole answer
+ * lives (`result-ref`, `final.md`), never a cut `<result>`. The last, minimal
+ * form is not re-checked: it is bounded by a constant (~2 KB), not by `limit`.
  */
 export function formatDelegateEnvelope(leaf: Run, limit: number): string {
   const full = formatCompletionNotification(leaf, []);

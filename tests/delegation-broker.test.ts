@@ -586,6 +586,149 @@ test("N2 a leaf spawn is depth 2 with lineage and read-only argv whatever the ca
   } finally { if (saved === undefined) delete process.env.PI_BIN; else process.env.PI_BIN = saved; }
 });
 
+// ── Review corrections (B1, B2, M1–M4) ───────────────────────────────
+
+test("N2 reload boundary: a start before /reload and its first update after are claimed and definitely rejected, never launched or dropped", async () => {
+  const cwd = project();
+  const { registry, spawned, broker } = harness();
+  const parent = parentRun(registry, cwd);
+  broker.observe(parent, start("straddle", ask("scout")), cwd);
+  await handleSessionShutdown({ reason: "reload" }, { runs: registry.list(), resetSanitizer: () => assert.fail("reload reset"), delegation: broker });
+  assert.equal(parent.status, "running", "a parent with nothing outstanding at reload keeps running");
+  assert.equal(parent.errorMessage, undefined);
+  broker.observe(parent, update("straddle"), cwd);
+  assert.ok(existsSync(claimPath(parent, "straddle")), "the post-reload update is claimed, not dropped");
+  const r = JSON.parse(readFileSync(responsePath(parent, "straddle"), "utf8"));
+  assert.deepEqual([r.ok, r.toolCallId, r.parentRunId], [false, "straddle", parent.id]);
+  assert.match(r.reason, /lead \/reload closed this run's delegation broker/);
+  await settle();
+  assert.equal(spawned.length, 0, "no leaf after reload");
+  assert.equal(leavesOf(registry, parent).length, 0);
+  assert.equal(parent.pendingDelegations, 0);
+});
+
+test("N2 a terminal parent's unfinished starts are dropped: a later update for that call claims nothing", async () => {
+  const cwd = project();
+  const { registry, spawned, broker } = harness();
+  const parent = parentRun(registry, cwd);
+  broker.observe(parent, start("stale", ask("scout")), cwd);
+  parent.status = "failed";
+  registry.notify(parent);
+  parent.status = "running"; // as a resume would
+  broker.observe(parent, update("stale"), cwd);
+  await settle();
+  assert.equal(existsSync(claimPath(parent, "stale")), false);
+  assert.equal(spawned.length, 0);
+});
+
+test("N2 leaves launch with the target's configured model and thinking (frontmatter or override); unset inherits as a normal spawn", { timeout: 20000 }, async () => {
+  const stub = join(dirname(piBin), "n2-model-argv.mjs");
+  writeFileSync(stub, 'import { writeFileSync } from "node:fs";\nwriteFileSync(process.env.CONDUCTOR_RUN_DIR + "/launch.json", JSON.stringify({ argv: process.argv.slice(2) }));\nprocess.exit(0);\n');
+  const saved = process.env.PI_BIN; process.env.PI_BIN = stub;
+  try {
+    const cwd = project({
+      "modeled.md": doc("modeled", "read_only: true\nmodel: prov-a/model-front\nthinking: low\n"),
+      "overridden.md": doc("overridden", "read_only: true\nmodel: prov-a/ignored\nthinking: low\n"),
+      "plain.md": doc("plain", "read_only: true\n"),
+    });
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "conductor.json"), JSON.stringify({ personaOverrides: { overridden: { model: "prov-b/model-override", thinking: "high" } } }));
+    const registry = new RunRegistry();
+    const queue = new SpawnQueue(registry, 8, 1);
+    const broker = new DelegationBroker({ registry, queue, env: {} });
+    registry.delegation = broker;
+    // The parent's own model must never leak into a leaf.
+    const parent = parentRun(registry, cwd, { delegateAllow: ["modeled", "overridden", "plain"], model: "prov-lead/lead-model", thinking: "xhigh" });
+    for (const name of ["modeled", "overridden", "plain"]) { broker.observe(parent, start(`m_${name}`, ask(name)), cwd); broker.observe(parent, update(`m_${name}`), cwd); }
+    for (const name of ["modeled", "overridden", "plain"]) assert.equal((await response(parent, `m_${name}`)).ok, true, name);
+    const argv = (name: string) => {
+      const leaf = leavesOf(registry, parent).find((r) => r.delegateToolCallId === `m_${name}`)!;
+      const args: string[] = JSON.parse(readFileSync(join(dirname(leaf.recordPath), "launch.json"), "utf8")).argv;
+      const flag = (f: string) => (args.includes(f) ? args[args.indexOf(f) + 1] : undefined);
+      return { model: flag("--model"), thinking: flag("--thinking") };
+    };
+    assert.deepEqual(argv("modeled"), { model: "prov-a/model-front", thinking: "low" }, "frontmatter model and thinking reach the leaf argv");
+    assert.deepEqual(argv("overridden"), { model: "prov-b/model-override", thinking: "high" }, "personaOverrides win, as for ensemble_spawn");
+    assert.deepEqual(argv("plain"), { model: undefined, thinking: undefined }, "unset keeps pi's inherited default, never the parent's model");
+  } finally { if (saved === undefined) delete process.env.PI_BIN; else process.env.PI_BIN = saved; }
+});
+
+test("N2 a delegator's child env carries its provisional deadline at launch, and a resume replaces it", { timeout: 20000 }, async () => {
+  const stub = join(dirname(piBin), "n2-deadline-env.mjs");
+  writeFileSync(stub, 'import { writeFileSync } from "node:fs";\nwriteFileSync(process.env.CONDUCTOR_RUN_DIR + "/launch.json", JSON.stringify({ deadline: process.env.CONDUCTOR_DEADLINE_AT ?? null }));\nprocess.exit(0);\n');
+  const saved = process.env.PI_BIN; process.env.PI_BIN = stub;
+  try {
+    const registry = new RunRegistry();
+    const cwd = tmpDir("n2-deadline-");
+    const lead: Persona = { name: "lead", description: "probe", inheritContext: "none", inheritSkills: false, defaultReads: [], worktree: false, timeoutMinutes: 1,
+      systemPrompt: "You are lead.", source: "project", sourcePath: "/fake/lead.md", readOnly: false, agents: ["scout"] };
+    const deadline = (run: Run) => JSON.parse(readFileSync(join(dirname(run.recordPath), "launch.json"), "utf8")).deadline as string | null;
+    const before = Date.now();
+    const { run, done } = spawnRun({ registry, persona: lead, task: "t", cwd, mode: "background", timeoutMs: 600_000, runtimeEnv: {} });
+    const after = Date.now();
+    await done;
+    const first = deadline(run);
+    assert.ok(first !== null, "the first launch carries the parent's deadline, not nothing");
+    assert.ok(Number(first) >= before + 600_000 && Number(first) <= after + 600_000, `first deadline ${first}`);
+    run.sessionPath = join(dirname(run.recordPath), "session", "s.jsonl");
+    mkdirSync(dirname(run.sessionPath), { recursive: true });
+    writeFileSync(run.sessionPath, JSON.stringify({ type: "session", cwd }) + "\n");
+    const resumedAt = Date.now();
+    const resumed = sendToRun(run, "continue", { registry, timeoutMs: 5_000 });
+    assert.equal(resumed.kind, "started", resumed.kind === "rejected" ? resumed.reason : "");
+    await (resumed as { done: Promise<Run> }).done;
+    const second = Number(deadline(run));
+    assert.ok(second >= resumedAt + 5_000 && second <= Date.now() + 5_000, `a resume carries its own deadline, not the stale ${first}: ${second}`);
+  } finally { if (saved === undefined) delete process.env.PI_BIN; else process.env.PI_BIN = saved; }
+});
+
+test("N2 a parent replaced in the registry while the roster resolves is rejected and never spawns", async () => {
+  const cwd = project();
+  const { registry, spawned, broker } = harness();
+  const parent = parentRun(registry, cwd);
+  broker.observe(parent, start("replaced", ask("scout")), cwd);
+  broker.observe(parent, update("replaced"), cwd);
+  registry.register({ ...parent, pendingDelegations: 0 }); // another owner now holds this id
+  await settle();
+  assert.equal(spawned.length, 0, "a parent that is no longer the current registered run must never spawn a leaf");
+  const r = await response(parent, "replaced");
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /not the current registered run/);
+});
+
+test("N2 the 64 KiB task limit counts UTF-8 bytes: 65536 spawns, 65537 is rejected", async () => {
+  const cwd = project();
+  const { registry, spawned, broker } = harness();
+  const parent = parentRun(registry, cwd);
+  const exact = "é".repeat(32768), over = `${exact}a`;
+  assert.deepEqual([Buffer.byteLength(exact), Buffer.byteLength(over), over.length], [65536, 65537, 32769]);
+  broker.observe(parent, start("exact", ask("scout", exact)), cwd); broker.observe(parent, update("exact"), cwd);
+  broker.observe(parent, start("over", ask("scout", over)), cwd); broker.observe(parent, update("over"), cwd);
+  await settle();
+  assert.deepEqual(spawned.map((o) => Buffer.byteLength(o.task)), [65536], "a 65537-byte task must never spawn, however few UTF-16 units it has");
+  const r = await response(parent, "over");
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /task exceeds 65536 bytes/);
+});
+
+test("N2 a run: ref to another parent's leaf is rejected and never spawns", async () => {
+  const cwd = project();
+  const { registry, spawned, broker } = harness();
+  const one = parentRun(registry, cwd), two = parentRun(registry, cwd);
+  broker.observe(one, start("own", ask("scout")), cwd); broker.observe(one, update("own"), cwd);
+  await settle();
+  const [leaf] = leavesOf(registry, one);
+  await finishLeaf(registry, leaf!, "Parent one's private leaf result.");
+  await response(one, "own");
+  broker.observe(two, start("borrow", ask("auditor", "review", { files: [`run:${leaf!.id}`] })), cwd);
+  broker.observe(two, update("borrow"), cwd);
+  await settle();
+  assert.equal(spawned.length, 1, "a ref to another parent's leaf must never reach a spawned task");
+  const r = await response(two, "borrow");
+  assert.equal(r.ok, false);
+  assert.match(r.reason, new RegExp(`files: run:${leaf!.id} is not a delegate child of this run`));
+});
+
 // ── Child tool ───────────────────────────────────────────────────────
 
 function childTool(env: NodeJS.ProcessEnv) {
@@ -662,7 +805,7 @@ test("N2 child wait: abort and timeout reject and release the watcher, poll and 
   assert.ok(handles() > before, "the waiter holds a watcher and timers while pending");
   controller.abort();
   await assert.rejects(aborted, /delegate aborted/);
-  await assert.rejects(waitForDelegateResponse(path, { toolCallId: "x", parentRunId: "p" }, Date.now() + 30), /no broker response/);
+  await assert.rejects(waitForDelegateResponse(path, { toolCallId: "x", parentRunId: "p" }, Date.now() + 30), /delegate outcome unconfirmed: no broker response before the deadline; a leaf may have run/);
   await new Promise((r) => setImmediate(r));
   assert.equal(handles(), before, "nothing dangles after either outcome");
 });

@@ -1208,3 +1208,12 @@ is sufficient.
 When reopened, mirror the `timeoutMinutes` cascade pattern (already
 established in v0.8.3). Reference:
 `docs/v0.10-watchdog-design.md` section 7 "Deferred from Slice 3".
+
+## N2 review follow-ups (2026-09-30, non-blocking)
+
+From the critic-opus-h11-gwm4 review of the N2 delegate broker. None blocks N2; each needs its own test-first slice.
+
+- **Smallest envelope is not re-checked against the limit.** `formatDelegateEnvelope`'s minimal form is bounded by a constant (about 2 KB); at a 1024-byte limit a multibyte or escape-heavy summary plus a long error reached 1385 bytes. The 128 KiB default is unaffected.
+- **Rejection reasons echo `persona` and `files` at any length.** The child could refuse a non-allowlisted persona before its first update, and reasons could truncate echoed input.
+- **OpenAI Responses-family call ids (`call_…|fc_…`) fail the plan's id regex**, and the error wrongly says "nested calls cannot delegate". Widening the id set needs its own path-safety review.
+- **Code-read only:** a herdr delegating persona as a chain successor throws inside `onChain` and `applyChainIfPresent` swallows it without a diagnostic; `ensemble_auto` plan validation does not check the herdr delegation refusal; `close()` captures leaves before its cancel loop, so for a queued leaf drained during the loop it awaits the placeholder's record write, not the spawned run's.

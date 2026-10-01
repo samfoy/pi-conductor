@@ -41,10 +41,10 @@ export class DelegationBroker implements DelegationObserver {
   private readonly starts = new Map<string, { args: unknown }>();
   private readonly calls = new Map<string, Call>();
   private closed = false;
-  private readonly unsubscribe: () => void;
 
   constructor(private readonly deps: { registry: RunRegistry; queue: SpawnQueue; env: NodeJS.ProcessEnv }) {
-    this.unsubscribe = deps.registry.onChange((run) => this.changed(run));
+    // Kept after close too: it drops a terminal parent's unfinished starts.
+    deps.registry.onChange((run) => this.changed(run));
   }
 
   observe(parent: Run, event: unknown, cwd: string): void {
@@ -110,6 +110,8 @@ export class DelegationBroker implements DelegationObserver {
     call.limit = cfg.inlineAttachmentLimitBytes;
     const result = this.deps.queue.enqueueOrSpawn({
       persona: target!, task, cwd, mode: "background", timeoutMs: verdict.timeoutMs, runtime: "subprocess", runtimeEnv: this.deps.env,
+      // resolvePersonas already applied personaOverrides; unset keeps pi's inherit semantics.
+      model: target!.model, thinking: target!.thinking,
       parentSessionId: parent.parentSessionId, delegation: { parentRunId: parent.id, delegateToolCallId: call.id },
       inheritContextOverride: "none", worktree: false, mergeStrategy: "none", onCompleteHook: "", retryMaxAttempts: 1, steerable: false,
     });
@@ -131,6 +133,7 @@ export class DelegationBroker implements DelegationObserver {
   }
 
   private changed(run: Run): void {
+    if (isTerminal(run.status)) for (const key of this.starts.keys()) if (key.startsWith(`${run.id}\0`)) this.starts.delete(key);
     if (run.parentRunId !== undefined && run.delegateToolCallId !== undefined && isTerminal(run.status)) {
       const call = this.calls.get(`${run.parentRunId}\0${run.delegateToolCallId}`);
       if (call && !call.done) void this.finish(call, run);
@@ -183,17 +186,16 @@ export class DelegationBroker implements DelegationObserver {
   /**
    * Approved R6 fallback on reload: the new module instance has no event source for
    * subprocess parents, so every parent with an outstanding call is stopped, leaves
-   * first, with a named diagnostic. Parents with nothing outstanding keep running.
+   * first, with a named diagnostic. Parents with nothing outstanding keep running;
+   * their saved starts stay, so an update after close is claimed and rejected, never dropped.
    */
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    this.starts.clear();
     const pending = [...this.calls.values()];
     const parents = [...new Set(pending.map((c) => c.parent))];
     const leaves = pending.map((c) => (c.leafId ? this.deps.registry.get(c.leafId) : undefined)).filter((r): r is Run => !!r);
     for (const call of pending) this.cancel(call, RELOAD_INTERRUPTED);
-    this.unsubscribe();
     for (const parent of parents) {
       if (isTerminal(parent.status)) continue;
       parent.errorMessage = RELOAD_INTERRUPTED;

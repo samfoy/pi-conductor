@@ -11448,7 +11448,7 @@ function waitForDelegateResponse(path2, expect, deadlineAt, signal) {
     cleanup.push(() => watcher.close());
     const poll = setInterval(check, POLL_MS);
     cleanup.push(() => clearInterval(poll));
-    const timer = setTimeout(() => finish(new Error("delegate rejected: no broker response before the deadline")), Math.max(0, deadlineAt - Date.now()));
+    const timer = setTimeout(() => finish(new Error("delegate outcome unconfirmed: no broker response before the deadline; a leaf may have run")), Math.max(0, deadlineAt - Date.now()));
     cleanup.push(() => clearTimeout(timer));
     check();
   });
@@ -13628,13 +13628,12 @@ import { dirname as dirname21 } from "node:path";
 var DelegationBroker = class {
   constructor(deps) {
     this.deps = deps;
-    this.unsubscribe = deps.registry.onChange((run) => this.changed(run));
+    deps.registry.onChange((run) => this.changed(run));
   }
   deps;
   starts = /* @__PURE__ */ new Map();
   calls = /* @__PURE__ */ new Map();
   closed = false;
-  unsubscribe;
   observe(parent, event, cwd) {
     const e = event;
     if (!e || typeof e !== "object" || e.toolName !== "delegate" || e.parentToolCallId !== void 0 || !isDelegateCallId(e.toolCallId)) return;
@@ -13719,6 +13718,9 @@ var DelegationBroker = class {
       timeoutMs: verdict.timeoutMs,
       runtime: "subprocess",
       runtimeEnv: this.deps.env,
+      // resolvePersonas already applied personaOverrides; unset keeps pi's inherit semantics.
+      model: target.model,
+      thinking: target.thinking,
       parentSessionId: parent.parentSessionId,
       delegation: { parentRunId: parent.id, delegateToolCallId: call.id },
       inheritContextOverride: "none",
@@ -13743,6 +13745,9 @@ var DelegationBroker = class {
     } else forceTerminate(leaf, "timeout", this.deps.registry);
   }
   changed(run) {
+    if (isTerminal(run.status)) {
+      for (const key of this.starts.keys()) if (key.startsWith(`${run.id}\0`)) this.starts.delete(key);
+    }
     if (run.parentRunId !== void 0 && run.delegateToolCallId !== void 0 && isTerminal(run.status)) {
       const call = this.calls.get(`${run.parentRunId}\0${run.delegateToolCallId}`);
       if (call && !call.done) void this.finish(call, run);
@@ -13792,17 +13797,16 @@ var DelegationBroker = class {
   /**
    * Approved R6 fallback on reload: the new module instance has no event source for
    * subprocess parents, so every parent with an outstanding call is stopped, leaves
-   * first, with a named diagnostic. Parents with nothing outstanding keep running.
+   * first, with a named diagnostic. Parents with nothing outstanding keep running;
+   * their saved starts stay, so an update after close is claimed and rejected, never dropped.
    */
   async close() {
     if (this.closed) return;
     this.closed = true;
-    this.starts.clear();
     const pending = [...this.calls.values()];
     const parents = [...new Set(pending.map((c) => c.parent))];
     const leaves = pending.map((c) => c.leafId ? this.deps.registry.get(c.leafId) : void 0).filter((r) => !!r);
     for (const call of pending) this.cancel(call, RELOAD_INTERRUPTED);
-    this.unsubscribe();
     for (const parent of parents) {
       if (isTerminal(parent.status)) continue;
       parent.errorMessage = RELOAD_INTERRUPTED;
