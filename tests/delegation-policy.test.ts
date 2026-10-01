@@ -1,7 +1,7 @@
 /**
  * N1: validated `agents:` allowlists, frozen depth scope, and the child
- * tool policy built from it. No `delegate` tool or broker exists yet, so
- * every child, a delegator included, excludes `delegate` until N2.
+ * tool policy built from it. Since N2 an eligible depth-1 delegator keeps
+ * the conductor's own `delegate`; every other child still excludes it.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -39,8 +39,10 @@ sandboxPi();
 const LEAD: ChildToolScope = { depth: 1, delegateAllow: [] };
 const DELEGATOR: ChildToolScope = { depth: 1, delegateAllow: ["inspector", "oracle"] };
 const LEAF: ChildToolScope = { depth: 2, delegateAllow: [] };
-/** What every child excludes after its own list, in every N1 scope: no child keeps `delegate` before N2 registers it. */
+/** What every non-delegating child excludes after its own list. */
 const ALWAYS = [...CONDUCTOR_LLM_TOOL_NAMES, "subagent", "agent", "delegate"];
+/** An eligible delegator keeps `delegate`, the conductor's own lead-brokered tool (N2). */
+const DELEGATOR_ALWAYS = ALWAYS.filter((n) => n !== "delegate");
 const LEAF_ONLY = ["ask_owner", "edit", "write", "insert_before", "insert_after"];
 const NINE_READERS = ["analyst", "clarifier", "critic", "finalizer", "inspector", "investigator", "oracle", "profiler", "redteam"];
 
@@ -221,13 +223,13 @@ for (const kind of ["fresh", "resume"] as const) {
   const cases: [string, ChildToolScope | undefined, string[] | undefined, string[], string | undefined, string[]][] = [
     ["legacy default", undefined, ["read", "bash"], [], "read,bash,ask_owner", ALWAYS],
     ["depth-1 lead child", LEAD, ["read", "bash"], [], "read,bash,ask_owner", ALWAYS],
-    ["depth-1 delegator", DELEGATOR, ["read", "bash"], [], "read,bash,ask_owner", ALWAYS],
-    ["depth-1 delegator whose allowlist names delegate", DELEGATOR, ["read", "delegate"], [], "read,delegate,ask_owner", ALWAYS],
-    ["depth-1 delegator, explicit exclusion wins", DELEGATOR, ["read", "bash"], ["delegate", "ask_owner"], "read,bash", [...new Set(["delegate", "ask_owner", ...ALWAYS])]],
+    ["depth-1 delegator", DELEGATOR, ["read", "bash"], [], "read,bash,ask_owner,delegate", DELEGATOR_ALWAYS],
+    ["depth-1 delegator whose allowlist names delegate", DELEGATOR, ["read", "delegate"], [], "read,delegate,ask_owner", DELEGATOR_ALWAYS],
+    ["depth-1 delegator, explicit exclusion wins", DELEGATOR, ["read", "bash"], ["delegate", "ask_owner"], "read,bash", ["delegate", "ask_owner", ...DELEGATOR_ALWAYS]],
     ["depth-1 lead child, explicit ask exclusion wins", LEAD, ["read"], ["ask_owner"], "read", ["ask_owner", ...ALWAYS]],
     ["depth-2 leaf", LEAF, ["read", "bash"], [], "read,bash", [...ALWAYS, ...LEAF_ONLY]],
     ["depth-2 leaf, default tool set", LEAF, undefined, ["grep"], undefined, ["grep", ...ALWAYS, ...LEAF_ONLY]],
-    ["depth-1 delegator, default tool set", DELEGATOR, undefined, [], undefined, ALWAYS],
+    ["depth-1 delegator, default tool set", DELEGATOR, undefined, [], undefined, DELEGATOR_ALWAYS],
   ];
   for (const [label, scope, allow, exclude, tools, excluded] of cases) {
     test(`N1 ${kind} argv for ${label}`, () => {
@@ -259,8 +261,8 @@ test("N1 prompt guard: only an eligible delegator differs from no-nesting; leave
   const delegating = buildSubAgentPrompt(p, "T", undefined, DELEGATOR);
   assert.notEqual(delegating.split("\n")[0], legacy.split("\n")[0]);
   assert.match(delegating, /inspector, oracle/);
-  assert.match(delegating, /no delegation tool is available yet\. Do NOT attempt to spawn/);
-  assert.doesNotMatch(delegating, /use `delegate`|you may delegate/i, "N1 must not advertise executable delegation");
+  assert.match(delegating, /delegate bounded read-only work\s+with the `delegate` tool to: inspector, oracle/);
+  assert.match(delegating, /You may not spawn anything else \(no ensemble_spawn, subagent, agent/);
   const leaf = buildSubAgentPrompt(p, "T", undefined, LEAF);
   assert.ok(leaf.startsWith(legacy.split("\n")[0]!), "leaves keep the no-nesting guard");
   assert.match(leaf, /read-only leaf: do not edit, write, or commit files/);
@@ -317,7 +319,7 @@ test("N1 herdr launch takes pane env and argv from the run's frozen scope, not t
     { ...POLLUTION, AWS_SECRET_ACCESS_KEY: "SECRET", PI_CONDUCTOR_MODE: "on" });
   assert.deepEqual({ d: paneEnv.CONDUCTOR_DEPTH, r: paneEnv.CONDUCTOR_RUN_DIR, a: paneEnv.CONDUCTOR_DELEGATE_ALLOW }, { d: "1", r: dir, a: "inspector,oracle" });
   assert.equal(paneEnv.AWS_SECRET_ACCESS_KEY, undefined); assert.equal(paneEnv.PI_CONDUCTOR_MODE, undefined);
-  assert.deepEqual(toolFlags(argv), { tools: "read,ask_owner", exclude: ["write", ...ALWAYS].join(",") }, "the caller's core scope never wins over the run");
+  assert.deepEqual(toolFlags(argv), { tools: "read,ask_owner,delegate", exclude: ["write", ...DELEGATOR_ALWAYS].join(",") }, "the caller's core scope never wins over the run");
 });
 
 // ── Durable scope: record, orphan restore and resume ─────────────────
@@ -419,7 +421,7 @@ test("N1 queue, retry and seeded parent context keep the same scoped tool flags"
   const delegator = persona({ agents: ["inspector"], tools: ["read"] });
   const direct = spawnRun(options({ persona: delegator })); t.after(() => clearTimeout(direct.run.timeoutTimer));
   const expected = toolFlags(launches[0]!.args);
-  assert.deepEqual(expected, { tools: "read,ask_owner", exclude: ALWAYS.join(",") });
+  assert.deepEqual(expected, { tools: "read,ask_owner,delegate", exclude: DELEGATOR_ALWAYS.join(",") });
 
   const registry = new RunRegistry(); const busy = run({ id: "busy-a", status: "running" }); registry.register(busy);
   const queue = new SpawnQueue(registry, 1);
@@ -461,7 +463,7 @@ test("N1 an ordinary LLM caller cannot supply depth or an allowlist to widen a s
   for (const r of registry.list()) t.after(() => clearTimeout(r.timeoutTimer));
   assert.deepEqual({ d: oracle!.depth, a: oracle!.delegateAllow, env: launches[0]!.env.CONDUCTOR_DELEGATE_ALLOW }, { d: 1, a: [], env: undefined });
   assert.deepEqual({ d: lead!.depth, a: lead!.delegateAllow, env: launches[1]!.env.CONDUCTOR_DELEGATE_ALLOW }, { d: 1, a: ["inspector"], env: "inspector" });
-  for (const { args } of launches) assert.ok(flag(args, "--exclude-tools")!.split(",").includes("delegate"), "no child, delegator included, keeps delegate in N1");
+  assert.deepEqual(launches.map(({ args }) => flag(args, "--exclude-tools")!.split(",").includes("delegate")), [true, false], "only the persona's own allowlist makes a delegator");
 });
 
 test("N1 a persona object bypassing resolution still cannot launch a malformed allowlist", (t) => {
@@ -482,23 +484,24 @@ test("N1 ensemble_list and doctor show the effective allowlist without advertisi
   const r = await roster(t, { project: { "lead.md": doc("lead", "agents:\n  - inspector\n  - oracle\n") } });
   const registry = new RunRegistry();
   const report = await buildDoctorReport({ cwd: r.cwd, registry, queue: new SpawnQueue(registry, 1), conductorMode: false, env: {} });
-  assert.match(report, /## Delegation allowlists\n {2}lead: inspector, oracle\n.*no delegate tool is registered yet/);
+  assert.match(report, /## Delegation allowlists\n {2}lead: inspector, oracle\n.*lead-brokered delegate tool \(opt-in; no admission lanes before N3\)/);
   const empty = await buildDoctorReport({ cwd: tmpDir("n1-doctor-"), registry, queue: new SpawnQueue(registry, 1), conductorMode: false, env: {} });
   assert.match(empty, /## Delegation allowlists\n {2}· none/);
 });
 
-test("N1 doctor's always-excluded list holds for every scope, so it never silences a name a delegator keeps", async (t) => {
+test("N1/N2 doctor's always-excluded list holds for every scope, and a foreign delegate is flagged as a delegator conflict", async (t) => {
   const r = await roster(t, { project: { "lead.md": doc("lead", "agents:\n  - inspector\n") } });
   const registry = new RunRegistry();
   const report = await buildDoctorReport({ cwd: r.cwd, registry, queue: new SpawnQueue(registry, 1), conductorMode: false, env: {},
     loadedToolNames: ["read", "delegate", "run_agent"] });
   const listed = /always excluded: (.*)/.exec(report)![1]!.split(", ");
-  assert.ok(listed.includes("delegate"), report);
+  assert.ok(!listed.includes("delegate"), "a delegator keeps the conductor's own delegate, so it is not always excluded");
   const lead = childToolScope({ depth: 1, delegateAllow: r.personas.get("lead")!.agents });
   for (const scope of [LEGACY_CHILD_SCOPE, LEAD, lead, LEAF]) {
     const excluded = effectiveExcludeTools(undefined, scope);
     for (const name of listed) assert.ok(excluded.includes(name), `doctor calls ${name} always excluded, but scope ${JSON.stringify(scope)} keeps it`);
   }
-  assert.doesNotMatch(report, /⚠ delegate /, "silent only because every child really excludes it");
+  assert.match(report, /⚠ delegate is registered by another extension: a delegating child that loads it fails to start with a tool conflict/);
+  assert.doesNotMatch(report, /⚠ delegate looks spawn-capable/);
   assert.match(report, /⚠ run_agent looks spawn-capable/, "a spawn-looking name children keep still warns");
 });

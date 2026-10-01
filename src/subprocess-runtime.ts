@@ -21,7 +21,7 @@ export class SubprocessRuntime implements RunRuntime {
       stdio: [rpc ? "pipe" : "ignore", "pipe", "pipe"],
       // Worktrees may not contain the spawning project's untracked config.
       env: buildSubagentEnv(process.env, { CONDUCTOR_CONFIG_CWD: run.cwd, CONDUCTOR_RUN_ID: run.id,
-        ...childScopeEnv(dirname(run.recordPath), childToolScope(run)), ...(tmp ? { TMPDIR: tmp } : {}) }),
+        ...childScopeEnv(dirname(run.recordPath), childToolScope(run), run.deadlineAt), ...(tmp ? { TMPDIR: tmp } : {}) }),
     });
     const closed = new Promise<void>(resolve => proc.once("close", () => resolve()));
     const stdoutLines = createLineDecoder(line => sink.line(line));

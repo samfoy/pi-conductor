@@ -259,7 +259,8 @@ type QueuedOptions = Omit<SpawnOptions, "registry" | "preAllocatedId">;
  * new SpawnOptions key lands without a value here.
  */
 // Effort values need a real owned repository; their nonempty round-trip is in effort-spawn.test.ts.
-function everyOption(): Required<Omit<QueuedOptions, "effort" | "touches">> & { effort: string | undefined; touches: string[] | undefined } {
+// A set `delegation` deliberately replaces the leaf's privileges (tests/delegation-broker.test.ts).
+function everyOption(): Required<Omit<QueuedOptions, "effort" | "touches" | "delegation">> & { effort: string | undefined; touches: string[] | undefined; delegation: undefined } {
   return {
     persona: builderPersona(),
     task: "drift",
@@ -267,6 +268,7 @@ function everyOption(): Required<Omit<QueuedOptions, "effort" | "touches">> & { 
     runtimeEnv: {},
     effort: undefined,
     touches: undefined,
+    delegation: undefined,
     files: [],
     mode: "foreground",
     cwd: "/drift/cwd",

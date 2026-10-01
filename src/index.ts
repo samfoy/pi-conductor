@@ -31,6 +31,7 @@ import { registerCommands } from "./commands.ts";
 import { registerTools } from "./tools.ts";
 import { RunRegistry, supportsFocus, availableActions } from "./runs.ts";
 import { SpawnQueue } from "./queue.ts";
+import { DelegationBroker } from "./delegation-broker.ts";
 import { mountEnsembleWidget, type EnsembleWidget } from "./widget.ts";
 import {
   buildCompletionMessage,
@@ -92,6 +93,7 @@ export default function (pi: ExtensionAPI): void {
 
   const registry = new RunRegistry();
   const queue = new SpawnQueue(registry, 4, 1);
+  registry.delegation = new DelegationBroker({ registry, queue, env: process.env });
   const focusModel = new FocusedStreamModel(registry);
   // v0.16 event bus: construct once at extension init; `pi.events` is the
   // shared cross-extension EventBus. The `?.` in each emit* method makes
@@ -696,6 +698,7 @@ export default function (pi: ExtensionAPI): void {
     await handleSessionShutdown(event, {
       runs: registry.list(),
       resetSanitizer: () => sanitizerHook.reset(),
+      delegation: registry.delegation,
       terminateHerdr: run => forceTerminate(run, "killed", registry),
       // A1: close the orphan-creation window. SIGTERM races the runtime
       // teardown; without this the on-disk record stays "running" until

@@ -58,7 +58,7 @@ import { loadConfigWithErrors } from "./config.ts";
 import { resolveWorktreeSpec, createWorktree, removeWorktree, mergeWorktree, buildMergeCommitMessage, currentBranch, worktreeHasUncommittedChanges, branchHasUnmergedCommits, restoreWorktree, refExists, worktreeCwd } from "./worktree.ts";
 import { readProcessStartTime } from "./reconcile-startup.ts";
 import { ConductorEventEmitter } from "./conductor-events.ts";
-import { builtinPersonasDir, childToolScope, effectiveAllowTools, effectiveExcludeTools, runScopeError } from "./personas.ts";
+import { builtinPersonasDir, childToolScope, effectiveAllowTools, effectiveExcludeTools, isWriteCapable, runScopeError } from "./personas.ts";
 import { loadWorkspaceDoctrine } from "./workspace-doctrine.ts";
 import {  emptyUsage,
   isDelegating,
@@ -251,13 +251,13 @@ const SUBAGENT_NESTING_GUARD = [
 const LEAF_GUARD = "You are a read-only leaf: do not edit, write, or commit files. " +
   "If you need a decision, end your final answer with `QUESTION: …`; your owner decides. You cannot ask anyone.";
 
-/** An allowlisted child is told its policy, but no `delegate` tool exists until the lead broker does. */
+/** An allowlisted child may delegate only through the lead-brokered `delegate` tool. */
 function delegatingGuard(allow: readonly string[]): string {
   return [
-    "IMPORTANT: You are running as a pi-conductor sub-agent. Your persona may later delegate",
-    `read-only work to: ${allow.join(", ")}, but no delegation tool is available yet. Do NOT attempt to spawn`,
-    "sub-agents (no calls to ensemble_spawn, subagent, agent, delegate, etc).",
-    "Complete the entire task yourself and return your findings.",
+    "IMPORTANT: You are running as a pi-conductor sub-agent. You may delegate bounded read-only work",
+    `with the \`delegate\` tool to: ${allow.join(", ")}. Each delegated scope has one executor; do not also do it yourself.`,
+    "You may not spawn anything else (no ensemble_spawn, subagent, agent, etc).",
+    "Own and complete the overall task and return your findings.",
   ].join(" ");
 }
 
@@ -941,6 +941,8 @@ export type TerminationReason = "killed" | "timeout" | "stalled" | "aborted";
 
 export class RunRegistry {
   herdrAdmissionOpen = true;
+  /** N2: this module instance's broker for subprocess delegators' `delegate` calls. */
+  delegation?: import("./delegation-broker.ts").DelegationObserver;
   admissionLimits?: AdmissionLimits;
   readonly integrations = new EffortDriver();
   private runs = new Map<string, Run>();
@@ -1164,6 +1166,30 @@ export interface SpawnOptions {
    * exclusive with it (chain fires on completed only).
    */
   onRetry?: (run: Run) => void;
+  /**
+   * N2: set only by the lead broker. The spawn becomes a depth-2 read-only
+   * leaf owned by this `delegate` call: no worktree, merge, hook, effort,
+   * chain, retry, inherited context or steering, whatever else is passed.
+   */
+  delegation?: { parentRunId: string; delegateToolCallId: string };
+}
+
+/** Until N5 a delegating run is subprocess-only; refuse herdr by name rather than downgrade it. */
+export function assertDelegationRuntime(persona: Persona, runtime: RuntimeKind, delegation?: SpawnOptions["delegation"]): void {
+  if (!delegation && (persona.agents ?? []).length > 0 && runtime === "herdr") {
+    throw new Error(`delegating persona ${persona.name} resolves to the herdr runtime; delegation supports subprocess parents only until N5`);
+  }
+}
+
+/** A broker leaf's fixed options; caller-supplied privileges are dropped, never honored. */
+export function leafSpawnOptions<T extends Partial<SpawnOptions>>(opts: T): T {
+  if (!opts.delegation) return opts;
+  if (opts.persona && (opts.persona.readOnly !== true || isWriteCapable(opts.persona.name))) {
+    throw new Error(`delegated leaves must be read_only, non-write-capable personas; ${opts.persona.name} is not`);
+  }
+  return { ...opts, runtime: "subprocess", mode: "background", worktree: false, mergeStrategy: "none", onCompleteHook: "", onCompleteHookTimeoutSeconds: undefined,
+    effort: undefined, touches: undefined, onChain: undefined, onRetry: undefined, retryMaxAttempts: 1, retryAttempt: 0, inheritContextOverride: "none",
+    parentMessages: undefined, steerable: false };
 }
 
 /**
@@ -1296,9 +1322,12 @@ export function prepareSpawnEffort(opts: Pick<SpawnOptions, "effort" | "touches"
 
 /** Spawn immediately; foreground/background callers await the same terminal promise. */
 export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
+  opts = leafSpawnOptions(opts);
   // Lead spawns are depth 1; the resolved persona alone grants delegation, never the caller.
-  const scope = childToolScope({ depth: 1, delegateAllow: opts.persona.agents ?? [] });
+  // Only the lead broker's leaf spawns are depth 2, and they never delegate.
+  const scope = childToolScope(opts.delegation ? { depth: 2, delegateAllow: [] } : { depth: 1, delegateAllow: opts.persona.agents ?? [] });
   opts = prepareSpawnRuntime(opts);
+  assertDelegationRuntime(opts.persona, opts.runtime as RuntimeKind, opts.delegation);
   if (opts.runtime === "herdr" && !opts.registry.herdrAdmissionOpen) throw new Error("herdr runtime shutting down; launch refused");
   opts = prepareSpawnEvidence(opts, opts.registry);
   const effort = prepareSpawnEffort(opts);
@@ -1340,6 +1369,8 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     excludeTools: effectiveExcludeTools(opts.persona.excludeTools, scope),
     depth: scope.depth,
     delegateAllow: [...scope.delegateAllow],
+    parentRunId: opts.delegation?.parentRunId,
+    delegateToolCallId: opts.delegation?.delegateToolCallId,
     // Item 15: per-invocation markers. Initial spawn IS the start of
     // the (sole, so far) invocation, so:
     //   - thisInvocationStartedAt mirrors startTime
@@ -1568,6 +1599,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
       },
       cwd: effectiveCwd, // v0.13: opts.cwd's counterpart in the worktree when one was created
       timeoutMs: opts.timeoutMs,
+      onEvent: delegationObserver(run, opts.registry, effectiveCwd),
       onUpdate: opts.onUpdate,
       onComplete: opts.onComplete,
       // Only let the subprocess discover a session file when we didn't pre-seed
@@ -1585,7 +1617,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
       // current config layers + persona frontmatter. Per-call args land
       // in slice 3; for slice 2 the per-call layer is always undefined.
       // Tests inject `resolvedHook` directly via the spawn-options surface.
-      resolvedHook: resolveCloseHook(
+      resolvedHook: opts.delegation ? undefined : resolveCloseHook(
         opts.cwd,
         opts.persona.name,
         hookSpecFromOpts(opts.onCompleteHook, opts.onCompleteHookTimeoutSeconds), // per-call (slice 3)
@@ -1604,6 +1636,12 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     const current = opts.registry.get(run.id)!;
     return failEffortLaunch(current, opts.registry, `effort isolation failed; no child started: ${(error as Error).message}. ${EFFORT_NOTICE}`, opts.onComplete);
   }
+}
+
+/** A subprocess delegator's parsed events go to this instance's broker, with the parent's effective cwd. */
+function delegationObserver(run: Run, registry: RunRegistry, cwd: string): ((run: Run, event: unknown) => void) | undefined {
+  if (run.runtime === "herdr" || !isDelegating(childToolScope(run))) return undefined;
+  return (r, event) => registry.delegation?.observe(r, event, cwd);
 }
 
 /** Release an unlaunched effort reservation once, without discarding its workspace or evidence. */
@@ -2187,6 +2225,9 @@ export function sendToRun(
       reason: `cannot send an empty message to sub-agent ${run.id}.`,
     };
   }
+  if (run.runtime === "herdr" && !runScopeError(run) && isDelegating(childToolScope(run))) {
+    return { kind: "rejected", reason: `delegating run ${run.id} is on the herdr runtime; delegation supports subprocess parents only until N5` };
+  }
   const behavior: StreamingBehavior = opts.streamingBehavior ?? "auto";
   const check = validateSendable(run, behavior, opts.sessionId);
   if (!check.ok) return { kind: "rejected", reason: check.reason };
@@ -2310,13 +2351,16 @@ export function sendToRun(
     opts.currentModelProvider,
   );
   const piArgs = buildResumePiArgs(run, trimmed);
+  const resumeCwd = run.runtime === "herdr" ? sessionHeaderCwd(readFileSync(sessionPath, "utf8")) ?? run.cwd : run.effort?.cwd ?? run.cwd;
 
   const done = createRunPipeline(run, piArgs, {
     answer,
     registry: opts.registry,
     runtime: runtimeFor(run),
     core: { kind: "resume", sessionPath, systemPrompt: run.systemPrompt, model: run.model, thinking: run.thinking, tools: run.tools, excludeTools: run.excludeTools },
-    cwd: run.runtime === "herdr" ? sessionHeaderCwd(readFileSync(sessionPath, "utf8")) ?? run.cwd : run.effort?.cwd ?? run.cwd,
+    cwd: resumeCwd,
+    // Pi resumes in the session header's cwd, which is the parent's effective cwd for its files.
+    onEvent: delegationObserver(run, opts.registry, sessionHeaderCwd(readFileSync(sessionPath, "utf8")) ?? resumeCwd),
     timeoutMs: opts.timeoutMs,
     onUpdate: opts.onUpdate,
     onComplete: opts.onComplete,

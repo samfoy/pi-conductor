@@ -57,7 +57,7 @@ export const CONDUCTOR_LLM_TOOL_NAMES: readonly string[] = Object.values(CONDUCT
  */
 export const FOREIGN_SPAWN_TOOLS: readonly string[] = ["subagent", "agent"];
 
-/** 1: spawned by the lead. 2: a read-only leaf a depth-1 delegator may own (not spawned yet). */
+/** 1: spawned by the lead. 2: a read-only leaf the lead broker spawns for a depth-1 delegator. */
 export type ChildDepth = 1 | 2;
 
 /** A run's frozen tool scope. Only depth 1 with a non-empty allowlist is a delegator. */
@@ -74,13 +74,15 @@ export function isDelegating(scope: ChildToolScope): boolean {
 }
 
 /** Conductor-owned child env names. Launchers drop inherited copies before setting their own. */
-export const CHILD_SCOPE_ENV = ["CONDUCTOR_DEPTH", "CONDUCTOR_RUN_DIR", "CONDUCTOR_DELEGATE_ALLOW"] as const;
+export const CHILD_SCOPE_ENV = ["CONDUCTOR_DEPTH", "CONDUCTOR_RUN_DIR", "CONDUCTOR_DELEGATE_ALLOW", "CONDUCTOR_DEADLINE_AT"] as const;
 
-export function childScopeEnv(runDir: string, scope: ChildToolScope): Record<string, string> {
+/** `deadlineAt` (the run's hard-timeout due time) bounds a delegator's own wait for broker responses. */
+export function childScopeEnv(runDir: string, scope: ChildToolScope, deadlineAt?: number): Record<string, string> {
   return {
     CONDUCTOR_DEPTH: String(scope.depth),
     CONDUCTOR_RUN_DIR: runDir,
     ...(isDelegating(scope) ? { CONDUCTOR_DELEGATE_ALLOW: scope.delegateAllow.join(",") } : {}),
+    ...(isDelegating(scope) && Number.isFinite(deadlineAt) ? { CONDUCTOR_DEADLINE_AT: String(deadlineAt) } : {}),
   };
 }
 
@@ -974,6 +976,13 @@ export interface Run {
    */
   depth?: ChildDepth;
   delegateAllow?: string[];
+  /** N2 lineage of a depth-2 leaf: the delegating run and the `delegate` call it answers. */
+  parentRunId?: string;
+  delegateToolCallId?: string;
+  /** In memory: `delegate` calls the lead broker has claimed and not yet answered. */
+  pendingDelegations?: number;
+  /** In memory: when the current invocation's hard-timeout timer fires. */
+  deadlineAt?: number;
 
   /** Working directory of the subprocess. */
   cwd: string;
@@ -1135,6 +1144,9 @@ export interface RunRecord {
   /** See `Run.depth` / `Run.delegateAllow`. Persisted verbatim, never normalized. */
   depth?: ChildDepth;
   delegateAllow?: string[];
+  /** See `Run.parentRunId` / `Run.delegateToolCallId`. */
+  parentRunId?: string;
+  delegateToolCallId?: string;
   /**
    * v0.12 steering: spawn-time steerable flag. See `Run.steerable`.
    * Persisted to record.json so post-startup reconcile (v0.9.x) knows
@@ -1256,6 +1268,8 @@ export function toRunRecord(r: Run): RunRecord {
     excludeTools: r.excludeTools,
     depth: r.depth,
     delegateAllow: r.delegateAllow,
+    parentRunId: r.parentRunId,
+    delegateToolCallId: r.delegateToolCallId,
     runtime: r.runtime === undefined ? "subprocess" : r.runtime,
     herdr: r.herdr,
     herdrUsageBaseline: r.herdrUsageBaseline,

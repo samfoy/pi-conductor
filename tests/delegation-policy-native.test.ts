@@ -4,8 +4,9 @@
  * CONDUCTOR_NATIVE_PI_ROOT and fails, never skips, when it is missing. Newer
  * roots listed in CONDUCTOR_H11_PI_ROOTS also prove `ctx.executeTool()` nested
  * calls cannot reach an excluded tool. An eligible delegator's argv comes from
- * real subprocess and herdr launches, and another extension's `delegate` stays
- * unreachable until N2 registers the conductor's own. Offline faux model only.
+ * real subprocess and herdr launches; since N2 it exposes exactly the
+ * conductor's own `delegate`, and another extension's same-named tool is a
+ * load conflict, never a fallback. Offline faux model only.
  */
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
@@ -124,23 +125,29 @@ async function witness(t: test.TestContext, pi: Harness, nested: boolean) {
     for (const name of ["delegate", "subagent", "agent", "ensemble_spawn"]) assert.match(probe.nested[name]?.text ?? "", notFound, `nested ${name}`);
   }
 
-  // N1 registers no delegate, so an eligible delegator still excludes the name and another extension's cannot fill it.
+  // N2: an eligible delegator exposes exactly the conductor's own delegate, never another extension's.
   for (const [kind, persona] of DELEGATORS) for (const [path, launch] of await delegatorLaunches(persona)) {
     const where = `${path} ${kind} delegator`;
     assert.equal(launch.env.CONDUCTOR_DELEGATE_ALLOW, "inspector", `${where}: the child is an eligible delegator`);
-    const delegator = await pi.nativeSurface(root, `${pi.VERSION}-delegator-${path}-${kind}`, { argv: launch.argv, env: launch.env, decoys: ["delegate", "subagent", "agent"],
-      calls: [{ name: "delegate", args: {} }, ...(nested ? [{ name: "nested_probe", args: {} }] : [])], nested: nested ? ["delegate", "read"] : undefined });
+    const delegator = await pi.nativeSurface(root, `${pi.VERSION}-delegator-${path}-${kind}`, { argv: launch.argv, env: launch.env, decoys: ["subagent", "agent"],
+      // Missing task: Pi's schema check ends it before execute, so no broker could ever act on it.
+      calls: [{ name: "delegate", args: { persona: "inspector" } }, ...(nested ? [{ name: "nested_probe", args: {} }] : [])], nested: nested ? ["delegate", "read"] : undefined });
     const call = delegator.ends.find(e => e.name === "delegate");
     t.diagnostic(`Pi ${pi.VERSION} ${where}: active=${delegator.active.join(",")} callable=${delegator.callable?.join(",") ?? "n/a"} ` +
       `delegate=${JSON.stringify(call?.text)} nested=${JSON.stringify(delegator.nested.delegate?.text ?? null)}`);
-    if (persona.tools) assert.deepEqual([...delegator.active].sort(), ["ask_owner", "nested_probe", "read"], where);
-    else for (const name of ["ask_owner", "nested_probe", "read", "bash"]) assert.ok(delegator.active.includes(name), `${where} keeps ${name}; the set is not vacuous`);
-    absent(delegator, ["delegate", "subagent", "agent"], where);
-    assert.ok(call?.isError && notFound.test(call.text), `${where}: model-issued delegate must not resolve: ${JSON.stringify(call)}`);
+    if (persona.tools) assert.deepEqual([...delegator.active].sort(), ["ask_owner", "delegate", "nested_probe", "read"], where);
+    else for (const name of ["ask_owner", "delegate", "nested_probe", "read", "bash"]) assert.ok(delegator.active.includes(name), `${where} keeps ${name}; the set is not vacuous`);
+    assert.equal(delegator.registered.filter(n => n === "delegate").length, 1, `${where}: one delegate, the conductor's`);
+    assert.deepEqual(delegator.errors, [], `${where}: no load conflict`);
+    absent(delegator, ["subagent", "agent"], where);
+    assert.ok(call?.isError && !notFound.test(call.text) && !/executed/.test(call.text) && /task/.test(call.text), `${where}: schema rejects before execute: ${JSON.stringify(call)}`);
     if (nested) {
-      assert.ok(delegator.nested.delegate?.isError && notFound.test(delegator.nested.delegate.text), `${where}: nested delegate: ${JSON.stringify(delegator.nested.delegate)}`);
+      assert.match(delegator.nested.delegate?.text ?? "", /delegate rejected: nested calls cannot delegate/, `${where}: nested delegate: ${JSON.stringify(delegator.nested.delegate)}`);
       assert.doesNotMatch(delegator.nested.read?.text ?? "not found", notFound, `${where}: nested positive control reaches an allowed tool`);
     }
+    // Another extension's delegate in the same delegator is a load conflict (the CLI exits on it), never a silent fallback.
+    const clash = await pi.nativeSurface(root, `${pi.VERSION}-delegator-clash-${path}-${kind}`, { argv: launch.argv, env: launch.env, decoys: ["delegate"] });
+    assert.ok(clash.errors.some(e => /Tool "delegate" conflicts/.test(e)), `${where}: ${JSON.stringify(clash.errors)}`);
   }
   t.diagnostic(`Pi ${pi.VERSION}: depth2 active=${leaf.active.join(",")} callable=${leaf.callable?.join(",") ?? "n/a"}`);
 }

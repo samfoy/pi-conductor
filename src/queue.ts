@@ -10,6 +10,8 @@
  */
 
 import {
+  assertDelegationRuntime,
+  leafSpawnOptions,
   forceTerminate,
   failEffortLaunch,
   RunRegistry,
@@ -23,6 +25,7 @@ import {
 import { addEffortMember, listEfforts, readEffort, type EffortRecord } from "./effort/store.ts";
 import { admitEffortWriter } from "./effort/admit.ts";
 import type { Run, SpawnMode } from "./types.ts";
+import type { RuntimeKind } from "./runtime.ts";
 import { emptyUsage } from "./types.ts";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -99,7 +102,8 @@ export class SpawnQueue {
   enqueueOrSpawn(
     opts: QueuedSpawnOptions & { registry?: RunRegistry },
   ): SpawnOrQueueResult {
-    opts = prepareSpawnRuntime(opts);
+    opts = prepareSpawnRuntime(leafSpawnOptions(opts));
+    assertDelegationRuntime(opts.persona, opts.runtime as RuntimeKind, opts.delegation);
     opts = prepareSpawnEvidence(opts, opts.registry ?? this.registry);
     const effort = prepareSpawnEffort(opts);
     if (opts.touches) opts = { ...opts, touches: [...opts.touches] };
@@ -129,6 +133,8 @@ export class SpawnQueue {
       thinking: opts.thinking,
       mode: "background", // queued runs are always background once they start
       status: "queued",
+      // A broker leaf's lineage is visible while it waits, so cancel and status find it.
+      ...(opts.delegation ? { depth: 2 as const, delegateAllow: [], parentRunId: opts.delegation.parentRunId, delegateToolCallId: opts.delegation.delegateToolCallId } : {}),
       waitReason,
       ...(effort ? { parentPid: effort.owner.pid, parentStartTime: effort.owner.startTime, parentSessionId: effort.owner.sessionId } : {}),
       effort: effort ? { owner: effort.owner, name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches ? [...opts.touches] : undefined } : undefined,

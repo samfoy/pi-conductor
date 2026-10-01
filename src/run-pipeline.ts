@@ -354,6 +354,8 @@ export function createRunPipeline(
         void finalize("failed", 1);
       }),
     };
+    // Provisional for the launch env (a delegator's child bounds its waits by it); re-stamped when armed.
+    if (!opts.reattach) run.deadlineAt = Date.now() + opts.timeoutMs;
     if (opts.reattach) {
       if (!runtime.attach) throw new Error("runtime attachment unavailable");
       transport = runtime.attach(run, sink);
@@ -446,7 +448,8 @@ export function createRunPipeline(
     };
   }
 
-  // Hard timeout.
+  // Hard timeout; deadlineAt is when this timer actually fires.
+  run.deadlineAt = Date.now() + opts.timeoutMs;
   run.timeoutTimer = setTimeout(() => {
     if (current() && (run.status === "running" || run.status === "paused")) {
       forceTerminate(run, "timeout", opts.registry, opts.onComplete);

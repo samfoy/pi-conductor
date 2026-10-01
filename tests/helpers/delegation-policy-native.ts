@@ -15,6 +15,8 @@ export interface NativeSurface {
   callable?: string[];
   ends: { name: string; isError: boolean; text: string; details?: unknown }[];
   nested: Record<string, { isError: boolean; text: string }>;
+  /** Extension load diagnostics, e.g. a same-named tool conflict (the CLI exits on these). */
+  errors: string[];
 }
 
 const textOf = (result: any) => (result?.content ?? []).map((p: any) => p.text ?? "").join("");
@@ -47,15 +49,18 @@ export async function nativeSurface(root: string, label: string, opts: {
   const loader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
     extensionFactories: [pi => {
       registerTools(pi, { getRegistry: () => new RunRegistry() } as never, opts.env);
-      for (const name of opts.decoys) pi.registerTool(decoy(name) as never);
       pi.registerTool({ name: "nested_probe", label: "Nested probe", description: "Offline nested-call probe", parameters: Type.Object({}),
         async execute(_id: string, _params: unknown, _signal: unknown, _update: unknown, ctx: any) {
           for (const name of opts.nested ?? []) {
-            const outcome = await ctx.executeTool(name, name === "ask_owner" ? { question: "Nested?" } : {});
+            const args = name === "ask_owner" ? { question: "Nested?" } : name === "delegate" ? { persona: "inspector", task: "Nested probe." } : {};
+            const outcome = await ctx.executeTool(name, args);
             nested[name] = { isError: outcome.isError, text: textOf(outcome.result) };
           }
           return { content: [{ type: "text" as const, text: "probed" }], details: {} };
         } } as never);
+    }, pi => {
+      // A separate extension, as another installed package would be.
+      for (const name of opts.decoys) pi.registerTool(decoy(name) as never);
     }] });
   await loader.reload();
   const { session } = await createAgentSession({ cwd, agentDir, modelRuntime, model: faux.getModel(), resourceLoader: loader, settingsManager,
@@ -67,6 +72,7 @@ export async function nativeSurface(root: string, label: string, opts: {
   try {
     const any = session as any;
     const surface = { active: session.getActiveToolNames(), registered: session.getAllTools().map(t => t.name),
+      errors: loader.getExtensions().errors.map((e: { error: string }) => e.error),
       callable: typeof any.getCallableToolNames === "function" ? any.getCallableToolNames() as string[] : undefined };
     if (opts.calls) {
       const calls = opts.calls.map((c, i) => fauxToolCall(c.name, c.args, { id: `n1-call-${i}` }));

@@ -75,10 +75,14 @@ function looksSpawnCapable(name: string): boolean {
 }
 
 function spawnToolLines(loaded: readonly string[] | undefined): string[] {
-  const excluded = effectiveExcludeTools();
-  const lines = [`  always excluded: ${excluded.join(", ")}`];
+  // An eligible delegator keeps `delegate`, filled by the conductor's own tool (N2).
+  const excluded = effectiveExcludeTools().filter((n) => n !== "delegate");
+  const lines = [`  always excluded: ${excluded.join(", ")}`,
+    "  delegate: excluded except in eligible depth-1 delegators, which get the conductor's own lead-brokered tool"];
   if (loaded === undefined) return [...lines, "  · loaded tools unavailable; spawn-capable check skipped"];
-  const suspects = [...new Set(loaded)].filter((n) => !excluded.includes(n) && looksSpawnCapable(n));
+  // The lead never registers delegate itself, so a loaded one belongs to another extension.
+  if (loaded.includes("delegate")) lines.push("  ⚠ delegate is registered by another extension: a delegating child that loads it fails to start with a tool conflict");
+  const suspects = [...new Set(loaded)].filter((n) => !excluded.includes(n) && n !== "delegate" && looksSpawnCapable(n));
   if (suspects.length === 0) return [...lines, "  ✓ no other loaded tool looks spawn-capable (name heuristic)"];
   return [
     ...lines,
@@ -261,7 +265,7 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
   const delegators = [...resolved.personas.values()].filter((p) => (p.agents ?? []).length > 0);
   if (delegators.length === 0) lines.push("  · none (opt in with `agents:` frontmatter or personaOverrides.<name>.agents)");
   for (const p of delegators) lines.push(`  ${p.name}: ${p.agents!.join(", ")}`);
-  lines.push("  · validated and frozen on depth-1 runs only; no delegate tool is registered yet");
+  lines.push("  · validated and frozen on depth-1 runs; subprocess delegators get the lead-brokered delegate tool (opt-in; no admission lanes before N3)");
 
   // v0.9 Slice 7: Run-record disk usage + next-eviction preview.
   // Reads the runs/ directory once via walkInventory, then runs a

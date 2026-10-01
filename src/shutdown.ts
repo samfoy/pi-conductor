@@ -74,6 +74,8 @@ export interface ShutdownDeps {
    * to wire it; production sites in src/index.ts always provide it.
    */
   reconcileRunning?: (runs: Run[], reason: ShutdownEventLike["reason"]) => void | Promise<void>;
+  /** N2 broker; on reload it stops subprocess parents with outstanding calls, leaves first (R6 fallback). */
+  delegation?: { close(): Promise<void> };
 }
 
 /**
@@ -108,6 +110,7 @@ export async function handleSessionShutdown(
   const uncertain = deps.runs.find(run => run.status === "integrating" && run.integration?.teardownError);
   if (uncertain) throw new Error(uncertain.integration!.teardownError);
   if (event.reason === "reload") {
+    await deps.delegation?.close();
     await Promise.all(deps.runs.filter(run => run.runtime === "herdr").map(detachHerdrRun));
     return;
   }

@@ -746,6 +746,8 @@ export function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
     // Verbatim, so a malformed saved scope still refuses relaunch after roundtrip.
     depth: record.depth,
     delegateAllow: record.delegateAllow,
+    parentRunId: record.parentRunId,
+    delegateToolCallId: record.delegateToolCallId,
     // resolveSendStrategy picks rpc vs spawn-resume from these.
     steerable: record.steerable,
     streamingMode: record.streamingMode,

@@ -70,7 +70,7 @@ test("buildPiArgs(fresh, steerable=false): emits today's argv EXACTLY (regressio
   });
   // Tool-policy slice: every argv now carries --exclude-tools with the
   // conductor's own LLM tools, the foreign spawn tools and `delegate`,
-  // which no child keeps before N2 (see tests/tool-policy.test.ts).
+  // which only an eligible delegator keeps (see tests/tool-policy.test.ts).
   assert.deepEqual(args, [
     "--mode",
     "json",
@@ -120,8 +120,7 @@ test("buildPiArgs(resume, steerable=false): emits today's resume argv EXACTLY (r
   ]);
 });
 
-test("buildPiArgs(fresh, eligible delegator): N1 adds no delegate and still excludes it (regression pin)", () => {
-  // N2 relaxes both in the commit that registers the conductor's own delegate tool.
+test("buildPiArgs(fresh, eligible delegator): keeps the conductor's own delegate (N2 regression pin)", () => {
   const args = buildPiArgs({
     kind: "fresh",
     sessionDir: "/tmp/sess",
@@ -138,9 +137,9 @@ test("buildPiArgs(fresh, eligible delegator): N1 adds no delegate and still excl
     "--session-dir",
     "/tmp/sess",
     "--tools",
-    "read,ask_owner",
+    "read,ask_owner,delegate",
     "--exclude-tools",
-    [...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS, "delegate"].join(","),
+    [...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS].join(","),
     "--append-system-prompt",
     "SYS",
     "PROMPT",

@@ -71,6 +71,8 @@ function fullRun(dir: string, over: Partial<Run> = {}): Run {
     excludeTools: ["edit"],
     depth: 1,
     delegateAllow: ["inspector"],
+    parentRunId: "lead-owner",
+    delegateToolCallId: "call_owner",
     steerable: false,
     streamingMode: "print",
     hookResult: {

@@ -20,6 +20,7 @@ import {
   CONTEXT_INHERITANCE,
   FOREIGN_SPAWN_TOOLS,
   LEGACY_CHILD_SCOPE,
+  isDelegating,
   THINKING_LEVELS,
   type ChildToolScope,
   type ContextInheritance,
@@ -358,16 +359,16 @@ export function effectiveExcludeTools(
     ...(excludeTools ?? []),
     ...CONDUCTOR_LLM_TOOL_NAMES,
     ...FOREIGN_SPAWN_TOOLS,
-    // Every scope, delegators too: the conductor registers no delegate before N2, so
-    // another extension's tool would fill the name. N2 relaxes this with its own tool.
-    "delegate",
+    // Only an eligible delegator keeps the name, filled by the conductor's own tool;
+    // another extension's same-named tool then fails pi's startup as a conflict.
+    ...(isDelegating(scope) ? [] : ["delegate"]),
     ...(scope.depth === 2 ? ["ask_owner", ...LEAF_MUTATION_TOOLS] : []),
   ])];
 }
 
 /**
- * An explicit allowlist keeps the scope's own child tool, `ask_owner` at
- * depth 1 (never `delegate` before N2). An excluded name is never added.
+ * An explicit allowlist keeps the scope's own child tools: `ask_owner` at
+ * depth 1 and `delegate` for a delegator. An excluded name is never added.
  */
 export function effectiveAllowTools(
   tools: readonly string[] | undefined,
@@ -375,7 +376,7 @@ export function effectiveAllowTools(
   excluded: readonly string[],
 ): string[] | undefined {
   if (tools === undefined) return undefined;
-  const own = scope.depth === 1 ? ["ask_owner"] : [];
+  const own = [...(scope.depth === 1 ? ["ask_owner"] : []), ...(isDelegating(scope) ? ["delegate"] : [])];
   return [...new Set([...tools, ...own.filter((n) => !excluded.includes(n))])];
 }
 

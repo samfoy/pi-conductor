@@ -36,6 +36,7 @@ import { resolveRetryPolicy } from "./retry.ts";
 import { collapseSteerableCascade } from "./steerable.ts";
 import { prepareSpawnRuntime, prepareSpawnEffort, availableActions, observeRunActions, computeAvailableActions, supportsFocus, validateRunAction, elapsedStr, failBeforeSpawn, forceTerminate, formatUsage, getCompletionText, keptBranchHint, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendCwd, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
 import { registerAskOwner } from "./ask-owner.ts";
+import { registerDelegate } from "./delegate-tool.ts";
 import { isSettled, isTerminal } from "./types.ts";
 import { SpawnQueue } from "./queue.ts";
 import { resolveMergeStrategy, resolveWorktreeSpec } from "./worktree.ts";
@@ -138,8 +139,10 @@ export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts, env: No
   // gate closes that channel.
   if (env.CONDUCTOR_SUBAGENT === "1") {
     // Only a depth-1 child asks its owner; an unset depth is a legacy depth-1 child.
-    // Any other value, including a depth-2 leaf, registers nothing. No delegate before its broker.
+    // Any other value, including a depth-2 leaf, registers nothing. Only a validated
+    // depth-1 delegator env also gets the lead-brokered `delegate`.
     if (env.CONDUCTOR_DEPTH === undefined || env.CONDUCTOR_DEPTH === "1") registerAskOwner(pi, opts.getRegistry, env);
+    registerDelegate(pi, env);
     return;
   }
 

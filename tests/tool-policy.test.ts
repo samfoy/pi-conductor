@@ -129,19 +129,21 @@ test("CONDUCTOR_LLM_TOOL_NAMES is exactly the set of tools registerTools registe
   assert.deepEqual([...CONDUCTOR_LLM_TOOL_NAMES].sort(), [...registered].sort());
 });
 
-// N1: set equality per injected env; no child ever gets an ensemble_* tool, and
-// no `delegate` is registered anywhere until the lead broker exists.
+// N1/N2: set equality per injected env; no child ever gets an ensemble_* tool, and
+// only a validated depth-1 delegator env (with its run dir and id) gets `delegate`.
 for (const [label, env, expected] of [
   ["lead", {}, [...CONDUCTOR_LLM_TOOL_NAMES]],
   ["lead with a non-exact child flag", { CONDUCTOR_SUBAGENT: "true" }, [...CONDUCTOR_LLM_TOOL_NAMES]],
   ["legacy child without depth", { CONDUCTOR_SUBAGENT: "1" }, ["ask_owner"]],
   ["depth-1 child", { CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: "1" }, ["ask_owner"]],
-  ["depth-1 delegator", { CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: "1", CONDUCTOR_DELEGATE_ALLOW: "inspector" }, ["ask_owner"]],
+  ["depth-1 delegator without its run identity", { CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: "1", CONDUCTOR_DELEGATE_ALLOW: "inspector" }, ["ask_owner"]],
+  ["depth-1 delegator", { CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: "1", CONDUCTOR_DELEGATE_ALLOW: "inspector", CONDUCTOR_RUN_ID: "lead-a", CONDUCTOR_RUN_DIR: "/runs/lead-a" }, ["ask_owner", "delegate"]],
+  ["depth-2 leaf with a leaked allowlist and identity", { CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: "2", CONDUCTOR_DELEGATE_ALLOW: "inspector", CONDUCTOR_RUN_ID: "x", CONDUCTOR_RUN_DIR: "/runs/x" }, []],
   ["depth-2 leaf", { CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: "2" }, []],
   ["depth-2 leaf with a leaked allowlist", { CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: "2", CONDUCTOR_DELEGATE_ALLOW: "inspector" }, []],
   ...["", "0", "3", "01", " 1", "1 ", "one"].map((d) => [`unknown depth ${JSON.stringify(d)}`, { CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: d }, []] as const),
 ] as const) {
-  test(`registerTools under ${label} registers exactly ${expected.length ? expected.length > 1 ? "the lead tools" : expected.join(",") : "nothing"}`, () => {
+  test(`registerTools under ${label} registers exactly ${expected.length ? expected.length > 2 ? "the lead tools" : expected.join(",") : "nothing"}`, () => {
     assert.deepEqual(captureRegisteredToolNames(env).sort(), [...expected].sort());
   });
 }
@@ -156,18 +158,19 @@ test("effectiveExcludeTools: persona exclusions first, then every conductor tool
   ]);
 });
 
-// N1 registers no delegate, so another extension's tool would fill the name. N2 relaxes
-// this for delegators in the same commit that registers the conductor's own tool.
-test("effectiveExcludeTools/effectiveAllowTools: until N2, every scope excludes delegate and none adds it", () => {
-  const scopes: ChildToolScope[] = [LEGACY_CHILD_SCOPE, { depth: 1, delegateAllow: [] }, { depth: 1, delegateAllow: ["inspector"] }, { depth: 2, delegateAllow: [] }];
-  for (const scope of scopes) {
-    for (const [own, allow] of [[undefined, ["read"]], [["edit"], ["read", "delegate"]]] as const) {
-      assert.ok(effectiveExcludeTools(own, scope).includes("delegate"), `${JSON.stringify(scope)} must exclude delegate`);
-      // No exclusions passed: the allowlist must not add it even where nothing would filter it back out.
-      const tools = effectiveAllowTools([...allow], scope, [])!;
-      assert.equal(tools.filter((n) => n === "delegate").length, allow.filter((n) => n === "delegate").length, `${JSON.stringify(scope)} must not add delegate`);
-    }
+// N2 registers the conductor's own delegate and relaxes the exclusion together, only for an
+// eligible depth-1 delegator; every other scope still excludes it so no other tool fills the name.
+test("effectiveExcludeTools/effectiveAllowTools: only an eligible delegator keeps and gains delegate; explicit exclusion wins", () => {
+  const delegator: ChildToolScope = { depth: 1, delegateAllow: ["inspector"] };
+  for (const scope of [LEGACY_CHILD_SCOPE, { depth: 1, delegateAllow: [] }, { depth: 2, delegateAllow: [] }] as ChildToolScope[]) {
+    assert.ok(effectiveExcludeTools(undefined, scope).includes("delegate"), `${JSON.stringify(scope)} must exclude delegate`);
+    assert.ok(!effectiveAllowTools(["read"], scope, [])!.includes("delegate"), `${JSON.stringify(scope)} must not add delegate`);
   }
+  assert.ok(!effectiveExcludeTools(undefined, delegator).includes("delegate"));
+  assert.deepEqual(effectiveAllowTools(["read"], delegator, effectiveExcludeTools(undefined, delegator)), ["read", "ask_owner", "delegate"]);
+  const excluded = effectiveExcludeTools(["delegate"], delegator);
+  assert.ok(excluded.includes("delegate"));
+  assert.deepEqual(effectiveAllowTools(["read"], delegator, excluded), ["read", "ask_owner"], "an explicit persona exclusion wins");
 });
 
 test("FOREIGN_SPAWN_TOOLS names pi's subagent example and pi-herdsman's agent tool", () => {

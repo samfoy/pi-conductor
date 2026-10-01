@@ -473,12 +473,13 @@ var LEGACY_CHILD_SCOPE = { depth: 1, delegateAllow: [] };
 function isDelegating(scope) {
   return scope.depth === 1 && scope.delegateAllow.length > 0;
 }
-var CHILD_SCOPE_ENV = ["CONDUCTOR_DEPTH", "CONDUCTOR_RUN_DIR", "CONDUCTOR_DELEGATE_ALLOW"];
-function childScopeEnv(runDir2, scope) {
+var CHILD_SCOPE_ENV = ["CONDUCTOR_DEPTH", "CONDUCTOR_RUN_DIR", "CONDUCTOR_DELEGATE_ALLOW", "CONDUCTOR_DEADLINE_AT"];
+function childScopeEnv(runDir2, scope, deadlineAt) {
   return {
     CONDUCTOR_DEPTH: String(scope.depth),
     CONDUCTOR_RUN_DIR: runDir2,
-    ...isDelegating(scope) ? { CONDUCTOR_DELEGATE_ALLOW: scope.delegateAllow.join(",") } : {}
+    ...isDelegating(scope) ? { CONDUCTOR_DELEGATE_ALLOW: scope.delegateAllow.join(",") } : {},
+    ...isDelegating(scope) && Number.isFinite(deadlineAt) ? { CONDUCTOR_DEADLINE_AT: String(deadlineAt) } : {}
   };
 }
 var DEFAULT_CONFIG = {
@@ -573,6 +574,8 @@ function toRunRecord(r) {
     excludeTools: r.excludeTools,
     depth: r.depth,
     delegateAllow: r.delegateAllow,
+    parentRunId: r.parentRunId,
+    delegateToolCallId: r.delegateToolCallId,
     runtime: r.runtime === void 0 ? "subprocess" : r.runtime,
     herdr: r.herdr,
     herdrUsageBaseline: r.herdrUsageBaseline,
@@ -822,15 +825,15 @@ function effectiveExcludeTools(excludeTools, scope = LEGACY_CHILD_SCOPE) {
     ...excludeTools ?? [],
     ...CONDUCTOR_LLM_TOOL_NAMES,
     ...FOREIGN_SPAWN_TOOLS,
-    // Every scope, delegators too: the conductor registers no delegate before N2, so
-    // another extension's tool would fill the name. N2 relaxes this with its own tool.
-    "delegate",
+    // Only an eligible delegator keeps the name, filled by the conductor's own tool;
+    // another extension's same-named tool then fails pi's startup as a conflict.
+    ...isDelegating(scope) ? [] : ["delegate"],
     ...scope.depth === 2 ? ["ask_owner", ...LEAF_MUTATION_TOOLS] : []
   ])];
 }
 function effectiveAllowTools(tools, scope, excluded) {
   if (tools === void 0) return void 0;
-  const own = scope.depth === 1 ? ["ask_owner"] : [];
+  const own = [...scope.depth === 1 ? ["ask_owner"] : [], ...isDelegating(scope) ? ["delegate"] : []];
   return [.../* @__PURE__ */ new Set([...tools, ...own.filter((n) => !excluded.includes(n))])];
 }
 function requireString(fm, key) {
@@ -1033,7 +1036,7 @@ var SubprocessRuntime = class {
       env: buildSubagentEnv(process.env, {
         CONDUCTOR_CONFIG_CWD: run.cwd,
         CONDUCTOR_RUN_ID: run.id,
-        ...childScopeEnv(dirname3(run.recordPath), childToolScope(run)),
+        ...childScopeEnv(dirname3(run.recordPath), childToolScope(run), run.deadlineAt),
         ...tmp ? { TMPDIR: tmp } : {}
       })
     });
@@ -1680,6 +1683,8 @@ function buildOrphanRun(record, status) {
     // Verbatim, so a malformed saved scope still refuses relaunch after roundtrip.
     depth: record.depth,
     delegateAllow: record.delegateAllow,
+    parentRunId: record.parentRunId,
+    delegateToolCallId: record.delegateToolCallId,
     // resolveSendStrategy picks rpc vs spawn-resume from these.
     steerable: record.steerable,
     streamingMode: record.streamingMode,
@@ -3919,6 +3924,7 @@ function createRunPipeline(run, piArgs, opts) {
         void finalize2("failed", 1);
       })
     };
+    if (!opts.reattach) run.deadlineAt = Date.now() + opts.timeoutMs;
     if (opts.reattach) {
       if (!runtime.attach) throw new Error("runtime attachment unavailable");
       transport = runtime.attach(run, sink);
@@ -4025,6 +4031,7 @@ function createRunPipeline(run, piArgs, opts) {
       }
     };
   }
+  run.deadlineAt = Date.now() + opts.timeoutMs;
   run.timeoutTimer = setTimeout(() => {
     if (current() && (run.status === "running" || run.status === "paused")) {
       forceTerminate(run, "timeout", opts.registry, opts.onComplete);
@@ -5389,10 +5396,10 @@ var SUBAGENT_NESTING_GUARD = [
 var LEAF_GUARD = "You are a read-only leaf: do not edit, write, or commit files. If you need a decision, end your final answer with `QUESTION: \u2026`; your owner decides. You cannot ask anyone.";
 function delegatingGuard(allow) {
   return [
-    "IMPORTANT: You are running as a pi-conductor sub-agent. Your persona may later delegate",
-    `read-only work to: ${allow.join(", ")}, but no delegation tool is available yet. Do NOT attempt to spawn`,
-    "sub-agents (no calls to ensemble_spawn, subagent, agent, delegate, etc).",
-    "Complete the entire task yourself and return your findings."
+    "IMPORTANT: You are running as a pi-conductor sub-agent. You may delegate bounded read-only work",
+    `with the \`delegate\` tool to: ${allow.join(", ")}. Each delegated scope has one executor; do not also do it yourself.`,
+    "You may not spawn anything else (no ensemble_spawn, subagent, agent, etc).",
+    "Own and complete the overall task and return your findings."
   ].join(" ");
 }
 var FILTERED_COMPACT_CHAIN_DEPTH_CAP = 6;
@@ -5641,6 +5648,8 @@ function planSpawnPiArgs(opts) {
 }
 var RunRegistry = class {
   herdrAdmissionOpen = true;
+  /** N2: this module instance's broker for subprocess delegators' `delegate` calls. */
+  delegation;
   admissionLimits;
   integrations = new EffortDriver();
   runs = /* @__PURE__ */ new Map();
@@ -5699,6 +5708,35 @@ var RunRegistry = class {
     }
   }
 };
+function assertDelegationRuntime(persona, runtime, delegation) {
+  if (!delegation && (persona.agents ?? []).length > 0 && runtime === "herdr") {
+    throw new Error(`delegating persona ${persona.name} resolves to the herdr runtime; delegation supports subprocess parents only until N5`);
+  }
+}
+function leafSpawnOptions(opts) {
+  if (!opts.delegation) return opts;
+  if (opts.persona && (opts.persona.readOnly !== true || isWriteCapable(opts.persona.name))) {
+    throw new Error(`delegated leaves must be read_only, non-write-capable personas; ${opts.persona.name} is not`);
+  }
+  return {
+    ...opts,
+    runtime: "subprocess",
+    mode: "background",
+    worktree: false,
+    mergeStrategy: "none",
+    onCompleteHook: "",
+    onCompleteHookTimeoutSeconds: void 0,
+    effort: void 0,
+    touches: void 0,
+    onChain: void 0,
+    onRetry: void 0,
+    retryMaxAttempts: 1,
+    retryAttempt: 0,
+    inheritContextOverride: "none",
+    parentMessages: void 0,
+    steerable: false
+  };
+}
 function recordSpawnedProc(run, proc) {
   run.proc = proc;
   run.pid = proc.pid;
@@ -5752,8 +5790,10 @@ function prepareSpawnEffort(opts) {
   return ownedEffort(opts.cwd, opts.effort, opts.parentSessionId);
 }
 function spawnRun(opts) {
-  const scope = childToolScope({ depth: 1, delegateAllow: opts.persona.agents ?? [] });
+  opts = leafSpawnOptions(opts);
+  const scope = childToolScope(opts.delegation ? { depth: 2, delegateAllow: [] } : { depth: 1, delegateAllow: opts.persona.agents ?? [] });
   opts = prepareSpawnRuntime(opts);
+  assertDelegationRuntime(opts.persona, opts.runtime, opts.delegation);
   if (opts.runtime === "herdr" && !opts.registry.herdrAdmissionOpen) throw new Error("herdr runtime shutting down; launch refused");
   opts = prepareSpawnEvidence(opts, opts.registry);
   const effort = prepareSpawnEffort(opts);
@@ -5794,6 +5834,8 @@ function spawnRun(opts) {
     excludeTools: effectiveExcludeTools(opts.persona.excludeTools, scope),
     depth: scope.depth,
     delegateAllow: [...scope.delegateAllow],
+    parentRunId: opts.delegation?.parentRunId,
+    delegateToolCallId: opts.delegation?.delegateToolCallId,
     // Item 15: per-invocation markers. Initial spawn IS the start of
     // the (sole, so far) invocation, so:
     //   - thisInvocationStartedAt mirrors startTime
@@ -5975,6 +6017,7 @@ function spawnRun(opts) {
       cwd: effectiveCwd,
       // v0.13: opts.cwd's counterpart in the worktree when one was created
       timeoutMs: opts.timeoutMs,
+      onEvent: delegationObserver(run, opts.registry, effectiveCwd),
       onUpdate: opts.onUpdate,
       onComplete: opts.onComplete,
       // Only let the subprocess discover a session file when we didn't pre-seed
@@ -5992,7 +6035,7 @@ function spawnRun(opts) {
       // current config layers + persona frontmatter. Per-call args land
       // in slice 3; for slice 2 the per-call layer is always undefined.
       // Tests inject `resolvedHook` directly via the spawn-options surface.
-      resolvedHook: resolveCloseHook(
+      resolvedHook: opts.delegation ? void 0 : resolveCloseHook(
         opts.cwd,
         opts.persona.name,
         hookSpecFromOpts(opts.onCompleteHook, opts.onCompleteHookTimeoutSeconds),
@@ -6012,6 +6055,10 @@ function spawnRun(opts) {
     const current = opts.registry.get(run.id);
     return failEffortLaunch(current, opts.registry, `effort isolation failed; no child started: ${error.message}. ${EFFORT_NOTICE}`, opts.onComplete);
   }
+}
+function delegationObserver(run, registry, cwd) {
+  if (run.runtime === "herdr" || !isDelegating(childToolScope(run))) return void 0;
+  return (r, event) => registry.delegation?.observe(r, event, cwd);
 }
 function failEffortLaunch(run, registry, errorMessage, onComplete) {
   if (!applyCloseHandlerTerminal(run, "failed", void 0)) return { run, done: Promise.resolve(run) };
@@ -6318,6 +6365,9 @@ function sendToRun(run, message, opts) {
       reason: `cannot send an empty message to sub-agent ${run.id}.`
     };
   }
+  if (run.runtime === "herdr" && !runScopeError(run) && isDelegating(childToolScope(run))) {
+    return { kind: "rejected", reason: `delegating run ${run.id} is on the herdr runtime; delegation supports subprocess parents only until N5` };
+  }
   const behavior = opts.streamingBehavior ?? "auto";
   const check = validateSendable(run, behavior, opts.sessionId);
   if (!check.ok) return { kind: "rejected", reason: check.reason };
@@ -6400,12 +6450,15 @@ function sendToRun(run, message, opts) {
     opts.currentModelProvider
   );
   const piArgs = buildResumePiArgs(run, trimmed);
+  const resumeCwd = run.runtime === "herdr" ? sessionHeaderCwd(readFileSync12(sessionPath, "utf8")) ?? run.cwd : run.effort?.cwd ?? run.cwd;
   const done = createRunPipeline(run, piArgs, {
     answer,
     registry: opts.registry,
     runtime: runtimeFor(run),
     core: { kind: "resume", sessionPath, systemPrompt: run.systemPrompt, model: run.model, thinking: run.thinking, tools: run.tools, excludeTools: run.excludeTools },
-    cwd: run.runtime === "herdr" ? sessionHeaderCwd(readFileSync12(sessionPath, "utf8")) ?? run.cwd : run.effort?.cwd ?? run.cwd,
+    cwd: resumeCwd,
+    // Pi resumes in the session header's cwd, which is the parent's effective cwd for its files.
+    onEvent: delegationObserver(run, opts.registry, sessionHeaderCwd(readFileSync12(sessionPath, "utf8")) ?? resumeCwd),
     timeoutMs: opts.timeoutMs,
     onUpdate: opts.onUpdate,
     onComplete: opts.onComplete,
@@ -8521,10 +8574,14 @@ function looksSpawnCapable(name2) {
   return name2.split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])/).some((token3) => SPAWN_NAME_TOKENS.has(token3.toLowerCase()));
 }
 function spawnToolLines(loaded) {
-  const excluded = effectiveExcludeTools();
-  const lines = [`  always excluded: ${excluded.join(", ")}`];
+  const excluded = effectiveExcludeTools().filter((n) => n !== "delegate");
+  const lines = [
+    `  always excluded: ${excluded.join(", ")}`,
+    "  delegate: excluded except in eligible depth-1 delegators, which get the conductor's own lead-brokered tool"
+  ];
   if (loaded === void 0) return [...lines, "  \xB7 loaded tools unavailable; spawn-capable check skipped"];
-  const suspects = [...new Set(loaded)].filter((n) => !excluded.includes(n) && looksSpawnCapable(n));
+  if (loaded.includes("delegate")) lines.push("  \u26A0 delegate is registered by another extension: a delegating child that loads it fails to start with a tool conflict");
+  const suspects = [...new Set(loaded)].filter((n) => !excluded.includes(n) && n !== "delegate" && looksSpawnCapable(n));
   if (suspects.length === 0) return [...lines, "  \u2713 no other loaded tool looks spawn-capable (name heuristic)"];
   return [
     ...lines,
@@ -8660,7 +8717,7 @@ async function buildDoctorReport(opts) {
   const delegators = [...resolved.personas.values()].filter((p) => (p.agents ?? []).length > 0);
   if (delegators.length === 0) lines.push("  \xB7 none (opt in with `agents:` frontmatter or personaOverrides.<name>.agents)");
   for (const p of delegators) lines.push(`  ${p.name}: ${p.agents.join(", ")}`);
-  lines.push("  \xB7 validated and frozen on depth-1 runs only; no delegate tool is registered yet");
+  lines.push("  \xB7 validated and frozen on depth-1 runs; subprocess delegators get the lead-brokered delegate tool (opt-in; no admission lanes before N3)");
   {
     const runsRoot2 = opts.runsRoot ?? join21(opts.homeDir ?? homedir8(), ".pi", "agent", "conductor", "runs");
     lines.push("");
@@ -10598,9 +10655,9 @@ Resolve manually in the worktree and run /conductor worktree merge ${runId} agai
 }
 
 // src/tools.ts
-import { Type as Type2 } from "@sinclair/typebox";
-import { readFileSync as readFileSync17, existsSync as existsSync17 } from "node:fs";
-import { dirname as dirname19 } from "node:path";
+import { Type as Type3 } from "@sinclair/typebox";
+import { readFileSync as readFileSync18, existsSync as existsSync18 } from "node:fs";
+import { dirname as dirname20 } from "node:path";
 
 // src/chain.ts
 import { readFileSync as readFileSync16, existsSync as existsSync16 } from "node:fs";
@@ -10788,6 +10845,613 @@ function finalize(state) {
 // src/steerable.ts
 function collapseSteerableCascade(inputs) {
   return inputs.perCall ?? inputs.project ?? inputs.user ?? inputs.defaultValue;
+}
+
+// src/delegate-tool.ts
+import { existsSync as existsSync17, mkdirSync as mkdirSync12, readFileSync as readFileSync17, watch as watch2 } from "node:fs";
+import { dirname as dirname19 } from "node:path";
+import { Type as Type2 } from "@sinclair/typebox";
+
+// src/delegation.ts
+import { join as join26 } from "node:path";
+
+// src/compaction-hook.ts
+var KEEP_RECENT_ENVELOPES = 2;
+var RESULT_SUMMARY_MAX_CHARS = 200;
+var ENVELOPE_RE = /<sub-agent-completed>[\s\S]*?<\/sub-agent-completed>/g;
+var RESULT_RE = /(\s*)<result>\n([\s\S]*?)\n(\s*)<\/result>\n?/;
+function summarizeResultText(text3, max = RESULT_SUMMARY_MAX_CHARS) {
+  const collapsed = text3.replace(/\s+/g, " ").trim();
+  if (collapsed.length <= max) return collapsed;
+  return collapsed.slice(0, max).trimEnd() + "\u2026";
+}
+function compactEnvelopeBlock(envelopeXml) {
+  const m = envelopeXml.match(RESULT_RE);
+  if (!m) return envelopeXml;
+  const indent = m[1] ?? "  ";
+  const body = m[2] ?? "";
+  const summary = summarizeResultText(body);
+  const replacement = `${indent}<result-summary>${summary}</result-summary>
+`;
+  return envelopeXml.replace(RESULT_RE, replacement);
+}
+function findEnvelopes(text3) {
+  const out = [];
+  ENVELOPE_RE.lastIndex = 0;
+  let m;
+  while ((m = ENVELOPE_RE.exec(text3)) !== null) {
+    out.push({ start: m.index, end: m.index + m[0].length, block: m[0] });
+  }
+  return out;
+}
+function rewriteSelected(text3, firstEnvelopeIdxOffset, shouldCompact) {
+  const hits = findEnvelopes(text3);
+  if (hits.length === 0) return text3;
+  let out = "";
+  let cursor = 0;
+  for (let i = 0; i < hits.length; i++) {
+    const hit = hits[i];
+    out += text3.slice(cursor, hit.start);
+    const globalIdx = firstEnvelopeIdxOffset + i;
+    out += shouldCompact(globalIdx) ? compactEnvelopeBlock(hit.block) : hit.block;
+    cursor = hit.end;
+  }
+  out += text3.slice(cursor);
+  return out;
+}
+function rewriteTextInMessage(msg, rewrite) {
+  if (msg == null) return msg;
+  const content = msg.content;
+  if (typeof content === "string") {
+    const next = rewrite(content);
+    return next === content ? msg : { ...msg, content: next };
+  }
+  if (Array.isArray(content)) {
+    let changed = false;
+    const nextBlocks = content.map((block) => {
+      if (block && typeof block === "object" && block.type === "text" && typeof block.text === "string") {
+        const nextText = rewrite(block.text);
+        if (nextText !== block.text) {
+          changed = true;
+          return { ...block, text: nextText };
+        }
+      }
+      return block;
+    });
+    return changed ? { ...msg, content: nextBlocks } : msg;
+  }
+  return msg;
+}
+function compactOlderEnvelopes(messages, keepRecent = KEEP_RECENT_ENVELOPES) {
+  let total = 0;
+  const perMessageStart = new Array(messages.length).fill(0);
+  for (let i = 0; i < messages.length; i++) {
+    perMessageStart[i] = total;
+    const msg = messages[i];
+    const content = msg?.content;
+    if (typeof content === "string") {
+      total += findEnvelopes(content).length;
+    } else if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block && typeof block === "object" && block.type === "text" && typeof block.text === "string") {
+          total += findEnvelopes(block.text).length;
+        }
+      }
+    }
+  }
+  if (total === 0) return messages;
+  const compactBefore = total - keepRecent;
+  if (compactBefore <= 0) return messages;
+  const shouldCompact = (globalIdx) => globalIdx < compactBefore;
+  let runningGlobalIdx = 0;
+  return messages.map((msg) => {
+    const before = runningGlobalIdx;
+    return rewriteTextInMessage(msg, (text3) => {
+      const hits = findEnvelopes(text3);
+      if (hits.length === 0) return text3;
+      const startIdx = runningGlobalIdx;
+      runningGlobalIdx += hits.length;
+      return rewriteSelected(text3, startIdx, shouldCompact);
+    });
+    void before;
+  });
+}
+function installCompactionHook(pi, opts = {}) {
+  const keepRecent = opts.keepRecent ?? KEEP_RECENT_ENVELOPES;
+  pi.on("context", async (event) => {
+    const messages = compactOlderEnvelopes(event.messages, keepRecent);
+    return { messages };
+  });
+  return {
+    reset: () => {
+    }
+  };
+}
+
+// src/notifications.ts
+function perSendNumbers(run) {
+  const startedAt = run.thisInvocationStartedAt ?? run.startTime;
+  const finishedAt = run.finishedAt ?? Date.now();
+  const baseline = run.thisInvocationUsageBaseline ?? {
+    turns: 0,
+    input: 0,
+    output: 0,
+    cost: 0
+  };
+  return {
+    durationMs: Math.max(0, finishedAt - startedAt),
+    turns: Math.max(0, run.usage.turns - baseline.turns),
+    input: Math.max(0, run.usage.input - baseline.input),
+    output: Math.max(0, run.usage.output - baseline.output),
+    cost: Math.max(0, run.usage.cost - baseline.cost)
+  };
+}
+function formatCompletionNotification(run, actions = availableActions(run)) {
+  if (run.status === "blocked") {
+    const ask = run.pendingAsk;
+    const tag = run.errorMessage ? "sub-agent-answer-failed" : "sub-agent-asked";
+    const error = run.errorMessage ? `
+  <error>${escapeXml(run.errorMessage)}</error>` : "";
+    return `<${tag}>${error}
+  <agent-id>${escapeXml(run.id)}</agent-id>
+  <status>blocked</status>
+  <ask-id>${escapeXml(ask?.askId ?? "")}</ask-id>
+  <question>${escapeXml(ask?.question ?? "Question unavailable; inspect transcript")}</question>
+${ask?.evidence ?? ""}
+  <available-actions>${actions.join(", ")}</available-actions>
+  <guidance>Answer via ensemble_send on this agent id. Assignment unresolved; do independent work while deciding.</guidance>
+  <transcript>${escapeXml(run.transcriptPath)}</transcript>
+</${tag}>`;
+  }
+  const finalText = getCompletionText(run);
+  const perSend = perSendNumbers(run);
+  const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
+  const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
+  const elapsed = elapsedStr(perSendStart, perSendEnd);
+  const usageStr = formatUsage({
+    turns: perSend.turns,
+    input: perSend.input,
+    output: perSend.output,
+    cost: perSend.cost
+  });
+  const resumed = sendsSinceSpawn(run) >= 1;
+  const lines = [];
+  lines.push("```xml");
+  lines.push("<sub-agent-completed>");
+  const ref = resultRef(run);
+  if (ref) lines.push(`  <result-ref>${ref}</result-ref>`);
+  lines.push(`  <agent-id>${run.id}</agent-id>`);
+  lines.push(`  <persona>${run.persona}</persona>`);
+  lines.push(`  <status>${run.status}</status>`);
+  lines.push(`  <available-actions>${actions.join(",")}</available-actions>`);
+  lines.push(`  <duration>${elapsed}</duration>`);
+  lines.push(
+    `  <usage><turns>${perSend.turns}</turns><input>${perSend.input}</input><output>${perSend.output}</output><cost>${perSend.cost.toFixed(4)}</cost></usage>`
+  );
+  if (resumed) {
+    const lifetimeElapsed = elapsedStr(run.startTime, run.finishedAt);
+    lines.push("  <lifetime>");
+    lines.push(`    <duration>${lifetimeElapsed}</duration>`);
+    lines.push(
+      `    <usage><turns>${run.usage.turns}</turns><input>${run.usage.input}</input><output>${run.usage.output}</output><cost>${run.usage.cost.toFixed(4)}</cost></usage>`
+    );
+    lines.push(`    <cost>${run.usage.cost.toFixed(4)}</cost>`);
+    lines.push(`    <resumes>${run.resumeCount ?? 0}</resumes>`);
+    if (run.steerCount) lines.push(`    <steers>${run.steerCount}</steers>`);
+    lines.push("  </lifetime>");
+  }
+  const retirement = contextRetirementNotice(run);
+  if (retirement) lines.push(`  <context-retired>${escapeXml(retirement)}</context-retired>`);
+  if (run.errorMessage) {
+    lines.push(`  <error>${escapeXml(run.errorMessage)}</error>`);
+  }
+  if (run.integration) lines.push(`  <integration>${escapeXml(JSON.stringify({ effort: run.effort?.name, landedCommit: run.landedCommit, ...run.integration, reason: run.mergeResult?.reason ?? run.integration.reason }))}</integration>`);
+  if (run.worktreeKept) {
+    const attrs = [
+      run.worktreePath && ` path="${escapeXmlAttr(run.worktreePath)}"`,
+      run.worktreeBranch && ` branch="${escapeXmlAttr(run.worktreeBranch)}"`
+    ].filter(Boolean).join("");
+    lines.push(`  <worktree-kept${attrs}>${escapeXml(run.worktreeKept)}</worktree-kept>`);
+  }
+  if (run.hookResult) {
+    const h = run.hookResult;
+    const hookElapsed = elapsedStr(run.finishedAt - h.durationMs, run.finishedAt);
+    lines.push("  <hook>");
+    lines.push(`    <command>${escapeXml(h.command)}</command>`);
+    lines.push(`    <exit-code>${h.exitCode ?? "signal"}</exit-code>`);
+    lines.push(`    <duration>${hookElapsed}</duration>`);
+    lines.push(`    <log-path>${escapeXml(h.logPath)}</log-path>`);
+    if (h.tailText.trim()) {
+      lines.push(
+        `    <tail bytes="${h.tailBytes}" lines="${h.tailLines}">${escapeXml(h.tailText)}</tail>`
+      );
+    }
+    lines.push("  </hook>");
+  }
+  if (run.herdr?.versionWarning) lines.push(`  <warning reason="pi-version">${escapeXml(run.herdr.versionWarning)}</warning>`);
+  if (run.nonSubstantiveFinal) {
+    lines.push(
+      `  <warning reason="${run.nonSubstantiveFinal.reason}">${escapeXml(run.nonSubstantiveFinal.message)}</warning>`
+    );
+  }
+  if (finalText) {
+    lines.push("  <result>");
+    lines.push(escapeXml(finalText));
+    lines.push("  </result>");
+  }
+  lines.push(`  <transcript>${run.transcriptPath}</transcript>`);
+  lines.push("</sub-agent-completed>");
+  lines.push("```");
+  lines.push("");
+  const header = headerLine(run, elapsed, usageStr, resumed);
+  return [header, "", ...lines].join("\n");
+}
+function statusVerb(status) {
+  switch (status) {
+    case "blocked":
+      return "awaiting owner";
+    case "completed":
+      return "completed";
+    case "killed":
+      return "killed";
+    case "timeout":
+      return "timed out";
+    case "hook_failed":
+      return "hook failed";
+    case "aborted":
+      return "aborted (turn limit)";
+    // v0.17
+    default:
+      return "failed";
+  }
+}
+function headerLine(run, elapsed, usageStr, resumed) {
+  const glyph = run.status === "blocked" ? "?" : run.status === "completed" ? "\u2713" : run.status === "killed" ? "\u25A0" : run.status === "timeout" ? "\u23F1" : run.status === "hook_failed" ? "\u2297" : run.status === "aborted" ? "\u23F9" : "\u2717";
+  const verb = statusVerb(run.status) + (run.effort ? ` \u2014 ${effortSummary(run)}` : "");
+  const usagePart = usageStr ? `, ${usageStr}` : "";
+  let line = `## ${glyph} \`${run.persona}\` ${verb} (${elapsed}${usagePart}) \u2014 id \`${run.id}\``;
+  if (resumed) {
+    const lifetimeElapsed = elapsedStr(run.startTime, run.finishedAt);
+    const lifetimeCost = run.usage.cost ? `$${run.usage.cost.toFixed(3)}` : "";
+    const suffix = lifetimeCost ? ` \xB7 lifetime ${lifetimeElapsed} ${lifetimeCost}` : ` \xB7 lifetime ${lifetimeElapsed}`;
+    line += suffix;
+  }
+  return line;
+}
+function escapeXml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function escapeXmlAttr(s) {
+  return escapeXml(s).replace(/"/g, "&quot;");
+}
+function formatStallNotification(run, args, actions = availableActions(run)) {
+  const elapsed = elapsedStr(run.startTime);
+  const lines = [];
+  lines.push("```xml");
+  lines.push("<sub-agent-stalled>");
+  lines.push(`  <agent-id>${run.id}</agent-id>`);
+  lines.push(`  <persona>${run.persona}</persona>`);
+  lines.push(`  <status>${run.status}</status>`);
+  lines.push(`  <available-actions>${actions.join(",")}</available-actions>`);
+  lines.push(`  <duration>${elapsed}</duration>`);
+  lines.push(
+    `  <stall><severity>${args.severity}</severity><silent-seconds>${args.silentSeconds}</silent-seconds><threshold-seconds>${args.thresholdSeconds}</threshold-seconds></stall>`
+  );
+  if (run.lastToolCall) {
+    lines.push(`  <last-tool>${escapeStallEvidence(boundStallText(run.lastToolCall, 512))}</last-tool>`);
+  }
+  lines.push(args.evidenceReference ? `  <evidence-reference>${escapeStallEvidence(args.evidenceReference)}</evidence-reference>` : `<recent-activity>
+${escapeStallEvidence(args.evidence ?? recentStallEvidence(run))}
+</recent-activity>`);
+  lines.push(`  <guidance>${escapeXml(STALL_GUIDANCE)}</guidance>`);
+  lines.push(`  <transcript>${run.transcriptPath}</transcript>`);
+  lines.push("</sub-agent-stalled>");
+  lines.push("```");
+  lines.push("");
+  const glyph = args.severity === "hard" ? "\u26A0" : "\xB7";
+  const verb = args.severity === "hard" ? "hard-stalled" : "soft-stalled";
+  const lastTool = run.lastToolCall ? `, last: ${escapeStallEvidence(boundStallText(run.lastToolCall, 512))}` : "";
+  const header = `## ${glyph} \`${run.persona}\` ${verb} \u2014 silent ${args.silentSeconds}s${lastTool} \u2014 id \`${run.id}\``;
+  return [header, "", ...lines].join("\n");
+}
+function buildCompletionSendMessageOptions(run) {
+  if (run.mode === "background") {
+    return { triggerTurn: true };
+  }
+  return { triggerTurn: true, deliverAs: "followUp" };
+}
+function buildCompletionMessage(run, canFocus = false, sessionId, registry) {
+  const actions = availableActions(run, canFocus, sessionId, registry);
+  const perSend = perSendNumbers(run);
+  const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
+  const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
+  const stats = [elapsedStr(perSendStart, perSendEnd)];
+  if (run.effort) stats.push(effortSummary(run));
+  const usageStr = formatUsage(perSend);
+  if (usageStr) stats.push(usageStr);
+  stats.push(run.id);
+  if (sendsSinceSpawn(run) >= 1) {
+    const cost = run.usage.cost ? ` $${run.usage.cost.toFixed(3)}` : "";
+    const plural = (n, noun) => `${n} ${noun}${n === 1 ? "" : "s"}`;
+    const sends = [
+      run.resumeCount && plural(run.resumeCount, "resume"),
+      run.steerCount && plural(run.steerCount, "steer")
+    ].filter(Boolean).join(", ");
+    stats.push(`lifetime ${elapsedStr(run.startTime, run.finishedAt)}${cost} (${sends})`);
+  }
+  const notes = [];
+  const ref = resultRef(run);
+  if (ref) notes.push({ slot: "muted", text: `result-ref: ${ref} \u2014 pass files: ['${ref}'] for the full evidence.` });
+  const retirement = contextRetirementNotice(run);
+  if (retirement) {
+    stats.push("session retired; use a fresh child with the handoff");
+    notes.push({ slot: "warning", text: retirement });
+  }
+  if (run.integration) notes.push({ slot: "muted", text: `Integration: ${effortSummary(run)}; ${run.mergeResult?.reason ?? run.integration.state}; verify ${run.integration.verify?.durationMs ?? 0}ms; log ${run.integration.verify?.logPath ?? run.integration.commitHook?.logPath ?? "not run"}` });
+  if (run.errorMessage) notes.push({ slot: "error", text: run.errorMessage });
+  if (run.worktreeKept) notes.push({ slot: "warning", text: run.worktreeKept });
+  if (run.herdr?.versionWarning) notes.push({ slot: "warning", text: run.herdr.versionWarning });
+  if (run.nonSubstantiveFinal) {
+    notes.push({
+      slot: "warning",
+      text: `${run.nonSubstantiveFinal.reason}: ${run.nonSubstantiveFinal.message}`
+    });
+  }
+  if (run.hookResult && run.status !== "blocked") {
+    const h = run.hookResult;
+    const exit = h.exitCode ?? "signal";
+    notes.push({
+      slot: h.passed ? "muted" : "error",
+      text: h.passed ? `hook ok: ${h.command} (${h.logPath})` : `hook failed: ${h.command} (exit ${exit}) \u2192 ${h.logPath}`
+    });
+  }
+  return {
+    customType: "ensemble-notification",
+    content: formatCompletionNotification(run, actions),
+    display: true,
+    details: {
+      kind: run.status === "blocked" ? run.errorMessage ? "answer_failed" : "asked" : "completed",
+      available_actions: actions,
+      id: run.id,
+      persona: run.persona,
+      status: run.status,
+      stats,
+      body: run.status === "blocked" ? `Question ${run.pendingAsk?.askId}: ${run.pendingAsk?.question}
+${run.pendingAsk?.evidence ?? ""}
+Answer via ensemble_send; the original assignment remains unresolved.` : getCompletionText(run),
+      transcriptPath: run.transcriptPath,
+      notes
+    }
+  };
+}
+function buildDialogMessage(run) {
+  const body = "Waiting for a human UI response in the managed herdr pane. This is not a stall. Inspect the pane; conductor does not auto-answer dialogs.";
+  return {
+    customType: "ensemble-notification",
+    display: true,
+    content: `<sub-agent-dialog><agent-id>${escapeXml(run.id)}</agent-id>${body}</sub-agent-dialog>`,
+    details: {
+      kind: "dialog",
+      id: run.id,
+      persona: run.persona,
+      status: run.status,
+      stats: [run.id],
+      body,
+      transcriptPath: run.transcriptPath,
+      notes: []
+    }
+  };
+}
+function buildStallMessage(run, args, canFocus = false, sessionId) {
+  const actions = args.availableActions ?? availableActions(run, canFocus, sessionId);
+  const evidence = args.evidenceReference ? void 0 : args.evidence ?? recentStallEvidence(run);
+  return {
+    customType: "ensemble-notification",
+    content: formatStallNotification(run, { ...args, evidence }, actions),
+    display: true,
+    details: {
+      kind: "stalled",
+      available_actions: actions,
+      id: run.id,
+      persona: run.persona,
+      status: run.status,
+      severity: args.severity,
+      evidence: evidence ?? args.evidenceReference,
+      guidance: STALL_GUIDANCE,
+      stats: [`silent ${args.silentSeconds}s`, `threshold ${args.thresholdSeconds}s`, run.id],
+      body: "",
+      transcriptPath: run.transcriptPath,
+      notes: run.lastToolCall ? [{ slot: "muted", text: `last tool: ${boundStallText(run.lastToolCall, 512)}` }] : []
+    }
+  };
+}
+
+// src/delegation.ts
+var MAX_DELEGATE_TASK_BYTES = 65536;
+var MAX_OUTSTANDING_DELEGATIONS = 8;
+var DELEGATE_RESPONSE_GRACE_MS = 12e4;
+var RELOAD_INTERRUPTED = "lead /reload interrupted subprocess delegation; resume with ensemble_send";
+var CALL_ID = /^[A-Za-z0-9_-]{1,128}$/;
+function isDelegateCallId(id) {
+  return typeof id === "string" && CALL_ID.test(id);
+}
+function delegatePaths(runDir2, toolCallId) {
+  const dir = join26(runDir2, "delegate");
+  return { dir, claim: join26(dir, `${toolCallId}.claim.json`), response: join26(dir, `${toolCallId}.json`) };
+}
+function parseDelegateArgs(args) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return { ok: false, reason: "arguments must be an object" };
+  const a = args;
+  if (typeof a.persona !== "string" || !a.persona.trim()) return { ok: false, reason: "persona must be a non-empty string" };
+  if (typeof a.task !== "string" || !a.task.trim()) return { ok: false, reason: "task must contain non-whitespace text" };
+  if (Buffer.byteLength(a.task) > MAX_DELEGATE_TASK_BYTES) return { ok: false, reason: `task exceeds ${MAX_DELEGATE_TASK_BYTES} bytes` };
+  if (a.files !== void 0 && (!Array.isArray(a.files) || a.files.some((f) => typeof f !== "string"))) return { ok: false, reason: "files must be an array of strings" };
+  if (a.timeout_minutes !== void 0 && (typeof a.timeout_minutes !== "number" || !Number.isInteger(a.timeout_minutes) || a.timeout_minutes < 1)) {
+    return { ok: false, reason: "timeout_minutes must be a positive integer" };
+  }
+  return { ok: true, args: { persona: a.persona, task: a.task, files: a.files, timeout_minutes: a.timeout_minutes } };
+}
+function validateDelegateRequest(input) {
+  const parsed = parseDelegateArgs(input.args);
+  if (!parsed.ok) return parsed;
+  const { args } = parsed;
+  const { parent, target } = input;
+  const scope = { depth: parent.depth ?? 1, delegateAllow: parent.delegateAllow ?? [] };
+  if (!isDelegating(scope)) return { ok: false, reason: "only a depth-1 delegator may delegate" };
+  if (parent.runtime === "herdr") return { ok: false, reason: "delegation supports subprocess parents only until N5" };
+  if (parent.status !== "running") return { ok: false, reason: `parent ${parent.id} is ${parent.status}, not running` };
+  if (!input.current) return { ok: false, reason: `parent ${parent.id} is not the current registered run` };
+  if (!scope.delegateAllow.includes(args.persona)) {
+    return { ok: false, reason: `persona ${args.persona} is not in this run's delegation allowlist (${scope.delegateAllow.join(", ")})` };
+  }
+  if (!target || target.name !== args.persona) return { ok: false, reason: `persona ${args.persona} is not available` };
+  if (WRITE_CAPABLE_PERSONAS.has(target.name)) return { ok: false, reason: `persona ${target.name} is write-capable` };
+  if (target.readOnly !== true) return { ok: false, reason: `persona ${target.name} is not read_only` };
+  if (input.outstanding >= MAX_OUTSTANDING_DELEGATIONS) {
+    return { ok: false, reason: `parent ${parent.id} already has ${MAX_OUTSTANDING_DELEGATIONS} delegate calls outstanding` };
+  }
+  if (parent.deadlineAt === void 0) return { ok: false, reason: `parent ${parent.id} deadline is unknown` };
+  const remaining = parent.deadlineAt - input.now;
+  if (remaining <= 0) return { ok: false, reason: `parent ${parent.id} has no time left` };
+  const timeoutMs = Math.min(input.personaTimeoutMs, remaining, args.timeout_minutes === void 0 ? Infinity : args.timeout_minutes * 6e4);
+  return { ok: true, timeoutMs, deadlineAt: input.now + timeoutMs };
+}
+function delegateWaitDeadline(o) {
+  const limits = [
+    o.personaTimeoutMs,
+    o.timeoutMinutes === void 0 ? void 0 : o.timeoutMinutes * 6e4,
+    o.ownDeadlineAt === void 0 ? void 0 : o.ownDeadlineAt - o.startedAt
+  ].filter((n) => n !== void 0 && Number.isFinite(n));
+  return o.startedAt + Math.max(0, Math.min(...limits, 24 * 36e5)) + DELEGATE_RESPONSE_GRACE_MS;
+}
+var escapeXml2 = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+var escapeAttr2 = (s) => escapeXml2(s).replace(/"/g, "&quot;");
+function formatDelegateEnvelope(leaf, limit) {
+  const full = formatCompletionNotification(leaf, []);
+  if (Buffer.byteLength(full) <= limit) return full;
+  const text3 = getCompletionText(leaf);
+  const omitted = `  <result-omitted bytes="${Buffer.byteLength(text3)}" path="${escapeAttr2(leaf.finalPath)}">envelope exceeded ${limit} bytes; read the full result from result-ref or path</result-omitted>`;
+  const compact = compactEnvelopeBlock(full).replace("</sub-agent-completed>", `${omitted}
+</sub-agent-completed>`);
+  if (Buffer.byteLength(compact) <= limit) return compact;
+  const ref = resultRef(leaf);
+  const lines = [
+    "```xml",
+    "<sub-agent-completed>",
+    `  <agent-id>${escapeXml2(leaf.id)}</agent-id>`,
+    `  <persona>${escapeXml2(leaf.persona)}</persona>`,
+    `  <status>${leaf.status}</status>`,
+    ...ref ? [`  <result-ref>${ref}</result-ref>`] : [],
+    ...leaf.errorMessage ? [`  <error-omitted bytes="${Buffer.byteLength(leaf.errorMessage)}">see the transcript</error-omitted>`] : [],
+    ...text3 ? [`  <result-summary>${escapeXml2(summarizeResultText(text3))}</result-summary>`] : [],
+    omitted,
+    `  <transcript>${escapeXml2(leaf.transcriptPath)}</transcript>`,
+    "</sub-agent-completed>",
+    "```"
+  ];
+  return lines.join("\n");
+}
+
+// src/delegate-tool.ts
+var NAME = /^[A-Za-z0-9_.:-]+$/;
+var POLL_MS = 1e3;
+function delegatorAllowlist(env) {
+  if (env.CONDUCTOR_SUBAGENT !== "1" || env.CONDUCTOR_DEPTH !== "1" || !env.CONDUCTOR_RUN_DIR || !env.CONDUCTOR_RUN_ID) return void 0;
+  const names = (env.CONDUCTOR_DELEGATE_ALLOW ?? "").split(",");
+  if (!names[0] || names.length > MAX_DELEGATE_TARGETS || names.some((n) => !NAME.test(n)) || new Set(names).size !== names.length) return void 0;
+  return names;
+}
+function registerDelegate(pi, env) {
+  const allow = delegatorAllowlist(env);
+  if (!allow) return;
+  const runDir2 = env.CONDUCTOR_RUN_DIR, runId = env.CONDUCTOR_RUN_ID;
+  pi.registerTool({
+    name: "delegate",
+    label: "Delegate",
+    description: `Run one bounded read-only task with a leaf sub-agent and wait for its result. Allowed personas: ${allow.join(", ")}. Several calls in one turn run in parallel. The leaf cannot edit, delegate or ask questions; it may end with QUESTION: for you to decide.`,
+    promptSnippet: `Delegate bounded read-only work to: ${allow.join(", ")}`,
+    parameters: Type2.Object({
+      persona: Type2.String({ description: `One of: ${allow.join(", ")}` }),
+      task: Type2.String({ description: "Complete, self-contained task for the leaf (at most 64 KiB)." }),
+      files: Type2.Optional(Type2.Array(Type2.String(), { description: "Local paths (relative to your cwd) or run:<agent_id> of your own earlier delegate results." })),
+      timeout_minutes: Type2.Optional(Type2.Integer({ minimum: 1 }))
+    }),
+    async execute(toolCallId, params, signal, onUpdate) {
+      if (!isDelegateCallId(toolCallId)) throw new Error("delegate rejected: nested calls cannot delegate; call delegate directly");
+      const parsed = parseDelegateArgs(params);
+      if (!parsed.ok) throw new Error(`delegate rejected: ${parsed.reason}`);
+      if (signal?.aborted) throw new Error("delegate aborted");
+      const paths = delegatePaths(runDir2, toolCallId);
+      if (existsSync17(paths.claim) || existsSync17(paths.response)) throw new Error(`delegate rejected: call id ${toolCallId} was already used in this run`);
+      const startedAt = Date.now();
+      onUpdate?.({ content: [{ type: "text", text: `delegating to ${parsed.args.persona}; waiting for the lead` }], details: {} });
+      let personaTimeoutMs;
+      try {
+        const cfg = loadConfig(env.CONDUCTOR_CONFIG_CWD || process.cwd());
+        const target = (await resolvePersonas({ cwd: env.CONDUCTOR_CONFIG_CWD || process.cwd(), personaOverrides: cfg.personaOverrides })).personas.get(parsed.args.persona);
+        if (target) personaTimeoutMs = resolveTimeoutMs(target, cfg.personaOverrides[target.name], cfg);
+      } catch {
+      }
+      const ownDeadline = Number(env.CONDUCTOR_DEADLINE_AT);
+      const deadlineAt = delegateWaitDeadline({
+        startedAt,
+        timeoutMinutes: parsed.args.timeout_minutes,
+        personaTimeoutMs,
+        ownDeadlineAt: Number.isFinite(ownDeadline) && ownDeadline > 0 ? ownDeadline : void 0
+      });
+      const response = await waitForDelegateResponse(paths.response, { toolCallId, parentRunId: runId }, deadlineAt, signal);
+      if (!response.ok) {
+        const reason = response.reason;
+        throw new Error(reason.startsWith("cancelled: ") ? `delegate cancelled: ${reason.slice("cancelled: ".length)}` : `delegate rejected: ${reason}`);
+      }
+      return { content: [{ type: "text", text: response.envelope }], details: { agentId: response.agentId, status: response.status } };
+    }
+  });
+}
+function validResponse(value, expect) {
+  const r = value;
+  return !!r && typeof r === "object" && r.v === 1 && r.toolCallId === expect.toolCallId && r.parentRunId === expect.parentRunId && (r.ok === true ? typeof r.envelope === "string" : r.ok === false && typeof r.reason === "string");
+}
+function waitForDelegateResponse(path2, expect, deadlineAt, signal) {
+  return new Promise((resolve7, reject) => {
+    mkdirSync12(dirname19(path2), { recursive: true });
+    let settled = false;
+    const cleanup = [];
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      for (const release of cleanup) release();
+      if (error) reject(error);
+      else resolve7(value);
+    };
+    const check = () => {
+      if (settled || !existsSync17(path2)) return;
+      let value;
+      try {
+        value = JSON.parse(readFileSync17(path2, "utf8"));
+      } catch {
+        value = void 0;
+      }
+      if (validResponse(value, expect)) finish(void 0, value);
+      else finish(new Error("delegate rejected: malformed or foreign broker response"));
+    };
+    const onAbort = () => finish(new Error("delegate aborted"));
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    cleanup.push(() => signal?.removeEventListener("abort", onAbort));
+    const watcher = watch2(dirname19(path2), () => check());
+    watcher.on("error", () => {
+    });
+    cleanup.push(() => watcher.close());
+    const poll = setInterval(check, POLL_MS);
+    cleanup.push(() => clearInterval(poll));
+    const timer = setTimeout(() => finish(new Error("delegate rejected: no broker response before the deadline")), Math.max(0, deadlineAt - Date.now()));
+    cleanup.push(() => clearTimeout(timer));
+    check();
+  });
 }
 
 // src/transcript.ts
@@ -11315,6 +11979,7 @@ var FOREGROUND_STREAM_INTERVAL_MS = 50;
 function registerTools(pi, opts, env = process.env) {
   if (env.CONDUCTOR_SUBAGENT === "1") {
     if (env.CONDUCTOR_DEPTH === void 0 || env.CONDUCTOR_DEPTH === "1") registerAskOwner(pi, opts.getRegistry, env);
+    registerDelegate(pi, env);
     return;
   }
   registerListTool(pi, opts);
@@ -11333,7 +11998,7 @@ function registerTools(pi, opts, env = process.env) {
 function resolveSpawnCwd(arg, base) {
   return arg === void 0 ? { ok: true, cwd: base } : resolveCwdArg(arg, base);
 }
-var runtimeSchema = Type2.Optional(Type2.Union([Type2.Literal("auto"), Type2.Literal("subprocess"), Type2.Literal("herdr")], { description: "Runtime selector: per-call > effective persona > project > user > auto. Herdr is unavailable in H2; use subprocess explicitly inside herdr." }));
+var runtimeSchema = Type3.Optional(Type3.Union([Type3.Literal("auto"), Type3.Literal("subprocess"), Type3.Literal("herdr")], { description: "Runtime selector: per-call > effective persona > project > user > auto. Herdr is unavailable in H2; use subprocess explicitly inside herdr." }));
 var SPAWN_CWD_DESCRIPTION = "Directory the sub-agent runs in; personas, config, and the git root for worktree isolation resolve from it. `~` and relative paths resolve against the conductor's cwd (see ensemble_cwd), which is also the default.";
 function registerEffortTool(pi, opts) {
   pi.registerTool({
@@ -11341,11 +12006,11 @@ function registerEffortTool(pi, opts) {
     label: "Effort",
     description: `Open or inspect a named effort in the conductor cwd. ${EFFORT_NOTICE}`,
     promptSnippet: "Open or inspect a verified serial effort",
-    parameters: Type2.Object({
-      action: Type2.Union([Type2.Literal("open"), Type2.Literal("status")]),
-      effort: Type2.String(),
-      verify: Type2.Optional(Type2.String({ description: 'Open override; "" explicitly disables verification.' })),
-      land: Type2.Optional(Type2.Union([Type2.Literal("branch"), Type2.Literal("base")]))
+    parameters: Type3.Object({
+      action: Type3.Union([Type3.Literal("open"), Type3.Literal("status")]),
+      effort: Type3.String(),
+      verify: Type3.Optional(Type3.String({ description: 'Open override; "" explicitly disables verification.' })),
+      land: Type3.Optional(Type3.Union([Type3.Literal("branch"), Type3.Literal("base")]))
     }),
     async execute(_id, params) {
       try {
@@ -11375,9 +12040,9 @@ function registerCwdTool(pi, opts) {
     promptGuidelines: [
       "Prefer a per-call `cwd` on ensemble_spawn for one-off repo work; use ensemble_cwd when a whole stretch of work targets another repo."
     ],
-    parameters: Type2.Object({
-      path: Type2.Optional(Type2.String({ description: "New default cwd. Must be an existing directory." })),
-      reset: Type2.Optional(Type2.Boolean({ description: "true clears the override and returns to the session's start cwd." }))
+    parameters: Type3.Object({
+      path: Type3.Optional(Type3.String({ description: "New default cwd. Must be an existing directory." })),
+      reset: Type3.Optional(Type3.Boolean({ description: "true clears the override and returns to the session's start cwd." }))
     }),
     async execute(_id, params) {
       const r = opts.cwdControl?.change({ path: params.path, reset: params.reset }) ?? {
@@ -11402,7 +12067,7 @@ function registerListTool(pi, opts) {
       "Call ensemble_list when you need to know which personas are installed before spawning one.",
       "The returned descriptions are short \u2014 read the persona body via /conductor show <name> if you need the full system prompt."
     ],
-    parameters: Type2.Object({}),
+    parameters: Type3.Object({}),
     async execute(_id, _params) {
       const cwd = opts.getCwd();
       const cfg = loadConfig(cwd);
@@ -11431,8 +12096,8 @@ function registerRecommendTool(pi, opts) {
       "Call ensemble_recommend before spawning when you're unsure which persona historically succeeds on this kind of task.",
       "The score is a HINT, not a mandate \u2014 a persona with no history simply won't appear. Prefer the canonical chain shapes when memory is empty."
     ],
-    parameters: Type2.Object({
-      task: Type2.String({ description: "The task description to score personas for." })
+    parameters: Type3.Object({
+      task: Type3.String({ description: "The task description to score personas for." })
     }),
     async execute(_id, params) {
       const scores = scoreForShape(params.task);
@@ -11457,9 +12122,9 @@ function registerStatusTool(pi, opts) {
       "Use ensemble_status when you need to know which sub-agents are alive (e.g. before deciding whether to spawn another).",
       "Background sub-agents push completion notifications automatically; you don't need to poll."
     ],
-    parameters: Type2.Object({
-      agent_id: Type2.Optional(
-        Type2.String({ description: "Filter to a specific agent_id; omit for all." })
+    parameters: Type3.Object({
+      agent_id: Type3.Optional(
+        Type3.String({ description: "Filter to a specific agent_id; omit for all." })
       )
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -11535,30 +12200,30 @@ function registerAutoTool(pi, opts, env) {
       "Always set max_steps; add budget_usd for cost-sensitive runs. The executor stops at the first non-retryable failure or stop verdict and reports what completed.",
       "Set reevaluate:true on a step whose successor should only run if the step's output doesn't signal a blocker."
     ],
-    parameters: Type2.Object({
-      goal: Type2.String({ description: "One-line description of the overall goal (for the run summary)." }),
-      steps: Type2.Array(
-        Type2.Object({
-          persona: Type2.String({ description: "Persona name to spawn for this step." }),
+    parameters: Type3.Object({
+      goal: Type3.String({ description: "One-line description of the overall goal (for the run summary)." }),
+      steps: Type3.Array(
+        Type3.Object({
+          persona: Type3.String({ description: "Persona name to spawn for this step." }),
           runtime: runtimeSchema,
-          files: Type2.Optional(Type2.Array(Type2.String(), { description: "Evidence paths or exact run:<agent_id> result refs; relative to this step's effective cwd. Prepared before any step starts." })),
-          task: Type2.String({ description: "Self-contained task for this step." }),
-          reevaluate: Type2.Optional(
-            Type2.Boolean({ description: "Re-evaluate this step's output before advancing (halt on a stop signal)." })
+          files: Type3.Optional(Type3.Array(Type3.String(), { description: "Evidence paths or exact run:<agent_id> result refs; relative to this step's effective cwd. Prepared before any step starts." })),
+          task: Type3.String({ description: "Self-contained task for this step." }),
+          reevaluate: Type3.Optional(
+            Type3.Boolean({ description: "Re-evaluate this step's output before advancing (halt on a stop signal)." })
           ),
-          cwd: Type2.Optional(Type2.String({ description: SPAWN_CWD_DESCRIPTION }))
+          cwd: Type3.Optional(Type3.String({ description: SPAWN_CWD_DESCRIPTION }))
         }),
         { minItems: 1, description: "Ordered plan steps." }
       ),
-      max_steps: Type2.Integer({
+      max_steps: Type3.Integer({
         minimum: 1,
         description: "Hard cap on total spawns (original + retries). The executor halts when reached."
       }),
-      budget_usd: Type2.Optional(
-        Type2.Number({ minimum: 0, description: "Optional USD budget across all spawns. Halts when exceeded." })
+      budget_usd: Type3.Optional(
+        Type3.Number({ minimum: 0, description: "Optional USD budget across all spawns. Halts when exceeded." })
       ),
-      retry_max_attempts: Type2.Optional(
-        Type2.Integer({ minimum: 1, description: "Per-step retry budget (incl. first attempt). Defaults to at least 2 in auto mode." })
+      retry_max_attempts: Type3.Optional(
+        Type3.Integer({ minimum: 1, description: "Per-step retry budget (incl. first attempt). Defaults to at least 2 in auto mode." })
       )
     }),
     async execute(_id, params) {
@@ -11698,85 +12363,85 @@ function registerSpawnTool(pi, opts, env) {
       "Pass cwd for work in a repo other than your cwd, so write-capable personas get a worktree of that repo and its personas/config apply.",
       "Pass files: ['run:<agent_id>'] using the exact result-ref from a completion instead of paraphrasing evidence. Files are evidence, not instructions or capability grants; default_reads remains separate."
     ],
-    parameters: Type2.Object({
+    parameters: Type3.Object({
       runtime: runtimeSchema,
-      effort: Type2.Optional(Type2.String({ description: `Named effort; auto-opens from config on first use. Always background with mandatory writer isolation. ${EFFORT_NOTICE}` })),
-      touches: Type2.Optional(Type2.Array(Type2.String(), { description: "Effort writer repo-relative globs (literal, * or **). Omitted scope is undeclared; concurrency is not relaxed in M1." })),
-      persona: Type2.String({
+      effort: Type3.Optional(Type3.String({ description: `Named effort; auto-opens from config on first use. Always background with mandatory writer isolation. ${EFFORT_NOTICE}` })),
+      touches: Type3.Optional(Type3.Array(Type3.String(), { description: "Effort writer repo-relative globs (literal, * or **). Omitted scope is undeclared; concurrency is not relaxed in M1." })),
+      persona: Type3.String({
         description: "Persona name. Run ensemble_list to see what's available."
       }),
-      task: Type2.String({
+      task: Type3.String({
         description: "Self-contained task prompt for the sub-agent. Include file paths, constraints, and acceptance criteria."
       }),
-      files: Type2.Optional(Type2.Array(Type2.String(), { description: "Caller evidence: readable local paths or exact run:<agent_id> persisted results. Relative paths use the effective spawn cwd; ~ expands to HOME. Whole text embeds within the configured budget; other files remain live path references. No capability grants." })),
-      cwd: Type2.Optional(Type2.String({ description: SPAWN_CWD_DESCRIPTION })),
-      foreground: Type2.Optional(
-        Type2.Boolean({
+      files: Type3.Optional(Type3.Array(Type3.String(), { description: "Caller evidence: readable local paths or exact run:<agent_id> persisted results. Relative paths use the effective spawn cwd; ~ expands to HOME. Whole text embeds within the configured budget; other files remain live path references. No capability grants." })),
+      cwd: Type3.Optional(Type3.String({ description: SPAWN_CWD_DESCRIPTION })),
+      foreground: Type3.Optional(
+        Type3.Boolean({
           description: "true (default) blocks until done and streams the sub-agent into the ensemble panel; false runs in background and notifies on completion."
         })
       ),
-      timeout_minutes: Type2.Optional(
-        Type2.Integer({
+      timeout_minutes: Type3.Optional(
+        Type3.Integer({
           minimum: 1,
           maximum: 1440,
           description: "Wall-clock timeout for this sub-agent in minutes (1\u20131440). Overrides the per-persona override and the global default. Omit to use the cascade."
         })
       ),
-      kill_on_stall: Type2.Optional(
-        Type2.Boolean({
+      kill_on_stall: Type3.Optional(
+        Type3.Boolean({
           description: "v0.10 watchdog opt-in. true \u2192 the sub-agent is auto-killed if it goes silent past the hard-stall threshold (default 600s). false / omitted \u2192 advisory-only; the wall-clock timeout still applies. Recommend true on autonomous chains; default off for interactive sessions."
         })
       ),
-      stall_threshold_seconds: Type2.Optional(
-        Type2.Integer({
+      stall_threshold_seconds: Type3.Optional(
+        Type3.Integer({
           minimum: 30,
           description: "v0.10 watchdog soft-stall threshold for this spawn, in seconds (\u2265 30). Hard threshold scales with the same ratio as conductor defaults (typically 5\xD7). Override when the persona's expected tool calls are legitimately slow (npm install, brazil-build, large test suites). Default: 120s."
         })
       ),
-      on_complete_hook: Type2.Optional(
-        Type2.String({
+      on_complete_hook: Type3.Optional(
+        Type3.String({
           description: 'v0.11 quality-gate hook. Shell command run after the sub-agent reaches a terminal status; non-zero exit flips the run to `hook_failed`. Empty string (`""`) is the explicit-disable sentinel \u2014 short-circuits the cascade so this spawn runs no hook even if project / user config or persona frontmatter declares one. Cascade: per-call > project > user > persona-frontmatter.'
         })
       ),
-      on_complete_hook_timeout_seconds: Type2.Optional(
-        Type2.Integer({
+      on_complete_hook_timeout_seconds: Type3.Optional(
+        Type3.Integer({
           minimum: 1,
           description: "v0.11 quality-gate hook timeout (seconds). Read paired with `on_complete_hook`; a runaway hook past this budget is killed and the run flips to `hook_failed`. Default 300 when omitted."
         })
       ),
-      merge_strategy: Type2.Optional(
-        Type2.Union(
-          [Type2.Literal("squash"), Type2.Literal("merge"), Type2.Literal("none")],
+      merge_strategy: Type3.Optional(
+        Type3.Union(
+          [Type3.Literal("squash"), Type3.Literal("merge"), Type3.Literal("none")],
           {
             description: 'v0.14 worktree auto-merge strategy. When set (and the persona has a worktree), the worktree branch is merged back to the base branch on `completed`. `"squash"` squashes all commits into one; `"merge"` creates a merge commit; `"none"` skips merge-back. Cascade: per-call > project > user > persona-frontmatter > built-in default (`"squash"` for builder/simplifier, `"none"` for others). Omit to use the cascade.'
           }
         )
       ),
-      steerable: Type2.Optional(
-        Type2.Boolean({
+      steerable: Type3.Optional(
+        Type3.Boolean({
           description: "v0.12 steering opt-in. true \u2192 launch the sub-agent in `pi --mode rpc` so the conductor can `steer` / `follow_up` it mid-run via ensemble_send. false / omitted \u2192 print mode without steering; prompts above 96 KiB automatically use RPC stdin for transport only, still without steering. Cascade per-call > project > user > built-in default false. Personas using ctx.ui.confirm/select must NOT be spawned with steerable=true (auto-cancelled on the conductor side)."
         })
       ),
-      inherit_context: Type2.Optional(
-        Type2.Union(
+      inherit_context: Type3.Optional(
+        Type3.Union(
           [
-            Type2.Literal("none"),
-            Type2.Literal("filtered"),
-            Type2.Literal("filtered_compact"),
-            Type2.Literal("full")
+            Type3.Literal("none"),
+            Type3.Literal("filtered"),
+            Type3.Literal("filtered_compact"),
+            Type3.Literal("full")
           ],
           {
             description: "Item 12 candidate #3 \u2014 per-call override for the persona's inherit_context frontmatter. Useful when the parent conductor's narration is contaminating the sub-agent's identity (see docs/backlog.md item 12 for the witnessed builder-4gsl bleed). Cascade: per-call > project config persona override > user config persona override > persona frontmatter. Default: persona frontmatter."
           }
         )
       ),
-      chain: Type2.Optional(
-        Type2.Boolean({
+      chain: Type3.Optional(
+        Type3.Boolean({
           description: "v0.15 chains: set to false to skip automatic chain spawns for this run even if a chain is configured in conductor.json for the persona. Default: true (chains apply when configured)."
         })
       ),
-      retry_max_attempts: Type2.Optional(
-        Type2.Integer({
+      retry_max_attempts: Type3.Optional(
+        Type3.Integer({
           minimum: 1,
           description: "v0.18 classified retry: total attempts (including the first) for this spawn. 1 = no retry (default). When >1, a non-completed terminal whose failure classifies as retryable (environment/stall/timeout/test by default) auto-respawns the same persona with a diagnostic-augmented task, up to this budget. Deterministic-cause failures (syntax/logic) and permission failures are never retried. Cascade: per-call > project > user > persona-frontmatter > built-in."
         })
@@ -12032,55 +12697,55 @@ function registerSendTool(pi, opts) {
       "Pass agent_id from a previous ensemble_spawn or ensemble_status result.",
       "Use files: ['run:<agent_id>'] to forward a full persisted result instead of a lossy paraphrase. A retired run's handoff can be attached to a fresh child."
     ],
-    parameters: Type2.Object({
-      agent_id: Type2.String({
+    parameters: Type3.Object({
+      agent_id: Type3.String({
         description: "agent_id of the sub-agent to send to. Get it from ensemble_spawn or ensemble_status."
       }),
-      message: Type2.String({
+      message: Type3.String({
         description: "User-role message delivered to the sub-agent's existing session."
       }),
-      files: Type2.Optional(Type2.Array(Type2.String(), { description: "Evidence paths or exact run:<agent_id> results. Relative paths use the CALLER's effective conductor cwd (ensemble_cwd), not the target session cwd. ~ expands to HOME. Prepared before send/resume effects; reference-only paths stay live." })),
-      foreground: Type2.Optional(
-        Type2.Boolean({
+      files: Type3.Optional(Type3.Array(Type3.String(), { description: "Evidence paths or exact run:<agent_id> results. Relative paths use the CALLER's effective conductor cwd (ensemble_cwd), not the target session cwd. ~ expands to HOME. Prepared before send/resume effects; reference-only paths stay live." })),
+      foreground: Type3.Optional(
+        Type3.Boolean({
           description: "true (default) blocks until the sub-agent finishes its reply; false runs in background and notifies on completion."
         })
       ),
-      timeout_minutes: Type2.Optional(
-        Type2.Integer({
+      timeout_minutes: Type3.Optional(
+        Type3.Integer({
           minimum: 1,
           maximum: 1440,
           description: "Wall-clock timeout for this resumed turn in minutes (1\u20131440). Overrides per-persona and global defaults. Send arms a fresh budget per call."
         })
       ),
-      kill_on_stall: Type2.Optional(
-        Type2.Boolean({
+      kill_on_stall: Type3.Optional(
+        Type3.Boolean({
           description: "v0.10 watchdog opt-in for the resumed turn. true \u2192 auto-kill on hard-stall. Replaces the original spawn's value and persists for subsequent sends. Omit to keep the existing setting."
         })
       ),
-      stall_threshold_seconds: Type2.Optional(
-        Type2.Integer({
+      stall_threshold_seconds: Type3.Optional(
+        Type3.Integer({
           minimum: 30,
           description: "v0.10 watchdog soft-stall threshold for the resumed turn, in seconds (\u2265 30). Hard threshold scales with the same ratio as conductor defaults. Replaces the original spawn's value."
         })
       ),
-      on_complete_hook: Type2.Optional(
-        Type2.String({
+      on_complete_hook: Type3.Optional(
+        Type3.String({
           description: "v0.11 quality-gate hook for the resumed turn. Replaces the original spawn's per-call hook (and persists for subsequent sends until next override). Empty string disables for this resume only."
         })
       ),
-      on_complete_hook_timeout_seconds: Type2.Optional(
-        Type2.Integer({
+      on_complete_hook_timeout_seconds: Type3.Optional(
+        Type3.Integer({
           minimum: 1,
           description: "v0.11 quality-gate hook timeout (seconds) for the resumed turn. Replaces the original spawn's per-call timeout."
         })
       ),
-      streaming_behavior: Type2.Optional(
-        Type2.Union(
+      streaming_behavior: Type3.Optional(
+        Type3.Union(
           [
-            Type2.Literal("auto"),
-            Type2.Literal("steer"),
-            Type2.Literal("follow_up"),
-            Type2.Literal("resume")
+            Type3.Literal("auto"),
+            Type3.Literal("steer"),
+            Type3.Literal("follow_up"),
+            Type3.Literal("resume")
           ],
           {
             description: "auto selects live follow_up or saved-session send. steer delivers a course correction before the next model call; follow_up queues until the agent finishes. resume means the available_actions token send (new process via pi --session), NOT ensemble_resume (SIGCONT). Use the latest available_actions; each call revalidates."
@@ -12254,8 +12919,8 @@ function registerPauseTool(pi, opts) {
       "Use ensemble_pause to halt token consumption on a long-running sub-agent without killing it.",
       "Use the latest available_actions; each call revalidates."
     ],
-    parameters: Type2.Object({
-      agent_id: Type2.String({ description: "agent_id of the sub-agent to pause." })
+    parameters: Type3.Object({
+      agent_id: Type3.String({ description: "agent_id of the sub-agent to pause." })
     }),
     async execute(_id, params) {
       const registry = opts.getRegistry();
@@ -12295,8 +12960,8 @@ function registerResumeTool(pi, opts) {
       "Use ensemble_resume to continue a sub-agent previously paused via ensemble_pause.",
       "Use the latest available_actions; each call revalidates."
     ],
-    parameters: Type2.Object({
-      agent_id: Type2.String({ description: "agent_id of the sub-agent to resume." })
+    parameters: Type3.Object({
+      agent_id: Type3.String({ description: "agent_id of the sub-agent to resume." })
     }),
     async execute(_id, params) {
       const registry = opts.getRegistry();
@@ -12337,8 +13002,8 @@ function registerKillTool(pi, opts) {
       "Use the latest available_actions; each call revalidates. Already-terminal sub-agents remain no-op success.",
       "Run records (transcript, final.md) are preserved for post-mortem inspection."
     ],
-    parameters: Type2.Object({
-      agent_id: Type2.String({
+    parameters: Type3.Object({
+      agent_id: Type3.String({
         description: "agent_id of the sub-agent to terminate."
       })
     }),
@@ -12385,9 +13050,9 @@ function registerFocusTool(pi, opts) {
       "Use ensemble_focus when you want to draw the user's attention to a particular sub-agent's live transcript.",
       "Pass agent_id when you have a specific sub-agent in mind; omit it to open the overlay on the most recently active one."
     ],
-    parameters: Type2.Object({
-      agent_id: Type2.Optional(
-        Type2.String({ description: "agent_id of the sub-agent to focus on (omit for most-recent)." })
+    parameters: Type3.Object({
+      agent_id: Type3.Optional(
+        Type3.String({ description: "agent_id of the sub-agent to focus on (omit for most-recent)." })
       )
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -12657,9 +13322,9 @@ function buildOnChainCallback(args) {
     let overrideTask;
     if (step.reevaluate) {
       let parentFinal = "";
-      if (existsSync17(parentRun.finalPath)) {
+      if (existsSync18(parentRun.finalPath)) {
         try {
-          parentFinal = readFileSync17(parentRun.finalPath, "utf-8");
+          parentFinal = readFileSync18(parentRun.finalPath, "utf-8");
         } catch {
         }
       }
@@ -12750,7 +13415,7 @@ function keptParentRefusal(parent, successor) {
   const branch = parent.worktreeBranch;
   if (!branch || parent.mergeResult?.success === true) return void 0;
   const base = parent.worktreeBaseBranch ?? "its base branch";
-  const gitRoot2 = parent.worktreePath ? dirname19(dirname19(dirname19(parent.worktreePath))) : resolveWorktreeSpec(parent.cwd, parent.id)?.gitRoot ?? parent.cwd;
+  const gitRoot2 = parent.worktreePath ? dirname20(dirname20(dirname20(parent.worktreePath))) : resolveWorktreeSpec(parent.cwd, parent.id)?.gitRoot ?? parent.cwd;
   const hint = parent.worktreeKept ?? keptBranchHint(gitRoot2, branch);
   return `chain: ${successor} not started after ${parent.id}: its work is on the kept branch ${branch}, not merged into ${base}, and a ${successor} branched from ${base} would lack it. ${hint}; then spawn ${successor} again.`;
 }
@@ -12794,8 +13459,8 @@ function buildOnRetryCallback(args) {
 }
 
 // src/queue.ts
-import { mkdirSync as mkdirSync12 } from "node:fs";
-import { join as join26 } from "node:path";
+import { mkdirSync as mkdirSync13 } from "node:fs";
+import { join as join27 } from "node:path";
 var SpawnQueue = class {
   constructor(registry, maxConcurrent, maxConcurrentWriteCapable = 1, spawn2 = spawnRun) {
     this.registry = registry;
@@ -12835,7 +13500,8 @@ var SpawnQueue = class {
    *   - { queued: PendingSpawn, downgraded }     if queued (downgraded=true means foreground→background)
    */
   enqueueOrSpawn(opts) {
-    opts = prepareSpawnRuntime(opts);
+    opts = prepareSpawnRuntime(leafSpawnOptions(opts));
+    assertDelegationRuntime(opts.persona, opts.runtime, opts.delegation);
     opts = prepareSpawnEvidence(opts, opts.registry ?? this.registry);
     const effort = prepareSpawnEffort(opts);
     if (opts.touches) opts = { ...opts, touches: [...opts.touches] };
@@ -12850,7 +13516,7 @@ var SpawnQueue = class {
     const id = allocateRunId(opts.persona.name, mapFromRegistry2(registry));
     if (effort) addEffortMember(effort, id);
     const dir = runDir(id);
-    mkdirSync12(dir, { recursive: true });
+    mkdirSync13(dir, { recursive: true });
     const placeholder = {
       id,
       runtime: opts.runtime,
@@ -12861,6 +13527,8 @@ var SpawnQueue = class {
       mode: "background",
       // queued runs are always background once they start
       status: "queued",
+      // A broker leaf's lineage is visible while it waits, so cancel and status find it.
+      ...opts.delegation ? { depth: 2, delegateAllow: [], parentRunId: opts.delegation.parentRunId, delegateToolCallId: opts.delegation.delegateToolCallId } : {},
       waitReason,
       ...effort ? { parentPid: effort.owner.pid, parentStartTime: effort.owner.startTime, parentSessionId: effort.owner.sessionId } : {},
       effort: effort ? { owner: effort.owner, name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches ? [...opts.touches] : void 0 } : void 0,
@@ -12869,9 +13537,9 @@ var SpawnQueue = class {
       messages: [],
       usage: emptyUsage(),
       cwd: opts.cwd,
-      recordPath: join26(dir, "record.json"),
-      transcriptPath: join26(dir, "transcript.jsonl"),
-      finalPath: join26(dir, "final.md")
+      recordPath: join27(dir, "record.json"),
+      transcriptPath: join27(dir, "transcript.jsonl"),
+      finalPath: join27(dir, "final.md")
     };
     registry.register(placeholder);
     if (effort) void writeRecord(placeholder);
@@ -12954,6 +13622,195 @@ function mapFromRegistry2(r) {
   for (const x of r.list()) m.set(x.id, x);
   return m;
 }
+
+// src/delegation-broker.ts
+import { dirname as dirname21 } from "node:path";
+var DelegationBroker = class {
+  constructor(deps) {
+    this.deps = deps;
+    this.unsubscribe = deps.registry.onChange((run) => this.changed(run));
+  }
+  deps;
+  starts = /* @__PURE__ */ new Map();
+  calls = /* @__PURE__ */ new Map();
+  closed = false;
+  unsubscribe;
+  observe(parent, event, cwd) {
+    const e = event;
+    if (!e || typeof e !== "object" || e.toolName !== "delegate" || e.parentToolCallId !== void 0 || !isDelegateCallId(e.toolCallId)) return;
+    const key = `${parent.id}\0${e.toolCallId}`;
+    if (e.type === "tool_execution_start") {
+      if (!this.starts.has(key) && !this.calls.has(key)) this.starts.set(key, { args: e.args });
+    } else if (e.type === "tool_execution_update") {
+      const start = this.starts.get(key);
+      if (!start || this.calls.has(key)) return;
+      this.starts.delete(key);
+      this.claim(parent, e.toolCallId, key, start.args, cwd);
+    } else if (e.type === "tool_execution_end") {
+      this.starts.delete(key);
+      const call = this.calls.get(key);
+      if (call) this.cancel(call, "the delegate call ended before its leaf finished");
+    }
+  }
+  /** Synchronous, before any await: exclusive claim, then count and notify, so a duplicate never spawns twice. */
+  claim(parent, id, key, args, cwd) {
+    const paths = delegatePaths(dirname21(parent.recordPath), id);
+    try {
+      publishJson(paths.claim, { v: 1, toolCallId: id, parentRunId: parent.id, claimedAt: Date.now() }, () => {
+      });
+    } catch (e) {
+      const reason = e.code === "EEXIST" ? `call ${id} was already claimed; leaf outcome uncertain; not replayed` : `claim failed: ${e.message}`;
+      this.respond(parent, id, { ok: false, reason });
+      return;
+    }
+    const call = { parent, id, done: false, outstanding: parent.pendingDelegations ?? 0 };
+    this.calls.set(key, call);
+    parent.pendingDelegations = (parent.pendingDelegations ?? 0) + 1;
+    this.deps.registry.notify(parent);
+    if (this.closed) {
+      this.reject(call, "lead /reload closed this run's delegation broker; resume this run with ensemble_send to delegate again");
+      return;
+    }
+    void this.resolve(call, args, cwd).catch((e) => this.reject(call, `delegation failed: ${e.message}`));
+  }
+  async resolve(call, args, cwd) {
+    const { parent } = call;
+    const cfg = loadConfig(parent.cwd);
+    const roster = await resolvePersonas({ cwd: parent.cwd, personaOverrides: cfg.personaOverrides });
+    if (call.done) return;
+    const name2 = args?.persona;
+    const target = typeof name2 === "string" ? roster.personas.get(name2) : void 0;
+    const verdict = validateDelegateRequest({
+      args,
+      parent,
+      current: this.deps.registry.get(parent.id) === parent,
+      target,
+      personaTimeoutMs: target ? resolveTimeoutMs(target, cfg.personaOverrides[target.name], cfg) : 0,
+      outstanding: call.outstanding,
+      now: Date.now()
+    });
+    if (!verdict.ok) {
+      this.reject(call, verdict.reason);
+      return;
+    }
+    const request = args;
+    if (prepareSpawnRuntime({ persona: target, cwd: parent.cwd, runtimeEnv: this.deps.env }).runtime !== "subprocess") {
+      this.reject(call, `persona ${target.name} resolves to the herdr runtime; delegated leaves run on subprocess only until N5`);
+      return;
+    }
+    const foreign = (request.files ?? []).find((f) => f.startsWith("run:") && this.deps.registry.get(f.slice(4))?.parentRunId !== parent.id);
+    if (foreign) {
+      this.reject(call, `files: ${foreign} is not a delegate child of this run`);
+      return;
+    }
+    let task;
+    try {
+      task = appendFileEvidence(request.task, request.files, { cwd, registry: this.deps.registry, limit: cfg.inlineAttachmentLimitBytes });
+    } catch (e) {
+      this.reject(call, e.message);
+      return;
+    }
+    call.limit = cfg.inlineAttachmentLimitBytes;
+    const result = this.deps.queue.enqueueOrSpawn({
+      persona: target,
+      task,
+      cwd,
+      mode: "background",
+      timeoutMs: verdict.timeoutMs,
+      runtime: "subprocess",
+      runtimeEnv: this.deps.env,
+      parentSessionId: parent.parentSessionId,
+      delegation: { parentRunId: parent.id, delegateToolCallId: call.id },
+      inheritContextOverride: "none",
+      worktree: false,
+      mergeStrategy: "none",
+      onCompleteHook: "",
+      retryMaxAttempts: 1,
+      steerable: false
+    });
+    const leaf = result.kind === "spawned" ? result.run : result.placeholderRun;
+    call.leafId = leaf.id;
+    if (call.done) return;
+    call.timer = setTimeout(() => this.expire(call), Math.max(0, verdict.deadlineAt - Date.now()));
+    call.timer.unref();
+  }
+  expire(call) {
+    const leaf = call.leafId ? this.deps.registry.get(call.leafId) : void 0;
+    if (call.done || !leaf || isTerminal(leaf.status)) return;
+    if (leaf.status === "queued") {
+      this.reject(call, `timeout: ${leaf.id} did not start before its deadline`);
+      this.deps.queue.removeQueued(leaf.id);
+    } else forceTerminate(leaf, "timeout", this.deps.registry);
+  }
+  changed(run) {
+    if (run.parentRunId !== void 0 && run.delegateToolCallId !== void 0 && isTerminal(run.status)) {
+      const call = this.calls.get(`${run.parentRunId}\0${run.delegateToolCallId}`);
+      if (call && !call.done) void this.finish(call, run);
+    }
+    if (isTerminal(run.status) && (run.pendingDelegations ?? 0) > 0) {
+      for (const call of [...this.calls.values()]) if (call.parent === run) this.cancel(call, `parent ${run.id} ended (${run.status})`);
+    }
+  }
+  async finish(call, leaf) {
+    this.settle(call);
+    await leaf.recordWrite;
+    await writeFinal(leaf);
+    this.respond(call.parent, call.id, { ok: true, agentId: leaf.id, status: leaf.status, envelope: formatDelegateEnvelope(leaf, call.limit ?? 131072) });
+  }
+  /** Answer first, so the leaf's own terminal notification cannot answer the call as a result. */
+  cancel(call, reason) {
+    if (call.done) return;
+    this.reject(call, `cancelled: ${reason}`);
+    const leaf = call.leafId ? this.deps.registry.get(call.leafId) : void 0;
+    if (!leaf || isTerminal(leaf.status)) return;
+    if (leaf.status === "queued") this.deps.queue.removeQueued(leaf.id);
+    else forceTerminate(leaf, "killed", this.deps.registry);
+  }
+  reject(call, reason) {
+    if (call.done) return;
+    this.settle(call);
+    this.respond(call.parent, call.id, { ok: false, reason });
+  }
+  settle(call) {
+    call.done = true;
+    clearTimeout(call.timer);
+    this.calls.delete(`${call.parent.id}\0${call.id}`);
+    call.parent.pendingDelegations = Math.max(0, (call.parent.pendingDelegations ?? 1) - 1);
+    this.deps.registry.notify(call.parent);
+  }
+  /** Create-only: an existing response (EEXIST) is never replaced. */
+  respond(parent, id, body) {
+    const response = { v: 1, toolCallId: id, parentRunId: parent.id, ...body };
+    try {
+      publishJson(delegatePaths(dirname21(parent.recordPath), id).response, response, () => {
+      });
+    } catch (e) {
+      if (e.code !== "EEXIST") process.stderr.write(`[conductor] delegate response ${parent.id}/${id} not written: ${e.message}
+`);
+    }
+  }
+  /**
+   * Approved R6 fallback on reload: the new module instance has no event source for
+   * subprocess parents, so every parent with an outstanding call is stopped, leaves
+   * first, with a named diagnostic. Parents with nothing outstanding keep running.
+   */
+  async close() {
+    if (this.closed) return;
+    this.closed = true;
+    this.starts.clear();
+    const pending = [...this.calls.values()];
+    const parents = [...new Set(pending.map((c) => c.parent))];
+    const leaves = pending.map((c) => c.leafId ? this.deps.registry.get(c.leafId) : void 0).filter((r) => !!r);
+    for (const call of pending) this.cancel(call, RELOAD_INTERRUPTED);
+    this.unsubscribe();
+    for (const parent of parents) {
+      if (isTerminal(parent.status)) continue;
+      parent.errorMessage = RELOAD_INTERRUPTED;
+      forceTerminate(parent, "killed", this.deps.registry, parent.onComplete);
+    }
+    await Promise.allSettled([...leaves, ...parents].map((r) => r.recordWrite));
+  }
+};
 
 // src/widget.ts
 import { Text } from "@earendil-works/pi-tui";
@@ -13068,417 +13925,6 @@ function statusColorSlot2(s) {
     case "aborted":
       return "error";
   }
-}
-
-// src/compaction-hook.ts
-var KEEP_RECENT_ENVELOPES = 2;
-var RESULT_SUMMARY_MAX_CHARS = 200;
-var ENVELOPE_RE = /<sub-agent-completed>[\s\S]*?<\/sub-agent-completed>/g;
-var RESULT_RE = /(\s*)<result>\n([\s\S]*?)\n(\s*)<\/result>\n?/;
-function summarizeResultText(text3, max = RESULT_SUMMARY_MAX_CHARS) {
-  const collapsed = text3.replace(/\s+/g, " ").trim();
-  if (collapsed.length <= max) return collapsed;
-  return collapsed.slice(0, max).trimEnd() + "\u2026";
-}
-function compactEnvelopeBlock(envelopeXml) {
-  const m = envelopeXml.match(RESULT_RE);
-  if (!m) return envelopeXml;
-  const indent = m[1] ?? "  ";
-  const body = m[2] ?? "";
-  const summary = summarizeResultText(body);
-  const replacement = `${indent}<result-summary>${summary}</result-summary>
-`;
-  return envelopeXml.replace(RESULT_RE, replacement);
-}
-function findEnvelopes(text3) {
-  const out = [];
-  ENVELOPE_RE.lastIndex = 0;
-  let m;
-  while ((m = ENVELOPE_RE.exec(text3)) !== null) {
-    out.push({ start: m.index, end: m.index + m[0].length, block: m[0] });
-  }
-  return out;
-}
-function rewriteSelected(text3, firstEnvelopeIdxOffset, shouldCompact) {
-  const hits = findEnvelopes(text3);
-  if (hits.length === 0) return text3;
-  let out = "";
-  let cursor = 0;
-  for (let i = 0; i < hits.length; i++) {
-    const hit = hits[i];
-    out += text3.slice(cursor, hit.start);
-    const globalIdx = firstEnvelopeIdxOffset + i;
-    out += shouldCompact(globalIdx) ? compactEnvelopeBlock(hit.block) : hit.block;
-    cursor = hit.end;
-  }
-  out += text3.slice(cursor);
-  return out;
-}
-function rewriteTextInMessage(msg, rewrite) {
-  if (msg == null) return msg;
-  const content = msg.content;
-  if (typeof content === "string") {
-    const next = rewrite(content);
-    return next === content ? msg : { ...msg, content: next };
-  }
-  if (Array.isArray(content)) {
-    let changed = false;
-    const nextBlocks = content.map((block) => {
-      if (block && typeof block === "object" && block.type === "text" && typeof block.text === "string") {
-        const nextText = rewrite(block.text);
-        if (nextText !== block.text) {
-          changed = true;
-          return { ...block, text: nextText };
-        }
-      }
-      return block;
-    });
-    return changed ? { ...msg, content: nextBlocks } : msg;
-  }
-  return msg;
-}
-function compactOlderEnvelopes(messages, keepRecent = KEEP_RECENT_ENVELOPES) {
-  let total = 0;
-  const perMessageStart = new Array(messages.length).fill(0);
-  for (let i = 0; i < messages.length; i++) {
-    perMessageStart[i] = total;
-    const msg = messages[i];
-    const content = msg?.content;
-    if (typeof content === "string") {
-      total += findEnvelopes(content).length;
-    } else if (Array.isArray(content)) {
-      for (const block of content) {
-        if (block && typeof block === "object" && block.type === "text" && typeof block.text === "string") {
-          total += findEnvelopes(block.text).length;
-        }
-      }
-    }
-  }
-  if (total === 0) return messages;
-  const compactBefore = total - keepRecent;
-  if (compactBefore <= 0) return messages;
-  const shouldCompact = (globalIdx) => globalIdx < compactBefore;
-  let runningGlobalIdx = 0;
-  return messages.map((msg) => {
-    const before = runningGlobalIdx;
-    return rewriteTextInMessage(msg, (text3) => {
-      const hits = findEnvelopes(text3);
-      if (hits.length === 0) return text3;
-      const startIdx = runningGlobalIdx;
-      runningGlobalIdx += hits.length;
-      return rewriteSelected(text3, startIdx, shouldCompact);
-    });
-    void before;
-  });
-}
-function installCompactionHook(pi, opts = {}) {
-  const keepRecent = opts.keepRecent ?? KEEP_RECENT_ENVELOPES;
-  pi.on("context", async (event) => {
-    const messages = compactOlderEnvelopes(event.messages, keepRecent);
-    return { messages };
-  });
-  return {
-    reset: () => {
-    }
-  };
-}
-
-// src/notifications.ts
-function perSendNumbers(run) {
-  const startedAt = run.thisInvocationStartedAt ?? run.startTime;
-  const finishedAt = run.finishedAt ?? Date.now();
-  const baseline = run.thisInvocationUsageBaseline ?? {
-    turns: 0,
-    input: 0,
-    output: 0,
-    cost: 0
-  };
-  return {
-    durationMs: Math.max(0, finishedAt - startedAt),
-    turns: Math.max(0, run.usage.turns - baseline.turns),
-    input: Math.max(0, run.usage.input - baseline.input),
-    output: Math.max(0, run.usage.output - baseline.output),
-    cost: Math.max(0, run.usage.cost - baseline.cost)
-  };
-}
-function formatCompletionNotification(run, actions = availableActions(run)) {
-  if (run.status === "blocked") {
-    const ask = run.pendingAsk;
-    const tag = run.errorMessage ? "sub-agent-answer-failed" : "sub-agent-asked";
-    const error = run.errorMessage ? `
-  <error>${escapeXml(run.errorMessage)}</error>` : "";
-    return `<${tag}>${error}
-  <agent-id>${escapeXml(run.id)}</agent-id>
-  <status>blocked</status>
-  <ask-id>${escapeXml(ask?.askId ?? "")}</ask-id>
-  <question>${escapeXml(ask?.question ?? "Question unavailable; inspect transcript")}</question>
-${ask?.evidence ?? ""}
-  <available-actions>${actions.join(", ")}</available-actions>
-  <guidance>Answer via ensemble_send on this agent id. Assignment unresolved; do independent work while deciding.</guidance>
-  <transcript>${escapeXml(run.transcriptPath)}</transcript>
-</${tag}>`;
-  }
-  const finalText = getCompletionText(run);
-  const perSend = perSendNumbers(run);
-  const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
-  const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
-  const elapsed = elapsedStr(perSendStart, perSendEnd);
-  const usageStr = formatUsage({
-    turns: perSend.turns,
-    input: perSend.input,
-    output: perSend.output,
-    cost: perSend.cost
-  });
-  const resumed = sendsSinceSpawn(run) >= 1;
-  const lines = [];
-  lines.push("```xml");
-  lines.push("<sub-agent-completed>");
-  const ref = resultRef(run);
-  if (ref) lines.push(`  <result-ref>${ref}</result-ref>`);
-  lines.push(`  <agent-id>${run.id}</agent-id>`);
-  lines.push(`  <persona>${run.persona}</persona>`);
-  lines.push(`  <status>${run.status}</status>`);
-  lines.push(`  <available-actions>${actions.join(",")}</available-actions>`);
-  lines.push(`  <duration>${elapsed}</duration>`);
-  lines.push(
-    `  <usage><turns>${perSend.turns}</turns><input>${perSend.input}</input><output>${perSend.output}</output><cost>${perSend.cost.toFixed(4)}</cost></usage>`
-  );
-  if (resumed) {
-    const lifetimeElapsed = elapsedStr(run.startTime, run.finishedAt);
-    lines.push("  <lifetime>");
-    lines.push(`    <duration>${lifetimeElapsed}</duration>`);
-    lines.push(
-      `    <usage><turns>${run.usage.turns}</turns><input>${run.usage.input}</input><output>${run.usage.output}</output><cost>${run.usage.cost.toFixed(4)}</cost></usage>`
-    );
-    lines.push(`    <cost>${run.usage.cost.toFixed(4)}</cost>`);
-    lines.push(`    <resumes>${run.resumeCount ?? 0}</resumes>`);
-    if (run.steerCount) lines.push(`    <steers>${run.steerCount}</steers>`);
-    lines.push("  </lifetime>");
-  }
-  const retirement = contextRetirementNotice(run);
-  if (retirement) lines.push(`  <context-retired>${escapeXml(retirement)}</context-retired>`);
-  if (run.errorMessage) {
-    lines.push(`  <error>${escapeXml(run.errorMessage)}</error>`);
-  }
-  if (run.integration) lines.push(`  <integration>${escapeXml(JSON.stringify({ effort: run.effort?.name, landedCommit: run.landedCommit, ...run.integration, reason: run.mergeResult?.reason ?? run.integration.reason }))}</integration>`);
-  if (run.worktreeKept) {
-    const attrs = [
-      run.worktreePath && ` path="${escapeXmlAttr(run.worktreePath)}"`,
-      run.worktreeBranch && ` branch="${escapeXmlAttr(run.worktreeBranch)}"`
-    ].filter(Boolean).join("");
-    lines.push(`  <worktree-kept${attrs}>${escapeXml(run.worktreeKept)}</worktree-kept>`);
-  }
-  if (run.hookResult) {
-    const h = run.hookResult;
-    const hookElapsed = elapsedStr(run.finishedAt - h.durationMs, run.finishedAt);
-    lines.push("  <hook>");
-    lines.push(`    <command>${escapeXml(h.command)}</command>`);
-    lines.push(`    <exit-code>${h.exitCode ?? "signal"}</exit-code>`);
-    lines.push(`    <duration>${hookElapsed}</duration>`);
-    lines.push(`    <log-path>${escapeXml(h.logPath)}</log-path>`);
-    if (h.tailText.trim()) {
-      lines.push(
-        `    <tail bytes="${h.tailBytes}" lines="${h.tailLines}">${escapeXml(h.tailText)}</tail>`
-      );
-    }
-    lines.push("  </hook>");
-  }
-  if (run.herdr?.versionWarning) lines.push(`  <warning reason="pi-version">${escapeXml(run.herdr.versionWarning)}</warning>`);
-  if (run.nonSubstantiveFinal) {
-    lines.push(
-      `  <warning reason="${run.nonSubstantiveFinal.reason}">${escapeXml(run.nonSubstantiveFinal.message)}</warning>`
-    );
-  }
-  if (finalText) {
-    lines.push("  <result>");
-    lines.push(escapeXml(finalText));
-    lines.push("  </result>");
-  }
-  lines.push(`  <transcript>${run.transcriptPath}</transcript>`);
-  lines.push("</sub-agent-completed>");
-  lines.push("```");
-  lines.push("");
-  const header = headerLine(run, elapsed, usageStr, resumed);
-  return [header, "", ...lines].join("\n");
-}
-function statusVerb(status) {
-  switch (status) {
-    case "blocked":
-      return "awaiting owner";
-    case "completed":
-      return "completed";
-    case "killed":
-      return "killed";
-    case "timeout":
-      return "timed out";
-    case "hook_failed":
-      return "hook failed";
-    case "aborted":
-      return "aborted (turn limit)";
-    // v0.17
-    default:
-      return "failed";
-  }
-}
-function headerLine(run, elapsed, usageStr, resumed) {
-  const glyph = run.status === "blocked" ? "?" : run.status === "completed" ? "\u2713" : run.status === "killed" ? "\u25A0" : run.status === "timeout" ? "\u23F1" : run.status === "hook_failed" ? "\u2297" : run.status === "aborted" ? "\u23F9" : "\u2717";
-  const verb = statusVerb(run.status) + (run.effort ? ` \u2014 ${effortSummary(run)}` : "");
-  const usagePart = usageStr ? `, ${usageStr}` : "";
-  let line = `## ${glyph} \`${run.persona}\` ${verb} (${elapsed}${usagePart}) \u2014 id \`${run.id}\``;
-  if (resumed) {
-    const lifetimeElapsed = elapsedStr(run.startTime, run.finishedAt);
-    const lifetimeCost = run.usage.cost ? `$${run.usage.cost.toFixed(3)}` : "";
-    const suffix = lifetimeCost ? ` \xB7 lifetime ${lifetimeElapsed} ${lifetimeCost}` : ` \xB7 lifetime ${lifetimeElapsed}`;
-    line += suffix;
-  }
-  return line;
-}
-function escapeXml(s) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-function escapeXmlAttr(s) {
-  return escapeXml(s).replace(/"/g, "&quot;");
-}
-function formatStallNotification(run, args, actions = availableActions(run)) {
-  const elapsed = elapsedStr(run.startTime);
-  const lines = [];
-  lines.push("```xml");
-  lines.push("<sub-agent-stalled>");
-  lines.push(`  <agent-id>${run.id}</agent-id>`);
-  lines.push(`  <persona>${run.persona}</persona>`);
-  lines.push(`  <status>${run.status}</status>`);
-  lines.push(`  <available-actions>${actions.join(",")}</available-actions>`);
-  lines.push(`  <duration>${elapsed}</duration>`);
-  lines.push(
-    `  <stall><severity>${args.severity}</severity><silent-seconds>${args.silentSeconds}</silent-seconds><threshold-seconds>${args.thresholdSeconds}</threshold-seconds></stall>`
-  );
-  if (run.lastToolCall) {
-    lines.push(`  <last-tool>${escapeStallEvidence(boundStallText(run.lastToolCall, 512))}</last-tool>`);
-  }
-  lines.push(args.evidenceReference ? `  <evidence-reference>${escapeStallEvidence(args.evidenceReference)}</evidence-reference>` : `<recent-activity>
-${escapeStallEvidence(args.evidence ?? recentStallEvidence(run))}
-</recent-activity>`);
-  lines.push(`  <guidance>${escapeXml(STALL_GUIDANCE)}</guidance>`);
-  lines.push(`  <transcript>${run.transcriptPath}</transcript>`);
-  lines.push("</sub-agent-stalled>");
-  lines.push("```");
-  lines.push("");
-  const glyph = args.severity === "hard" ? "\u26A0" : "\xB7";
-  const verb = args.severity === "hard" ? "hard-stalled" : "soft-stalled";
-  const lastTool = run.lastToolCall ? `, last: ${escapeStallEvidence(boundStallText(run.lastToolCall, 512))}` : "";
-  const header = `## ${glyph} \`${run.persona}\` ${verb} \u2014 silent ${args.silentSeconds}s${lastTool} \u2014 id \`${run.id}\``;
-  return [header, "", ...lines].join("\n");
-}
-function buildCompletionSendMessageOptions(run) {
-  if (run.mode === "background") {
-    return { triggerTurn: true };
-  }
-  return { triggerTurn: true, deliverAs: "followUp" };
-}
-function buildCompletionMessage(run, canFocus = false, sessionId, registry) {
-  const actions = availableActions(run, canFocus, sessionId, registry);
-  const perSend = perSendNumbers(run);
-  const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
-  const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
-  const stats = [elapsedStr(perSendStart, perSendEnd)];
-  if (run.effort) stats.push(effortSummary(run));
-  const usageStr = formatUsage(perSend);
-  if (usageStr) stats.push(usageStr);
-  stats.push(run.id);
-  if (sendsSinceSpawn(run) >= 1) {
-    const cost = run.usage.cost ? ` $${run.usage.cost.toFixed(3)}` : "";
-    const plural = (n, noun) => `${n} ${noun}${n === 1 ? "" : "s"}`;
-    const sends = [
-      run.resumeCount && plural(run.resumeCount, "resume"),
-      run.steerCount && plural(run.steerCount, "steer")
-    ].filter(Boolean).join(", ");
-    stats.push(`lifetime ${elapsedStr(run.startTime, run.finishedAt)}${cost} (${sends})`);
-  }
-  const notes = [];
-  const ref = resultRef(run);
-  if (ref) notes.push({ slot: "muted", text: `result-ref: ${ref} \u2014 pass files: ['${ref}'] for the full evidence.` });
-  const retirement = contextRetirementNotice(run);
-  if (retirement) {
-    stats.push("session retired; use a fresh child with the handoff");
-    notes.push({ slot: "warning", text: retirement });
-  }
-  if (run.integration) notes.push({ slot: "muted", text: `Integration: ${effortSummary(run)}; ${run.mergeResult?.reason ?? run.integration.state}; verify ${run.integration.verify?.durationMs ?? 0}ms; log ${run.integration.verify?.logPath ?? run.integration.commitHook?.logPath ?? "not run"}` });
-  if (run.errorMessage) notes.push({ slot: "error", text: run.errorMessage });
-  if (run.worktreeKept) notes.push({ slot: "warning", text: run.worktreeKept });
-  if (run.herdr?.versionWarning) notes.push({ slot: "warning", text: run.herdr.versionWarning });
-  if (run.nonSubstantiveFinal) {
-    notes.push({
-      slot: "warning",
-      text: `${run.nonSubstantiveFinal.reason}: ${run.nonSubstantiveFinal.message}`
-    });
-  }
-  if (run.hookResult && run.status !== "blocked") {
-    const h = run.hookResult;
-    const exit = h.exitCode ?? "signal";
-    notes.push({
-      slot: h.passed ? "muted" : "error",
-      text: h.passed ? `hook ok: ${h.command} (${h.logPath})` : `hook failed: ${h.command} (exit ${exit}) \u2192 ${h.logPath}`
-    });
-  }
-  return {
-    customType: "ensemble-notification",
-    content: formatCompletionNotification(run, actions),
-    display: true,
-    details: {
-      kind: run.status === "blocked" ? run.errorMessage ? "answer_failed" : "asked" : "completed",
-      available_actions: actions,
-      id: run.id,
-      persona: run.persona,
-      status: run.status,
-      stats,
-      body: run.status === "blocked" ? `Question ${run.pendingAsk?.askId}: ${run.pendingAsk?.question}
-${run.pendingAsk?.evidence ?? ""}
-Answer via ensemble_send; the original assignment remains unresolved.` : getCompletionText(run),
-      transcriptPath: run.transcriptPath,
-      notes
-    }
-  };
-}
-function buildDialogMessage(run) {
-  const body = "Waiting for a human UI response in the managed herdr pane. This is not a stall. Inspect the pane; conductor does not auto-answer dialogs.";
-  return {
-    customType: "ensemble-notification",
-    display: true,
-    content: `<sub-agent-dialog><agent-id>${escapeXml(run.id)}</agent-id>${body}</sub-agent-dialog>`,
-    details: {
-      kind: "dialog",
-      id: run.id,
-      persona: run.persona,
-      status: run.status,
-      stats: [run.id],
-      body,
-      transcriptPath: run.transcriptPath,
-      notes: []
-    }
-  };
-}
-function buildStallMessage(run, args, canFocus = false, sessionId) {
-  const actions = args.availableActions ?? availableActions(run, canFocus, sessionId);
-  const evidence = args.evidenceReference ? void 0 : args.evidence ?? recentStallEvidence(run);
-  return {
-    customType: "ensemble-notification",
-    content: formatStallNotification(run, { ...args, evidence }, actions),
-    display: true,
-    details: {
-      kind: "stalled",
-      available_actions: actions,
-      id: run.id,
-      persona: run.persona,
-      status: run.status,
-      severity: args.severity,
-      evidence: evidence ?? args.evidenceReference,
-      guidance: STALL_GUIDANCE,
-      stats: [`silent ${args.silentSeconds}s`, `threshold ${args.thresholdSeconds}s`, run.id],
-      body: "",
-      transcriptPath: run.transcriptPath,
-      notes: run.lastToolCall ? [{ slot: "muted", text: `last tool: ${boundStallText(run.lastToolCall, 512)}` }] : []
-    }
-  };
 }
 
 // src/notification-renderer.ts
@@ -13939,8 +14385,8 @@ If your reason isn't on this list, default back to the canonical chain. "I think
 }
 
 // src/child-bridge.ts
-import { closeSync as closeSync6, constants as constants6, fstatSync as fstatSync5, lstatSync as lstatSync3, mkdirSync as mkdirSync13, openSync as openSync6, readFileSync as readFileSync18, realpathSync as realpathSync8, writeSync as writeSync2 } from "node:fs";
-import { basename as basename3, dirname as dirname20, isAbsolute as isAbsolute6, join as join27, resolve as resolve6 } from "node:path";
+import { closeSync as closeSync6, constants as constants6, fstatSync as fstatSync5, lstatSync as lstatSync3, mkdirSync as mkdirSync14, openSync as openSync6, readFileSync as readFileSync19, realpathSync as realpathSync8, writeSync as writeSync2 } from "node:fs";
+import { basename as basename3, dirname as dirname22, isAbsolute as isAbsolute6, join as join28, resolve as resolve6 } from "node:path";
 
 // package.json
 var package_default = {
@@ -14031,7 +14477,7 @@ function readJson(file) {
   const fd = openSync6(file, constants6.O_RDONLY | constants6.O_NOFOLLOW);
   try {
     if (!fstatSync5(fd).isFile()) throw new Error("invalid identity file");
-    return JSON.parse(readFileSync18(fd, "utf8"));
+    return JSON.parse(readFileSync19(fd, "utf8"));
   } finally {
     closeSync6(fd);
   }
@@ -14248,8 +14694,8 @@ function installChildBridge(pi, options = {}) {
     try {
       const runId = env.CONDUCTOR_RUN_ID, runDir3 = env.CONDUCTOR_RUN_DIR;
       const sessionId = ctx.sessionManager.getSessionId(), sessionFile = ctx.sessionManager.getSessionFile();
-      if (!token2(nonce) || !token2(runId) || !path(runDir3) || basename3(runDir3) !== runId || realpathSync8(runDir3) !== runDir3 || !token2(sessionId) || !path(sessionFile) || dirname20(sessionFile) !== join27(runDir3, "session") || realpathSync8(dirname20(sessionFile)) !== dirname20(sessionFile)) throw new Error("invalid invocation paths or identity");
-      const record = readJson(join27(runDir3, "record.json"));
+      if (!token2(nonce) || !token2(runId) || !path(runDir3) || basename3(runDir3) !== runId || realpathSync8(runDir3) !== runDir3 || !token2(sessionId) || !path(sessionFile) || dirname22(sessionFile) !== join28(runDir3, "session") || realpathSync8(dirname22(sessionFile)) !== dirname22(sessionFile)) throw new Error("invalid invocation paths or identity");
+      const record = readJson(join28(runDir3, "record.json"));
       const b = isRecord(record) && record.herdr;
       if (!isRecord(record) || record.id !== runId || record.runtime !== "herdr" || !isRecord(b) || b.runId !== runId || b.launchNonce !== nonce || b.sessionId !== sessionId || b.sessionFile !== sessionFile || env.HERDR_ENV !== "1" || !path(b.socketPath) || b.socketPath !== env.HERDR_SOCKET_PATH || !text2(b.paneId) || b.paneId !== env.HERDR_PANE_ID || !text2(b.tabId) || b.tabId !== env.HERDR_TAB_ID || !text2(b.workspaceId) || b.workspaceId !== env.HERDR_WORKSPACE_ID || !text2(b.terminalId) || typeof b.createdTab !== "boolean") throw new Error("run binding mismatch");
       try {
@@ -14278,10 +14724,10 @@ function installChildBridge(pi, options = {}) {
         at: Date.now()
       };
       if (processState[faultKey]?.has(faultIdentity(expected))) throw new Error("invocation tee previously failed; reload cannot resume it; preserve evidence for the parent");
-      const launchDir = join27(runDir3, "launch");
-      mkdirSync13(launchDir, { recursive: true });
+      const launchDir = join28(runDir3, "launch");
+      mkdirSync14(launchDir, { recursive: true });
       if (realpathSync8(launchDir) !== launchDir) throw new Error("invalid launch directory");
-      const claim = join27(launchDir, `${nonce}.json`);
+      const claim = join28(launchDir, `${nonce}.json`);
       let reload = false;
       try {
         exclusive(claim, expected);
@@ -14292,7 +14738,7 @@ function installChildBridge(pi, options = {}) {
         expected.at = prior.at;
         reload = true;
       }
-      statePath = join27(launchDir, nonce);
+      statePath = join28(launchDir, nonce);
       accepted = statePresent(`${statePath}.accepted.json`, expected) || readInbox(runDir3, nonce).some(({ request }) => (request.kind === "initial" || request.kind === "reply") && readInboxAck(runDir3, request)?.accepted === true);
       closing = statePresent(`${statePath}.closing.json`, expected);
       if (closing && !accepted) throw new Error("closing without initial acceptance");
@@ -14306,7 +14752,7 @@ function installChildBridge(pi, options = {}) {
       phase.signal = signal;
       phase.owner = phaseOwner;
       phases.set(runDir3, phase);
-      fd = openSync6(join27(runDir3, "transcript.jsonl"), constants6.O_APPEND | constants6.O_CREAT | constants6.O_WRONLY | constants6.O_NOFOLLOW, 384);
+      fd = openSync6(join28(runDir3, "transcript.jsonl"), constants6.O_APPEND | constants6.O_CREAT | constants6.O_WRONLY | constants6.O_NOFOLLOW, 384);
       if (!fstatSync5(fd).isFile() || fstatSync5(fd).nlink !== 1) throw new Error("invalid transcript file");
       if (!reload) write({ type: "conductor_child", event: "launch", ...hello });
       timer = setInterval(pump, 250);
@@ -15424,6 +15870,7 @@ async function handleSessionShutdown(event, deps) {
   const uncertain = deps.runs.find((run) => run.status === "integrating" && run.integration?.teardownError);
   if (uncertain) throw new Error(uncertain.integration.teardownError);
   if (event.reason === "reload") {
+    await deps.delegation?.close();
     await Promise.all(deps.runs.filter((run) => run.runtime === "herdr").map(detachHerdrRun));
     return;
   }
@@ -15536,7 +15983,7 @@ var ConductorEventEmitter = class {
 };
 
 // src/rpc-detach.ts
-import { existsSync as existsSync18, unlinkSync as unlinkSync2 } from "node:fs";
+import { existsSync as existsSync19, unlinkSync as unlinkSync2 } from "node:fs";
 function createRpcDetach(filePath, intervalMs = 200) {
   let resolveDetach = () => {
   };
@@ -15544,7 +15991,7 @@ function createRpcDetach(filePath, intervalMs = 200) {
     resolveDetach = res;
   });
   const pollTimer = setInterval(() => {
-    if (existsSync18(filePath)) {
+    if (existsSync19(filePath)) {
       try {
         unlinkSync2(filePath);
       } catch {
@@ -15556,7 +16003,7 @@ function createRpcDetach(filePath, intervalMs = 200) {
   const unregister = () => {
     clearInterval(pollTimer);
     try {
-      if (existsSync18(filePath)) unlinkSync2(filePath);
+      if (existsSync19(filePath)) unlinkSync2(filePath);
     } catch {
     }
   };
@@ -15654,6 +16101,7 @@ function index_default(pi) {
   const getCwdOverride = () => cwdControl.override();
   const registry = new RunRegistry();
   const queue = new SpawnQueue(registry, 4, 1);
+  registry.delegation = new DelegationBroker({ registry, queue, env: process.env });
   const focusModel = new FocusedStreamModel(registry);
   const conductorEvents = new ConductorEventEmitter(pi.events);
   let overlayOpen = false;
@@ -16085,6 +16533,7 @@ function index_default(pi) {
     await handleSessionShutdown(event, {
       runs: registry.list(),
       resetSanitizer: () => sanitizerHook.reset(),
+      delegation: registry.delegation,
       terminateHerdr: (run) => forceTerminate(run, "killed", registry),
       // A1: close the orphan-creation window. SIGTERM races the runtime
       // teardown; without this the on-disk record stays "running" until
