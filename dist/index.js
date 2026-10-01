@@ -8239,7 +8239,7 @@ import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
 
 // src/commands.ts
 import { existsSync as existsSync15, readdirSync as readdirSync8, readFileSync as readFileSync15, statSync as statSync6 } from "node:fs";
-import { join as join25, dirname as dirname18 } from "node:path";
+import { join as join26, dirname as dirname18 } from "node:path";
 
 // src/status-glyph.ts
 var STATUS_GLYPH = {
@@ -9345,8 +9345,519 @@ async function maybeAutoRunGc(opts) {
   return { ran: true, result };
 }
 
+// src/delegation.ts
+import { join as join25 } from "node:path";
+
+// src/compaction-hook.ts
+var KEEP_RECENT_ENVELOPES = 2;
+var RESULT_SUMMARY_MAX_CHARS = 200;
+var ENVELOPE_RE = /<sub-agent-completed>[\s\S]*?<\/sub-agent-completed>/g;
+var RESULT_RE = /(\s*)<result>\n([\s\S]*?)\n(\s*)<\/result>\n?/;
+function summarizeResultText(text3, max = RESULT_SUMMARY_MAX_CHARS) {
+  const collapsed = text3.replace(/\s+/g, " ").trim();
+  if (collapsed.length <= max) return collapsed;
+  return collapsed.slice(0, max).trimEnd() + "\u2026";
+}
+function compactEnvelopeBlock(envelopeXml) {
+  const m = envelopeXml.match(RESULT_RE);
+  if (!m) return envelopeXml;
+  const indent = m[1] ?? "  ";
+  const body = m[2] ?? "";
+  const summary = summarizeResultText(body);
+  const replacement = `${indent}<result-summary>${summary}</result-summary>
+`;
+  return envelopeXml.replace(RESULT_RE, replacement);
+}
+function findEnvelopes(text3) {
+  const out = [];
+  ENVELOPE_RE.lastIndex = 0;
+  let m;
+  while ((m = ENVELOPE_RE.exec(text3)) !== null) {
+    out.push({ start: m.index, end: m.index + m[0].length, block: m[0] });
+  }
+  return out;
+}
+function rewriteSelected(text3, firstEnvelopeIdxOffset, shouldCompact) {
+  const hits = findEnvelopes(text3);
+  if (hits.length === 0) return text3;
+  let out = "";
+  let cursor = 0;
+  for (let i = 0; i < hits.length; i++) {
+    const hit = hits[i];
+    out += text3.slice(cursor, hit.start);
+    const globalIdx = firstEnvelopeIdxOffset + i;
+    out += shouldCompact(globalIdx) ? compactEnvelopeBlock(hit.block) : hit.block;
+    cursor = hit.end;
+  }
+  out += text3.slice(cursor);
+  return out;
+}
+function rewriteTextInMessage(msg, rewrite) {
+  if (msg == null) return msg;
+  const content = msg.content;
+  if (typeof content === "string") {
+    const next = rewrite(content);
+    return next === content ? msg : { ...msg, content: next };
+  }
+  if (Array.isArray(content)) {
+    let changed = false;
+    const nextBlocks = content.map((block) => {
+      if (block && typeof block === "object" && block.type === "text" && typeof block.text === "string") {
+        const nextText = rewrite(block.text);
+        if (nextText !== block.text) {
+          changed = true;
+          return { ...block, text: nextText };
+        }
+      }
+      return block;
+    });
+    return changed ? { ...msg, content: nextBlocks } : msg;
+  }
+  return msg;
+}
+function compactOlderEnvelopes(messages, keepRecent = KEEP_RECENT_ENVELOPES) {
+  let total = 0;
+  const perMessageStart = new Array(messages.length).fill(0);
+  for (let i = 0; i < messages.length; i++) {
+    perMessageStart[i] = total;
+    const msg = messages[i];
+    const content = msg?.content;
+    if (typeof content === "string") {
+      total += findEnvelopes(content).length;
+    } else if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block && typeof block === "object" && block.type === "text" && typeof block.text === "string") {
+          total += findEnvelopes(block.text).length;
+        }
+      }
+    }
+  }
+  if (total === 0) return messages;
+  const compactBefore = total - keepRecent;
+  if (compactBefore <= 0) return messages;
+  const shouldCompact = (globalIdx) => globalIdx < compactBefore;
+  let runningGlobalIdx = 0;
+  return messages.map((msg) => {
+    const before = runningGlobalIdx;
+    return rewriteTextInMessage(msg, (text3) => {
+      const hits = findEnvelopes(text3);
+      if (hits.length === 0) return text3;
+      const startIdx = runningGlobalIdx;
+      runningGlobalIdx += hits.length;
+      return rewriteSelected(text3, startIdx, shouldCompact);
+    });
+    void before;
+  });
+}
+function installCompactionHook(pi, opts = {}) {
+  const keepRecent = opts.keepRecent ?? KEEP_RECENT_ENVELOPES;
+  pi.on("context", async (event) => {
+    const messages = compactOlderEnvelopes(event.messages, keepRecent);
+    return { messages };
+  });
+  return {
+    reset: () => {
+    }
+  };
+}
+
+// src/notifications.ts
+function perSendNumbers(run) {
+  const startedAt = run.thisInvocationStartedAt ?? run.startTime;
+  const finishedAt = run.finishedAt ?? Date.now();
+  const baseline = run.thisInvocationUsageBaseline ?? {
+    turns: 0,
+    input: 0,
+    output: 0,
+    cost: 0
+  };
+  return {
+    durationMs: Math.max(0, finishedAt - startedAt),
+    turns: Math.max(0, run.usage.turns - baseline.turns),
+    input: Math.max(0, run.usage.input - baseline.input),
+    output: Math.max(0, run.usage.output - baseline.output),
+    cost: Math.max(0, run.usage.cost - baseline.cost)
+  };
+}
+function formatCompletionNotification(run, actions = availableActions(run)) {
+  if (run.status === "blocked") {
+    const ask = run.pendingAsk;
+    const tag = run.errorMessage ? "sub-agent-answer-failed" : "sub-agent-asked";
+    const error = run.errorMessage ? `
+  <error>${escapeXml(run.errorMessage)}</error>` : "";
+    return `<${tag}>${error}
+  <agent-id>${escapeXml(run.id)}</agent-id>
+  <status>blocked</status>
+  <ask-id>${escapeXml(ask?.askId ?? "")}</ask-id>
+  <question>${escapeXml(ask?.question ?? "Question unavailable; inspect transcript")}</question>
+${ask?.evidence ?? ""}
+  <available-actions>${actions.join(", ")}</available-actions>
+  <guidance>Answer via ensemble_send on this agent id. Assignment unresolved; do independent work while deciding.</guidance>
+  <transcript>${escapeXml(run.transcriptPath)}</transcript>
+</${tag}>`;
+  }
+  const finalText = getCompletionText(run);
+  const perSend = perSendNumbers(run);
+  const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
+  const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
+  const elapsed = elapsedStr(perSendStart, perSendEnd);
+  const usageStr = formatUsage({
+    turns: perSend.turns,
+    input: perSend.input,
+    output: perSend.output,
+    cost: perSend.cost
+  });
+  const resumed = sendsSinceSpawn(run) >= 1;
+  const lines = [];
+  lines.push("```xml");
+  lines.push("<sub-agent-completed>");
+  const ref = resultRef(run);
+  if (ref) lines.push(`  <result-ref>${ref}</result-ref>`);
+  lines.push(`  <agent-id>${run.id}</agent-id>`);
+  lines.push(`  <persona>${run.persona}</persona>`);
+  lines.push(`  <status>${run.status}</status>`);
+  lines.push(`  <available-actions>${actions.join(",")}</available-actions>`);
+  lines.push(`  <duration>${elapsed}</duration>`);
+  lines.push(
+    `  <usage><turns>${perSend.turns}</turns><input>${perSend.input}</input><output>${perSend.output}</output><cost>${perSend.cost.toFixed(4)}</cost></usage>`
+  );
+  if (resumed) {
+    const lifetimeElapsed = elapsedStr(run.startTime, run.finishedAt);
+    lines.push("  <lifetime>");
+    lines.push(`    <duration>${lifetimeElapsed}</duration>`);
+    lines.push(
+      `    <usage><turns>${run.usage.turns}</turns><input>${run.usage.input}</input><output>${run.usage.output}</output><cost>${run.usage.cost.toFixed(4)}</cost></usage>`
+    );
+    lines.push(`    <cost>${run.usage.cost.toFixed(4)}</cost>`);
+    lines.push(`    <resumes>${run.resumeCount ?? 0}</resumes>`);
+    if (run.steerCount) lines.push(`    <steers>${run.steerCount}</steers>`);
+    lines.push("  </lifetime>");
+  }
+  const retirement = contextRetirementNotice(run);
+  if (retirement) lines.push(`  <context-retired>${escapeXml(retirement)}</context-retired>`);
+  if (run.errorMessage) {
+    lines.push(`  <error>${escapeXml(run.errorMessage)}</error>`);
+  }
+  if (run.integration) lines.push(`  <integration>${escapeXml(JSON.stringify({ effort: run.effort?.name, landedCommit: run.landedCommit, ...run.integration, reason: run.mergeResult?.reason ?? run.integration.reason }))}</integration>`);
+  if (run.worktreeKept) {
+    const attrs = [
+      run.worktreePath && ` path="${escapeXmlAttr(run.worktreePath)}"`,
+      run.worktreeBranch && ` branch="${escapeXmlAttr(run.worktreeBranch)}"`
+    ].filter(Boolean).join("");
+    lines.push(`  <worktree-kept${attrs}>${escapeXml(run.worktreeKept)}</worktree-kept>`);
+  }
+  if (run.hookResult) {
+    const h = run.hookResult;
+    const hookElapsed = elapsedStr(run.finishedAt - h.durationMs, run.finishedAt);
+    lines.push("  <hook>");
+    lines.push(`    <command>${escapeXml(h.command)}</command>`);
+    lines.push(`    <exit-code>${h.exitCode ?? "signal"}</exit-code>`);
+    lines.push(`    <duration>${hookElapsed}</duration>`);
+    lines.push(`    <log-path>${escapeXml(h.logPath)}</log-path>`);
+    if (h.tailText.trim()) {
+      lines.push(
+        `    <tail bytes="${h.tailBytes}" lines="${h.tailLines}">${escapeXml(h.tailText)}</tail>`
+      );
+    }
+    lines.push("  </hook>");
+  }
+  if (run.herdr?.versionWarning) lines.push(`  <warning reason="pi-version">${escapeXml(run.herdr.versionWarning)}</warning>`);
+  if (run.nonSubstantiveFinal) {
+    lines.push(
+      `  <warning reason="${run.nonSubstantiveFinal.reason}">${escapeXml(run.nonSubstantiveFinal.message)}</warning>`
+    );
+  }
+  if (finalText) {
+    lines.push("  <result>");
+    lines.push(escapeXml(finalText));
+    lines.push("  </result>");
+  }
+  lines.push(`  <transcript>${run.transcriptPath}</transcript>`);
+  lines.push("</sub-agent-completed>");
+  lines.push("```");
+  lines.push("");
+  const header = headerLine(run, elapsed, usageStr, resumed);
+  return [header, "", ...lines].join("\n");
+}
+function statusVerb(status) {
+  switch (status) {
+    case "blocked":
+      return "awaiting owner";
+    case "completed":
+      return "completed";
+    case "killed":
+      return "killed";
+    case "timeout":
+      return "timed out";
+    case "hook_failed":
+      return "hook failed";
+    case "aborted":
+      return "aborted (turn limit)";
+    // v0.17
+    default:
+      return "failed";
+  }
+}
+function headerLine(run, elapsed, usageStr, resumed) {
+  const glyph = run.status === "blocked" ? "?" : run.status === "completed" ? "\u2713" : run.status === "killed" ? "\u25A0" : run.status === "timeout" ? "\u23F1" : run.status === "hook_failed" ? "\u2297" : run.status === "aborted" ? "\u23F9" : "\u2717";
+  const verb = statusVerb(run.status) + (run.effort ? ` \u2014 ${effortSummary(run)}` : "");
+  const usagePart = usageStr ? `, ${usageStr}` : "";
+  let line = `## ${glyph} \`${run.persona}\` ${verb} (${elapsed}${usagePart}) \u2014 id \`${run.id}\``;
+  if (resumed) {
+    const lifetimeElapsed = elapsedStr(run.startTime, run.finishedAt);
+    const lifetimeCost = run.usage.cost ? `$${run.usage.cost.toFixed(3)}` : "";
+    const suffix = lifetimeCost ? ` \xB7 lifetime ${lifetimeElapsed} ${lifetimeCost}` : ` \xB7 lifetime ${lifetimeElapsed}`;
+    line += suffix;
+  }
+  return line;
+}
+function escapeXml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function escapeXmlAttr(s) {
+  return escapeXml(s).replace(/"/g, "&quot;");
+}
+function formatStallNotification(run, args, actions = availableActions(run)) {
+  const elapsed = elapsedStr(run.startTime);
+  const lines = [];
+  lines.push("```xml");
+  lines.push("<sub-agent-stalled>");
+  lines.push(`  <agent-id>${run.id}</agent-id>`);
+  lines.push(`  <persona>${run.persona}</persona>`);
+  lines.push(`  <status>${run.status}</status>`);
+  lines.push(`  <available-actions>${actions.join(",")}</available-actions>`);
+  lines.push(`  <duration>${elapsed}</duration>`);
+  lines.push(
+    `  <stall><severity>${args.severity}</severity><silent-seconds>${args.silentSeconds}</silent-seconds><threshold-seconds>${args.thresholdSeconds}</threshold-seconds></stall>`
+  );
+  if (run.lastToolCall) {
+    lines.push(`  <last-tool>${escapeStallEvidence(boundStallText(run.lastToolCall, 512))}</last-tool>`);
+  }
+  lines.push(args.evidenceReference ? `  <evidence-reference>${escapeStallEvidence(args.evidenceReference)}</evidence-reference>` : `<recent-activity>
+${escapeStallEvidence(args.evidence ?? recentStallEvidence(run))}
+</recent-activity>`);
+  lines.push(`  <guidance>${escapeXml(STALL_GUIDANCE)}</guidance>`);
+  lines.push(`  <transcript>${run.transcriptPath}</transcript>`);
+  lines.push("</sub-agent-stalled>");
+  lines.push("```");
+  lines.push("");
+  const glyph = args.severity === "hard" ? "\u26A0" : "\xB7";
+  const verb = args.severity === "hard" ? "hard-stalled" : "soft-stalled";
+  const lastTool = run.lastToolCall ? `, last: ${escapeStallEvidence(boundStallText(run.lastToolCall, 512))}` : "";
+  const header = `## ${glyph} \`${run.persona}\` ${verb} \u2014 silent ${args.silentSeconds}s${lastTool} \u2014 id \`${run.id}\``;
+  return [header, "", ...lines].join("\n");
+}
+function buildCompletionSendMessageOptions(run) {
+  if (run.mode === "background") {
+    return { triggerTurn: true };
+  }
+  return { triggerTurn: true, deliverAs: "followUp" };
+}
+function buildCompletionMessage(run, canFocus = false, sessionId, registry) {
+  const actions = availableActions(run, canFocus, sessionId, registry);
+  const perSend = perSendNumbers(run);
+  const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
+  const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
+  const stats = [elapsedStr(perSendStart, perSendEnd)];
+  if (run.effort) stats.push(effortSummary(run));
+  const usageStr = formatUsage(perSend);
+  if (usageStr) stats.push(usageStr);
+  stats.push(run.id);
+  if (sendsSinceSpawn(run) >= 1) {
+    const cost = run.usage.cost ? ` $${run.usage.cost.toFixed(3)}` : "";
+    const plural = (n, noun) => `${n} ${noun}${n === 1 ? "" : "s"}`;
+    const sends = [
+      run.resumeCount && plural(run.resumeCount, "resume"),
+      run.steerCount && plural(run.steerCount, "steer")
+    ].filter(Boolean).join(", ");
+    stats.push(`lifetime ${elapsedStr(run.startTime, run.finishedAt)}${cost} (${sends})`);
+  }
+  const notes = [];
+  const ref = resultRef(run);
+  if (ref) notes.push({ slot: "muted", text: `result-ref: ${ref} \u2014 pass files: ['${ref}'] for the full evidence.` });
+  const retirement = contextRetirementNotice(run);
+  if (retirement) {
+    stats.push("session retired; use a fresh child with the handoff");
+    notes.push({ slot: "warning", text: retirement });
+  }
+  if (run.integration) notes.push({ slot: "muted", text: `Integration: ${effortSummary(run)}; ${run.mergeResult?.reason ?? run.integration.state}; verify ${run.integration.verify?.durationMs ?? 0}ms; log ${run.integration.verify?.logPath ?? run.integration.commitHook?.logPath ?? "not run"}` });
+  if (run.errorMessage) notes.push({ slot: "error", text: run.errorMessage });
+  if (run.worktreeKept) notes.push({ slot: "warning", text: run.worktreeKept });
+  if (run.herdr?.versionWarning) notes.push({ slot: "warning", text: run.herdr.versionWarning });
+  if (run.nonSubstantiveFinal) {
+    notes.push({
+      slot: "warning",
+      text: `${run.nonSubstantiveFinal.reason}: ${run.nonSubstantiveFinal.message}`
+    });
+  }
+  if (run.hookResult && run.status !== "blocked") {
+    const h = run.hookResult;
+    const exit = h.exitCode ?? "signal";
+    notes.push({
+      slot: h.passed ? "muted" : "error",
+      text: h.passed ? `hook ok: ${h.command} (${h.logPath})` : `hook failed: ${h.command} (exit ${exit}) \u2192 ${h.logPath}`
+    });
+  }
+  return {
+    customType: "ensemble-notification",
+    content: formatCompletionNotification(run, actions),
+    display: true,
+    details: {
+      kind: run.status === "blocked" ? run.errorMessage ? "answer_failed" : "asked" : "completed",
+      available_actions: actions,
+      id: run.id,
+      persona: run.persona,
+      status: run.status,
+      stats,
+      body: run.status === "blocked" ? `Question ${run.pendingAsk?.askId}: ${run.pendingAsk?.question}
+${run.pendingAsk?.evidence ?? ""}
+Answer via ensemble_send; the original assignment remains unresolved.` : getCompletionText(run),
+      transcriptPath: run.transcriptPath,
+      notes
+    }
+  };
+}
+function buildDialogMessage(run) {
+  const body = "Waiting for a human UI response in the managed herdr pane. This is not a stall. Inspect the pane; conductor does not auto-answer dialogs.";
+  return {
+    customType: "ensemble-notification",
+    display: true,
+    content: `<sub-agent-dialog><agent-id>${escapeXml(run.id)}</agent-id>${body}</sub-agent-dialog>`,
+    details: {
+      kind: "dialog",
+      id: run.id,
+      persona: run.persona,
+      status: run.status,
+      stats: [run.id],
+      body,
+      transcriptPath: run.transcriptPath,
+      notes: []
+    }
+  };
+}
+function buildStallMessage(run, args, canFocus = false, sessionId) {
+  const actions = args.availableActions ?? availableActions(run, canFocus, sessionId);
+  const evidence = args.evidenceReference ? void 0 : args.evidence ?? recentStallEvidence(run);
+  return {
+    customType: "ensemble-notification",
+    content: formatStallNotification(run, { ...args, evidence }, actions),
+    display: true,
+    details: {
+      kind: "stalled",
+      available_actions: actions,
+      id: run.id,
+      persona: run.persona,
+      status: run.status,
+      severity: args.severity,
+      evidence: evidence ?? args.evidenceReference,
+      guidance: STALL_GUIDANCE,
+      stats: [`silent ${args.silentSeconds}s`, `threshold ${args.thresholdSeconds}s`, run.id],
+      body: "",
+      transcriptPath: run.transcriptPath,
+      notes: run.lastToolCall ? [{ slot: "muted", text: `last tool: ${boundStallText(run.lastToolCall, 512)}` }] : []
+    }
+  };
+}
+
+// src/delegation.ts
+var MAX_DELEGATE_TASK_BYTES = 65536;
+var MAX_OUTSTANDING_DELEGATIONS = 8;
+var DELEGATE_RESPONSE_GRACE_MS = 12e4;
+var RELOAD_INTERRUPTED = "lead /reload interrupted subprocess delegation; resume with ensemble_send";
+var CALL_ID = /^[A-Za-z0-9_-]{1,128}$/;
+function isDelegateCallId(id) {
+  return typeof id === "string" && CALL_ID.test(id);
+}
+function delegatePaths(runDir2, toolCallId) {
+  const dir = join25(runDir2, "delegate");
+  return { dir, claim: join25(dir, `${toolCallId}.claim.json`), response: join25(dir, `${toolCallId}.json`) };
+}
+function parseDelegateArgs(args) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return { ok: false, reason: "arguments must be an object" };
+  const a = args;
+  if (typeof a.persona !== "string" || !a.persona.trim()) return { ok: false, reason: "persona must be a non-empty string" };
+  if (typeof a.task !== "string" || !a.task.trim()) return { ok: false, reason: "task must contain non-whitespace text" };
+  if (Buffer.byteLength(a.task) > MAX_DELEGATE_TASK_BYTES) return { ok: false, reason: `task exceeds ${MAX_DELEGATE_TASK_BYTES} bytes` };
+  if (a.files !== void 0 && (!Array.isArray(a.files) || a.files.some((f) => typeof f !== "string"))) return { ok: false, reason: "files must be an array of strings" };
+  if (a.timeout_minutes !== void 0 && (typeof a.timeout_minutes !== "number" || !Number.isInteger(a.timeout_minutes) || a.timeout_minutes < 1)) {
+    return { ok: false, reason: "timeout_minutes must be a positive integer" };
+  }
+  return { ok: true, args: { persona: a.persona, task: a.task, files: a.files, timeout_minutes: a.timeout_minutes } };
+}
+function validateDelegateRequest(input) {
+  const parsed = parseDelegateArgs(input.args);
+  if (!parsed.ok) return parsed;
+  const { args } = parsed;
+  const { parent, target } = input;
+  const scope = { depth: parent.depth ?? 1, delegateAllow: parent.delegateAllow ?? [] };
+  if (!isDelegating(scope)) return { ok: false, reason: "only a depth-1 delegator may delegate" };
+  if (parent.runtime === "herdr") return { ok: false, reason: "delegation supports subprocess parents only until N5" };
+  if (parent.status !== "running") return { ok: false, reason: `parent ${parent.id} is ${parent.status}, not running` };
+  if (!input.current) return { ok: false, reason: `parent ${parent.id} is not the current registered run` };
+  if (!scope.delegateAllow.includes(args.persona)) {
+    return { ok: false, reason: `persona ${args.persona} is not in this run's delegation allowlist (${scope.delegateAllow.join(", ")})` };
+  }
+  if (!target || target.name !== args.persona) return { ok: false, reason: `persona ${args.persona} is not available` };
+  if (WRITE_CAPABLE_PERSONAS.has(target.name)) return { ok: false, reason: `persona ${target.name} is write-capable` };
+  if (target.readOnly !== true) return { ok: false, reason: `persona ${target.name} is not read_only` };
+  if (input.outstanding >= MAX_OUTSTANDING_DELEGATIONS) {
+    return { ok: false, reason: `parent ${parent.id} already has ${MAX_OUTSTANDING_DELEGATIONS} delegate calls outstanding` };
+  }
+  if (parent.deadlineAt === void 0) return { ok: false, reason: `parent ${parent.id} deadline is unknown` };
+  const remaining = parent.deadlineAt - input.now;
+  if (remaining <= 0) return { ok: false, reason: `parent ${parent.id} has no time left` };
+  const timeoutMs = Math.min(input.personaTimeoutMs, remaining, args.timeout_minutes === void 0 ? Infinity : args.timeout_minutes * 6e4);
+  return { ok: true, timeoutMs, deadlineAt: input.now + timeoutMs };
+}
+function awaitingChildren(parent, runs) {
+  if (!consumesSlot(parent) || runScopeError(parent) || !isDelegating(childToolScope(parent)) || !runs.includes(parent)) return 0;
+  return (parent.provisionalDelegations ?? 0) + runs.filter((c) => c.depth === 2 && c.parentRunId === parent.id && !isSettled(c.status)).length;
+}
+function awaitingDelegation(run, runs) {
+  return awaitingChildren(run, runs) > 0 || (run.pendingDelegations ?? 0) > 0;
+}
+function delegationLoad(runs) {
+  const active = runs.filter(consumesSlot);
+  return { active: active.length, awaiting: active.filter((r) => awaitingChildren(r, runs) > 0).length };
+}
+function delegateWaitDeadline(o) {
+  const limits = [
+    o.personaTimeoutMs,
+    o.timeoutMinutes === void 0 ? void 0 : o.timeoutMinutes * 6e4,
+    o.ownDeadlineAt === void 0 ? void 0 : o.ownDeadlineAt - o.startedAt
+  ].filter((n) => n !== void 0 && Number.isFinite(n));
+  return o.startedAt + Math.max(0, Math.min(...limits, 24 * 36e5)) + DELEGATE_RESPONSE_GRACE_MS;
+}
+var escapeXml2 = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+var escapeAttr2 = (s) => escapeXml2(s).replace(/"/g, "&quot;");
+function formatDelegateEnvelope(leaf, limit) {
+  const full = formatCompletionNotification(leaf, []);
+  if (Buffer.byteLength(full) <= limit) return full;
+  const text3 = getCompletionText(leaf);
+  const omitted = `  <result-omitted bytes="${Buffer.byteLength(text3)}" path="${escapeAttr2(leaf.finalPath)}">envelope exceeded ${limit} bytes; read the full result from result-ref or path</result-omitted>`;
+  const compact = compactEnvelopeBlock(full).replace("</sub-agent-completed>", `${omitted}
+</sub-agent-completed>`);
+  if (Buffer.byteLength(compact) <= limit) return compact;
+  const ref = resultRef(leaf);
+  const lines = [
+    "```xml",
+    "<sub-agent-completed>",
+    `  <agent-id>${escapeXml2(leaf.id)}</agent-id>`,
+    `  <persona>${escapeXml2(leaf.persona)}</persona>`,
+    `  <status>${leaf.status}</status>`,
+    ...ref ? [`  <result-ref>${ref}</result-ref>`] : [],
+    ...leaf.errorMessage ? [`  <error-omitted bytes="${Buffer.byteLength(leaf.errorMessage)}">see the transcript</error-omitted>`] : [],
+    ...text3 ? [`  <result-summary>${escapeXml2(summarizeResultText(text3))}</result-summary>`] : [],
+    omitted,
+    `  <transcript>${escapeXml2(leaf.transcriptPath)}</transcript>`,
+    "</sub-agent-completed>",
+    "```"
+  ];
+  return lines.join("\n");
+}
+
 // src/watchdog.ts
-function evaluateRun(run, state, config, now) {
+function evaluateRun(run, state, config, now, awaiting = false) {
   const current = state ?? { kind: "fresh" };
   if (run.status !== "running" || waitingForDialog(run)) {
     return { transition: { kind: "none" }, nextState: current };
@@ -9354,7 +9865,7 @@ function evaluateRun(run, state, config, now) {
   if (run.pausedAt !== void 0) {
     return { transition: { kind: "none" }, nextState: current };
   }
-  if (run.hookExecuting === true) {
+  if (run.hookExecuting === true || awaiting) {
     return { transition: { kind: "none" }, nextState: current };
   }
   if (!isObservableHere(run)) {
@@ -9428,10 +9939,10 @@ function resolveKillOnStallForPersona(run, defaultKillOnStall, isWriteCapablePer
   if (defaultKillOnStall !== false) return defaultKillOnStall;
   return isWriteCapablePersona;
 }
-function classifyStall(run, nowMs, defaults) {
+function classifyStall(run, nowMs, defaults, awaiting = false) {
   if (run.status !== "running" || waitingForDialog(run)) return null;
   if (run.pausedAt !== void 0) return null;
-  if (run.hookExecuting === true) return null;
+  if (run.hookExecuting === true || awaiting) return null;
   if (!isObservableHere(run)) return null;
   const eff = effectiveConfig(run, defaults);
   const silentMs = Math.max(0, nowMs - run.lastEventAt);
@@ -9513,6 +10024,7 @@ var Watchdog = class {
     const now = this.deps.now();
     const runs = this.deps.registry.list();
     const ids = new Set(runs.map((run) => run.id));
+    const awaiting = (run) => awaitingDelegation(run, runs);
     for (const id of this.states.keys()) if (!ids.has(id)) this.states.delete(id);
     for (const run of runs) {
       if (run.status === "running" && isObservableHere(run) && waitingForDialog(run) && !run.herdrPrompts.notified) {
@@ -9520,7 +10032,7 @@ var Watchdog = class {
         this.deps.dialog?.(run);
       }
       if (this.deps.isEnabled && !this.deps.isEnabled()) continue;
-      if (classifyStall(run, now, this.deps.config) === null) {
+      if (classifyStall(run, now, this.deps.config, awaiting(run)) === null) {
         this.states.delete(run.id);
         run.stalledSince = void 0;
         continue;
@@ -9538,7 +10050,7 @@ var Watchdog = class {
       if (episode?.pending) continue;
       const prev = episode?.state;
       const effective = effectiveConfig(run, this.deps.config);
-      let { transition, nextState } = evaluateRun(run, prev, effective, now);
+      let { transition, nextState } = evaluateRun(run, prev, effective, now, awaiting(run));
       const reminder = transition.kind === "none" && nextState.kind === "soft" && episode !== void 0 && now >= episode.nextReminderAt;
       if (reminder) {
         transition = {
@@ -9581,7 +10093,7 @@ var Watchdog = class {
         saved.pending = true;
         void read2().catch(() => "Live pane diagnostic unavailable.").then((evidence) => {
           saved.pending = false;
-          if (this.disposed || this.states.get(run.id) !== saved || run.lastEventAt !== saved.lastEventAt || run.herdr?.launchNonce !== saved.herdrNonce || classifyStall(run, this.deps.now(), this.deps.config) === null) return;
+          if (this.disposed || this.states.get(run.id) !== saved || run.lastEventAt !== saved.lastEventAt || run.herdr?.launchNonce !== saved.herdrNonce || classifyStall(run, this.deps.now(), this.deps.config, awaitingDelegation(run, this.deps.registry.list())) === null) return;
           this.dispatch(run, transition, effective, { ...notice, evidence: boundStallText(`${notice.evidence}
 
 Live pane (untrusted):
@@ -9635,7 +10147,7 @@ ${evidence}`, 16 * 1024 - 64) });
         }
         const nowAfter = this.deps.now();
         const stillStaleMs = nowAfter - run.lastEventAt;
-        if (stillStaleMs < effective.hardThresholdSeconds * 1e3 || classifyStall(run, nowAfter, effective) === null) {
+        if (stillStaleMs < effective.hardThresholdSeconds * 1e3 || classifyStall(run, nowAfter, effective, awaitingDelegation(run, this.deps.registry.list())) === null) {
           run.stalledSince = void 0;
           this.states.delete(run.id);
           this.deps.log.info(
@@ -10130,7 +10642,7 @@ function runHistory(_opts, ctx, arg) {
         }
       },
       readRecord: (id) => {
-        const p = join25(runDir(id), "record.json");
+        const p = join26(runDir(id), "record.json");
         try {
           return JSON.parse(readFileSync15(p, "utf8"));
         } catch {
@@ -10138,7 +10650,7 @@ function runHistory(_opts, ctx, arg) {
         }
       },
       readFinalText: (id) => {
-        const p = join25(runDir(id), "final.md");
+        const p = join26(runDir(id), "final.md");
         try {
           return readFileSync15(p, "utf8");
         } catch {
@@ -10147,7 +10659,7 @@ function runHistory(_opts, ctx, arg) {
       },
       statMtime: (id) => {
         try {
-          return statSync6(join25(runDir(id), "record.json")).mtimeMs;
+          return statSync6(join26(runDir(id), "record.json")).mtimeMs;
         } catch {
           try {
             return statSync6(runDir(id)).mtimeMs;
@@ -10156,8 +10668,8 @@ function runHistory(_opts, ctx, arg) {
           }
         }
       },
-      isPinned: (id) => existsSync15(join25(runDir(id), ".pinned")),
-      isArchived: (id) => existsSync15(join25(runDir(id), ".archived"))
+      isPinned: (id) => existsSync15(join26(runDir(id), ".pinned")),
+      isArchived: (id) => existsSync15(join26(runDir(id), ".archived"))
     },
     { limit }
   );
@@ -10175,7 +10687,7 @@ async function runPin(ctx, arg) {
     return;
   }
   const root = runsRoot();
-  if (!existsSync15(join25(root, id))) {
+  if (!existsSync15(join26(root, id))) {
     ctx.ui.notify(`No such run: ${id}`, "warning");
     return;
   }
@@ -10201,7 +10713,7 @@ async function runUnpin(ctx, arg) {
     return;
   }
   const root = runsRoot();
-  if (!existsSync15(join25(root, id))) {
+  if (!existsSync15(join26(root, id))) {
     ctx.ui.notify(`No such run: ${id}`, "warning");
     return;
   }
@@ -10457,7 +10969,7 @@ function buildWatchdogStatusReport(args) {
     "  " + "id".padEnd(idW) + "  " + "persona".padEnd(personaW) + "  " + "silent".padEnd(7) + "  " + "state".padEnd(7) + "  " + "threshold".padEnd(11) + "  action"
   );
   for (const r of active) {
-    const c = classifyStall(r, now, watchdogConfig);
+    const c = classifyStall(r, now, watchdogConfig, awaitingDelegation(r, registry.list()));
     const silent = c ? `${c.silentSeconds}s` : "\u2014";
     const state = c ? c.severity : "fresh";
     const soft = c ? c.softThresholdSeconds : watchdogConfig.softThresholdSeconds;
@@ -10851,508 +11363,6 @@ function collapseSteerableCascade(inputs) {
 import { existsSync as existsSync17, mkdirSync as mkdirSync12, readFileSync as readFileSync17, watch as watch2 } from "node:fs";
 import { dirname as dirname19 } from "node:path";
 import { Type as Type2 } from "@sinclair/typebox";
-
-// src/delegation.ts
-import { join as join26 } from "node:path";
-
-// src/compaction-hook.ts
-var KEEP_RECENT_ENVELOPES = 2;
-var RESULT_SUMMARY_MAX_CHARS = 200;
-var ENVELOPE_RE = /<sub-agent-completed>[\s\S]*?<\/sub-agent-completed>/g;
-var RESULT_RE = /(\s*)<result>\n([\s\S]*?)\n(\s*)<\/result>\n?/;
-function summarizeResultText(text3, max = RESULT_SUMMARY_MAX_CHARS) {
-  const collapsed = text3.replace(/\s+/g, " ").trim();
-  if (collapsed.length <= max) return collapsed;
-  return collapsed.slice(0, max).trimEnd() + "\u2026";
-}
-function compactEnvelopeBlock(envelopeXml) {
-  const m = envelopeXml.match(RESULT_RE);
-  if (!m) return envelopeXml;
-  const indent = m[1] ?? "  ";
-  const body = m[2] ?? "";
-  const summary = summarizeResultText(body);
-  const replacement = `${indent}<result-summary>${summary}</result-summary>
-`;
-  return envelopeXml.replace(RESULT_RE, replacement);
-}
-function findEnvelopes(text3) {
-  const out = [];
-  ENVELOPE_RE.lastIndex = 0;
-  let m;
-  while ((m = ENVELOPE_RE.exec(text3)) !== null) {
-    out.push({ start: m.index, end: m.index + m[0].length, block: m[0] });
-  }
-  return out;
-}
-function rewriteSelected(text3, firstEnvelopeIdxOffset, shouldCompact) {
-  const hits = findEnvelopes(text3);
-  if (hits.length === 0) return text3;
-  let out = "";
-  let cursor = 0;
-  for (let i = 0; i < hits.length; i++) {
-    const hit = hits[i];
-    out += text3.slice(cursor, hit.start);
-    const globalIdx = firstEnvelopeIdxOffset + i;
-    out += shouldCompact(globalIdx) ? compactEnvelopeBlock(hit.block) : hit.block;
-    cursor = hit.end;
-  }
-  out += text3.slice(cursor);
-  return out;
-}
-function rewriteTextInMessage(msg, rewrite) {
-  if (msg == null) return msg;
-  const content = msg.content;
-  if (typeof content === "string") {
-    const next = rewrite(content);
-    return next === content ? msg : { ...msg, content: next };
-  }
-  if (Array.isArray(content)) {
-    let changed = false;
-    const nextBlocks = content.map((block) => {
-      if (block && typeof block === "object" && block.type === "text" && typeof block.text === "string") {
-        const nextText = rewrite(block.text);
-        if (nextText !== block.text) {
-          changed = true;
-          return { ...block, text: nextText };
-        }
-      }
-      return block;
-    });
-    return changed ? { ...msg, content: nextBlocks } : msg;
-  }
-  return msg;
-}
-function compactOlderEnvelopes(messages, keepRecent = KEEP_RECENT_ENVELOPES) {
-  let total = 0;
-  const perMessageStart = new Array(messages.length).fill(0);
-  for (let i = 0; i < messages.length; i++) {
-    perMessageStart[i] = total;
-    const msg = messages[i];
-    const content = msg?.content;
-    if (typeof content === "string") {
-      total += findEnvelopes(content).length;
-    } else if (Array.isArray(content)) {
-      for (const block of content) {
-        if (block && typeof block === "object" && block.type === "text" && typeof block.text === "string") {
-          total += findEnvelopes(block.text).length;
-        }
-      }
-    }
-  }
-  if (total === 0) return messages;
-  const compactBefore = total - keepRecent;
-  if (compactBefore <= 0) return messages;
-  const shouldCompact = (globalIdx) => globalIdx < compactBefore;
-  let runningGlobalIdx = 0;
-  return messages.map((msg) => {
-    const before = runningGlobalIdx;
-    return rewriteTextInMessage(msg, (text3) => {
-      const hits = findEnvelopes(text3);
-      if (hits.length === 0) return text3;
-      const startIdx = runningGlobalIdx;
-      runningGlobalIdx += hits.length;
-      return rewriteSelected(text3, startIdx, shouldCompact);
-    });
-    void before;
-  });
-}
-function installCompactionHook(pi, opts = {}) {
-  const keepRecent = opts.keepRecent ?? KEEP_RECENT_ENVELOPES;
-  pi.on("context", async (event) => {
-    const messages = compactOlderEnvelopes(event.messages, keepRecent);
-    return { messages };
-  });
-  return {
-    reset: () => {
-    }
-  };
-}
-
-// src/notifications.ts
-function perSendNumbers(run) {
-  const startedAt = run.thisInvocationStartedAt ?? run.startTime;
-  const finishedAt = run.finishedAt ?? Date.now();
-  const baseline = run.thisInvocationUsageBaseline ?? {
-    turns: 0,
-    input: 0,
-    output: 0,
-    cost: 0
-  };
-  return {
-    durationMs: Math.max(0, finishedAt - startedAt),
-    turns: Math.max(0, run.usage.turns - baseline.turns),
-    input: Math.max(0, run.usage.input - baseline.input),
-    output: Math.max(0, run.usage.output - baseline.output),
-    cost: Math.max(0, run.usage.cost - baseline.cost)
-  };
-}
-function formatCompletionNotification(run, actions = availableActions(run)) {
-  if (run.status === "blocked") {
-    const ask = run.pendingAsk;
-    const tag = run.errorMessage ? "sub-agent-answer-failed" : "sub-agent-asked";
-    const error = run.errorMessage ? `
-  <error>${escapeXml(run.errorMessage)}</error>` : "";
-    return `<${tag}>${error}
-  <agent-id>${escapeXml(run.id)}</agent-id>
-  <status>blocked</status>
-  <ask-id>${escapeXml(ask?.askId ?? "")}</ask-id>
-  <question>${escapeXml(ask?.question ?? "Question unavailable; inspect transcript")}</question>
-${ask?.evidence ?? ""}
-  <available-actions>${actions.join(", ")}</available-actions>
-  <guidance>Answer via ensemble_send on this agent id. Assignment unresolved; do independent work while deciding.</guidance>
-  <transcript>${escapeXml(run.transcriptPath)}</transcript>
-</${tag}>`;
-  }
-  const finalText = getCompletionText(run);
-  const perSend = perSendNumbers(run);
-  const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
-  const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
-  const elapsed = elapsedStr(perSendStart, perSendEnd);
-  const usageStr = formatUsage({
-    turns: perSend.turns,
-    input: perSend.input,
-    output: perSend.output,
-    cost: perSend.cost
-  });
-  const resumed = sendsSinceSpawn(run) >= 1;
-  const lines = [];
-  lines.push("```xml");
-  lines.push("<sub-agent-completed>");
-  const ref = resultRef(run);
-  if (ref) lines.push(`  <result-ref>${ref}</result-ref>`);
-  lines.push(`  <agent-id>${run.id}</agent-id>`);
-  lines.push(`  <persona>${run.persona}</persona>`);
-  lines.push(`  <status>${run.status}</status>`);
-  lines.push(`  <available-actions>${actions.join(",")}</available-actions>`);
-  lines.push(`  <duration>${elapsed}</duration>`);
-  lines.push(
-    `  <usage><turns>${perSend.turns}</turns><input>${perSend.input}</input><output>${perSend.output}</output><cost>${perSend.cost.toFixed(4)}</cost></usage>`
-  );
-  if (resumed) {
-    const lifetimeElapsed = elapsedStr(run.startTime, run.finishedAt);
-    lines.push("  <lifetime>");
-    lines.push(`    <duration>${lifetimeElapsed}</duration>`);
-    lines.push(
-      `    <usage><turns>${run.usage.turns}</turns><input>${run.usage.input}</input><output>${run.usage.output}</output><cost>${run.usage.cost.toFixed(4)}</cost></usage>`
-    );
-    lines.push(`    <cost>${run.usage.cost.toFixed(4)}</cost>`);
-    lines.push(`    <resumes>${run.resumeCount ?? 0}</resumes>`);
-    if (run.steerCount) lines.push(`    <steers>${run.steerCount}</steers>`);
-    lines.push("  </lifetime>");
-  }
-  const retirement = contextRetirementNotice(run);
-  if (retirement) lines.push(`  <context-retired>${escapeXml(retirement)}</context-retired>`);
-  if (run.errorMessage) {
-    lines.push(`  <error>${escapeXml(run.errorMessage)}</error>`);
-  }
-  if (run.integration) lines.push(`  <integration>${escapeXml(JSON.stringify({ effort: run.effort?.name, landedCommit: run.landedCommit, ...run.integration, reason: run.mergeResult?.reason ?? run.integration.reason }))}</integration>`);
-  if (run.worktreeKept) {
-    const attrs = [
-      run.worktreePath && ` path="${escapeXmlAttr(run.worktreePath)}"`,
-      run.worktreeBranch && ` branch="${escapeXmlAttr(run.worktreeBranch)}"`
-    ].filter(Boolean).join("");
-    lines.push(`  <worktree-kept${attrs}>${escapeXml(run.worktreeKept)}</worktree-kept>`);
-  }
-  if (run.hookResult) {
-    const h = run.hookResult;
-    const hookElapsed = elapsedStr(run.finishedAt - h.durationMs, run.finishedAt);
-    lines.push("  <hook>");
-    lines.push(`    <command>${escapeXml(h.command)}</command>`);
-    lines.push(`    <exit-code>${h.exitCode ?? "signal"}</exit-code>`);
-    lines.push(`    <duration>${hookElapsed}</duration>`);
-    lines.push(`    <log-path>${escapeXml(h.logPath)}</log-path>`);
-    if (h.tailText.trim()) {
-      lines.push(
-        `    <tail bytes="${h.tailBytes}" lines="${h.tailLines}">${escapeXml(h.tailText)}</tail>`
-      );
-    }
-    lines.push("  </hook>");
-  }
-  if (run.herdr?.versionWarning) lines.push(`  <warning reason="pi-version">${escapeXml(run.herdr.versionWarning)}</warning>`);
-  if (run.nonSubstantiveFinal) {
-    lines.push(
-      `  <warning reason="${run.nonSubstantiveFinal.reason}">${escapeXml(run.nonSubstantiveFinal.message)}</warning>`
-    );
-  }
-  if (finalText) {
-    lines.push("  <result>");
-    lines.push(escapeXml(finalText));
-    lines.push("  </result>");
-  }
-  lines.push(`  <transcript>${run.transcriptPath}</transcript>`);
-  lines.push("</sub-agent-completed>");
-  lines.push("```");
-  lines.push("");
-  const header = headerLine(run, elapsed, usageStr, resumed);
-  return [header, "", ...lines].join("\n");
-}
-function statusVerb(status) {
-  switch (status) {
-    case "blocked":
-      return "awaiting owner";
-    case "completed":
-      return "completed";
-    case "killed":
-      return "killed";
-    case "timeout":
-      return "timed out";
-    case "hook_failed":
-      return "hook failed";
-    case "aborted":
-      return "aborted (turn limit)";
-    // v0.17
-    default:
-      return "failed";
-  }
-}
-function headerLine(run, elapsed, usageStr, resumed) {
-  const glyph = run.status === "blocked" ? "?" : run.status === "completed" ? "\u2713" : run.status === "killed" ? "\u25A0" : run.status === "timeout" ? "\u23F1" : run.status === "hook_failed" ? "\u2297" : run.status === "aborted" ? "\u23F9" : "\u2717";
-  const verb = statusVerb(run.status) + (run.effort ? ` \u2014 ${effortSummary(run)}` : "");
-  const usagePart = usageStr ? `, ${usageStr}` : "";
-  let line = `## ${glyph} \`${run.persona}\` ${verb} (${elapsed}${usagePart}) \u2014 id \`${run.id}\``;
-  if (resumed) {
-    const lifetimeElapsed = elapsedStr(run.startTime, run.finishedAt);
-    const lifetimeCost = run.usage.cost ? `$${run.usage.cost.toFixed(3)}` : "";
-    const suffix = lifetimeCost ? ` \xB7 lifetime ${lifetimeElapsed} ${lifetimeCost}` : ` \xB7 lifetime ${lifetimeElapsed}`;
-    line += suffix;
-  }
-  return line;
-}
-function escapeXml(s) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-function escapeXmlAttr(s) {
-  return escapeXml(s).replace(/"/g, "&quot;");
-}
-function formatStallNotification(run, args, actions = availableActions(run)) {
-  const elapsed = elapsedStr(run.startTime);
-  const lines = [];
-  lines.push("```xml");
-  lines.push("<sub-agent-stalled>");
-  lines.push(`  <agent-id>${run.id}</agent-id>`);
-  lines.push(`  <persona>${run.persona}</persona>`);
-  lines.push(`  <status>${run.status}</status>`);
-  lines.push(`  <available-actions>${actions.join(",")}</available-actions>`);
-  lines.push(`  <duration>${elapsed}</duration>`);
-  lines.push(
-    `  <stall><severity>${args.severity}</severity><silent-seconds>${args.silentSeconds}</silent-seconds><threshold-seconds>${args.thresholdSeconds}</threshold-seconds></stall>`
-  );
-  if (run.lastToolCall) {
-    lines.push(`  <last-tool>${escapeStallEvidence(boundStallText(run.lastToolCall, 512))}</last-tool>`);
-  }
-  lines.push(args.evidenceReference ? `  <evidence-reference>${escapeStallEvidence(args.evidenceReference)}</evidence-reference>` : `<recent-activity>
-${escapeStallEvidence(args.evidence ?? recentStallEvidence(run))}
-</recent-activity>`);
-  lines.push(`  <guidance>${escapeXml(STALL_GUIDANCE)}</guidance>`);
-  lines.push(`  <transcript>${run.transcriptPath}</transcript>`);
-  lines.push("</sub-agent-stalled>");
-  lines.push("```");
-  lines.push("");
-  const glyph = args.severity === "hard" ? "\u26A0" : "\xB7";
-  const verb = args.severity === "hard" ? "hard-stalled" : "soft-stalled";
-  const lastTool = run.lastToolCall ? `, last: ${escapeStallEvidence(boundStallText(run.lastToolCall, 512))}` : "";
-  const header = `## ${glyph} \`${run.persona}\` ${verb} \u2014 silent ${args.silentSeconds}s${lastTool} \u2014 id \`${run.id}\``;
-  return [header, "", ...lines].join("\n");
-}
-function buildCompletionSendMessageOptions(run) {
-  if (run.mode === "background") {
-    return { triggerTurn: true };
-  }
-  return { triggerTurn: true, deliverAs: "followUp" };
-}
-function buildCompletionMessage(run, canFocus = false, sessionId, registry) {
-  const actions = availableActions(run, canFocus, sessionId, registry);
-  const perSend = perSendNumbers(run);
-  const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
-  const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
-  const stats = [elapsedStr(perSendStart, perSendEnd)];
-  if (run.effort) stats.push(effortSummary(run));
-  const usageStr = formatUsage(perSend);
-  if (usageStr) stats.push(usageStr);
-  stats.push(run.id);
-  if (sendsSinceSpawn(run) >= 1) {
-    const cost = run.usage.cost ? ` $${run.usage.cost.toFixed(3)}` : "";
-    const plural = (n, noun) => `${n} ${noun}${n === 1 ? "" : "s"}`;
-    const sends = [
-      run.resumeCount && plural(run.resumeCount, "resume"),
-      run.steerCount && plural(run.steerCount, "steer")
-    ].filter(Boolean).join(", ");
-    stats.push(`lifetime ${elapsedStr(run.startTime, run.finishedAt)}${cost} (${sends})`);
-  }
-  const notes = [];
-  const ref = resultRef(run);
-  if (ref) notes.push({ slot: "muted", text: `result-ref: ${ref} \u2014 pass files: ['${ref}'] for the full evidence.` });
-  const retirement = contextRetirementNotice(run);
-  if (retirement) {
-    stats.push("session retired; use a fresh child with the handoff");
-    notes.push({ slot: "warning", text: retirement });
-  }
-  if (run.integration) notes.push({ slot: "muted", text: `Integration: ${effortSummary(run)}; ${run.mergeResult?.reason ?? run.integration.state}; verify ${run.integration.verify?.durationMs ?? 0}ms; log ${run.integration.verify?.logPath ?? run.integration.commitHook?.logPath ?? "not run"}` });
-  if (run.errorMessage) notes.push({ slot: "error", text: run.errorMessage });
-  if (run.worktreeKept) notes.push({ slot: "warning", text: run.worktreeKept });
-  if (run.herdr?.versionWarning) notes.push({ slot: "warning", text: run.herdr.versionWarning });
-  if (run.nonSubstantiveFinal) {
-    notes.push({
-      slot: "warning",
-      text: `${run.nonSubstantiveFinal.reason}: ${run.nonSubstantiveFinal.message}`
-    });
-  }
-  if (run.hookResult && run.status !== "blocked") {
-    const h = run.hookResult;
-    const exit = h.exitCode ?? "signal";
-    notes.push({
-      slot: h.passed ? "muted" : "error",
-      text: h.passed ? `hook ok: ${h.command} (${h.logPath})` : `hook failed: ${h.command} (exit ${exit}) \u2192 ${h.logPath}`
-    });
-  }
-  return {
-    customType: "ensemble-notification",
-    content: formatCompletionNotification(run, actions),
-    display: true,
-    details: {
-      kind: run.status === "blocked" ? run.errorMessage ? "answer_failed" : "asked" : "completed",
-      available_actions: actions,
-      id: run.id,
-      persona: run.persona,
-      status: run.status,
-      stats,
-      body: run.status === "blocked" ? `Question ${run.pendingAsk?.askId}: ${run.pendingAsk?.question}
-${run.pendingAsk?.evidence ?? ""}
-Answer via ensemble_send; the original assignment remains unresolved.` : getCompletionText(run),
-      transcriptPath: run.transcriptPath,
-      notes
-    }
-  };
-}
-function buildDialogMessage(run) {
-  const body = "Waiting for a human UI response in the managed herdr pane. This is not a stall. Inspect the pane; conductor does not auto-answer dialogs.";
-  return {
-    customType: "ensemble-notification",
-    display: true,
-    content: `<sub-agent-dialog><agent-id>${escapeXml(run.id)}</agent-id>${body}</sub-agent-dialog>`,
-    details: {
-      kind: "dialog",
-      id: run.id,
-      persona: run.persona,
-      status: run.status,
-      stats: [run.id],
-      body,
-      transcriptPath: run.transcriptPath,
-      notes: []
-    }
-  };
-}
-function buildStallMessage(run, args, canFocus = false, sessionId) {
-  const actions = args.availableActions ?? availableActions(run, canFocus, sessionId);
-  const evidence = args.evidenceReference ? void 0 : args.evidence ?? recentStallEvidence(run);
-  return {
-    customType: "ensemble-notification",
-    content: formatStallNotification(run, { ...args, evidence }, actions),
-    display: true,
-    details: {
-      kind: "stalled",
-      available_actions: actions,
-      id: run.id,
-      persona: run.persona,
-      status: run.status,
-      severity: args.severity,
-      evidence: evidence ?? args.evidenceReference,
-      guidance: STALL_GUIDANCE,
-      stats: [`silent ${args.silentSeconds}s`, `threshold ${args.thresholdSeconds}s`, run.id],
-      body: "",
-      transcriptPath: run.transcriptPath,
-      notes: run.lastToolCall ? [{ slot: "muted", text: `last tool: ${boundStallText(run.lastToolCall, 512)}` }] : []
-    }
-  };
-}
-
-// src/delegation.ts
-var MAX_DELEGATE_TASK_BYTES = 65536;
-var MAX_OUTSTANDING_DELEGATIONS = 8;
-var DELEGATE_RESPONSE_GRACE_MS = 12e4;
-var RELOAD_INTERRUPTED = "lead /reload interrupted subprocess delegation; resume with ensemble_send";
-var CALL_ID = /^[A-Za-z0-9_-]{1,128}$/;
-function isDelegateCallId(id) {
-  return typeof id === "string" && CALL_ID.test(id);
-}
-function delegatePaths(runDir2, toolCallId) {
-  const dir = join26(runDir2, "delegate");
-  return { dir, claim: join26(dir, `${toolCallId}.claim.json`), response: join26(dir, `${toolCallId}.json`) };
-}
-function parseDelegateArgs(args) {
-  if (!args || typeof args !== "object" || Array.isArray(args)) return { ok: false, reason: "arguments must be an object" };
-  const a = args;
-  if (typeof a.persona !== "string" || !a.persona.trim()) return { ok: false, reason: "persona must be a non-empty string" };
-  if (typeof a.task !== "string" || !a.task.trim()) return { ok: false, reason: "task must contain non-whitespace text" };
-  if (Buffer.byteLength(a.task) > MAX_DELEGATE_TASK_BYTES) return { ok: false, reason: `task exceeds ${MAX_DELEGATE_TASK_BYTES} bytes` };
-  if (a.files !== void 0 && (!Array.isArray(a.files) || a.files.some((f) => typeof f !== "string"))) return { ok: false, reason: "files must be an array of strings" };
-  if (a.timeout_minutes !== void 0 && (typeof a.timeout_minutes !== "number" || !Number.isInteger(a.timeout_minutes) || a.timeout_minutes < 1)) {
-    return { ok: false, reason: "timeout_minutes must be a positive integer" };
-  }
-  return { ok: true, args: { persona: a.persona, task: a.task, files: a.files, timeout_minutes: a.timeout_minutes } };
-}
-function validateDelegateRequest(input) {
-  const parsed = parseDelegateArgs(input.args);
-  if (!parsed.ok) return parsed;
-  const { args } = parsed;
-  const { parent, target } = input;
-  const scope = { depth: parent.depth ?? 1, delegateAllow: parent.delegateAllow ?? [] };
-  if (!isDelegating(scope)) return { ok: false, reason: "only a depth-1 delegator may delegate" };
-  if (parent.runtime === "herdr") return { ok: false, reason: "delegation supports subprocess parents only until N5" };
-  if (parent.status !== "running") return { ok: false, reason: `parent ${parent.id} is ${parent.status}, not running` };
-  if (!input.current) return { ok: false, reason: `parent ${parent.id} is not the current registered run` };
-  if (!scope.delegateAllow.includes(args.persona)) {
-    return { ok: false, reason: `persona ${args.persona} is not in this run's delegation allowlist (${scope.delegateAllow.join(", ")})` };
-  }
-  if (!target || target.name !== args.persona) return { ok: false, reason: `persona ${args.persona} is not available` };
-  if (WRITE_CAPABLE_PERSONAS.has(target.name)) return { ok: false, reason: `persona ${target.name} is write-capable` };
-  if (target.readOnly !== true) return { ok: false, reason: `persona ${target.name} is not read_only` };
-  if (input.outstanding >= MAX_OUTSTANDING_DELEGATIONS) {
-    return { ok: false, reason: `parent ${parent.id} already has ${MAX_OUTSTANDING_DELEGATIONS} delegate calls outstanding` };
-  }
-  if (parent.deadlineAt === void 0) return { ok: false, reason: `parent ${parent.id} deadline is unknown` };
-  const remaining = parent.deadlineAt - input.now;
-  if (remaining <= 0) return { ok: false, reason: `parent ${parent.id} has no time left` };
-  const timeoutMs = Math.min(input.personaTimeoutMs, remaining, args.timeout_minutes === void 0 ? Infinity : args.timeout_minutes * 6e4);
-  return { ok: true, timeoutMs, deadlineAt: input.now + timeoutMs };
-}
-function delegateWaitDeadline(o) {
-  const limits = [
-    o.personaTimeoutMs,
-    o.timeoutMinutes === void 0 ? void 0 : o.timeoutMinutes * 6e4,
-    o.ownDeadlineAt === void 0 ? void 0 : o.ownDeadlineAt - o.startedAt
-  ].filter((n) => n !== void 0 && Number.isFinite(n));
-  return o.startedAt + Math.max(0, Math.min(...limits, 24 * 36e5)) + DELEGATE_RESPONSE_GRACE_MS;
-}
-var escapeXml2 = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-var escapeAttr2 = (s) => escapeXml2(s).replace(/"/g, "&quot;");
-function formatDelegateEnvelope(leaf, limit) {
-  const full = formatCompletionNotification(leaf, []);
-  if (Buffer.byteLength(full) <= limit) return full;
-  const text3 = getCompletionText(leaf);
-  const omitted = `  <result-omitted bytes="${Buffer.byteLength(text3)}" path="${escapeAttr2(leaf.finalPath)}">envelope exceeded ${limit} bytes; read the full result from result-ref or path</result-omitted>`;
-  const compact = compactEnvelopeBlock(full).replace("</sub-agent-completed>", `${omitted}
-</sub-agent-completed>`);
-  if (Buffer.byteLength(compact) <= limit) return compact;
-  const ref = resultRef(leaf);
-  const lines = [
-    "```xml",
-    "<sub-agent-completed>",
-    `  <agent-id>${escapeXml2(leaf.id)}</agent-id>`,
-    `  <persona>${escapeXml2(leaf.persona)}</persona>`,
-    `  <status>${leaf.status}</status>`,
-    ...ref ? [`  <result-ref>${ref}</result-ref>`] : [],
-    ...leaf.errorMessage ? [`  <error-omitted bytes="${Buffer.byteLength(leaf.errorMessage)}">see the transcript</error-omitted>`] : [],
-    ...text3 ? [`  <result-summary>${escapeXml2(summarizeResultText(text3))}</result-summary>`] : [],
-    omitted,
-    `  <transcript>${escapeXml2(leaf.transcriptPath)}</transcript>`,
-    "</sub-agent-completed>",
-    "```"
-  ];
-  return lines.join("\n");
-}
-
-// src/delegate-tool.ts
 var NAME = /^[A-Za-z0-9_.:-]+$/;
 var POLL_MS = 1e3;
 function delegatorAllowlist(env) {
@@ -13178,8 +13188,10 @@ function groupByStatus(runs) {
 }
 function toStatusSummary(r, canFocus, sessionId, registry) {
   const observed = observeRunActions(r, canFocus, sessionId, registry);
+  const awaiting = registry ? awaitingChildren(r, registry.list()) : 0;
   return {
     id: r.id,
+    ...awaiting > 0 ? { awaiting_children: awaiting } : {},
     available_actions: computeAvailableActions(r, observed),
     wait_reason: r.waitReason ?? observed.effortAdmissionError,
     persona: r.persona,
@@ -13230,8 +13242,8 @@ function formatStatusForLLM(g, queueSize, summaries) {
       const tokenPart = formatUsage({ turns: 0, input: r.usage.input, output: r.usage.output, cost: r.usage.cost });
       const usageStr = [turnPart, tokenPart].filter(Boolean).join(" ");
       const usagePart = usageStr ? `[${usageStr}]` : "";
-      const waitReason = summaries.get(r.id).wait_reason;
-      const hint = (waitReason ? ` ${waitReason}` : "") + (r.lastToolCall ? ` \u2192 ${r.lastToolCall}` : "") + (r.effort ? ` effort=${effortSummary(r)}` : "");
+      const { wait_reason: waitReason, awaiting_children: awaiting } = summaries.get(r.id);
+      const hint = (waitReason ? ` ${waitReason}` : "") + (awaiting ? ` \u21E3${awaiting} waiting` : "") + (r.lastToolCall ? ` \u2192 ${r.lastToolCall}` : "") + (r.effort ? ` effort=${effortSummary(r)}` : "");
       lines.push(
         `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} runtime=${r.runtime === void 0 ? "subprocess" : r.runtime} available_actions=${summaries.get(r.id).available_actions.join(",") || "(none)"}`
       );
@@ -13576,9 +13588,19 @@ var SpawnQueue = class {
     }
     return true;
   }
+  /** N3: a broker leaf of a current awaiting delegator; anything else takes the lead-level rules. */
+  lent(opts, registry) {
+    const parent = opts.delegation && registry.get(opts.delegation.parentRunId);
+    return !!parent && awaitingChildren(parent, registry.list()) > 0;
+  }
+  /** One predicate for immediate enqueue and drain alike. */
   waitReason(opts, registry, effort, id) {
-    const preceding = new Set(this.pending.slice(0, id ? this.pending.findIndex((p) => p.id === id) : void 0).map((p) => p.id));
     const members = registry.list();
+    if (this.lent(opts, registry)) {
+      const { active, awaiting } = delegationLoad(members);
+      return active - awaiting < this.maxConcurrent ? void 0 : `waits for a lent slot (${active - awaiting} executing, maxConcurrent ${this.maxConcurrent})`;
+    }
+    const preceding = new Set(this.pending.slice(0, id ? this.pending.findIndex((p) => p.id === id) : void 0).map((p) => p.id));
     const waitingBehind = new Set(members.filter((r) => r.status === "queued" && !preceding.has(r.id)).map((r) => r.id));
     return admitEffortWriter({ id, persona: opts.persona.name, effort: effort ? { owner: effort.owner, name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches } : void 0 }, members, { maxConcurrent: this.maxConcurrent, maxConcurrentWriteCapable: this.maxConcurrentWriteCapable }, effort, effort ? listEfforts(effort.gitRoot) : [], waitingBehind);
   }
@@ -13587,33 +13609,41 @@ var SpawnQueue = class {
     if (this.draining) return;
     this.draining = true;
     try {
-      let i = 0;
-      while (i < this.pending.length) {
-        const next = this.pending[i];
-        const placeholder = this.registry.get(next.id);
-        if (!placeholder || placeholder.status !== "queued") {
-          this.pending.splice(i, 1);
-          continue;
-        }
-        try {
-          const effort = placeholder.effort ? readEffort(placeholder.effort.gitRoot, placeholder.effort.name) : void 0;
-          if (placeholder.effort && !effort) throw new Error("effort record missing");
-          placeholder.waitReason = this.waitReason(next.spawn, this.registry, effort, next.id);
-          if (placeholder.waitReason) {
-            i++;
-            continue;
-          }
-          this.pending.splice(i, 1);
-          this.spawn({ ...next.spawn, mode: next.effectiveMode, registry: this.registry, preAllocatedId: next.id });
-        } catch (e) {
-          if (!placeholder.effort) throw e;
-          if (this.pending[i]?.id === next.id) this.pending.splice(i, 1);
-          const current = this.registry.get(next.id);
-          void failEffortLaunch(current, this.registry, `effort launch refused: ${e.message}`, next.spawn.onComplete).done;
-        }
-      }
+      this.drainPass(true);
+      this.drainPass(false);
     } finally {
       this.draining = false;
+    }
+  }
+  drainPass(leavesOnly) {
+    let i = 0;
+    while (i < this.pending.length) {
+      const next = this.pending[i];
+      const placeholder = this.registry.get(next.id);
+      if (!placeholder || placeholder.status !== "queued") {
+        this.pending.splice(i, 1);
+        continue;
+      }
+      if (leavesOnly && !this.lent(next.spawn, this.registry)) {
+        i++;
+        continue;
+      }
+      try {
+        const effort = placeholder.effort ? readEffort(placeholder.effort.gitRoot, placeholder.effort.name) : void 0;
+        if (placeholder.effort && !effort) throw new Error("effort record missing");
+        placeholder.waitReason = this.waitReason(next.spawn, this.registry, effort, next.id);
+        if (placeholder.waitReason) {
+          i++;
+          continue;
+        }
+        this.pending.splice(i, 1);
+        this.spawn({ ...next.spawn, mode: next.effectiveMode, registry: this.registry, preAllocatedId: next.id });
+      } catch (e) {
+        if (!placeholder.effort && !next.spawn.delegation) throw e;
+        if (this.pending[i]?.id === next.id) this.pending.splice(i, 1);
+        const current = this.registry.get(next.id);
+        void failEffortLaunch(current, this.registry, `${placeholder.effort ? "effort" : "delegated leaf"} launch refused: ${e.message}`, next.spawn.onComplete).done;
+      }
     }
   }
 };
@@ -13662,9 +13692,10 @@ var DelegationBroker = class {
       this.respond(parent, id, { ok: false, reason });
       return;
     }
-    const call = { parent, id, done: false, outstanding: parent.pendingDelegations ?? 0 };
+    const call = { parent, id, done: false, outstanding: parent.pendingDelegations ?? 0, provisional: true };
     this.calls.set(key, call);
     parent.pendingDelegations = (parent.pendingDelegations ?? 0) + 1;
+    parent.provisionalDelegations = (parent.provisionalDelegations ?? 0) + 1;
     this.deps.registry.notify(parent);
     if (this.closed) {
       this.reject(call, "lead /reload closed this run's delegation broker; resume this run with ensemble_send to delegate again");
@@ -13748,13 +13779,24 @@ var DelegationBroker = class {
     if (isTerminal(run.status)) {
       for (const key of this.starts.keys()) if (key.startsWith(`${run.id}\0`)) this.starts.delete(key);
     }
-    if (run.parentRunId !== void 0 && run.delegateToolCallId !== void 0 && isTerminal(run.status)) {
+    if (run.parentRunId !== void 0 && run.delegateToolCallId !== void 0) {
       const call = this.calls.get(`${run.parentRunId}\0${run.delegateToolCallId}`);
-      if (call && !call.done) void this.finish(call, run);
+      if (call && !call.done) {
+        if (this.deps.registry.get(run.id) === run) {
+          call.leafId = run.id;
+          this.unprovision(call);
+        }
+        if (isTerminal(run.status)) void this.finish(call, run);
+      }
     }
     if (isTerminal(run.status) && (run.pendingDelegations ?? 0) > 0) {
-      for (const call of [...this.calls.values()]) if (call.parent === run) this.cancel(call, `parent ${run.id} ended (${run.status})`);
+      this.cancelAll([...this.calls.values()].filter((call) => call.parent === run), `parent ${run.id} ended (${run.status})`);
     }
+  }
+  /** Queued leaves first, so a cancelled sibling's freed slot never launches a leaf about to be cancelled. */
+  cancelAll(calls, reason) {
+    const queued = calls.filter((c) => this.deps.registry.get(c.leafId ?? "")?.status === "queued");
+    for (const call of [...queued, ...calls.filter((c) => !queued.includes(c))]) this.cancel(call, reason);
   }
   async finish(call, leaf) {
     this.settle(call);
@@ -13762,26 +13804,37 @@ var DelegationBroker = class {
     await writeFinal(leaf);
     this.respond(call.parent, call.id, { ok: true, agentId: leaf.id, status: leaf.status, envelope: formatDelegateEnvelope(leaf, call.limit ?? 131072) });
   }
-  /** Answer first, so the leaf's own terminal notification cannot answer the call as a result. */
+  /**
+   * Answer first, so the leaf's own terminal notification cannot answer the call as a result;
+   * notify last, so no listener sees an answered call whose leaf is still queued.
+   */
   cancel(call, reason) {
     if (call.done) return;
-    this.reject(call, `cancelled: ${reason}`);
+    this.reject(call, `cancelled: ${reason}`, false);
     const leaf = call.leafId ? this.deps.registry.get(call.leafId) : void 0;
-    if (!leaf || isTerminal(leaf.status)) return;
-    if (leaf.status === "queued") this.deps.queue.removeQueued(leaf.id);
-    else forceTerminate(leaf, "killed", this.deps.registry);
+    if (leaf?.status === "queued") this.deps.queue.removeQueued(leaf.id);
+    if (leaf && !isTerminal(leaf.status)) forceTerminate(leaf, "killed", this.deps.registry);
+    this.deps.registry.notify(call.parent);
   }
-  reject(call, reason) {
+  reject(call, reason, notify = true) {
     if (call.done) return;
-    this.settle(call);
+    this.settle(call, notify);
     this.respond(call.parent, call.id, { ok: false, reason });
   }
-  settle(call) {
+  settle(call, notify = true) {
     call.done = true;
     clearTimeout(call.timer);
     this.calls.delete(`${call.parent.id}\0${call.id}`);
-    call.parent.pendingDelegations = Math.max(0, (call.parent.pendingDelegations ?? 1) - 1);
-    this.deps.registry.notify(call.parent);
+    this.unprovision(call);
+    const { parent } = call;
+    parent.pendingDelegations = Math.max(0, (parent.pendingDelegations ?? 1) - 1);
+    if (parent.pendingDelegations === 0 && parent.status === "running") parent.lastEventAt = Date.now();
+    if (notify) this.deps.registry.notify(parent);
+  }
+  unprovision(call) {
+    if (!call.provisional) return;
+    call.provisional = false;
+    call.parent.provisionalDelegations = Math.max(0, (call.parent.provisionalDelegations ?? 1) - 1);
   }
   /** Create-only: an existing response (EEXIST) is never replaced. */
   respond(parent, id, body) {
@@ -13806,7 +13859,7 @@ var DelegationBroker = class {
     const pending = [...this.calls.values()];
     const parents = [...new Set(pending.map((c) => c.parent))];
     const leaves = pending.map((c) => c.leafId ? this.deps.registry.get(c.leafId) : void 0).filter((r) => !!r);
-    for (const call of pending) this.cancel(call, RELOAD_INTERRUPTED);
+    this.cancelAll(pending, RELOAD_INTERRUPTED);
     for (const parent of parents) {
       if (isTerminal(parent.status)) continue;
       parent.errorMessage = RELOAD_INTERRUPTED;
@@ -13833,7 +13886,8 @@ function mountEnsembleWidget(registry, getCtx, getWatchdogConfig, getCwdOverride
     for (let i = recentlyFinished.length - 1; i >= 0; i--) {
       if (recentlyFinished[i].expiresAt <= now) recentlyFinished.splice(i, 1);
     }
-    const active = registry.list().filter(isActiveRun);
+    const runs = registry.list();
+    const active = runs.filter(isActiveRun);
     const linger = recentlyFinished.map((e) => e.run);
     const cwdOverride = getCwdOverride?.();
     if (active.length === 0 && linger.length === 0 && !cwdOverride) {
@@ -13851,8 +13905,8 @@ function mountEnsembleWidget(registry, getCtx, getWatchdogConfig, getCwdOverride
         lines.push(theme.fg("dim", `\u2500\u2500 conductor ensemble (${active.length} active${linger.length ? `, ${linger.length} done` : ""}) \u2500\u2500`));
         if (cwdOverride) lines.push(theme.fg("dim", `cwd: ${cwdOverride}`));
         const wdCfg = getWatchdogConfig?.();
-        for (const r of active) lines.push(formatRow(r, theme, now, wdCfg));
-        for (const r of linger) lines.push(formatRow(r, theme, now, wdCfg));
+        for (const r of active) lines.push(formatRow(r, theme, now, wdCfg, runs));
+        for (const r of linger) lines.push(formatRow(r, theme, now, wdCfg, runs));
         return new Text(lines.join("\n"), 0, 0);
       },
       { placement: "belowEditor" }
@@ -13883,21 +13937,22 @@ function mountEnsembleWidget(registry, getCtx, getWatchdogConfig, getCwdOverride
     }
   };
 }
-function formatRow(r, theme, nowMs, wdCfg) {
+function formatRow(r, theme, nowMs, wdCfg, runs = []) {
   const glyph = statusGlyph(r.status, theme);
+  const awaiting = awaitingChildren(r, runs);
   const name2 = theme.fg("accent", r.persona) + theme.fg("dim", `:${r.id.split("-").pop() ?? r.id}`);
   const elapsed = theme.fg("dim", elapsedStr(r.startTime, r.finishedAt));
-  const activity = r.status === "integrating" ? theme.fg("warning", ` \xB7 ${r.effort?.name}: ${r.integration?.state ?? "paused"}${r.integration?.reason ? `: ${r.integration.reason}` : ""}`) : r.status === "queued" ? theme.fg("dim", ` (queued${r.waitReason ? `: ${r.waitReason}` : ""})`) : r.status === "blocked" ? theme.fg("warning", " (blocked: awaiting owner)") : r.status === "paused" ? theme.fg("warning", " (paused)") : r.hookExecuting ? theme.fg("warning", " \xB7 hook") : r.gracePeriodActive ? theme.fg("warning", " \xB7 \u26A0 wrapping up") : r.lastToolCall ? theme.fg("dim", ` \u2192 ${r.lastToolCall}`) : r.status === "running" ? theme.fg("dim", " starting\u2026") : "";
+  const activity = r.status === "integrating" ? theme.fg("warning", ` \xB7 ${r.effort?.name}: ${r.integration?.state ?? "paused"}${r.integration?.reason ? `: ${r.integration.reason}` : ""}`) : r.status === "queued" ? theme.fg("dim", ` (queued${r.waitReason ? `: ${r.waitReason}` : ""})`) : r.status === "blocked" ? theme.fg("warning", " (blocked: awaiting owner)") : r.status === "paused" ? theme.fg("warning", " (paused)") : r.hookExecuting ? theme.fg("warning", " \xB7 hook") : r.gracePeriodActive ? theme.fg("warning", " \xB7 \u26A0 wrapping up") : awaiting > 0 ? theme.fg("dim", ` \u21E3${awaiting} waiting`) : r.lastToolCall ? theme.fg("dim", ` \u2192 ${r.lastToolCall}`) : r.status === "running" ? theme.fg("dim", " starting\u2026") : "";
   const turnPart = r.usage.turns > 0 ? r.maxTurns !== void 0 ? `\u27F3${r.usage.turns}/${r.maxTurns}` : `\u27F3${r.usage.turns}` : "";
   const tokenPart = formatUsage({ turns: 0, input: r.usage.input, output: r.usage.output, cost: r.usage.cost });
   const usageStr = [turnPart, tokenPart].filter(Boolean).join(" ");
   const usage = usageStr ? theme.fg("muted", ` [${usageStr}]`) : "";
-  const stall = formatStallSegment(r, theme, nowMs, wdCfg);
+  const stall = formatStallSegment(r, theme, nowMs, wdCfg, awaitingDelegation(r, runs));
   return `${glyph} ${name2} ${elapsed}${activity}${stall}${usage}`;
 }
-function formatStallSegment(r, theme, nowMs, wdCfg) {
+function formatStallSegment(r, theme, nowMs, wdCfg, awaiting = false) {
   if (nowMs === void 0 || wdCfg === void 0) return "";
-  const c = classifyStall(r, nowMs, wdCfg);
+  const c = classifyStall(r, nowMs, wdCfg, awaiting);
   if (c === null) return "";
   if (c.severity === "fresh") return "";
   if (c.severity === "hard") {

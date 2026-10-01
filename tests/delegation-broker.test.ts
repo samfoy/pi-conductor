@@ -382,11 +382,11 @@ test("N2 at most 8 calls are outstanding per parent; the ninth is rejected witho
 
 test("N2 an end while queued removes only that placeholder; while running kills only that leaf; siblings continue", async () => {
   const cwd = project();
-  const { registry, spawned, broker, queue } = harness({ maxConcurrent: 2 });
+  const { registry, spawned, broker, queue } = harness({ maxConcurrent: 1 });
   const parent = parentRun(registry, cwd);
   for (const id of ["run_one", "run_two", "queued_three"]) { broker.observe(parent, start(id, ask("scout", id)), cwd); broker.observe(parent, update(id), cwd); }
   await settle();
-  assert.equal(spawned.length, 1, "parent + one leaf fill the cap of 2");
+  assert.equal(spawned.length, 1, "the awaiting parent's lent slot (N3) runs one leaf at a cap of 1");
   assert.equal(queue.size(), 2);
   const placeholder = registry.list().find((r) => r.delegateToolCallId === "queued_three")!;
   assert.equal(placeholder.status, "queued");
@@ -427,6 +427,7 @@ test("N2 a leaf still queued at its clamped deadline is removed and answered wit
   const cwd = project();
   const { registry, broker } = harness({ maxConcurrent: 1 });
   const parent = parentRun(registry, cwd, { deadlineAt: Date.now() + 250 });
+  parentRun(registry, cwd, { delegateAllow: [] }); // executing work that fills the cap the parent's loan (N3) would offer
   broker.observe(parent, start("starved", ask("scout")), cwd);
   broker.observe(parent, update("starved"), cwd);
   await settle();

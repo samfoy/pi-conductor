@@ -1,5 +1,5 @@
 /**
- * N2 native smoke: the real Pi CLI (`main()` from Pi 0.87.1, plus any root in
+ * N2/N3 native smoke: the real Pi CLI (`main()` from Pi 0.87.1, plus any root in
  * CONDUCTOR_H11_PI_ROOTS such as 0.99.1) runs as a real subprocess through
  * spawnRun -> createRunPipeline -> DelegationBroker -> SpawnQueue -> spawnRun.
  * The child loads the real conductor extension and an offline faux model.
@@ -19,6 +19,7 @@ import { SpawnQueue } from "../src/queue.ts";
 import { DelegationBroker } from "../src/delegation-broker.ts";
 import { handleSessionShutdown } from "../src/shutdown.ts";
 import { delegatePaths } from "../src/delegation.ts";
+import { consumesSlot } from "../src/effort/admit.ts";
 import { childScopeEnv, isTerminal, type ChildToolScope, type Run } from "../src/types.ts";
 
 sandboxPi();
@@ -51,7 +52,7 @@ function project(): string {
   mkdirSync(projectPersonasDir(cwd), { recursive: true });
   // scout's model comes from its frontmatter, auditor's from a project override; lead sets none and inherits faux-1.
   for (const [f, text] of Object.entries({ "lead.md": doc("lead", "agents:\n  - scout\n  - auditor\n"), "scout.md": doc("scout", "read_only: true\nmodel: faux/faux-scout\nthinking: low\n"),
-    "auditor.md": doc("auditor", "read_only: true\n"), "writer.md": doc("writer", "") })) writeFileSync(join(projectPersonasDir(cwd), f), text);
+    "auditor.md": doc("auditor", "read_only: true\n"), "writer.md": doc("writer", ""), "plain.md": doc("plain", "") })) writeFileSync(join(projectPersonasDir(cwd), f), text);
   writeFileSync(join(cwd, ".pi", "conductor.json"), JSON.stringify({ personaOverrides: { auditor: { model: "faux/faux-auditor", thinking: "high" } } }));
   writeFileSync(join(cwd, "notes.md"), "N2-NOTES-EVIDENCE\n");
   return cwd;
@@ -177,6 +178,71 @@ async function reloadBoundary(t: test.TestContext, bin: string, version: string)
   t.diagnostic(`Pi ${version} reload boundary: start before reload, update after -> ${final.split("\n").at(-1)}`);
 }
 
+/** Blocked only while a claimed delegate call has no response for the child to read. */
+function blockedOnDelegate(run: Run): boolean {
+  const dir = join(dirname(run.recordPath), "delegate");
+  if (!existsSync(dir)) return false;
+  const files = new Set(readdirSync(dir));
+  return [...files].some(f => f.endsWith(".claim.json") && !files.has(f.replace(/\.claim\.json$/, ".json")));
+}
+
+/**
+ * N3 barrier: four real delegators fill cap 4, each fans out two real leaves
+ * that hold until released, and a lead-level run queued before any leaf must
+ * not start on a lent slot. Every registry transition (and every poll) samples
+ * live pids, slot holders and executing work measured from claim/response files.
+ */
+async function lentSlots(t: test.TestContext, bin: string, version: string) {
+  process.env.PI_BIN = bin;
+  const cwd = project(), fixture = tmpDir("n3-native-fixture-");
+  process.env.N2_FIXTURE = fixture;
+  const registry = new RunRegistry();
+  const queue = new SpawnQueue(registry, 4, 1);
+  registry.delegation = new DelegationBroker({ registry, queue, env: {} });
+  t.after(() => { for (const r of registry.list()) if (alive(r.pid)) process.kill(r.pid!, "SIGKILL"); });
+  // Slots free at agent_settled, before the process exits; live settled runs are counted apart as `exiting`.
+  const peak = { physical: 0, holders: 0, exiting: 0, active: 0, executing: 0, lead: 0 };
+  const sample = () => {
+    const runs = registry.list(), active = runs.filter(consumesSlot), live = runs.filter(r => alive(r.pid));
+    peak.physical = Math.max(peak.physical, live.length);
+    peak.holders = Math.max(peak.holders, live.filter(consumesSlot).length);
+    peak.exiting = Math.max(peak.exiting, live.filter(r => isTerminal(r.status)).length);
+    peak.active = Math.max(peak.active, active.length);
+    peak.executing = Math.max(peak.executing, active.filter(r => !blockedOnDelegate(r)).length);
+    peak.lead = Math.max(peak.lead, active.filter(r => r.depth !== 2).length);
+  };
+  registry.onChange(sample);
+  const wait = async (cond: () => boolean, what: string) => until(() => { sample(); return cond(); }, what, 90000);
+  const personas = (await resolvePersonas({ cwd })).personas;
+  const spawn = (task: string, persona: string) => {
+    const r = queue.enqueueOrSpawn({ persona: personas.get(persona)!, task, cwd, mode: "background", timeoutMs: 120000, runtimeEnv: {} });
+    return r.kind === "spawned" ? r.run.id : r.placeholderRun.id;
+  };
+  const parents = [1, 2, 3, 4].map(k => spawn(`N3-PARENT ${k}`, "lead"));
+  const plain = spawn("N3-PLAIN", "plain");
+  assert.equal(registry.get(plain)!.status, "queued", "the cap is full of delegators");
+  const leaves = () => registry.list().filter(r => r.depth === 2);
+  const holding = () => readdirSync(fixture).filter(f => f.startsWith("n3-running-")).length;
+  await wait(() => leaves().length === 8 && holding() === 4, "eight leaves claimed and four holding");
+  assert.deepEqual(leaves().map(l => l.status).sort(), ["queued", "queued", "queued", "queued", "running", "running", "running", "running"],
+    "four awaiting parents lend four slots; N2 queues every leaf behind them until the parents time out");
+  for (const l of leaves().filter(l => l.status === "queued")) assert.match(l.waitReason ?? "", /lent slot/);
+  assert.equal(registry.get(plain)!.status, "queued", "the earlier lead-level run never takes a lent slot");
+  assert.match(registry.get(plain)!.waitReason ?? "", /maxConcurrent \(4\)/);
+  writeFileSync(join(fixture, "n3-release"), "go");
+  await wait(() => [...parents, plain].every(id => isTerminal(registry.get(id)!.status)) && registry.list().every(r => isTerminal(r.status) && !alive(r.pid)), "every own run settled and exited");
+  for (const id of [...parents, plain]) assert.equal(registry.get(id)!.status, "completed", registry.get(id)!.errorMessage);
+  assert.equal(holding(), 8, "all eight leaves ran");
+  for (const [i, id] of parents.entries()) {
+    const final = getFinalText(registry.get(id)!.messages);
+    for (const c of ["a", "b"]) assert.match(final, new RegExp(`n3_${i + 1}_${c}: ## ✓ \`scout\` completed[\\s\\S]*?N3 LEAF ${i + 1}-${c} done`));
+  }
+  t.diagnostic(`Pi ${version} N3 peaks: ${JSON.stringify(peak)}`);
+  const { physical, exiting, ...bounded } = peak;
+  assert.deepEqual(bounded, { holders: 8, active: 8, executing: 4, lead: 4 }, "live slot holders and A <= 2*max, executing <= max, lead-level <= max");
+  assert.ok(physical <= 8 + exiting, `every live pi beyond 2*max had already settled: ${physical} live, ${exiting} exiting`);
+}
+
 /** A delegator whose host also loads another extension's `delegate` fails Pi startup; a non-delegator with it starts. */
 function collision(t: test.TestContext, bin: string) {
   const run = (scope: ChildToolScope) => {
@@ -203,6 +269,14 @@ test("N2 native Pi 0.87.1: real delegate through spawnRun, pipeline, broker and 
   collision(t, path);
 });
 
+test("N3 native Pi 0.87.1: four delegators at cap 4 fan out on lent slots within the bounds", { timeout: 180000 }, async t => {
+  const piRoot = process.env.CONDUCTOR_NATIVE_PI_ROOT;
+  assert.ok(piRoot, "CONDUCTOR_NATIVE_PI_ROOT must name installed Pi 0.87.1; a missing minimum is a failure, not a skip");
+  const { path, version } = await child(t, piRoot);
+  assert.equal(version, "0.87.1");
+  await lentSlots(t, path, version);
+});
+
 for (const piRoot of (process.env.CONDUCTOR_H11_PI_ROOTS ?? "").split(":").filter(Boolean)) {
   const version = JSON.parse(readFileSync(join(piRoot, "package.json"), "utf8")).version as string;
   test(`N2 native Pi ${version} (H11 matrix): real delegate and rejected nested ctx.executeTool delegate`, { timeout: 180000 }, async t => {
@@ -210,5 +284,9 @@ for (const piRoot of (process.env.CONDUCTOR_H11_PI_ROOTS ?? "").split(":").filte
     await witness(t, bundle.path, bundle.version);
     await reloadBoundary(t, bundle.path, bundle.version);
     collision(t, bundle.path);
+  });
+  test(`N3 native Pi ${version} (H11 matrix): four delegators at cap 4 fan out on lent slots`, { timeout: 180000 }, async t => {
+    const bundle = await child(t, piRoot);
+    await lentSlots(t, bundle.path, bundle.version);
   });
 }

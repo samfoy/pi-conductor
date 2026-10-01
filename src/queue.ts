@@ -24,6 +24,7 @@ import {
 } from "./runs.ts";
 import { addEffortMember, listEfforts, readEffort, type EffortRecord } from "./effort/store.ts";
 import { admitEffortWriter } from "./effort/admit.ts";
+import { awaitingChildren, delegationLoad } from "./delegation.ts";
 import type { Run, SpawnMode } from "./types.ts";
 import type { RuntimeKind } from "./runtime.ts";
 import { emptyUsage } from "./types.ts";
@@ -187,10 +188,22 @@ export class SpawnQueue {
     return true;
   }
 
+  /** N3: a broker leaf of a current awaiting delegator; anything else takes the lead-level rules. */
+  private lent(opts: QueuedSpawnOptions, registry: RunRegistry): boolean {
+    const parent = opts.delegation && registry.get(opts.delegation.parentRunId);
+    return !!parent && awaitingChildren(parent, registry.list()) > 0;
+  }
+
+  /** One predicate for immediate enqueue and drain alike. */
   private waitReason(opts: QueuedSpawnOptions, registry: RunRegistry, effort?: EffortRecord, id?: string): string | undefined {
+    // Leaves are read-only and no effort members: only executing work (A - W) bounds them.
+    const members = registry.list();
+    if (this.lent(opts, registry)) {
+      const { active, awaiting } = delegationLoad(members);
+      return active - awaiting < this.maxConcurrent ? undefined : `waits for a lent slot (${active - awaiting} executing, maxConcurrent ${this.maxConcurrent})`;
+    }
     // Earlier waiters reserve scope, not slots; independent work may pass them.
     const preceding = new Set(this.pending.slice(0, id ? this.pending.findIndex(p => p.id === id) : undefined).map(p => p.id));
-    const members = registry.list();
     const waitingBehind = new Set(members.filter(r => r.status === "queued" && !preceding.has(r.id)).map(r => r.id));
     return admitEffortWriter({ id, persona: opts.persona.name, effort: effort ? { owner: effort.owner, name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches } : undefined }, members, { maxConcurrent: this.maxConcurrent, maxConcurrentWriteCapable: this.maxConcurrentWriteCapable }, effort, effort ? listEfforts(effort.gitRoot) : [], waitingBehind);
   }
@@ -200,26 +213,34 @@ export class SpawnQueue {
     if (this.draining) return;
     this.draining = true;
     try {
-      let i = 0;
-      while (i < this.pending.length) {
-        const next = this.pending[i]!;
-        const placeholder = this.registry.get(next.id);
-        if (!placeholder || placeholder.status !== "queued") { this.pending.splice(i, 1); continue; }
-        try {
-          const effort = placeholder.effort ? readEffort(placeholder.effort.gitRoot, placeholder.effort.name) : undefined;
-          if (placeholder.effort && !effort) throw new Error("effort record missing");
-          placeholder.waitReason = this.waitReason(next.spawn, this.registry, effort, next.id);
-          if (placeholder.waitReason) { i++; continue; }
-          this.pending.splice(i, 1);
-          this.spawn({ ...next.spawn, mode: next.effectiveMode, registry: this.registry, preAllocatedId: next.id });
-        } catch (e) {
-          if (!placeholder.effort) throw e;
-          if (this.pending[i]?.id === next.id) this.pending.splice(i, 1);
-          const current = this.registry.get(next.id)!;
-          void failEffortLaunch(current, this.registry, `effort launch refused: ${(e as Error).message}`, next.spawn.onComplete).done;
-        }
-      }
+      // N3: lent-lane leaves first, so earlier lead-level work cannot take the slot a leaf would get.
+      this.drainPass(true);
+      this.drainPass(false);
     } finally { this.draining = false; }
+  }
+
+  private drainPass(leavesOnly: boolean): void {
+    let i = 0;
+    while (i < this.pending.length) {
+      const next = this.pending[i]!;
+      const placeholder = this.registry.get(next.id);
+      if (!placeholder || placeholder.status !== "queued") { this.pending.splice(i, 1); continue; }
+      if (leavesOnly && !this.lent(next.spawn, this.registry)) { i++; continue; }
+      try {
+        const effort = placeholder.effort ? readEffort(placeholder.effort.gitRoot, placeholder.effort.name) : undefined;
+        if (placeholder.effort && !effort) throw new Error("effort record missing");
+        placeholder.waitReason = this.waitReason(next.spawn, this.registry, effort, next.id);
+        if (placeholder.waitReason) { i++; continue; }
+        this.pending.splice(i, 1);
+        this.spawn({ ...next.spawn, mode: next.effectiveMode, registry: this.registry, preAllocatedId: next.id });
+      } catch (e) {
+        // A leaf left queued outside the queue would keep its parent awaiting after the call is answered.
+        if (!placeholder.effort && !next.spawn.delegation) throw e;
+        if (this.pending[i]?.id === next.id) this.pending.splice(i, 1);
+        const current = this.registry.get(next.id)!;
+        void failEffortLaunch(current, this.registry, `${placeholder.effort ? "effort" : "delegated leaf"} launch refused: ${(e as Error).message}`, next.spawn.onComplete).done;
+      }
+    }
   }
 }
 

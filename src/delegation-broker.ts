@@ -30,6 +30,8 @@ interface Call {
   done: boolean;
   /** The parent's other outstanding calls when this one was claimed. */
   outstanding: number;
+  /** Counted in `provisionalDelegations` until its leaf is registered or it is answered. */
+  provisional: boolean;
   leafId?: string;
   limit?: number;
   timer?: NodeJS.Timeout;
@@ -77,9 +79,10 @@ export class DelegationBroker implements DelegationObserver {
       this.respond(parent, id, { ok: false, reason });
       return;
     }
-    const call: Call = { parent, id, done: false, outstanding: parent.pendingDelegations ?? 0 };
+    const call: Call = { parent, id, done: false, outstanding: parent.pendingDelegations ?? 0, provisional: true };
     this.calls.set(key, call);
     parent.pendingDelegations = (parent.pendingDelegations ?? 0) + 1;
+    parent.provisionalDelegations = (parent.provisionalDelegations ?? 0) + 1;
     this.deps.registry.notify(parent);
     if (this.closed) { this.reject(call, "lead /reload closed this run's delegation broker; resume this run with ensemble_send to delegate again"); return; }
     void this.resolve(call, args, cwd).catch((e) => this.reject(call, `delegation failed: ${(e as Error).message}`));
@@ -134,13 +137,23 @@ export class DelegationBroker implements DelegationObserver {
 
   private changed(run: Run): void {
     if (isTerminal(run.status)) for (const key of this.starts.keys()) if (key.startsWith(`${run.id}\0`)) this.starts.delete(key);
-    if (run.parentRunId !== undefined && run.delegateToolCallId !== undefined && isTerminal(run.status)) {
+    if (run.parentRunId !== undefined && run.delegateToolCallId !== undefined) {
       const call = this.calls.get(`${run.parentRunId}\0${run.delegateToolCallId}`);
-      if (call && !call.done) void this.finish(call, run);
+      if (call && !call.done) {
+        // From registration the leaf itself carries the wait, so its terminal flip lowers A and W together.
+        if (this.deps.registry.get(run.id) === run) { call.leafId = run.id; this.unprovision(call); }
+        if (isTerminal(run.status)) void this.finish(call, run);
+      }
     }
     if (isTerminal(run.status) && (run.pendingDelegations ?? 0) > 0) {
-      for (const call of [...this.calls.values()]) if (call.parent === run) this.cancel(call, `parent ${run.id} ended (${run.status})`);
+      this.cancelAll([...this.calls.values()].filter((call) => call.parent === run), `parent ${run.id} ended (${run.status})`);
     }
+  }
+
+  /** Queued leaves first, so a cancelled sibling's freed slot never launches a leaf about to be cancelled. */
+  private cancelAll(calls: Call[], reason: string): void {
+    const queued = calls.filter((c) => this.deps.registry.get(c.leafId ?? "")?.status === "queued");
+    for (const call of [...queued, ...calls.filter((c) => !queued.includes(c))]) this.cancel(call, reason);
   }
 
   private async finish(call: Call, leaf: Run): Promise<void> {
@@ -150,28 +163,41 @@ export class DelegationBroker implements DelegationObserver {
     this.respond(call.parent, call.id, { ok: true, agentId: leaf.id, status: leaf.status, envelope: formatDelegateEnvelope(leaf, call.limit ?? 131072) });
   }
 
-  /** Answer first, so the leaf's own terminal notification cannot answer the call as a result. */
+  /**
+   * Answer first, so the leaf's own terminal notification cannot answer the call as a result;
+   * notify last, so no listener sees an answered call whose leaf is still queued.
+   */
   private cancel(call: Call, reason: string): void {
     if (call.done) return;
-    this.reject(call, `cancelled: ${reason}`);
+    this.reject(call, `cancelled: ${reason}`, false);
     const leaf = call.leafId ? this.deps.registry.get(call.leafId) : undefined;
-    if (!leaf || isTerminal(leaf.status)) return;
-    if (leaf.status === "queued") this.deps.queue.removeQueued(leaf.id);
-    else forceTerminate(leaf, "killed", this.deps.registry);
+    if (leaf?.status === "queued") this.deps.queue.removeQueued(leaf.id);
+    if (leaf && !isTerminal(leaf.status)) forceTerminate(leaf, "killed", this.deps.registry);
+    this.deps.registry.notify(call.parent);
   }
 
-  private reject(call: Call, reason: string): void {
+  private reject(call: Call, reason: string, notify = true): void {
     if (call.done) return;
-    this.settle(call);
+    this.settle(call, notify);
     this.respond(call.parent, call.id, { ok: false, reason });
   }
 
-  private settle(call: Call): void {
+  private settle(call: Call, notify = true): void {
     call.done = true;
     clearTimeout(call.timer);
     this.calls.delete(`${call.parent.id}\0${call.id}`);
-    call.parent.pendingDelegations = Math.max(0, (call.parent.pendingDelegations ?? 1) - 1);
-    this.deps.registry.notify(call.parent);
+    this.unprovision(call);
+    const { parent } = call;
+    parent.pendingDelegations = Math.max(0, (parent.pendingDelegations ?? 1) - 1);
+    // Resume grace: the watchdog measures silence from the last handoff, not from before the wait.
+    if (parent.pendingDelegations === 0 && parent.status === "running") parent.lastEventAt = Date.now();
+    if (notify) this.deps.registry.notify(parent);
+  }
+
+  private unprovision(call: Call): void {
+    if (!call.provisional) return;
+    call.provisional = false;
+    call.parent.provisionalDelegations = Math.max(0, (call.parent.provisionalDelegations ?? 1) - 1);
   }
 
   /** Create-only: an existing response (EEXIST) is never replaced. */
@@ -195,7 +221,7 @@ export class DelegationBroker implements DelegationObserver {
     const pending = [...this.calls.values()];
     const parents = [...new Set(pending.map((c) => c.parent))];
     const leaves = pending.map((c) => (c.leafId ? this.deps.registry.get(c.leafId) : undefined)).filter((r): r is Run => !!r);
-    for (const call of pending) this.cancel(call, RELOAD_INTERRUPTED);
+    this.cancelAll(pending, RELOAD_INTERRUPTED);
     for (const parent of parents) {
       if (isTerminal(parent.status)) continue;
       parent.errorMessage = RELOAD_INTERRUPTED;

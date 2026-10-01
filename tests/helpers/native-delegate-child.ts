@@ -1,4 +1,4 @@
-// N2 native child: the real Pi CLI `main()` from one explicit installed root
+// N2/N3 native child: the real Pi CLI `main()` from one explicit installed root
 // (bundled with an esbuild alias), loading the real conductor extension plus an
 // offline faux model. Plays the depth-1 delegator or the depth-2 leaf by its env.
 import { existsSync, readdirSync, writeFileSync } from "node:fs";
@@ -21,7 +21,13 @@ type Served = { model: string; reasoning: string };
 function parent(messages: Message[], served: Served) {
   const task = text(messages.find(m => m.role === "user"));
   const results = messages.filter(m => m.role === "toolResult");
+  // N3 barrier: a lead-level run with nothing to delegate.
+  if (task.includes("N3-PLAIN")) return fauxAssistantMessage("N3 plain done");
   if (results.length) return fauxAssistantMessage(`N2 parent model=${served.model} reasoning=${served.reasoning} saw ${results.length} results:\n` + results.map(r => `${r.toolCallId}: ${r.isError ? "ERROR " : ""}${text(r)}`).join("\n---\n"));
+  const n3 = task.match(/N3-PARENT (\d+)/)?.[1];
+  if (n3) {
+    return fauxAssistantMessage(["a", "b"].map(c => fauxToolCall("delegate", { persona: "scout", task: `N3-LEAF ${n3}-${c}` }, { id: `n3_${n3}_${c}` })), { stopReason: "toolUse" });
+  }
   if (task.includes("N2-PARENT reload")) {
     return fauxAssistantMessage([fauxToolCall("delegate", { persona: "scout", task: "N2-LEAF scout after reload must not run" }, { id: "d_reload" })], { stopReason: "toolUse" });
   }
@@ -42,6 +48,13 @@ async function leaf(messages: Message[], served: Served) {
   const task = text(messages.find(m => m.role === "user"));
   const persona = task.match(/N2-LEAF (\w+)/)?.[1] ?? "unknown";
   const results = messages.filter(m => m.role === "toolResult");
+  // N3 barrier: every leaf holds until the test has seen the admission state, then answers.
+  const n3 = task.match(/N3-LEAF (\S+)/)?.[1];
+  if (n3) {
+    writeFileSync(join(fixture, `n3-running-${process.pid}`), n3);
+    while (!existsSync(join(fixture, "n3-release"))) await new Promise(r => setTimeout(r, 20));
+    return fauxAssistantMessage(`N3 LEAF ${n3} done`);
+  }
   if (task.includes("hold until killed")) {
     writeFileSync(join(fixture, `leaf-running-${process.pid}`), String(process.pid));
     await new Promise(() => {}); // until the broker kills this leaf

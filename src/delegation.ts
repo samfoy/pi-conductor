@@ -9,7 +9,9 @@ import { compactEnvelopeBlock, summarizeResultText } from "./compaction-hook.ts"
 import { resultRef } from "./file-evidence.ts";
 import { formatCompletionNotification } from "./notifications.ts";
 import { getCompletionText } from "./runs.ts";
-import { WRITE_CAPABLE_PERSONAS, isDelegating, type Persona, type Run } from "./types.ts";
+import { consumesSlot } from "./effort/admit.ts";
+import { childToolScope, runScopeError } from "./personas.ts";
+import { WRITE_CAPABLE_PERSONAS, isDelegating, isSettled, type Persona, type Run } from "./types.ts";
 
 export const MAX_DELEGATE_TASK_BYTES = 65536;
 export const MAX_OUTSTANDING_DELEGATIONS = 8;
@@ -89,6 +91,28 @@ export function validateDelegateRequest(input: DelegateRequestInput): { ok: true
   if (remaining <= 0) return { ok: false, reason: `parent ${parent.id} has no time left` };
   const timeoutMs = Math.min(input.personaTimeoutMs, remaining, args.timeout_minutes === undefined ? Infinity : args.timeout_minutes * 60_000);
   return { ok: true, timeoutMs, deadlineAt: input.now + timeoutMs };
+}
+
+/**
+ * N3: the delegated work a current slot-holding depth-1 delegator is blocked
+ * on: claims whose leaf is not registered yet plus its unsettled leaves. A
+ * leaf's terminal flip lowers this and A in the same registry state. Zero for
+ * A6-blocked, terminal, depth-2, invalid-scope or unregistered runs.
+ */
+export function awaitingChildren(parent: Run, runs: readonly Run[]): number {
+  if (!consumesSlot(parent) || runScopeError(parent) || !isDelegating(childToolScope(parent)) || !runs.includes(parent)) return 0;
+  return (parent.provisionalDelegations ?? 0) + runs.filter((c) => c.depth === 2 && c.parentRunId === parent.id && !isSettled(c.status)).length;
+}
+
+/** Stall suppression also covers a settled leaf whose response the broker is still handing back. */
+export function awaitingDelegation(run: Run, runs: readonly Run[]): boolean {
+  return awaitingChildren(run, runs) > 0 || (run.pendingDelegations ?? 0) > 0;
+}
+
+/** N3 two-lane load: A slot holders and W the awaiting delegators among them; A - W is executing work. */
+export function delegationLoad(runs: readonly Run[]): { active: number; awaiting: number } {
+  const active = runs.filter(consumesSlot);
+  return { active: active.length, awaiting: active.filter((r) => awaitingChildren(r, runs) > 0).length };
 }
 
 /** The child's own bound: the same clamp from its side, plus the response grace. */

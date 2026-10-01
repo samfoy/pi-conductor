@@ -15,6 +15,7 @@ import { STATUS_GLYPH } from "./status-glyph.ts";
 import { isTerminal } from "./types.ts";
 import type { Run, RunStatus } from "./types.ts";
 import { classifyStall, type WatchdogConfig } from "./watchdog.ts";
+import { awaitingChildren, awaitingDelegation } from "./delegation.ts";
 
 const WIDGET_KEY = "conductor-ensemble";
 const FINISHED_LINGER_MS = 8000;
@@ -63,7 +64,8 @@ export function mountEnsembleWidget(
       if (recentlyFinished[i]!.expiresAt <= now) recentlyFinished.splice(i, 1);
     }
 
-    const active = registry.list().filter(isActiveRun);
+    const runs = registry.list();
+    const active = runs.filter(isActiveRun);
     const linger = recentlyFinished.map((e) => e.run);
     const cwdOverride = getCwdOverride?.();
 
@@ -83,8 +85,8 @@ export function mountEnsembleWidget(
         lines.push(theme.fg("dim", `── conductor ensemble (${active.length} active${linger.length ? `, ${linger.length} done` : ""}) ──`));
         if (cwdOverride) lines.push(theme.fg("dim", `cwd: ${cwdOverride}`));
         const wdCfg = getWatchdogConfig?.();
-        for (const r of active) lines.push(formatRow(r, theme, now, wdCfg));
-        for (const r of linger) lines.push(formatRow(r, theme, now, wdCfg));
+        for (const r of active) lines.push(formatRow(r, theme, now, wdCfg, runs));
+        for (const r of linger) lines.push(formatRow(r, theme, now, wdCfg, runs));
         return new Text(lines.join("\n"), 0, 0);
       },
       { placement: "belowEditor" },
@@ -135,8 +137,11 @@ export function formatRow(
   theme: any,
   nowMs?: number,
   wdCfg?: WatchdogConfig,
+  /** The registry's runs, for N3 `⇣N waiting`; omitted means no delegation view. */
+  runs: readonly Run[] = [],
 ): string {
   const glyph = statusGlyph(r.status, theme);
+  const awaiting = awaitingChildren(r, runs);
   const name = theme.fg("accent", r.persona) + theme.fg("dim", `:${r.id.split("-").pop() ?? r.id}`);
   const elapsed = theme.fg("dim", elapsedStr(r.startTime, r.finishedAt));
   const activity =
@@ -151,6 +156,8 @@ export function formatRow(
           ? theme.fg("warning", " · hook") // v0.11 slice 5: in-flight hook glyph
           : r.gracePeriodActive
             ? theme.fg("warning", " · ⚠ wrapping up") // v0.17-S6: grace period active
+            : awaiting > 0
+              ? theme.fg("dim", ` ⇣${awaiting} waiting`)
             : r.lastToolCall
               ? theme.fg("dim", ` → ${r.lastToolCall}`)
               : r.status === "running"
@@ -169,7 +176,7 @@ export function formatRow(
   // v0.10 Slice 4: stall indicator. Sourced from classifyStall (pure)
   // so widget output stays deterministic and mutation-witness-able.
   // Soft → warning slot; hard → error slot with trailing `!`.
-  const stall = formatStallSegment(r, theme, nowMs, wdCfg);
+  const stall = formatStallSegment(r, theme, nowMs, wdCfg, awaitingDelegation(r, runs));
   return `${glyph} ${name} ${elapsed}${activity}${stall}${usage}`;
 }
 
@@ -186,9 +193,10 @@ export function formatStallSegment(
   theme: any,
   nowMs?: number,
   wdCfg?: WatchdogConfig,
+  awaiting = false,
 ): string {
   if (nowMs === undefined || wdCfg === undefined) return "";
-  const c = classifyStall(r, nowMs, wdCfg);
+  const c = classifyStall(r, nowMs, wdCfg, awaiting);
   if (c === null) return "";
   if (c.severity === "fresh") return "";
   if (c.severity === "hard") {

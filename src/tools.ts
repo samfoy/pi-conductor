@@ -37,6 +37,7 @@ import { collapseSteerableCascade } from "./steerable.ts";
 import { prepareSpawnRuntime, prepareSpawnEffort, availableActions, observeRunActions, computeAvailableActions, supportsFocus, validateRunAction, elapsedStr, failBeforeSpawn, forceTerminate, formatUsage, getCompletionText, keptBranchHint, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendCwd, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
 import { registerAskOwner } from "./ask-owner.ts";
 import { registerDelegate } from "./delegate-tool.ts";
+import { awaitingChildren } from "./delegation.ts";
 import { isSettled, isTerminal } from "./types.ts";
 import { SpawnQueue } from "./queue.ts";
 import { resolveMergeStrategy, resolveWorktreeSpec } from "./worktree.ts";
@@ -1630,8 +1631,11 @@ function groupByStatus(runs: Run[]): StatusGroups {
 
 function toStatusSummary(r: Run, canFocus: boolean, sessionId?: string, registry?: RunRegistry) {
   const observed = observeRunActions(r, canFocus, sessionId, registry);
+  // N3: the same count the panel's ⇣N and queue lending use.
+  const awaiting = registry ? awaitingChildren(r, registry.list()) : 0;
   return {
     id: r.id,
+    ...(awaiting > 0 ? { awaiting_children: awaiting } : {}),
     available_actions: computeAvailableActions(r, observed),
     wait_reason: r.waitReason ?? observed.effortAdmissionError,
     persona: r.persona,
@@ -1689,8 +1693,8 @@ function formatStatusForLLM(g: StatusGroups, queueSize: number, summaries: Map<s
       const tokenPart = formatUsage({ turns: 0, input: r.usage.input, output: r.usage.output, cost: r.usage.cost });
       const usageStr = [turnPart, tokenPart].filter(Boolean).join(" ");
       const usagePart = usageStr ? `[${usageStr}]` : "";
-      const waitReason = summaries.get(r.id)!.wait_reason;
-      const hint = (waitReason ? ` ${waitReason}` : "") + (r.lastToolCall ? ` → ${r.lastToolCall}` : "") + (r.effort ? ` effort=${effortSummary(r)}` : "");
+      const { wait_reason: waitReason, awaiting_children: awaiting } = summaries.get(r.id)!;
+      const hint = (waitReason ? ` ${waitReason}` : "") + (awaiting ? ` ⇣${awaiting} waiting` : "") + (r.lastToolCall ? ` → ${r.lastToolCall}` : "") + (r.effort ? ` effort=${effortSummary(r)}` : "");
       lines.push(
         `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} runtime=${r.runtime === undefined ? "subprocess" : r.runtime} available_actions=${summaries.get(r.id)!.available_actions.join(",") || "(none)"}`,
       );
