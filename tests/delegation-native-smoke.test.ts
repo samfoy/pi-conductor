@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { build, stop } from "esbuild";
 import { sandboxPi, tmpDir } from "./helpers/tmp.ts";
 import { projectPersonasDir, resolvePersonas } from "../src/personas.ts";
-import { RunRegistry, buildPiArgs, buildSubagentEnv, getFinalText, spawnRun } from "../src/runs.ts";
+import { RunRegistry, buildPiArgs, buildSubagentEnv, getFinalText, sendToRun, spawnRun } from "../src/runs.ts";
 import { SpawnQueue } from "../src/queue.ts";
 import { DelegationBroker } from "../src/delegation-broker.ts";
 import { handleSessionShutdown } from "../src/shutdown.ts";
@@ -178,6 +178,55 @@ async function reloadBoundary(t: test.TestContext, bin: string, version: string)
   t.diagnostic(`Pi ${version} reload boundary: start before reload, update after -> ${final.split("\n").at(-1)}`);
 }
 
+/**
+ * N4: a leaf's QUESTION travels only in its envelope (it has no ask_owner). The parent
+ * escalates with its own sole ask_owner after the call settled, blocks with its leaf
+ * already exited, and after the owner's reply delegates again. The lead gets the
+ * parent's two cards and never a leaf's.
+ */
+async function ownerQuestion(t: test.TestContext, bin: string, version: string) {
+  process.env.PI_BIN = bin;
+  const cwd = project();
+  process.env.N2_FIXTURE = tmpDir("n4-native-fixture-");
+  const registry = new RunRegistry();
+  const queue = new SpawnQueue(registry, 4, 1);
+  registry.delegation = new DelegationBroker({ registry, queue, env: {} });
+  const proc = (r: Run) => (r.transport as { proc?: ChildProcess } | undefined)?.proc;
+  const live = (r: Run) => { const p = proc(r); return !!p && p.exitCode === null && p.signalCode === null; };
+  // Own processes only, through their handles: a reaped handle signals nothing.
+  t.after(() => { for (const r of registry.list()) if (live(r)) proc(r)!.kill("SIGKILL"); });
+  const cards: string[] = [], leafAsks: string[] = [], liveAtBlocked: string[] = [];
+  registry.onChange(r => {
+    if (r.depth === 2 && (r.status === "blocked" || r.pendingAsk || r.askExecution)) leafAsks.push(r.id);
+    if (r.depth !== 2 && r.status === "blocked") liveAtBlocked.push(...registry.list().filter(l => l.depth === 2 && (!isTerminal(l.status) || live(l))).map(l => l.id));
+  });
+  const lead = (await resolvePersonas({ cwd })).personas.get("lead")!;
+  const { run, done } = spawnRun({ registry, persona: lead, task: "N4-PARENT question", cwd, mode: "background", timeoutMs: 45000, runtimeEnv: {}, onComplete: r => cards.push(`${r.id} ${r.status}`) });
+  await done;
+  assert.equal(run.status, "blocked", run.errorMessage);
+  assert.match(run.pendingAsk?.question ?? "", /^A leaf asks: Which config, A or B\?$/);
+  assert.deepEqual(liveAtBlocked, [], "the parent blocked only after its leaf had settled and exited");
+  const [first] = registry.list().filter(r => r.parentRunId === run.id);
+  assert.equal(first!.status, "completed", first!.errorMessage);
+  assert.match(response(run, "n4_first").envelope, /QUESTION: Which config, A or B\?/, "the question travelled in the leaf's envelope");
+  const leafAsk = events(first!).filter(e => e.toolCallId === "leaf_ask");
+  assert.deepEqual(leafAsk.map(e => e.type), ["tool_execution_start", "tool_execution_end"], "a leaf's ask_owner is unknown to Pi");
+  assert.equal(leafAsk[1].isError, true);
+  const reply = sendToRun(run, "Use config B", { registry, timeoutMs: 45000, onComplete: r => cards.push(`${r.id} ${r.status}`) });
+  assert.equal(reply.kind, "started", reply.kind === "rejected" ? reply.reason : "");
+  await (reply as { done: Promise<Run> }).done;
+  assert.equal(run.status, "completed", run.errorMessage);
+  const final = getFinalText(run.messages);
+  t.diagnostic(`Pi ${version} N4 question round trip: ${final}`);
+  assert.match(final, /^N4 parent done: N4 LEAF followup done with Use config B$/);
+  const leaves = registry.list().filter(r => r.parentRunId === run.id);
+  assert.deepEqual(leaves.map(l => [l.delegateToolCallId, l.status]).sort(), [["n4_first", "completed"], ["n4_second", "completed"]]);
+  for (const leaf of leaves) assert.equal(leaf.onComplete, undefined, "no leaf card");
+  assert.deepEqual(cards, [`${run.id} blocked`, `${run.id} completed`], "only the parent's cards");
+  assert.deepEqual(leafAsks, [], "no leaf ever asked the lead");
+  await until(() => registry.list().every(r => !live(r)), "every own process exited");
+}
+
 /** Blocked only while a claimed delegate call has no response for the child to read. */
 function blockedOnDelegate(run: Run): boolean {
   const dir = join(dirname(run.recordPath), "delegate");
@@ -286,6 +335,14 @@ test("N2 native Pi 0.87.1: real delegate through spawnRun, pipeline, broker and 
   collision(t, path);
 });
 
+test("N4 native Pi 0.87.1: a leaf's QUESTION reaches the parent, which asks its owner, blocks, and delegates again after the reply", { timeout: 180000 }, async t => {
+  const piRoot = process.env.CONDUCTOR_NATIVE_PI_ROOT;
+  assert.ok(piRoot, "CONDUCTOR_NATIVE_PI_ROOT must name installed Pi 0.87.1; a missing minimum is a failure, not a skip");
+  const { path, version } = await child(t, piRoot);
+  assert.equal(version, "0.87.1");
+  await ownerQuestion(t, path, version);
+});
+
 test("N3 native Pi 0.87.1: four delegators at cap 4 fan out on lent slots within the bounds", { timeout: 180000 }, async t => {
   const piRoot = process.env.CONDUCTOR_NATIVE_PI_ROOT;
   assert.ok(piRoot, "CONDUCTOR_NATIVE_PI_ROOT must name installed Pi 0.87.1; a missing minimum is a failure, not a skip");
@@ -305,5 +362,9 @@ for (const piRoot of (process.env.CONDUCTOR_H11_PI_ROOTS ?? "").split(":").filte
   test(`N3 native Pi ${version} (H11 matrix): four delegators at cap 4 fan out on lent slots`, { timeout: 180000 }, async t => {
     const bundle = await child(t, piRoot);
     await lentSlots(t, bundle.path, bundle.version);
+  });
+  test(`N4 native Pi ${version} (H11 matrix): leaf QUESTION, parent ask_owner, reply, second delegation`, { timeout: 180000 }, async t => {
+    const bundle = await child(t, piRoot);
+    await ownerQuestion(t, bundle.path, bundle.version);
   });
 }

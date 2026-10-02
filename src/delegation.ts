@@ -1,17 +1,18 @@
 /**
  * N2 delegation: pure request validation, file layout and envelope bounds
  * shared by the lead broker (`delegation-broker.ts`) and the child tool
- * (`delegate-tool.ts`). Read-only leaves are a tool and prompt boundary,
+ * (`delegate-tool.ts`); N3 admission load; N4 ownership (lineage, the
+ * child-first kill cascade and the finalization gate). Read-only leaves are a tool and prompt boundary,
  * not an OS sandbox; same-uid forgery of `delegate/*` is out of scope.
  */
 import { join } from "node:path";
 import { compactEnvelopeBlock, summarizeResultText } from "./compaction-hook.ts";
 import { resultRef } from "./file-evidence.ts";
 import { formatCompletionNotification } from "./notifications.ts";
-import { getCompletionText } from "./runs.ts";
+import { forceTerminate, getCompletionText, type RunRegistry } from "./runs.ts";
 import { consumesSlot, holdsSlot } from "./effort/admit.ts";
 import { childToolScope, runScopeError } from "./personas.ts";
-import { WRITE_CAPABLE_PERSONAS, isDelegating, type Persona, type Run } from "./types.ts";
+import { WRITE_CAPABLE_PERSONAS, isDelegating, isTerminal, type AbandonedChild, type Persona, type Run } from "./types.ts";
 
 export const MAX_DELEGATE_TASK_BYTES = 65536;
 export const MAX_OUTSTANDING_DELEGATIONS = 8;
@@ -76,6 +77,7 @@ export function validateDelegateRequest(input: DelegateRequestInput): { ok: true
   if (!isDelegating(scope)) return { ok: false, reason: "only a depth-1 delegator may delegate" };
   if (parent.runtime === "herdr") return { ok: false, reason: "delegation supports subprocess parents only until N5" };
   if (parent.status !== "running") return { ok: false, reason: `parent ${parent.id} is ${parent.status}, not running` };
+  if (parent.delegationClosed) return { ok: false, reason: `parent ${parent.id} is finalizing; it starts no new delegation` };
   if (!input.current) return { ok: false, reason: `parent ${parent.id} is not the current registered run` };
   if (!scope.delegateAllow.includes(args.persona)) {
     return { ok: false, reason: `persona ${args.persona} is not in this run's delegation allowlist (${scope.delegateAllow.join(", ")})` };
@@ -113,6 +115,86 @@ export function awaitingChildren(parent: Run, runs: readonly Run[]): number {
 export function delegationLoad(runs: readonly Run[], candidate?: Run): { active: number; lending: number } {
   const lends = (p: Run) => awaitingChildren(p, runs) > 0 && (p === candidate || runs.some((l) => l.depth === 2 && l.parentRunId === p.id && holdsSlot(l)));
   return { active: runs.filter(holdsSlot).length, lending: runs.filter(lends).length };
+}
+
+/**
+ * N4: the depth-2 leaves `parent` directly owns, by exact lineage only: a depth-1
+ * parent, a depth-2 run naming it, started at or after `since` (so never a reused
+ * id's earlier leaf). Each id once. Pure over the given runs.
+ */
+export function childrenOf(parent: Run, runs: readonly Run[], since = parent.startTime): Run[] {
+  if (parent.depth !== 1) return [];
+  return [...new Map(runs.filter(r => r !== parent && r.depth === 2 && r.parentRunId === parent.id && r.startTime >= since).map(r => [r.id, r])).values()];
+}
+
+/** Lifetime cost of `root` plus each leaf it owns, each counted once: the `ensemble_auto` budget. */
+export function subtreeCost(root: Run, runs: readonly Run[]): number {
+  return childrenOf(root, runs).reduce((sum, leaf) => sum + leaf.usage.cost, root.usage.cost);
+}
+
+/** 2 s TERM→KILL plus time to reap and close the pipes. */
+const CHILD_EXIT_BOUND_MS = 2_500;
+
+/** What this module instance has observed of a leaf's process; undefined when nothing yet. A bare pid is unobservable. */
+function observedExit(leaf: Run): AbandonedChild["exit"] | undefined {
+  const t = leaf.transport;
+  if (t?.kind === "herdr") return t.childExited ? "confirmed" : undefined;
+  if (t?.kind !== "subprocess") return leaf.pid === undefined ? "confirmed" : undefined;
+  if (t.proc.pid === undefined || leaf.processOpen !== true) return "confirmed";
+  return t.proc.exitCode != null || t.proc.signalCode != null ? "stdio-open" : undefined;
+}
+
+/** Bounded: a subprocess gets CHILD_EXIT_BOUND_MS to close; herdr uses its own exit proof. Never waits for an answer. */
+async function awaitExit(leaf: Run): Promise<AbandonedChild["exit"]> {
+  const t = leaf.transport;
+  if (observedExit(leaf) === "confirmed") return "confirmed";
+  if (t?.kind === "herdr") return await t.waitForExit() ? "confirmed" : "unconfirmed";
+  if (t?.kind !== "subprocess") return "unconfirmed";
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([t.closed, new Promise(resolve => { timer = setTimeout(resolve, CHILD_EXIT_BOUND_MS); })]);
+  clearTimeout(timer);
+  return observedExit(leaf) ?? "unconfirmed";
+}
+
+/** Merge by id, so the gate's waited exit replaces a kill's earlier `requested`. */
+function noteAbandoned(parent: Run, leaves: readonly Run[], exits: readonly AbandonedChild["exit"][]): void {
+  const entries = new Map((parent.abandonedChildren ?? []).map(c => [c.id, c]));
+  leaves.forEach((leaf, i) => entries.set(leaf.id, { id: leaf.id, persona: leaf.persona, status: leaf.status, exit: exits[i]! }));
+  parent.abandonedChildren = [...entries.values()];
+}
+
+/**
+ * N4 cascade, before the parent's own termination: cancel the leaves the
+ * current registered parent owns, queued ones first so a freed slot never
+ * launches a leaf about to be cancelled. A stale or replaced parent object owns
+ * nothing. Closes delegation for the parent and records what it abandoned.
+ */
+export function terminateChildren(parent: Run, registry: RunRegistry): void {
+  if (parent.depth !== 1 || registry.get(parent.id) !== parent) return;
+  parent.delegationClosed = true;
+  const live = childrenOf(parent, registry.list()).filter(c => !isTerminal(c.status));
+  const ordered = [...live.filter(c => c.status === "queued"), ...live.filter(c => c.status !== "queued")];
+  for (const leaf of ordered) {
+    leaf.errorMessage ??= `cancelled: parent ${parent.id} stopped before this leaf finished`;
+    forceTerminate(leaf, "killed", registry);
+  }
+  if (ordered.length) noteAbandoned(parent, ordered, ordered.map(leaf => observedExit(leaf) ?? "requested"));
+}
+
+/**
+ * N4 finalization gate, before any of the parent's hook, merge, footprint,
+ * integration, final.md, terminal record or card: cancel this invocation's
+ * unsettled leaves (started at or after `since`) and wait, bounded, for each
+ * process to exit. A terminal status is not an exit.
+ */
+export async function settleOwnedChildren(parent: Run, registry: RunRegistry, since: number): Promise<void> {
+  if (parent.depth !== 1 || registry.get(parent.id) !== parent) return;
+  parent.delegationClosed = true;
+  const abandoned = new Set(parent.abandonedChildren?.map(c => c.id));
+  const owned = childrenOf(parent, registry.list(), since).filter(c => abandoned.has(c.id) || !isTerminal(c.status) || observedExit(c) !== "confirmed");
+  if (!owned.length) return;
+  terminateChildren(parent, registry);
+  noteAbandoned(parent, owned, await Promise.all(owned.map(awaitExit)));
 }
 
 /** The child's own bound: the same clamp from its side, plus the response grace. */

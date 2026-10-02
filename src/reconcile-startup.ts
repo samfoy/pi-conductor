@@ -48,7 +48,7 @@ import { join } from "node:path";
 import { unsupportedRuntimeReason } from "./runtime.ts";
 import { runScopeError } from "./personas.ts";
 import type { Run, RunRecord, RunStatus } from "./types.ts";
-import { TERMINAL_STATUSES, emptyUsage } from "./types.ts";
+import { TERMINAL_STATUSES, emptyUsage, isDelegatedLeaf, isTerminal } from "./types.ts";
 
 /**
  * Outcome of classifying a single on-disk record at startup.
@@ -481,6 +481,7 @@ export async function reconcileOrphansAtStartup(
     return result;
   }
 
+  const readoptedLeaves: { record: RunRecord; recordPath: string }[] = [];
   for (const id of entries) {
     const recordPath = join(deps.runsRoot, id, "record.json");
 
@@ -580,6 +581,7 @@ export async function reconcileOrphansAtStartup(
           // mutate disk — the original pi process owns the file.
           const orphan = buildOrphanRun(record, "running");
           if (!dryRun) deps.registry.register(orphan);
+          if (!dryRun && isDelegatedLeaf(record)) readoptedLeaves.push({ record, recordPath });
           result.readopted.push(record.id);
           await checkSessionResumability(record, result);
           break;
@@ -687,7 +689,38 @@ export async function reconcileOrphansAtStartup(
     }
   }
 
+  // N4: only the parent that spawned a leaf can answer it. Without that parent live
+  // here the leaf is orphaned in place: never signalled (its pid may be reused), and
+  // nothing is deleted. Checked after the scan, so every parent record has been seen.
+  for (const { record, recordPath } of readoptedLeaves) {
+    try {
+      const why = await leafOrphanReason(record, deps);
+      if (!why) continue;
+      const errorMessage = `orphaned: parent ${record.parentRunId ?? "(none)"} ${why}; process ${record.pid} was not signalled and may still be running`;
+      await reclassifyOnDisk({ recordPath, record, nextStatus: "killed", errorMessage, now: deps.now });
+      deps.registry.register(buildOrphanRun({ ...record, status: "killed", finishedAt: deps.now, errorMessage }, "killed"));
+      result.readopted = result.readopted.filter(id => id !== record.id);
+      result.reclassified.push(record.id);
+    } catch (e: unknown) {
+      result.errors.push({ id: record.id, message: (e as Error)?.message ?? String(e) });
+    }
+  }
+
   return result;
+}
+
+/** Terminal, missing (absent, or another run now holds that id) or, when the parent is live or uncertain, undefined. */
+async function leafOrphanReason(record: RunRecord, deps: Pick<PostStartupReconcileDeps, "registry" | "runsRoot">): Promise<"terminal" | "missing" | undefined> {
+  const id = record.parentRunId;
+  if (id === undefined || !/^[^/\\]+$/.test(id) || id === "." || id === "..") return "missing";
+  const parent = deps.registry.get(id);
+  if (parent) return parent.depth !== 1 || parent.startTime > record.startTime ? "missing" : isTerminal(parent.status) ? "terminal" : undefined;
+  try {
+    const onDisk = JSON.parse(await readFile(join(deps.runsRoot, id, "record.json"), "utf-8")) as RunRecord;
+    return (TERMINAL_STATUSES as readonly string[]).includes(onDisk.status) ? "terminal" : undefined;
+  } catch (e: unknown) {
+    return (e as NodeJS.ErrnoException)?.code === "ENOENT" ? "missing" : undefined;
+  }
 }
 
 /**
@@ -748,6 +781,7 @@ export function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
     delegateAllow: record.delegateAllow,
     parentRunId: record.parentRunId,
     delegateToolCallId: record.delegateToolCallId,
+    abandonedChildren: record.abandonedChildren,
     // resolveSendStrategy picks rpc vs spawn-resume from these.
     steerable: record.steerable,
     streamingMode: record.streamingMode,

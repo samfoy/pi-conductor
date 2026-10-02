@@ -985,6 +985,10 @@ export interface Run {
   processOpen?: boolean;
   /** In memory: when the current invocation's hard-timeout timer fires. */
   deadlineAt?: number;
+  /** In memory (N4): the parent is finalizing or killed; the broker starts no new leaf for it. */
+  delegationClosed?: boolean;
+  /** N4: leaves cancelled at this invocation's end or kill, with what was observed of their exit. */
+  abandonedChildren?: AbandonedChild[];
 
   /** Working directory of the subprocess. */
   cwd: string;
@@ -1149,6 +1153,8 @@ export interface RunRecord {
   /** See `Run.parentRunId` / `Run.delegateToolCallId`. */
   parentRunId?: string;
   delegateToolCallId?: string;
+  /** See `Run.abandonedChildren`; an `unconfirmed` exit means this invocation published no result. */
+  abandonedChildren?: AbandonedChild[];
   /**
    * v0.12 steering: spawn-time steerable flag. See `Run.steerable`.
    * Persisted to record.json so post-startup reconcile (v0.9.x) knows
@@ -1272,6 +1278,7 @@ export function toRunRecord(r: Run): RunRecord {
     delegateAllow: r.delegateAllow,
     parentRunId: r.parentRunId,
     delegateToolCallId: r.delegateToolCallId,
+    abandonedChildren: r.abandonedChildren,
     runtime: r.runtime === undefined ? "subprocess" : r.runtime,
     herdr: r.herdr,
     herdrUsageBaseline: r.herdrUsageBaseline,
@@ -1348,6 +1355,29 @@ export interface HookResult {
   tailBytes: number;
   tailLines: number;
   failureKind?: "exited" | "timeout" | "spawn_error" | "signal" | "runaway_output";
+}
+
+/**
+ * N4: a leaf the parent cancelled. `confirmed`: its process exited and closed
+ * (or never launched); `stdio-open`: it exited but a descendant still holds its
+ * pipes; `requested`: only signalled when this was recorded; `unconfirmed`: no
+ * exit was observed within the bound.
+ */
+export interface AbandonedChild {
+  id: string;
+  persona: string;
+  status: RunStatus;
+  exit: "confirmed" | "stdio-open" | "requested" | "unconfirmed";
+}
+
+/** N4: a depth-2 leaf belongs to its delegating parent, which alone consumes its result. Only the broker spawns depth 2. */
+export function isDelegatedLeaf(run: { depth?: unknown }): boolean {
+  return run.depth === 2;
+}
+
+/** N4: a cancelled leaf's exit was never observed, so this invocation publishes no hook, merge, integration or result. */
+export function childExitUnconfirmed(run: { abandonedChildren?: AbandonedChild[] }): boolean {
+  return run.abandonedChildren?.some(c => c.exit === "unconfirmed") === true;
 }
 
 export const TERMINAL_STATUSES: RunStatus[] = [

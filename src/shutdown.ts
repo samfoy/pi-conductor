@@ -25,7 +25,7 @@
 
 import { ownsHerdrRun } from "./herdr/ownership.ts";
 import { runtimeFor } from "./runtime.ts";
-import type { Run } from "./types.ts";
+import { isDelegatedLeaf, type Run } from "./types.ts";
 import { writeRecord } from "./runs.ts";
 
 /**
@@ -76,6 +76,8 @@ export interface ShutdownDeps {
   reconcileRunning?: (runs: Run[], reason: ShutdownEventLike["reason"]) => void | Promise<void>;
   /** N2 broker; on reload it stops subprocess parents with outstanding calls, leaves first (R6 fallback). */
   delegation?: { close(): Promise<void> };
+  /** N4: cancel a queued leaf before quit signals anything, so no slot a stopping leaf frees can launch it. */
+  removeQueued?: (id: string) => void;
 }
 
 /**
@@ -115,7 +117,9 @@ export async function handleSessionShutdown(
     return;
   }
   const stillActive: Run[] = [];
-  for (const r of deps.runs) {
+  for (const r of deps.runs) if (isDelegatedLeaf(r) && r.status === "queued") deps.removeQueued?.(r.id);
+  // N4: leaves before the parents that own them.
+  for (const r of [...deps.runs.filter(isDelegatedLeaf), ...deps.runs.filter(r => !isDelegatedLeaf(r))]) {
     if (ownsHerdrRun(r) && (r.status === "running" || r.status === "paused")) {
       stillActive.push(r);
       try {

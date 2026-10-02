@@ -27,6 +27,12 @@ The remainder of this document is a historical v0.10 map, not current line-numbe
 - Known, not fixed in H11: a crash between registration and publication leaves a live child's record `running` and foreign, or fails a gone one with the generic pre-acceptance message; a killed run whose notification stopped at `intent` is not re-marked `uncertain`. The fake CLI's reused-name error (`agent_name_taken`) differs from real herdr's `agent_name_not_found`, which fires after Pi was already launched. Conductor never reuses names. `tests/herdr-send.test.ts` pins cancel/death/kill in the registration → publication window: nothing published, prepared reply kept, one start, correct ask outcome.
 - Human TUI acceptance is unverified.
 
+## Current N4 delegation ownership addendum
+
+- Child delegation is `delegate` only (README "Direct ownership (N4)"). `src/delegation.ts` owns lineage (`childrenOf`, `subtreeCost`), the kill cascade (`terminateChildren`, called by `forceTerminate` before the parent's own effects) and the finalize gate (`settleOwnedChildren`, called by `createRunPipeline` right after the stdout tail drains, before the blocked transition, hook, merge, footprint, integration, final, record and card).
+- The gate's known-exit test is the transport's `closed` (stdio), bounded by `CHILD_EXIT_BOUND_MS` (2.5 s); an exit seen without close is `stdio-open` and proceeds, while the N3 reservation (`processOpen`) still waits for close. A run with no handle (readopted) is never signalled and its exit is never confirmed.
+- `runActionError` makes depth-2 runs kill-only for every caller; `pushCompletionCard` (used by `index.ts`) posts no leaf card; `handleSessionShutdown` cancels queued leaves through `removeQueued` and stops leaves before parents on quit; startup reconcile orphans leaves whose parent is terminal, missing or replaced, after the whole scan.
+
 ## 1. Overview
 
 The runtime is the delivery vehicle for the persona library and the

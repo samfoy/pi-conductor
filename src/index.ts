@@ -38,6 +38,7 @@ import {
   buildCompletionSendMessageOptions,
   buildStallMessage,
   buildDialogMessage,
+  pushCompletionCard,
   type StallNoticeArgs,
 } from "./notifications.ts";
 import { registerNotificationRenderer } from "./notification-renderer.ts";
@@ -401,7 +402,7 @@ export default function (pi: ExtensionAPI): void {
       return { detachSignal, unregister };
     },
     pushCompletionNotification: (run: Run) => {
-      pi.sendMessage(buildCompletionMessage(run, supportsFocus(ctxRef), opts.getSessionId(), opts.getRegistry()), buildCompletionSendMessageOptions(run));
+      if (!pushCompletionCard(run, pi, supportsFocus(ctxRef), opts.getSessionId(), opts.getRegistry())) return;
       // Item 11 dead-man-switch: track this wake. clearOnTurnStart()
       // drops it when the conductor's next turn fires (the wake
       // worked). The 15s tick re-fires if no turn fires within 30s.
@@ -699,6 +700,7 @@ export default function (pi: ExtensionAPI): void {
       runs: registry.list(),
       resetSanitizer: () => sanitizerHook.reset(),
       delegation: registry.delegation,
+      removeQueued: id => void queue.removeQueued(id),
       terminateHerdr: run => forceTerminate(run, "killed", registry),
       // A1: close the orphan-creation window. SIGTERM races the runtime
       // teardown; without this the on-disk record stays "running" until

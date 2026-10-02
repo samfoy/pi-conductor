@@ -73,6 +73,7 @@ function fullRun(dir: string, over: Partial<Run> = {}): Run {
     delegateAllow: ["inspector"],
     parentRunId: "lead-owner",
     delegateToolCallId: "call_owner",
+    abandonedChildren: [{ id: "scout-gone", persona: "scout", status: "killed", exit: "confirmed" }],
     steerable: false,
     streamingMode: "print",
     hookResult: {

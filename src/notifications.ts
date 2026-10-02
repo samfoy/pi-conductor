@@ -19,7 +19,8 @@ import { compactEnvelopeBlock } from "./compaction-hook.ts";
 import { contextRetirementNotice } from "./context-retirement.ts";
 import { availableActions, type RunAction, type RunRegistry, elapsedStr, formatUsage, getCompletionText, sendsSinceSpawn } from "./runs.ts";
 import { boundStallText, escapeStallEvidence, recentStallEvidence, STALL_GUIDANCE } from "./stall-evidence.ts";
-import type { Run, RunStatus } from "./types.ts";
+import { childrenOf, subtreeCost } from "./delegation.ts";
+import { isDelegatedLeaf, type Run, type RunStatus } from "./types.ts";
 
 /** Theme slot for an annotation row under a notification card. */
 export type NotificationNoteSlot = "error" | "warning" | "muted";
@@ -116,7 +117,8 @@ function perSendNumbers(run: Run): PerSendNumbers {
   };
 }
 
-export function formatCompletionNotification(run: Run, actions: RunAction[] = availableActions(run)): string {
+/** `runs` is the registry, for a delegator's `<children>` and `<subtree-cost>`. */
+export function formatCompletionNotification(run: Run, actions: RunAction[] = availableActions(run), runs: readonly Run[] = []): string {
   if (run.status === "blocked") {
     const ask = run.pendingAsk;
     const tag = run.errorMessage ? "sub-agent-answer-failed" : "sub-agent-asked";
@@ -152,6 +154,22 @@ export function formatCompletionNotification(run: Run, actions: RunAction[] = av
     `  <usage><turns>${perSend.turns}</turns><input>${perSend.input}</input>` +
       `<output>${perSend.output}</output><cost>${perSend.cost.toFixed(4)}</cost></usage>`,
   );
+  // N4: per-send like <usage>: this invocation's own leaves; <lifetime> counts every leaf once.
+  const children = childrenOf(run, runs, perSendStart);
+  if (children.length) {
+    lines.push("  <children>");
+    for (const c of children) {
+      const ref = resultRef(c);
+      lines.push(`    <child id="${escapeXmlAttr(c.id)}" persona="${escapeXmlAttr(c.persona)}" status="${c.status}" cost="${c.usage.cost.toFixed(4)}"${ref ? ` result-ref="${ref}"` : ""}/>`);
+    }
+    lines.push("  </children>");
+    lines.push(`  <subtree-cost>${children.reduce((sum, c) => sum + c.usage.cost, perSend.cost).toFixed(4)}</subtree-cost>`);
+  }
+  if (run.abandonedChildren?.length) {
+    lines.push("  <abandoned-children>");
+    for (const c of run.abandonedChildren) lines.push(`    <child id="${escapeXmlAttr(c.id)}" persona="${escapeXmlAttr(c.persona)}" status="${c.status}" exit="${c.exit}"/>`);
+    lines.push("  </abandoned-children>");
+  }
   if (resumed) {
     const lifetimeElapsed = elapsedStr(run.startTime, run.finishedAt);
     lines.push("  <lifetime>");
@@ -161,6 +179,7 @@ export function formatCompletionNotification(run: Run, actions: RunAction[] = av
         `<output>${run.usage.output}</output><cost>${run.usage.cost.toFixed(4)}</cost></usage>`,
     );
     lines.push(`    <cost>${run.usage.cost.toFixed(4)}</cost>`);
+    if (childrenOf(run, runs).length) lines.push(`    <subtree-cost>${subtreeCost(run, runs).toFixed(4)}</subtree-cost>`);
     lines.push(`    <resumes>${run.resumeCount ?? 0}</resumes>`);
     if (run.steerCount) lines.push(`    <steers>${run.steerCount}</steers>`);
     lines.push("  </lifetime>");
@@ -464,7 +483,7 @@ export function buildCompletionMessage(run: Run, canFocus = false, sessionId?: s
 
   return {
     customType: "ensemble-notification",
-    content: formatCompletionNotification(run, actions),
+    content: formatCompletionNotification(run, actions, registry?.list()),
     display: true,
     details: {
       kind: run.status === "blocked" ? (run.errorMessage ? "answer_failed" : "asked") : "completed",
@@ -478,6 +497,20 @@ export function buildCompletionMessage(run: Run, canFocus = false, sessionId?: s
       notes,
     },
   };
+}
+
+/**
+ * Post a completion card to the lead, except for a delegated leaf: its parent's
+ * broker alone consumes its result, live or after readopt. Returns whether it sent.
+ */
+export function pushCompletionCard(
+  run: Run,
+  host: { sendMessage(message: NotificationMessage, options: ReturnType<typeof buildCompletionSendMessageOptions>): void },
+  canFocus = false, sessionId?: string, registry?: RunRegistry,
+): boolean {
+  if (isDelegatedLeaf(run)) return false;
+  host.sendMessage(buildCompletionMessage(run, canFocus, sessionId, registry), buildCompletionSendMessageOptions(run));
+  return true;
 }
 
 export function buildDialogMessage(run: Run): NotificationMessage {

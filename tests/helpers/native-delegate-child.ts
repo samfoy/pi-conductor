@@ -30,9 +30,25 @@ function holdAfterSettle(release: string) {
 /** What Pi actually requested: the model id and the thinking level it sent (undefined is off). */
 type Served = { model: string; reasoning: string };
 
+/**
+ * N4: a leaf's QUESTION reaches the parent in its envelope once the call settled; the
+ * parent escalates with its own sole ask_owner, and after the owner's answer delegates again.
+ */
+function questionParent(messages: Message[]) {
+  const result = (id: string) => messages.find(m => m.role === "toolResult" && m.toolCallId === id);
+  const answer = messages.map(m => m.role === "user" ? text(m) : "").find(t => t.includes("<owner-answer"))?.match(/Answer: (.*)/)?.[1];
+  const second = result("n4_second");
+  if (second) return fauxAssistantMessage(`N4 parent done: ${text(second).match(/N4 LEAF followup done with [^\n<]*/)?.[0] ?? "no followup"}`);
+  if (answer) return fauxAssistantMessage([fauxToolCall("delegate", { persona: "scout", task: `N4-LEAF followup ${answer}` }, { id: "n4_second" })], { stopReason: "toolUse" });
+  const question = text(result("n4_first")).match(/QUESTION: ([^\n<]*)/)?.[1];
+  if (question) return fauxAssistantMessage([fauxToolCall("ask_owner", { question: `A leaf asks: ${question}` }, { id: "n4_ask" })], { stopReason: "toolUse" });
+  return fauxAssistantMessage([fauxToolCall("delegate", { persona: "scout", task: "N4-LEAF question" }, { id: "n4_first" })], { stopReason: "toolUse" });
+}
+
 function parent(messages: Message[], served: Served) {
   const task = text(messages.find(m => m.role === "user"));
   const results = messages.filter(m => m.role === "toolResult");
+  if (task.includes("N4-PARENT question")) return questionParent(messages);
   // N3 barrier: a lead-level run with nothing to delegate.
   if (task.includes("N3-PLAIN")) return fauxAssistantMessage("N3 plain done");
   if (results.length) return fauxAssistantMessage(`N2 parent model=${served.model} reasoning=${served.reasoning} saw ${results.length} results:\n` + results.map(r => `${r.toolCallId}: ${r.isError ? "ERROR " : ""}${text(r)}`).join("\n---\n"));
@@ -61,6 +77,13 @@ async function leaf(messages: Message[], served: Served) {
   const task = text(messages.find(m => m.role === "user"));
   const persona = task.match(/N2-LEAF (\w+)/)?.[1] ?? "unknown";
   const results = messages.filter(m => m.role === "toolResult");
+  // N4: a leaf has no ask_owner (Pi reports it unknown: start, then error end), so its question travels in its final text.
+  if (task.includes("N4-LEAF question")) {
+    if (!results.length) return fauxAssistantMessage([fauxToolCall("ask_owner", { question: "may a leaf escalate?" }, { id: "leaf_ask" })], { stopReason: "toolUse" });
+    return fauxAssistantMessage(`N4 LEAF needs input; saw=${results.map(r => text(r)).join("|")}\nQUESTION: Which config, A or B?`);
+  }
+  const followup = task.match(/N4-LEAF followup (.*)/)?.[1];
+  if (followup) return fauxAssistantMessage(`N4 LEAF followup done with ${followup}`);
   // N3 barrier: every leaf holds until the test has seen the admission state, then answers.
   const n3 = task.match(/N3-LEAF (\S+)/)?.[1];
   if (n3) {

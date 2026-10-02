@@ -37,7 +37,7 @@ import { collapseSteerableCascade } from "./steerable.ts";
 import { prepareSpawnRuntime, prepareSpawnEffort, availableActions, observeRunActions, computeAvailableActions, supportsFocus, validateRunAction, elapsedStr, failBeforeSpawn, forceTerminate, formatUsage, getCompletionText, keptBranchHint, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendCwd, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
 import { registerAskOwner } from "./ask-owner.ts";
 import { registerDelegate } from "./delegate-tool.ts";
-import { awaitingChildren } from "./delegation.ts";
+import { awaitingChildren, childrenOf, subtreeCost } from "./delegation.ts";
 import { isSettled, isTerminal } from "./types.ts";
 import { SpawnQueue } from "./queue.ts";
 import { resolveMergeStrategy, resolveWorktreeSpec } from "./worktree.ts";
@@ -317,7 +317,8 @@ function registerStatusTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
     name: CONDUCTOR_LLM_TOOLS.status,
     label: "Sub-agent status",
     description:
-      "Report status and available_actions for each sub-agent in this session. Use the latest available_actions; each call revalidates.",
+      "Report status and available_actions for each sub-agent in this session. Use the latest available_actions; each call revalidates. " +
+      "focus opens a read-only view, not control. A delegated leaf (depth 2, parent_run_id) belongs to its parent: only kill.",
     promptSnippet: "Check status of conductor sub-agents",
     promptGuidelines: [
       "Use ensemble_status when you need to know which sub-agents are alive (e.g. before deciding whether to spawn another).",
@@ -578,7 +579,8 @@ function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts, env: Runtim
         return promise.then((run) => ({
           status: run.status,
           failureClass: run.failureClass,
-          costUsd: run.usage.cost ?? 0,
+          // N4: the step's own cost plus its own leaves', each counted once.
+          costUsd: subtreeCost(run, registry.list()),
           finalText: getCompletionText(run),
         }));
       };
@@ -1632,10 +1634,18 @@ function groupByStatus(runs: Run[]): StatusGroups {
 function toStatusSummary(r: Run, canFocus: boolean, sessionId?: string, registry?: RunRegistry) {
   const observed = observeRunActions(r, canFocus, sessionId, registry);
   // N3: the same count the panel's ⇣N and queue lending use.
-  const awaiting = registry ? awaitingChildren(r, registry.list()) : 0;
+  const runs = registry?.list() ?? [];
+  const awaiting = awaitingChildren(r, runs);
+  const children = childrenOf(r, runs);
   return {
     id: r.id,
     ...(awaiting > 0 ? { awaiting_children: awaiting } : {}),
+    depth: r.depth,
+    ...(r.parentRunId !== undefined ? { parent_run_id: r.parentRunId } : {}),
+    ...(children.length ? {
+      children: children.map(c => ({ id: c.id, persona: c.persona, status: c.status, cost: c.usage.cost, result_ref: resultRef(c) })),
+      subtree_cost: subtreeCost(r, runs),
+    } : {}),
     available_actions: computeAvailableActions(r, observed),
     wait_reason: r.waitReason ?? observed.effortAdmissionError,
     persona: r.persona,
@@ -1693,8 +1703,9 @@ function formatStatusForLLM(g: StatusGroups, queueSize: number, summaries: Map<s
       const tokenPart = formatUsage({ turns: 0, input: r.usage.input, output: r.usage.output, cost: r.usage.cost });
       const usageStr = [turnPart, tokenPart].filter(Boolean).join(" ");
       const usagePart = usageStr ? `[${usageStr}]` : "";
-      const { wait_reason: waitReason, awaiting_children: awaiting } = summaries.get(r.id)!;
-      const hint = (waitReason ? ` ${waitReason}` : "") + (awaiting ? ` ⇣${awaiting} waiting` : "") + (r.lastToolCall ? ` → ${r.lastToolCall}` : "") + (r.effort ? ` effort=${effortSummary(r)}` : "");
+      const { wait_reason: waitReason, awaiting_children: awaiting, parent_run_id: parent, children, subtree_cost: subtree } = summaries.get(r.id)!;
+      const hint = (waitReason ? ` ${waitReason}` : "") + (awaiting ? ` ⇣${awaiting} waiting` : "")
+        + (parent ? ` parent=${parent}` : "") + (children ? ` children=${children.length} subtree=$${subtree!.toFixed(3)}` : "") + (r.lastToolCall ? ` → ${r.lastToolCall}` : "") + (r.effort ? ` effort=${effortSummary(r)}` : "");
       lines.push(
         `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} runtime=${r.runtime === undefined ? "subprocess" : r.runtime} available_actions=${summaries.get(r.id)!.available_actions.join(",") || "(none)"}`,
       );

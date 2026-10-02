@@ -12,7 +12,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { elapsedStr, formatUsage, type RunRegistry } from "./runs.ts";
 import { STATUS_GLYPH } from "./status-glyph.ts";
-import { isTerminal } from "./types.ts";
+import { isDelegatedLeaf, isTerminal } from "./types.ts";
 import type { Run, RunStatus } from "./types.ts";
 import { classifyStall, type WatchdogConfig } from "./watchdog.ts";
 import { awaitingChildren } from "./delegation.ts";
@@ -177,7 +177,8 @@ export function formatRow(
   // so widget output stays deterministic and mutation-witness-able.
   // Soft → warning slot; hard → error slot with trailing `!`.
   const stall = formatStallSegment(r, theme, nowMs, wdCfg, awaitingChildren(r, runs) > 0);
-  return `${glyph} ${name} ${elapsed}${activity}${stall}${usage}`;
+  // N4: a delegated leaf is indented; rows keep registry order.
+  return `${isDelegatedLeaf(r) ? "  " : ""}${glyph} ${name} ${elapsed}${activity}${stall}${usage}`;
 }
 
 /**

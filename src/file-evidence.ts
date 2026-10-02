@@ -2,7 +2,7 @@ import { closeSync, constants, fstatSync, openSync, readFileSync, readSync, real
 import { dirname, isAbsolute, join } from "node:path";
 import { resolveLocalPath } from "./conductor-cwd.ts";
 import { runsRoot, type RunRegistry } from "./runs.ts";
-import { isTerminal, type Run, type RunRecord } from "./types.ts";
+import { childExitUnconfirmed, isTerminal, type Run, type RunRecord } from "./types.ts";
 
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
@@ -66,7 +66,7 @@ function sourceRun(id: string, registry: RunRegistry): Run | RunRecord {
 /** Advertise only a terminal, persisted, readable result; never infer one from a model summary. */
 export function resultRef(run: Run): string | undefined {
   try {
-    return RUN_ID.test(run.id) && isTerminal(run.status) && !run.herdrExitUnconfirmed && !run.herdrResultUnavailable && usableResult(run.finalPath) ? `run:${run.id}` : undefined;
+    return RUN_ID.test(run.id) && isTerminal(run.status) && !run.herdrExitUnconfirmed && !run.herdrResultUnavailable && !childExitUnconfirmed(run) && usableResult(run.finalPath) ? `run:${run.id}` : undefined;
   } catch { return undefined; }
 }
 
@@ -82,7 +82,7 @@ export function appendFileEvidence(task: string, files: readonly string[] | unde
     if (typeof input !== "string" || !input.trim() || input.includes("\0")) throw new Error("files entries must be non-empty local paths or run:<agent_id> references");
     try {
       const run = input.startsWith("run:") ? sourceRun(input.slice(4), options.registry) : undefined;
-      if (run && (run.herdrExitUnconfirmed || run.herdrResultUnavailable || !usableResult(run.finalPath))) throw new Error(`no usable final result: ${input}`);
+      if (run && (run.herdrExitUnconfirmed || run.herdrResultUnavailable || childExitUnconfirmed(run) || !usableResult(run.finalPath))) throw new Error(`no usable final result: ${input}`);
       const path = realpathSync(run ? run.finalPath : resolveLocalPath(input, options.cwd));
       const size = inspect(path, (_fd, size) => size);
       if (seen.has(path)) return undefined;

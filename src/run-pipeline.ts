@@ -12,7 +12,8 @@ import { classifyFailure } from "./failure-classify.ts";
 import { contextRetirementNotice } from "./context-retirement.ts";
 import { recordRunOutcome } from "./memory.ts";
 import type { ConductorEventEmitter } from "./conductor-events.ts";
-import { isTerminal, type Run, type RunStatus, type ResolvedHook } from "./types.ts";
+import { childExitUnconfirmed, isTerminal, type Run, type RunStatus, type ResolvedHook } from "./types.ts";
+import { settleOwnedChildren } from "./delegation.ts";
 import {
   type RunRegistry, attachSpawnedProc, stampSpawnStreamingMode, forceTerminate,
   discoverSessionPathIfMissing, discoverContextRetirement, applyHookToTerminal,
@@ -51,6 +52,8 @@ export function createRunPipeline(
   if (opts.reattach && run.integration) throw new Error("durable integration belongs to M5 recovery, not stream attachment");
   if (run.runtime === "herdr" && !opts.registry.herdrAdmissionOpen) throw new Error("herdr runtime shutting down; launch/attach refused");
   const runtime = opts.runtime ?? runtimeFor(run);
+  // N4: this invocation's leaves are the ones started from here on.
+  const launchedAt = Date.now();
   if (run.runtime === "herdr") run.herdrResultUnavailable = true;
   if (opts.reattach) {
     run.messages = []; run.usage = { ...(run.herdrUsageBaseline?.launchNonce === run.herdr?.launchNonce ? run.herdrUsageBaseline!.usage : emptyUsage()) };
@@ -139,6 +142,17 @@ export function createRunPipeline(
     if (transport.kind === "herdr") run.herdrResultUnavailable = !getFinalText(run.messages.slice(messageOffset)) || undefined;
     if (opts.answer) await answerRecord;
     check();
+    // N4: leaves stop and exit first, before any blocked or terminal hook, merge, footprint, integration, final, record or card.
+    await settleOwnedChildren(run, opts.registry, launchedAt);
+    check();
+    if (childExitUnconfirmed(run) && !isTerminal(run.status) && !awaitingAnswer) {
+      // Nothing of this invocation is published; a withdrawn owner question is named, not lost.
+      const ask = run.pendingAsk, ids = run.abandonedChildren!.filter(c => c.exit === "unconfirmed").map(c => c.id).join(", ");
+      run.pendingAsk = undefined;
+      terminal = "failed";
+      run.errorMessage = [run.errorMessage, `delegated child ${ids} exit unconfirmed after cancellation; hook, merge, integration and final result withheld; worktree preserved` +
+        (ask ? `; owner question ${ask.askId} withdrawn: ${ask.question}` : "")].filter(Boolean).join("\n");
+    }
     discoverSessionPathIfMissing(run, opts.sessionDir);
     discoverContextRetirement(run, opts.sessionDir);
     if ((awaitingAnswer || run.pendingAsk) && !isTerminal(run.status)) {
@@ -271,7 +285,8 @@ export function createRunPipeline(
       run.integration.reason = `terminal persistence uncertain: ${(error as Error).message}`;
       opts.registry.notify(run);
     } finally {
-      // Settlement sent SIGTERM; one that is ignored ends in SIGKILL, so the slot reservation is bounded.
+      // Settlement sent SIGTERM; one that is ignored ends in SIGKILL. The reservation lasts until
+      // close, which waits for stdio: a descendant holding an inherited pipe can extend it past 2 s.
       if (transport.kind === "subprocess") {
         const launched = transport;
         const kill = setTimeout(() => { try { launched.stop("SIGKILL"); } catch { /* already exited */ } }, 2000);

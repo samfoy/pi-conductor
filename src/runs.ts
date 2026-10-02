@@ -60,7 +60,10 @@ import { readProcessStartTime } from "./reconcile-startup.ts";
 import { ConductorEventEmitter } from "./conductor-events.ts";
 import { builtinPersonasDir, childToolScope, effectiveAllowTools, effectiveExcludeTools, isWriteCapable, runScopeError } from "./personas.ts";
 import { loadWorkspaceDoctrine } from "./workspace-doctrine.ts";
+import { terminateChildren } from "./delegation.ts";
 import {  emptyUsage,
+  childExitUnconfirmed,
+  isDelegatedLeaf,
   isDelegating,
   isSettled,
   isTerminal,
@@ -1951,6 +1954,8 @@ export function runActionError(run: Run, action: RunAction, observed: ActionObse
     const scopeError = runScopeError(run);
     if (scopeError) return scopeError;
   }
+  // N4: its delegating parent consumes a leaf's result and is its only messenger; the lead may only kill it.
+  if (action !== "kill" && isDelegatedLeaf(run)) return `sub-agent ${run.id} is owned by ${run.parentRunId ?? "its delegating parent"}; only kill. Its parent consumes the result.`;
   if (run.runtime === "herdr") {
     if (!ownsHerdrRun(run)) return "herdr owner generation fenced; action refused";
     if (run.transport?.kind !== "herdr") return "herdr runtime unavailable here: stream is not attached";
@@ -2321,6 +2326,8 @@ export function sendToRun(
   run.worktreeKept = undefined;
   run.stopReason = undefined;
   run.lastToolCall = undefined;
+  run.abandonedChildren = undefined;
+  run.delegationClosed = undefined;
   // Reseed watchdog timing so the next tick doesn't compute silentMs
   // against the *previous turn's* lastEventAt (resume-race bug fix).
   run.lastEventAt = Date.now();
@@ -2617,6 +2624,10 @@ export async function settleWorktree(run: Run, terminal: RunStatus): Promise<Run
     return terminal;
   }
   if (!run.worktreePath || !run.worktreeBranch) return terminal;
+  if (childExitUnconfirmed(run)) {
+    run.worktreeKept = `delegated child exit unconfirmed: worktree ${run.worktreePath} and branch ${run.worktreeBranch} preserved, nothing merged.`;
+    return terminal;
+  }
   const gitRoot = dirname(dirname(dirname(run.worktreePath)));
   const noMergeBack = !run.mergeStrategy || run.mergeStrategy === "none";
   if (!noMergeBack) terminal = await applyMergeToTerminal(run, gitRoot, terminal);
@@ -2996,6 +3007,8 @@ export function forceTerminate(
     return;
   }
   run.rejectAnswerDelivery = undefined;
+  // N4: owned leaves first, so the parent's record and card follow their cancellation.
+  terminateChildren(run, registry);
   if (run.timeoutTimer) {
     clearTimeout(run.timeoutTimer);
     run.timeoutTimer = undefined;
@@ -3174,7 +3187,7 @@ export async function writeFinal(run: Run, durable = false): Promise<void> {
   const text = getFinalText(run.messages) || run.integration?.resultText || "(no output)";
   const fence = () => { ownership?.assert(); assertHerdrOwner(run); if (run.herdr !== binding) throw new Error("herdr invocation changed before final write"); };
   // Keep any prior invocation's artifact intact; it is not this invocation's result.
-  if (run.herdrExitUnconfirmed || run.herdrResultUnavailable) return;
+  if (run.herdrExitUnconfirmed || run.herdrResultUnavailable || childExitUnconfirmed(run)) return;
   if (durable || run.runtime === "herdr") {
     if (!ownsHerdrRun(run)) return;
     await mkdir(dirname(run.finalPath), { recursive: true });
@@ -3194,6 +3207,7 @@ export async function writeFinal(run: Run, durable = false): Promise<void> {
 /** Completion surfaces must not present unquiesced assistant output as an assignment result. */
 export function getCompletionText(run: Run): string {
   if (run.herdrResultUnavailable) return "herdr: no usable final output from this invocation. Any existing final.md is historical; inspect the transcript and diagnostics.";
+  if (childExitUnconfirmed(run)) return "delegated child exit unconfirmed; no final result published. Any existing final.md is historical; inspect the transcript and abandoned-children.";
   return run.herdrExitUnconfirmed
     ? "herdr: child exit unconfirmed; no final result published. Any existing final.md belongs to a previous invocation. Inspect the retained transcript and diagnostics."
     : getFinalText(run.messages);
