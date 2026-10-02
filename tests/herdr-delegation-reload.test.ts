@@ -62,13 +62,24 @@ function herdrLeaf(registry: RunRegistry, parent: Run, callId: string, over: { i
   registry.register(leaf);
   return leaf;
 }
+/** A subprocess leaf this module instance launched: its stdout source cannot move to the next instance. */
+function subprocessLeaf(o: SpawnOptions, parent: Run): Run {
+  const id = o.preAllocatedId ?? `scout-n5s${++seq}`, dir = join(runsRoot(), id); mkdirSync(dir, { recursive: true });
+  const leaf: Run = { id, runtime: "subprocess", persona: "scout", task: "t", cwd: parent.cwd, mode: "background", status: "running", startTime: Date.now(), lastEventAt: Date.now(),
+    messages: [], usage: emptyUsage(), recordPath: join(dir, "record.json"), transcriptPath: join(dir, "transcript.jsonl"), finalPath: join(dir, "final.md"),
+    depth: 2, delegateAllow: [], parentRunId: parent.id, delegateToolCallId: o.delegation!.delegateToolCallId,
+    transport: { kind: "subprocess", closed: new Promise(() => {}), stderr: "", drain: () => "", stop() {} } as never };
+  o.registry.register(leaf);
+  return leaf;
+}
 /** One lead instance: registry, queue whose spawner launches owned herdr leaf stubs, broker. */
-function lead(maxConcurrent = 4) {
+function lead(maxConcurrent = 4, leafRuntime: "herdr" | "subprocess" = "herdr") {
   const registry = new RunRegistry(), spawned: SpawnOptions[] = [];
   const queue = new SpawnQueue(registry, maxConcurrent, 1, (o: SpawnOptions) => {
     spawned.push(o);
     const parent = o.registry.get(o.delegation!.parentRunId)!;
-    return { run: herdrLeaf(o.registry, parent, o.delegation!.delegateToolCallId, { id: o.preAllocatedId }), done: new Promise<Run>(() => {}) };
+    const leaf = leafRuntime === "herdr" ? herdrLeaf(o.registry, parent, o.delegation!.delegateToolCallId, { id: o.preAllocatedId }) : subprocessLeaf(o, parent);
+    return { run: leaf, done: new Promise<Run>(() => {}) };
   });
   const broker = new DelegationBroker({ registry, queue, env: {} });
   registry.delegation = broker;
@@ -411,4 +422,17 @@ test("N5 a parent that settled before reconcile registered its leaf: the late re
   assert.equal(leaf.status, "killed", "no live leaf is left working for a settled parent");
   assert.equal(owner2.spawned.length, 0);
   await handleSessionShutdown({ reason: "reload" }, { runs: owner2.registry.list(), resetSanitizer() {}, delegation: owner2.broker });
+});
+
+test("N5 reload: a herdr parent survives; leaves it cannot hand over (subprocess, queued) are cancelled by name while it is still owned", { timeout: 15000 }, async () => {
+  const { parent, tee, owner } = await herdrParent(lead(2, "subprocess"));
+  for (const id of ["s1", "s2", "s3"]) tee(start(id), update(id));
+  await until(() => owner.spawned.length === 2 && owner.registry.list().some(r => r.parentRunId === parent.id && r.status === "queued"), "two running, one queued");
+  const leaves = owner.registry.list().filter(r => r.parentRunId === parent.id);
+  await reload(owner);
+  for (const id of ["s1", "s2", "s3"]) assert.equal(answer(parent, id)?.reason, `cancelled: ${HERDR_RELOAD_CANCELLED}`, id);
+  assert.deepEqual(leaves.map(l => l.status), ["killed", "killed", "killed"], "running leaves stopped, the queued one withdrawn");
+  assert.equal(owner.queue.size(), 0);
+  assert.equal(parent.status, "running", "the herdr parent itself survives the reload (R6 is subprocess-only)");
+  assert.equal(owner.spawned.length, 2, "nothing launched while cancelling");
 });
