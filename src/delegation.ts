@@ -189,12 +189,16 @@ export function terminateChildren(parent: Run, registry: RunRegistry): void {
  */
 export async function settleOwnedChildren(parent: Run, registry: RunRegistry, since: number): Promise<void> {
   if (parent.depth !== 1 || registry.get(parent.id) !== parent) return;
+  const invocation = parent.transport;
   parent.delegationClosed = true;
   const abandoned = new Set(parent.abandonedChildren?.map(c => c.id));
   const owned = childrenOf(parent, registry.list(), since).filter(c => abandoned.has(c.id) || !isTerminal(c.status) || observedExit(c) !== "confirmed");
   if (!owned.length) return;
   terminateChildren(parent, registry);
-  noteAbandoned(parent, owned, await Promise.all(owned.map(awaitExit)));
+  const exits = await Promise.all(owned.map(awaitExit));
+  // A resume replaced the invocation these leaves belonged to; its record is not this one's.
+  if (parent.transport !== invocation) return;
+  noteAbandoned(parent, owned, exits);
 }
 
 /** The child's own bound: the same clamp from its side, plus the response grace. */

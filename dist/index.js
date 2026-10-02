@@ -4277,12 +4277,15 @@ function terminateChildren(parent, registry) {
 }
 async function settleOwnedChildren(parent, registry, since) {
   if (parent.depth !== 1 || registry.get(parent.id) !== parent) return;
+  const invocation = parent.transport;
   parent.delegationClosed = true;
   const abandoned = new Set(parent.abandonedChildren?.map((c) => c.id));
   const owned = childrenOf(parent, registry.list(), since).filter((c) => abandoned.has(c.id) || !isTerminal(c.status) || observedExit(c) !== "confirmed");
   if (!owned.length) return;
   terminateChildren(parent, registry);
-  noteAbandoned(parent, owned, await Promise.all(owned.map(awaitExit)));
+  const exits = await Promise.all(owned.map(awaitExit));
+  if (parent.transport !== invocation) return;
+  noteAbandoned(parent, owned, exits);
 }
 function delegateWaitDeadline(o) {
   const limits = [
@@ -4384,6 +4387,10 @@ function createRunPipeline(run, piArgs, opts) {
     }
     finalizing = finalizeEffects(terminal, exitCode).catch((error) => {
       if (!current()) return;
+      if (replaced()) {
+        donePromiseResolve(run);
+        return;
+      }
       run.errorMessage = `herdr settlement preserved: ${error.message}`;
       opts.registry.notify(run);
     });
@@ -4422,8 +4429,17 @@ function createRunPipeline(run, piArgs, opts) {
     if (transport.kind === "herdr") run.herdrResultUnavailable = !getFinalText(run.messages.slice(messageOffset)) || void 0;
     if (opts.answer) await answerRecord;
     check();
-    await settleOwnedChildren(run, opts.registry, launchedAt);
+    if (!replaced()) await settleOwnedChildren(run, opts.registry, launchedAt);
     check();
+    if (replaced()) {
+      try {
+        transport.stop();
+      } catch {
+      }
+      escalate();
+      donePromiseResolve(run);
+      return;
+    }
     if (childExitUnconfirmed(run) && !isTerminal(run.status) && !awaitingAnswer) {
       const ask = run.pendingAsk, ids = run.abandonedChildren.filter((c) => c.exit === "unconfirmed").map((c) => c.id).join(", ");
       run.pendingAsk = void 0;
@@ -4573,6 +4589,19 @@ function createRunPipeline(run, piArgs, opts) {
     check();
     await settle(terminal, exitCode);
   };
+  const replaced = () => run.transport !== transport;
+  const escalate = () => {
+    if (transport.kind !== "subprocess") return;
+    const launched = transport;
+    const kill = setTimeout(() => {
+      try {
+        launched.stop("SIGKILL");
+      } catch {
+      }
+    }, 2e3);
+    kill.unref();
+    void launched.closed.then(() => clearTimeout(kill));
+  };
   let settled = false;
   const settle = async (terminal, exitCode) => {
     if (!current() || settled) return;
@@ -4586,17 +4615,7 @@ function createRunPipeline(run, piArgs, opts) {
       run.integration.reason = `terminal persistence uncertain: ${error.message}`;
       opts.registry.notify(run);
     } finally {
-      if (transport.kind === "subprocess") {
-        const launched = transport;
-        const kill = setTimeout(() => {
-          try {
-            launched.stop("SIGKILL");
-          } catch {
-          }
-        }, 2e3);
-        kill.unref();
-        void launched.closed.then(() => clearTimeout(kill));
-      }
+      escalate();
     }
   };
   const processLine = (line) => {

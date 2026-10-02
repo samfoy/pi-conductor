@@ -40,7 +40,8 @@ import { FocusedStreamModel } from "../src/focused-stream-model.ts";
 import { ConductorEventEmitter } from "../src/conductor-events.ts";
 import { openEffort } from "../src/effort/open.ts";
 import { holdsSlot } from "../src/effort/admit.ts";
-import { emptyUsage, isTerminal, toRunRecord, type Persona, type Run, type RunRecord } from "../src/types.ts";
+import { appendFileEvidence, resultRef } from "../src/file-evidence.ts";
+import { emptyUsage, isTerminal, toRunRecord, type MergeStrategy, type Persona, type Run, type RunRecord } from "../src/types.ts";
 
 sandboxPi();
 
@@ -151,7 +152,8 @@ function before(log: string[], ...entries: string[]) {
   assert.ok(at.every(i => i >= 0) && at.every((v, i) => i === 0 || at[i - 1]! < v), `expected order ${JSON.stringify(entries)} in ${JSON.stringify(log)}`);
 }
 
-interface DelegatorOpts { modeFor?: (role: "parent" | "leaf") => ExitMode; maxConcurrent?: number; hook?: string; cwd?: string; persona?: Persona; effort?: string; worktree?: boolean }
+interface DelegatorOpts { modeFor?: (role: "parent" | "leaf") => ExitMode; maxConcurrent?: number; hook?: string; cwd?: string; persona?: Persona; effort?: string; worktree?: boolean;
+  timeoutMs?: number; mergeStrategy?: MergeStrategy }
 async function delegator(t: test.TestContext, o: DelegatorOpts = {}) {
   const fp = fakePi(t, o.modeFor);
   const cwd = o.cwd ?? project();
@@ -159,12 +161,12 @@ async function delegator(t: test.TestContext, o: DelegatorOpts = {}) {
   const queue = new SpawnQueue(registry, o.maxConcurrent ?? 1, 1);
   registry.delegation = new DelegationBroker({ registry, queue, env: {} });
   transitions(registry, fp.log);
-  const cards: { run: Run; content: string; leaves: string[] }[] = [];
+  const cards: { run: Run; status: Run["status"]; content: string; leaves: string[] }[] = [];
   const persona = o.persona ?? (await resolvePersonas({ cwd })).personas.get("lead")!;
+  const card = (r: Run) => void cards.push({ run: r, status: r.status, content: formatCompletionNotification(r, [], registry.list()), leaves: registry.list().filter(l => l.depth === 2).map(l => `${l.id} ${l.status}`) });
   const { run, done } = spawnRun({
-    registry, persona, task: "N4 parent", cwd, mode: "background", timeoutMs: 60_000, runtimeEnv: {}, worktree: o.worktree,
-    effort: o.effort, parentSessionId: o.effort ? "owner" : undefined, onCompleteHook: o.hook ?? "", events: new HookSpy(fp.log),
-    onComplete: r => cards.push({ run: r, content: formatCompletionNotification(r, [], registry.list()), leaves: registry.list().filter(l => l.depth === 2).map(l => `${l.id} ${l.status}`) }),
+    registry, persona, task: "N4 parent", cwd, mode: "background", timeoutMs: o.timeoutMs ?? 60_000, runtimeEnv: {}, worktree: o.worktree, mergeStrategy: o.mergeStrategy,
+    effort: o.effort, parentSessionId: o.effort ? "owner" : undefined, onCompleteHook: o.hook ?? "", events: new HookSpy(fp.log), onComplete: card,
   });
   const parent = fp.of(run)!;
   const leaf = (id: string) => registry.list().find(r => r.delegateToolCallId === id && r.parentRunId === run.id);
@@ -174,7 +176,7 @@ async function delegator(t: test.TestContext, o: DelegatorOpts = {}) {
     return leaf(id)!;
   };
   const finish = async (text = "parent final answer", cost = 0) => { parent.line(final(text, cost)); await tick(); parent.exit(0); };
-  return { ...fp, cwd, registry, queue, run, done, parent, cards, leaf, delegate, finish };
+  return { ...fp, cwd, registry, queue, run, done, parent, cards, card, leaf, delegate, finish };
 }
 
 // ── Finalization gate ────────────────────────────────────────────────
@@ -315,6 +317,118 @@ for (const mode of ["hold", "never"] as const) {
     }
     assert.equal(h.cards.length, 1, "one card");
     assert.equal(git(cwd, "rev-parse", "HEAD"), base, "the main checkout never moved");
+  });
+}
+
+// ── A resume replaces the invocation the gate belongs to ─────────────
+
+/**
+ * A killed or timed-out parent is resumable while its old gate still waits on a
+ * leaf (up to 2.5 s after its process closed). The resume starts after
+ * forceTerminate's own 2 s SIGKILL timer, so only the gate can reach the new
+ * invocation. `parent` closes on SIGTERM (prompt) or only on that timer's
+ * SIGKILL (hold, closing at about +2005 ms).
+ */
+interface StaleCase { leaf: ExitMode; parent: ExitMode; resumeAt: number; merge?: boolean; ask?: boolean }
+async function staleResume(t: test.TestContext, c: StaleCase) {
+  const cwd = c.merge ? repo() : project();
+  const h = await delegator(t, { cwd, timeoutMs: 400, hook: "true", worktree: c.merge, mergeStrategy: c.merge ? "merge" : undefined,
+    modeFor: role => role === "leaf" ? c.leaf : c.parent });
+  const base = c.merge ? git(cwd, "rev-parse", "main") : "";
+  if (c.merge) { writeFileSync(join(h.run.worktreePath!, "work"), "work\n"); git(h.run.worktreePath!, "add", "work"); git(h.run.worktreePath!, "commit", "-m", "work"); }
+  // As a seeded session or an earlier invocation's discovery leaves it.
+  const session = join(dirname(h.run.recordPath), "session", "s.jsonl");
+  mkdirSync(dirname(session), { recursive: true });
+  writeFileSync(session, JSON.stringify({ type: "session", id: "s", cwd: h.run.worktreePath ?? cwd }) + "\n");
+  h.run.sessionPath = session;
+  const hooks = () => h.log.filter(e => e === "hook started").length;
+  const leaf = await h.delegate("s_leaf");
+  let oldDone = false;
+  void h.done.then(() => { oldDone = true; });
+  const old = h.of(h.run)!;
+  let closedAt = 0;
+  old.once("close", () => { closedAt = Date.now(); });
+  await until(() => h.cards.length === 1, "the production hard timer's card");
+  const killedAt = Date.now();
+  assert.equal(h.run.status, "timeout");
+  await until(() => Date.now() - killedAt >= c.resumeAt, "the resume time", c.resumeAt + 2000);
+  assert.ok(closedAt > 0, "the old parent process has closed");
+  if (c.parent === "hold") assert.ok(closedAt - killedAt >= 1990, `the TERM-ignoring parent closed only on the 2 s SIGKILL (+${closedAt - killedAt} ms)`);
+  assert.equal(oldDone, false, "the old invocation's gate is still waiting on its leaf");
+  const resumed = sendToRun(h.run, "continue", { registry: h.registry, timeoutMs: 60_000, onComplete: h.card, events: new HookSpy(h.log) });
+  assert.equal(resumed.kind, "started", resumed.kind === "rejected" ? resumed.reason : "");
+  const fresh = h.procs.at(-1)!;
+  assert.ok(fresh !== old && fresh.runId === h.run.id && fresh.role === "parent");
+  const question = "Use A or B?";
+  if (c.ask) {
+    fresh.line({ type: "message_end", message: { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "ask_new", name: "ask_owner", arguments: { question } }] } });
+    fresh.line({ type: "tool_execution_start", toolCallId: "ask_new", toolName: "ask_owner", args: { question } });
+    fresh.line({ type: "tool_execution_end", toolCallId: "ask_new", toolName: "ask_owner", isError: false, result: { content: [], details: { askId: "ask_new", question, evidence: "" } } });
+    await until(() => h.run.pendingAsk?.askId === "ask_new", "the new invocation's question");
+  }
+  await until(() => oldDone, "the old invocation's pipeline finished", 6000);
+  await new Promise(r => setTimeout(r, 100)); // any stale effect would have landed
+  if (c.merge) {
+    assert.equal(git(cwd, "rev-parse", "main"), base, "the killed invocation merged nothing into main");
+    assert.ok(existsSync(h.run.worktreePath!), "its worktree is still the new invocation's");
+  }
+  assert.equal(h.run.status, "running", h.run.errorMessage);
+  assert.equal(h.cards.length, 1, "one card: the old invocation's timeout");
+  assert.equal(hooks(), 0, "no hook for the killed invocation");
+  assert.equal(h.run.abandonedChildren, undefined, "the old gate wrote no abandoned children into the new invocation");
+  assert.equal(h.run.errorMessage, undefined);
+  assert.equal(h.run.pendingAsk?.askId, c.ask ? "ask_new" : undefined, "the new invocation's question is untouched");
+  assert.equal((h.run.transport as { proc?: unknown } | undefined)?.proc, fresh, "the new process is still the run's");
+  assert.equal(h.registry.get(leaf.id)!.status === "killed" || h.registry.get(leaf.id)!.status === "timeout", true, "the old leaf stays cancelled");
+  if (!c.ask) fresh.line(final("resumed answer"));
+  await tick();
+  fresh.exit(0);
+  await (resumed as { done: Promise<Run> }).done;
+  await new Promise(r => setTimeout(r, 50));
+  assert.deepEqual(h.cards.map(x => x.status), ["timeout", c.ask ? "blocked" : "completed"], "the new invocation settled once");
+  if (c.ask) return;
+  assert.equal(h.run.status, "completed", h.run.errorMessage);
+  assert.equal(hooks(), 1, "only the new invocation ran its hook");
+  assert.equal(readFileSync(h.run.finalPath, "utf8"), "resumed answer");
+  assert.equal(resultRef(h.run), `run:${h.run.id}`);
+  if (c.merge) {
+    assert.equal(git(cwd, "show", "main:work"), "work", "the new invocation merged once");
+    assert.equal(git(cwd, "rev-list", "--count", `${base}..main`), "2", "one merge of one commit");
+    assert.equal(h.run.worktreePath, undefined, "released by the new invocation's merge");
+  }
+}
+
+test("N4 stale gate: a leaf exited with pipes held, a merging worktree parent timed out by its hard timer and resumed at +2102 ms; the old gate merges, hooks and publishes nothing", { timeout: 20_000 }, async t => {
+  await staleResume(t, { leaf: "stdio", parent: "prompt", resumeAt: 2102, merge: true });
+});
+
+test("N4 stale gate: a never-exiting leaf, resume at +2102 ms while the new invocation holds a question; the old gate fails, clears and publishes nothing", { timeout: 20_000 }, async t => {
+  await staleResume(t, { leaf: "never", parent: "prompt", resumeAt: 2102, ask: true });
+});
+
+test("N4 stale gate, wide window: the parent ignores SIGTERM and closes at about +2005 ms, the leaf never exits, resume at +3003 ms", { timeout: 20_000 }, async t => {
+  await staleResume(t, { leaf: "never", parent: "hold", resumeAt: 3003 });
+});
+
+for (const [mode, exit] of [["never", "unconfirmed"], ["prompt", "confirmed"]] as const) {
+  test(`N4 a hard-timer timeout with partial text and a ${exit} leaf: the kill-time final.md is ${exit === "unconfirmed" ? "refused as result-ref and run: evidence" : "a valid result-ref and run: evidence"}`, { timeout: 20_000 }, async t => {
+    const h = await delegator(t, { timeoutMs: 400, modeFor: role => role === "leaf" ? mode : "prompt" });
+    h.parent.line(final("partial answer before the timeout"));
+    const leaf = await h.delegate("r_leaf");
+    await h.done;
+    assert.equal(h.run.status, "timeout");
+    await until(() => existsSync(h.run.finalPath), "the kill-time final.md");
+    assert.equal(readFileSync(h.run.finalPath, "utf8"), "partial answer before the timeout", "the kill wrote a diagnostic final.md");
+    const evidence = () => appendFileEvidence("task", [`run:${h.run.id}`], { cwd: h.cwd, registry: h.registry });
+    if (exit === "unconfirmed") {
+      assert.deepEqual(h.run.abandonedChildren?.map(c => [c.id, c.exit]), [[leaf.id, "unconfirmed"]]);
+      assert.equal(resultRef(h.run), undefined, "no result-ref while a child's exit is unconfirmed");
+      assert.throws(evidence, /no usable final result/, "run: evidence is refused");
+    } else {
+      assert.equal(h.run.abandonedChildren?.some(c => c.exit === "unconfirmed") ?? false, false);
+      assert.equal(resultRef(h.run), `run:${h.run.id}`, "a proven exit keeps the ref");
+      assert.match(evidence(), /partial answer before the timeout/);
+    }
   });
 }
 

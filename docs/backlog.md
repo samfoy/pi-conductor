@@ -1217,3 +1217,12 @@ From the critic-opus-h11-gwm4 review of the N2 delegate broker. None blocks N2; 
 - **Rejection reasons echo `persona` and `files` at any length.** The child could refuse a non-allowlisted persona before its first update, and reasons could truncate echoed input.
 - **OpenAI Responses-family call ids (`call_…|fc_…`) fail the plan's id regex**, and the error wrongly says "nested calls cannot delegate". Widening the id set needs its own path-safety review.
 - **Code-read only:** a herdr delegating persona as a chain successor throws inside `onChain` and `applyChainIfPresent` swallows it without a diagnostic; `ensemble_auto` plan validation does not check the herdr delegation refusal; `close()` captures leaves before its cancel loop, so for a queued leaf drained during the loop it awaits the placeholder's record write, not the spawned run's.
+
+## N4 review follow-ups (2026-10-01, non-blocking)
+
+From the critic-opus-h11-6ptr review of N4 direct ownership. The stale-invocation blocker it found is fixed (the gate is fenced by invocation); these are pre-existing or accepted and each needs its own test-first slice.
+
+- **forceTerminate's 2 s SIGKILL reads `run.proc` when it fires** (`src/subprocess-runtime.ts:71-89`, `terminate`; the SIGKILL is at line 82). A resume within 2 s of a kill gets its new process SIGKILLed. Pre-existing on base; the N4 tests resume after it.
+- **A resume before the old process closes is only partly fenced.** Before the invocation fence, `createRunPipeline`'s finalize (`src/run-pipeline.ts:119-142`) still works through `run.*`: it destroys the stdin queue, rejects acks, clears the timeout timer and applies the old drained tail. Later awaits (the hook at `src/run-pipeline.ts:221`, effort close and integration) are not fenced either. All of this is pre-existing on base.
+- **`ensemble_status` cost per call is O(runs × children)** (`src/tools.ts:1639-1646`). Every lifetime child of every run is listed, and each child's `resultRef` reads its `final.md`. Lifetime children accumulate across resumes without a bound.
+- **The `ensemble_auto` budget is not an exact bill** (`src/tools.ts:583`). `subtreeCost` is charged when the step settles; a leaf still closing (`stdio-open` or `unconfirmed`) can add usage afterwards.

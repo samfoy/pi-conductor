@@ -108,6 +108,7 @@ export function createRunPipeline(
     }
     finalizing = finalizeEffects(terminal, exitCode).catch(error => {
       if (!current()) return;
+      if (replaced()) { donePromiseResolve(run); return; }
       run.errorMessage = `herdr settlement preserved: ${(error as Error).message}`;
       opts.registry.notify(run);
     });
@@ -143,8 +144,16 @@ export function createRunPipeline(
     if (opts.answer) await answerRecord;
     check();
     // N4: leaves stop and exit first, before any blocked or terminal hook, merge, footprint, integration, final, record or card.
-    await settleOwnedChildren(run, opts.registry, launchedAt);
+    if (!replaced()) await settleOwnedChildren(run, opts.registry, launchedAt);
     check();
+    // A resume of the killed run replaced this invocation before or during the gate: the run, its
+    // record and callbacks are the new invocation's. Only this one's process is still ours.
+    if (replaced()) {
+      try { transport.stop(); } catch { /* already exited */ }
+      escalate();
+      donePromiseResolve(run);
+      return;
+    }
     if (childExitUnconfirmed(run) && !isTerminal(run.status) && !awaitingAnswer) {
       // Nothing of this invocation is published; a withdrawn owner question is named, not lost.
       const ask = run.pendingAsk, ids = run.abandonedChildren!.filter(c => c.exit === "unconfirmed").map(c => c.id).join(", ");
@@ -274,6 +283,16 @@ export function createRunPipeline(
     await settle(terminal, exitCode);
   };
 
+  /** N4 invocation fence: a subprocess resume launches a new transport on the same run. */
+  const replaced = () => run.transport !== transport;
+  /** An ignored SIGTERM ends in SIGKILL on this invocation's own handle, never `run.proc`. */
+  const escalate = () => {
+    if (transport.kind !== "subprocess") return;
+    const launched = transport;
+    const kill = setTimeout(() => { try { launched.stop("SIGKILL"); } catch { /* already exited */ } }, 2000);
+    kill.unref();
+    void launched.closed.then(() => clearTimeout(kill));
+  };
   let settled = false;
   const settle = async (terminal: RunStatus, exitCode?: number) => {
     if (!current() || settled) return;
@@ -285,14 +304,9 @@ export function createRunPipeline(
       run.integration.reason = `terminal persistence uncertain: ${(error as Error).message}`;
       opts.registry.notify(run);
     } finally {
-      // Settlement sent SIGTERM; one that is ignored ends in SIGKILL. The reservation lasts until
-      // close, which waits for stdio: a descendant holding an inherited pipe can extend it past 2 s.
-      if (transport.kind === "subprocess") {
-        const launched = transport;
-        const kill = setTimeout(() => { try { launched.stop("SIGKILL"); } catch { /* already exited */ } }, 2000);
-        kill.unref();
-        void launched.closed.then(() => clearTimeout(kill));
-      }
+      // Settlement sent SIGTERM. The reservation lasts until close, which waits for stdio:
+      // a descendant holding an inherited pipe can extend it past 2 s.
+      escalate();
     }
   };
 
