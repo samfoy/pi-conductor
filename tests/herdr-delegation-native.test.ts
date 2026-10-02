@@ -3,11 +3,12 @@
  * real `delegate`; its real start/update/end events reach the lead only through the H4
  * tee, the lead's broker spawns real Pi leaves that split the parent's pane, and the
  * parent's next turn reads their envelopes. Pane sessions are built from the exact pane
- * env and argv the lead gave herdr. Offline faux model; a missing root fails, never skips.
+ * env and argv the lead gave herdr. Offline faux model. The 0.87.1 minimum root is required (missing
+ * fails, never skips); each CONDUCTOR_H11_PI_ROOTS root also runs, expecting its own declared version.
  */
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build, stop } from "esbuild";
@@ -39,18 +40,17 @@ async function bundle(t: test.TestContext, piRoot: string): Promise<{ path: stri
   return { path, version };
 }
 
-test("N5 native Pi 0.87.1: real delegate start/update/end through the H4 tee to the broker; split leaves; depth-2 tool surface", { timeout: 120000 }, async t => {
-  const piRoot = process.env.CONDUCTOR_NATIVE_PI_ROOT;
-  assert.ok(piRoot && existsSync(join(piRoot, "package.json")), "CONDUCTOR_NATIVE_PI_ROOT must name the approved Pi 0.87.1 root");
+/** One installed Pi root, at the version its own package.json declares. */
+async function witness(t: test.TestContext, piRoot: string, expected: string) {
   const child = await bundle(t, piRoot);
-  assert.equal(child.version, "0.87.1", "native witness requires Pi 0.87.1, not the repo or global copy");
+  assert.equal(child.version, expected, `the bundled child runs Pi ${expected}, read from the root itself`);
   process.env.N5_NATIVE_VERSION = child.version;
   const h = await delegationHarness(t, { child: manifest => [child.path, manifest] });
   const { run: parent, done } = await h.spawnParent("N5-NATIVE parent fan-out", 90000);
   await done;
   assert.equal(parent.status, "completed", parent.errorMessage);
   const final = getFinalText(parent.messages);
-  t.diagnostic(`parent final:\n${final.replace(/```xml[\s\S]*?```/g, "<envelope>")}`);
+  t.diagnostic(`Pi ${child.version} parent final:\n${final.replace(/```xml[\s\S]*?```/g, "<envelope>")}`);
   assert.match(final, /^N5 native parent saw 4 results/);
   assert.match(final, /n_scout: ## ✓ `scout` completed[\s\S]*?N5 native leaf scout done; saw=Tool delegate not found/);
   assert.match(final, /n_auditor: ## ✓ `auditor` completed[\s\S]*?N5 native leaf auditor done/);
@@ -75,13 +75,13 @@ test("N5 native Pi 0.87.1: real delegate start/update/end through the H4 tee to 
   // Tool surfaces of the real sessions, built from the lead's pane env and argv.
   const surface = (run: Run) => JSON.parse(readFileSync(`${h.manifestOf(run)}.tools.json`, "utf8")) as { version: string; depth: string; active: string[] };
   const p = surface(parent);
-  t.diagnostic(`parent tools: ${p.active.join(",")}`);
-  assert.equal(p.version, "0.87.1"); assert.equal(p.depth, "1");
+  t.diagnostic(`Pi ${child.version} parent tools: ${p.active.join(",")}`);
+  assert.equal(p.version, child.version); assert.equal(p.depth, "1");
   for (const name of ["delegate", "ask_owner", "read", "bash", "edit", "write"]) assert.ok(p.active.includes(name), `delegating parent keeps ${name}`);
   for (const leafRun of leaves) {
     const s = surface(leafRun);
-    t.diagnostic(`${leafRun.persona} tools: ${s.active.join(",")}`);
-    assert.equal(s.depth, "2");
+    t.diagnostic(`Pi ${child.version} ${leafRun.persona} tools: ${s.active.join(",")}`);
+    assert.equal(s.version, child.version); assert.equal(s.depth, "2");
     assert.ok(s.active.includes("read") && s.active.includes("bash"), "a leaf keeps its default read-only tools");
     for (const name of ["delegate", "ask_owner", "edit", "write", "insert_before", "insert_after", "subagent", "ensemble_spawn", "ensemble_send"]) {
       assert.ok(!s.active.includes(name), `${leafRun.persona} has no ${name}`);
@@ -89,5 +89,21 @@ test("N5 native Pi 0.87.1: real delegate start/update/end through the H4 tee to 
     const r = JSON.parse(readFileSync(delegatePaths(dirname(parent.recordPath), leafRun.delegateToolCallId!).response, "utf8"));
     assert.deepEqual([r.ok, r.agentId, r.status], [true, leafRun.id, "completed"]);
   }
-  writeFileSync(join(root, "done"), "ok");
+  // Each pane child wrote a tool-surface sidecar beside its request; none was taken for a request.
+  const sidecars = readdirSync(h.manifests).filter(f => f.endsWith(".json.tools.json"));
+  assert.equal(sidecars.length, 3);
+  assert.deepEqual(h.launched(), sidecars.map(f => f.slice(0, -".tools.json".length)).sort(), "exactly the three agent-start requests were launched");
+}
+
+test("N5 native Pi 0.87.1 (minimum): real delegate start/update/end through the H4 tee to the broker; split leaves; depth-2 tool surface", { timeout: 120000 }, async t => {
+  const piRoot = process.env.CONDUCTOR_NATIVE_PI_ROOT;
+  assert.ok(piRoot && existsSync(join(piRoot, "package.json")), "CONDUCTOR_NATIVE_PI_ROOT must name the approved Pi 0.87.1 root; a missing minimum is a failure, not a skip");
+  await witness(t, piRoot, "0.87.1");
 });
+
+for (const piRoot of (process.env.CONDUCTOR_H11_PI_ROOTS ?? "").split(":").filter(Boolean)) {
+  const version = JSON.parse(readFileSync(join(piRoot, "package.json"), "utf8")).version as string;
+  test(`N5 native Pi ${version} (H11 matrix): real delegate through the H4 tee to the broker; split leaves; depth-2 tool surface`, { timeout: 120000 }, async t => {
+    await witness(t, piRoot, version);
+  });
+}

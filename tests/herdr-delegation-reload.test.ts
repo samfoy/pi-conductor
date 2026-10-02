@@ -6,7 +6,7 @@
  * record -> answer from it; anything else -> explicit uncertainty. A claimed call is
  * never re-spawned, and an old broker never answers or cancels after handing over.
  */
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -83,8 +83,16 @@ function lead(maxConcurrent = 4, leafRuntime: "herdr" | "subprocess" = "herdr") 
   });
   const broker = new DelegationBroker({ registry, queue, env: {} });
   registry.delegation = broker;
+  leads.push({ registry, broker });
   return { registry, queue, broker, spawned };
 }
+/** Every lead instance a test made; afterEach quiesces them, so a failed assertion never leaves a pipeline timer holding the file open. */
+const leads: { registry: RunRegistry; broker: DelegationBroker }[] = [];
+afterEach(async () => {
+  for (const { registry, broker } of leads.splice(0)) {
+    try { await handleSessionShutdown({ reason: "reload" }, { runs: registry.list(), resetSanitizer() {}, delegation: broker }); } catch { /* already fenced or released */ }
+  }
+});
 /** A running herdr delegator whose tee events the test writes, nonce-stamped. */
 async function herdrParent(owner = lead()) {
   const cwd = project(), id = `lead-n5r${++seq}`;
@@ -435,4 +443,53 @@ test("N5 reload: a herdr parent survives; leaves it cannot hand over (subprocess
   assert.equal(owner.queue.size(), 0);
   assert.equal(parent.status, "running", "the herdr parent itself survives the reload (R6 is subprocess-only)");
   assert.equal(owner.spawned.length, 2, "nothing launched while cancelling");
+});
+
+test("N5 the answer's owner fence after its awaited I/O: a parent fenced while the leaf's record and final are written gets no answer from this lead", { timeout: 15000 }, async () => {
+  for (const fenced of [false, true]) {
+    const { parent, tee, owner, crash } = await herdrParent();
+    tee(start("f1"), update("f1"));
+    await until(() => owner.spawned.length === 1, "one leaf");
+    const [leaf] = owner.registry.list().filter(r => r.parentRunId === parent.id);
+    const io = deferred();
+    leaf!.recordWrite = io.promise; // the answer waits for the leaf's terminal record write
+    await complete(owner.registry, leaf!, "f1 result", 0.25, false);
+    await tick();
+    assert.equal(answer(parent, "f1"), undefined, "the answer is still waiting for the I/O");
+    assert.equal(parent.pendingDelegations, 1);
+    if (fenced) crash(); // the owner generation is fenced while the answer awaits
+    io.resolve();
+    await tick();
+    if (fenced) {
+      assert.equal(answer(parent, "f1"), undefined, "a fenced lead writes no answer after its await");
+      assert.equal(parent.pendingDelegations, 0, "its local credit is released");
+    } else {
+      assert.deepEqual([answer(parent, "f1")?.ok, answer(parent, "f1")?.agentId], [true, leaf!.id], "positive control: the owning lead answers");
+    }
+  }
+});
+
+test("N5 readopt lineage: a terminal leaf record that started before the claim (an older run's leaf) is never this call's answer", { timeout: 15000 }, async () => {
+  const { h, parent, tee, crash, attach } = await herdrParent();
+  crash();
+  const claimedAt = Date.now() - 1000;
+  const leafRecord = (call: string, startTime: number) => {
+    const id = `scout-n5l${++seq}`, dir = join(runsRoot(), id); mkdirSync(dir, { recursive: true });
+    publishJson(delegatePaths(dirname(parent.recordPath), call).claim, { v: 1, toolCallId: call, parentRunId: parent.id, claimedAt, launchNonce: parent.herdr!.launchNonce }, () => {});
+    const leaf: Run = { id, runtime: "subprocess", persona: "scout", task: "t", cwd: parent.cwd, mode: "background", status: "completed", startTime, lastEventAt: Date.now(),
+      messages: [], usage: emptyUsage(), recordPath: join(dir, "record.json"), transcriptPath: join(dir, "transcript.jsonl"), finalPath: join(dir, "final.md"),
+      depth: 2, delegateAllow: [], parentRunId: parent.id, delegateToolCallId: call };
+    writeFileSync(leaf.recordPath, JSON.stringify(toRunRecord(leaf))); writeFileSync(leaf.finalPath, `final of ${call}`);
+    return id;
+  };
+  const current = leafRecord("l_new", claimedAt + 500), older = leafRecord("l_old", claimedAt - 5000);
+  for (const id of ["l_new", "l_old"]) tee(start(id), update(id));
+  const next = await nextLead(JSON.parse(readFileSync(parent.recordPath, "utf8")), h, []);
+  attach(next.parent);
+  await next.reconciled();
+  assert.deepEqual([answer(parent, "l_new")?.ok, answer(parent, "l_new")?.agentId], [true, current], "positive control: a leaf started after the claim answers it");
+  const r = answer(parent, "l_old");
+  assert.equal(r?.ok, false, `${older} predates the claim`);
+  assert.match(r.reason, new RegExp(LEAF_OUTCOME_UNCERTAIN));
+  assert.equal(next.owner.spawned.length, 0);
 });

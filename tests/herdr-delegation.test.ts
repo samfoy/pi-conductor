@@ -15,8 +15,11 @@ import { forceTerminate, getFinalText, releaseRunPane, runsRoot, spawnRun } from
 import { handleSessionShutdown } from "../src/shutdown.ts";
 import { delegatePaths, subtreeCost } from "../src/delegation.ts";
 import { isTerminal, type Run } from "../src/types.ts";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { emptyUsage } from "../src/types.ts";
+import { createSplitPane } from "../src/herdr/placement.ts";
+import type { HerdrCli } from "../src/herdr/cli.ts";
+import type { HerdrBinding } from "../src/herdr/identity.ts";
 
 sandboxPi();
 const response = (run: Run, id: string) => JSON.parse(readFileSync(delegatePaths(dirname(run.recordPath), id).response, "utf8"));
@@ -64,6 +67,7 @@ test("N5 herdr parent fan-out: tee -> broker -> split leaves right then down; fo
   assert.equal(h.state().tabs[pb.tabId]!.pane_count, 3, "parent plus two leaves in one tab");
   assert.equal(h.cards(), 1, "the lead gets the parent's card only");
   assert.equal(parent.pendingDelegations, 0);
+  assert.equal(h.launched().length, h.state().calls.filter(c => c.args[0] === "agent" && c.args[1] === "start").length, "one pane child per agent start, nothing else");
   assert.ok(Math.abs(subtreeCost(parent, h.registry.list()) - (parent.usage.cost + 0.04)) < 1e-9, "each leaf's cost counted once");
 
   // A leaf's release closes its own pane, never the parent's, a sibling's or the tab.
@@ -146,4 +150,43 @@ test("N5 a subprocess parent's herdr leaf gets its own tab plus a diagnostic; it
   assert.deepEqual(h.state().removedTabs, [b.tabId], "herdr removed the emptied tab; the conductor closed no tab");
   assert.ok(!h.state().calls.some(c => c.args[0] === "tab" && c.args[1] !== "create"));
   assert.ok(isTerminal(leaf.status));
+});
+
+test("N5 createSplitPane accepts a new pane only in the anchor's own workspace and tab, even when herdr's answer is otherwise well formed", async () => {
+  const anchor: HerdrBinding = { runId: "lead-a", launchNonce: "n0", sessionId: "s0", sessionFile: "/runs/lead-a/session/n0.jsonl", socketPath: "/fake/herdr.sock",
+    workspaceId: "w1", tabId: "w1:t1", paneId: "w1:p1", terminalId: "term_1", createdTab: true };
+  const invocation = { runId: "scout-a", launchNonce: "n1", sessionId: "s1", sessionFile: "/runs/scout-a/session/n1.jsonl" };
+  const split = async (over: Record<string, string>) => {
+    const pane = { pane_id: "w1:p2", terminal_id: "term_2", workspace_id: "w1", tab_id: "w1:t1", agent: null, ...over };
+    const calls: string[] = [];
+    // A schema-valid herdr: the split answers pane_info and pane get reports that same pane, empty.
+    const cli = { socketPath: anchor.socketPath, async text() { return ""; },
+      async json(args: readonly string[]) { calls.push(args.slice(0, 2).join(" ")); return { type: "pane_info", pane: { ...pane } }; } } as unknown as HerdrCli;
+    const outcome = await createSplitPane(cli, { anchor, direction: "right", cwd: "/work", invocation, env: { CONDUCTOR_DEPTH: "2" }, known: [] }).then(b => b, (e: Error) => e);
+    return { outcome, calls };
+  };
+  const ok = await split({});
+  assert.ok(!(ok.outcome instanceof Error), `positive control: the well-formed same-tab pane is accepted (${String(ok.outcome)})`);
+  assert.deepEqual([ok.outcome.tabId, ok.outcome.workspaceId, ok.outcome.paneId, ok.outcome.createdTab], ["w1:t1", "w1", "w1:p2", false]);
+  assert.deepEqual(ok.calls, ["pane split", "pane get"]);
+  for (const [why, over] of [["another tab", { tab_id: "w1:t9" }], ["another workspace", { workspace_id: "w9" }]] as const) {
+    const { outcome, calls } = await split(over);
+    assert.ok(outcome instanceof Error && /herdr: protocol/.test(outcome.message), `${why}: refused, got ${String(outcome)}`);
+    assert.deepEqual(calls, ["pane split"], `${why}: refused before the pane is ever used`);
+  }
+});
+
+test("N5 fixture: the harness launches a pane child only for a well-formed agent-start request, never a sidecar or a malformed file", { timeout: 15000 }, async t => {
+  const h = await delegationHarness(t);
+  const { paneRequest } = await import("./helpers/herdr-delegation.ts");
+  const valid = { runDir: "/runs/x", nonce: "n", paneId: "w1:p9", socketPath: "/s", cwd: "/w", argv: ["--session", "/runs/x/session/n.jsonl"], paneEnv: {} };
+  writeFileSync(join(h.manifests, "0007-w1_p9.json.tools.json"), JSON.stringify(valid)); // a native child's tool-surface sidecar
+  writeFileSync(join(h.manifests, "0008-w1_p9.json"), JSON.stringify({ paneId: "w1:p9" })); // request-named but not a request
+  writeFileSync(join(h.manifests, "0009-w1_p9.json.ready"), "123");
+  await new Promise(r => setTimeout(r, 200)); // twenty watcher passes
+  assert.deepEqual(h.launched(), [], "nothing launched");
+  // Positive control, outside the watched directory: the same bytes under a request name are a request.
+  const probeDir = mkdtempSync(join(h.root, "probe-"));
+  writeFileSync(join(probeDir, "0001-w1_p9.json"), JSON.stringify(valid));
+  assert.equal(paneRequest(probeDir, "0001-w1_p9.json")?.paneId, "w1:p9");
 });

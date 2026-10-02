@@ -51,8 +51,11 @@ interface Call {
   timer?: NodeJS.Timeout;
 }
 
-/** An update seen for a readopted parent before startup reconcile finished populating the registry. */
-interface Deferred { parent: Run; id: string; args: unknown; cwd: string; ended: boolean }
+/**
+ * An update seen for a readopted parent before startup reconcile (and the effort recovery that
+ * may grant it) finished. It belongs to the parent invocation that was current when it arrived.
+ */
+interface Deferred { parent: Run; id: string; args: unknown; cwd: string; ended: boolean; ownership: Run["herdrOwnership"]; nonce?: string }
 
 type ToolEvent = { type?: unknown; toolName?: unknown; toolCallId?: unknown; parentToolCallId?: unknown; args?: unknown };
 
@@ -86,13 +89,14 @@ export class DelegationBroker implements DelegationObserver {
       const start = this.starts.get(key);
       if (!start || this.calls.has(key)) return;
       this.starts.delete(key);
-      // Run ownership is not effort ownership: without the effort claim, only observe.
-      if (!brokerable(parent)) return;
+      // Before the effort check: a readopted writer's effort claim is granted during this barrier.
       if (parent.reconciledAtStartup && !this.reconciledNow) {
-        this.deferred.set(key, { parent, id: e.toolCallId, args: start.args, cwd, ended: false });
+        this.deferred.set(key, { parent, id: e.toolCallId, args: start.args, cwd, ended: false, ownership: parent.herdrOwnership, nonce: parent.herdr?.launchNonce });
         void this.reconciled.then(() => this.undefer(key));
         return;
       }
+      // Run ownership is not effort ownership: without the effort claim, only observe.
+      if (!brokerable(parent)) return;
       this.claim(parent, e.toolCallId, key, start.args, cwd);
     } else if (e.type === "tool_execution_end") {
       this.starts.delete(key);
@@ -107,7 +111,8 @@ export class DelegationBroker implements DelegationObserver {
     const d = this.deferred.get(key);
     if (!d) return;
     this.deferred.delete(key);
-    if (!this.current(d.parent) || !brokerable(d.parent)) return;
+    // Still this lead's current invocation of the parent, and (for an effort writer) granted.
+    if (!this.current(d.parent) || d.parent.herdrOwnership !== d.ownership || d.parent.herdr?.launchNonce !== d.nonce || !brokerable(d.parent)) return;
     // Nothing was claimed and nobody waits any more.
     if (d.ended && !existsSync(delegatePaths(dirname(d.parent.recordPath), d.id).claim)) return;
     this.claim(d.parent, d.id, key, d.args, d.cwd, d.ended);

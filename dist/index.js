@@ -13983,12 +13983,12 @@ var DelegationBroker = class {
       const start = this.starts.get(key);
       if (!start || this.calls.has(key)) return;
       this.starts.delete(key);
-      if (!brokerable(parent)) return;
       if (parent.reconciledAtStartup && !this.reconciledNow) {
-        this.deferred.set(key, { parent, id: e.toolCallId, args: start.args, cwd, ended: false });
+        this.deferred.set(key, { parent, id: e.toolCallId, args: start.args, cwd, ended: false, ownership: parent.herdrOwnership, nonce: parent.herdr?.launchNonce });
         void this.reconciled.then(() => this.undefer(key));
         return;
       }
+      if (!brokerable(parent)) return;
       this.claim(parent, e.toolCallId, key, start.args, cwd);
     } else if (e.type === "tool_execution_end") {
       this.starts.delete(key);
@@ -14002,7 +14002,7 @@ var DelegationBroker = class {
     const d = this.deferred.get(key);
     if (!d) return;
     this.deferred.delete(key);
-    if (!this.current(d.parent) || !brokerable(d.parent)) return;
+    if (!this.current(d.parent) || d.parent.herdrOwnership !== d.ownership || d.parent.herdr?.launchNonce !== d.nonce || !brokerable(d.parent)) return;
     if (d.ended && !existsSync20(delegatePaths(dirname22(d.parent.recordPath), d.id).claim)) return;
     this.claim(d.parent, d.id, key, d.args, d.cwd, d.ended);
   }
