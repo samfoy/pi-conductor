@@ -20,6 +20,7 @@ import {
   CONTEXT_INHERITANCE,
   FOREIGN_SPAWN_TOOLS,
   LEGACY_CHILD_SCOPE,
+  SUPERVISION_TOOL_NAMES,
   isDelegating,
   THINKING_LEVELS,
   type ChildToolScope,
@@ -348,8 +349,8 @@ const LEAF_MUTATION_TOOLS = ["edit", "write", "insert_before", "insert_after"];
 /**
  * The `--exclude-tools` list a sub-agent actually gets: the persona's own
  * exclusions (first, in order), every conductor LLM tool, the foreign spawn
- * tools, `delegate`, and at depth 2 the owner tool and write tools too.
- * Deduped; idempotent for the same scope.
+ * tools, the supervision tools, `delegate`, and at depth 2 the owner tool and
+ * write tools too. Deduped; idempotent for the same scope.
  */
 export function effectiveExcludeTools(
   excludeTools?: readonly string[],
@@ -359,6 +360,7 @@ export function effectiveExcludeTools(
     ...(excludeTools ?? []),
     ...CONDUCTOR_LLM_TOOL_NAMES,
     ...FOREIGN_SPAWN_TOOLS,
+    ...SUPERVISION_TOOL_NAMES,
     // Only an eligible delegator keeps the name, filled by the conductor's own tool;
     // another extension's same-named tool then fails pi's startup as a conflict.
     ...(isDelegating(scope) ? [] : ["delegate"]),

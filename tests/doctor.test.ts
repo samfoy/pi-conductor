@@ -835,3 +835,46 @@ test("/conductor doctor passes pi's loaded tool names to the report", async () =
     teardown(fx);
   }
 });
+
+// ── S1 supervision ──────────────────────────────────────────────────
+
+test("S1 doctor: ## Supervision shows presence state, reason, record and peer tool state without probing herdr", async () => {
+  const fx = setup();
+  try {
+    const reg = new RunRegistry();
+    const report = (supervision?: import("../src/supervision/presence.ts").PresenceStatus) =>
+      buildDoctorReport({ cwd: fx.projectDir, registry: reg, queue: new SpawnQueue(reg, 4), conductorMode: true, supervision, env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/nonexistent/sock", HERDR_PANE_ID: "p" } });
+    const published = section(await report({ state: "published", sessionId: "s-1", generation: "g-1", path: "/home/x/leads/abc.json", toolOwned: true, toolActive: true }), "Supervision");
+    assert.match(published, /presence: published \(session s-1, epoch g-1\)/);
+    assert.match(published, /record: \/home\/x\/leads\/abc\.json/);
+    assert.match(published, /peer tool: active/);
+    assert.match(published, /S1 only: presence plus read-only `peer list`; no coordination messages, chief lease or staff tools yet/);
+    const off = section(await report({ state: "inactive", reason: "conductor mode OFF", toolOwned: true, toolActive: false }), "Supervision");
+    assert.match(off, /presence: inactive — conductor mode OFF/);
+    assert.match(off, /peer tool: inactive/);
+    const dup = section(await report({ state: "duplicate", reason: "session s-1 already has a live lead presence (pid 7)", toolOwned: true, toolActive: false, lastError: "EIO" }), "Supervision");
+    assert.match(dup, /presence: duplicate — session s-1 already has a live lead presence \(pid 7\)/);
+    assert.match(dup, /⚠ last refresh failed: EIO/);
+    assert.match(section(await report({ state: "inactive", reason: "not a herdr pane (HERDR_ENV is not 1)", toolOwned: false }), "Supervision"), /peer tool: not registered/);
+    assert.match(section(await report(undefined), "Supervision"), /unavailable in this context/);
+  } finally {
+    teardown(fx);
+  }
+});
+
+test("S1 /conductor doctor passes the presence status to the report", async () => {
+  const fx = setup();
+  try {
+    const { registerCommands } = await import("../src/commands.ts");
+    let handler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+    registerCommands({ registerCommand: (name: string, spec: any) => name === "conductor" && (handler = spec.handler), getAllTools: () => [] } as any, {
+      getCwd: () => fx.projectDir, getRegistry: () => new RunRegistry(), getQueue: () => new SpawnQueue(new RunRegistry(), 4), getConductorMode: () => true,
+      getSupervisionStatus: () => ({ state: "error", reason: "presence not published: EACCES", toolOwned: true, toolActive: false }),
+    } as any);
+    const notes: string[] = [];
+    await handler!("doctor", { ui: { notify: (m: string) => notes.push(m) } });
+    assert.match(notes.join("\n"), /## Supervision\n {2}presence: error — presence not published: EACCES/);
+  } finally {
+    teardown(fx);
+  }
+});

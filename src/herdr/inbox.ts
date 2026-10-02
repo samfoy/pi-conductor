@@ -38,11 +38,11 @@ function directory(runDir: string, nonce: string, create = false): string {
   }
   return join(runDir, "inbox", nonce);
 }
-function read(file: string): unknown {
+function read(file: string, maxBytes = MAX_RECORD_BYTES): unknown {
   const fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_RECORD_BYTES) throw new Error("invalid inbox record");
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > maxBytes) throw new Error("invalid inbox record");
     const buffer = Buffer.alloc(stat.size + 1);
     let n = 0, count = 0;
     while (n < buffer.length && (count = readSync(fd, buffer, n, buffer.length - n, n)) > 0) n += count;

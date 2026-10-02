@@ -56,9 +56,11 @@ const DELEGATOR: Persona = { name: "lead", description: "probe", inheritContext:
   systemPrompt: "You are lead.", source: "project", sourcePath: "/fake/lead.md", readOnly: false, tools: ["read", "nested_probe"], agents: ["inspector"] };
 /** With Pi's default set only the exclusion, not a missing allowlist entry, keeps a foreign `delegate` out. */
 const DELEGATORS: [string, Persona][] = [["allowlisted", DELEGATOR], ["default-tools", { ...DELEGATOR, tools: undefined }]];
-const FORBIDDEN_AT_LEAF = ["ask_owner", "delegate", "subagent", "agent", "edit", "write", "insert_before", "insert_after", ...CONDUCTOR_LLM_TOOL_NAMES];
+/** S1: another extension's chief, peer or staff never reaches a child at any depth. */
+const SUPERVISION = ["chief", "peer", "staff"];
+const FORBIDDEN_AT_LEAF = ["ask_owner", "delegate", "subagent", "agent", "edit", "write", "insert_before", "insert_after", ...SUPERVISION, ...CONDUCTOR_LLM_TOOL_NAMES];
 /** Tools other extensions could register; `ask_owner` is only a decoy where the conductor registers none. */
-const DECOYS = ["delegate", "subagent", "agent", "ensemble_spawn", "insert_before", "insert_after"];
+const DECOYS = ["delegate", "subagent", "agent", "ensemble_spawn", "insert_before", "insert_after", ...SUPERVISION];
 const notFound = /not found/;
 
 /** The env a launcher actually hands the child, from a lead env carrying stale scope values. */
@@ -100,7 +102,7 @@ async function witness(t: test.TestContext, pi: Harness, nested: boolean) {
     assert.doesNotMatch(leaf.nested.read?.text ?? "not found", notFound, "nested positive control reaches an allowed tool");
   }
 
-  const reallowed = await pi.nativeSurface(root, `${pi.VERSION}-leaf-allow`, { argv: fresh(LEAF, ["read", "ask_owner", "delegate", "edit", "write", "subagent"]),
+  const reallowed = await pi.nativeSurface(root, `${pi.VERSION}-leaf-allow`, { argv: fresh(LEAF, ["read", "ask_owner", "delegate", "edit", "write", "subagent", ...SUPERVISION]),
     env: childEnv(dir, LEAF), decoys: [...DECOYS, "ask_owner"] });
   assert.deepEqual(reallowed.active, ["read"], "a leaf's own allowlist cannot re-grant excluded tools");
   absent(reallowed, FORBIDDEN_AT_LEAF, "depth 2 allowlist");
@@ -113,23 +115,30 @@ async function witness(t: test.TestContext, pi: Harness, nested: boolean) {
   const lead = await pi.nativeSurface(root, `${pi.VERSION}-depth1`, { argv: resumeArgv, env: childEnv(dir, childToolScope(saved)), decoys: DECOYS,
     calls: [{ name: "ask_owner", args: { question: "A or B?" } }] });
   assert.ok(lead.active.includes("ask_owner"));
-  absent(lead, ["delegate", "subagent", "agent", "ensemble_spawn"], "depth 1");
+  absent(lead, ["delegate", "subagent", "agent", "ensemble_spawn", ...SUPERVISION], "depth 1");
+  // An allowlist naming them gains nothing: the exclusion still wins over the decoys, and a model call does not resolve.
+  const allowlisted = await pi.nativeSurface(root, `${pi.VERSION}-depth1-allow`, { argv: buildResumePiArgs({ ...saved, tools: ["read", ...SUPERVISION] }, "continue"),
+    env: childEnv(dir, childToolScope(saved)), decoys: DECOYS, calls: [{ name: "peer", args: { action: "list" } }] });
+  assert.deepEqual([...allowlisted.active].sort(), ["ask_owner", "read"], "depth 1 allowlist cannot re-grant supervision tools");
+  absent(allowlisted, SUPERVISION, "depth 1 allowlist");
+  const peerCall = allowlisted.ends.find(e => e.name === "peer");
+  assert.ok(peerCall?.isError && notFound.test(peerCall.text) && !/executed/.test(peerCall.text), `model-issued peer at depth 1 must not resolve, even to a decoy: ${JSON.stringify(peerCall)}`);
   const ask = lead.ends.find(e => e.name === "ask_owner");
   assert.equal(ask?.isError, false, JSON.stringify(ask));
   assert.equal((ask?.details as { askId?: string } | undefined)?.askId, "n1-call-0", "positive control: the depth-1 owner question is accepted");
   if (nested) {
     const probe = await pi.nativeSurface(root, `${pi.VERSION}-depth1-nested`, { argv: resumeArgv, env: childEnv(dir, childToolScope(saved)), decoys: DECOYS,
-      calls: [{ name: "nested_probe", args: {} }], nested: ["ask_owner", "delegate", "subagent", "agent", "ensemble_spawn"] });
+      calls: [{ name: "nested_probe", args: {} }], nested: ["ask_owner", "delegate", "subagent", "agent", "ensemble_spawn", ...SUPERVISION] });
     assert.ok(probe.callable?.includes("ask_owner"));
     assert.ok(probe.nested.ask_owner?.isError && !notFound.test(probe.nested.ask_owner.text), `nested ask_owner is reached, then refused by its own sole-call rule: ${JSON.stringify(probe.nested.ask_owner)}`);
-    for (const name of ["delegate", "subagent", "agent", "ensemble_spawn"]) assert.match(probe.nested[name]?.text ?? "", notFound, `nested ${name}`);
+    for (const name of ["delegate", "subagent", "agent", "ensemble_spawn", ...SUPERVISION]) assert.match(probe.nested[name]?.text ?? "", notFound, `nested ${name}`);
   }
 
   // N2: an eligible delegator exposes exactly the conductor's own delegate, never another extension's.
   for (const [kind, persona] of DELEGATORS) for (const [path, launch] of await delegatorLaunches(persona)) {
     const where = `${path} ${kind} delegator`;
     assert.equal(launch.env.CONDUCTOR_DELEGATE_ALLOW, "inspector", `${where}: the child is an eligible delegator`);
-    const delegator = await pi.nativeSurface(root, `${pi.VERSION}-delegator-${path}-${kind}`, { argv: launch.argv, env: launch.env, decoys: ["subagent", "agent"],
+    const delegator = await pi.nativeSurface(root, `${pi.VERSION}-delegator-${path}-${kind}`, { argv: launch.argv, env: launch.env, decoys: ["subagent", "agent", ...SUPERVISION],
       // Missing task: Pi's schema check ends it before execute, so no broker could ever act on it.
       calls: [{ name: "delegate", args: { persona: "inspector" } }, ...(nested ? [{ name: "nested_probe", args: {} }] : [])], nested: nested ? ["delegate", "read"] : undefined });
     const call = delegator.ends.find(e => e.name === "delegate");
@@ -139,7 +148,7 @@ async function witness(t: test.TestContext, pi: Harness, nested: boolean) {
     else for (const name of ["ask_owner", "delegate", "nested_probe", "read", "bash"]) assert.ok(delegator.active.includes(name), `${where} keeps ${name}; the set is not vacuous`);
     assert.equal(delegator.registered.filter(n => n === "delegate").length, 1, `${where}: one delegate, the conductor's`);
     assert.deepEqual(delegator.errors, [], `${where}: no load conflict`);
-    absent(delegator, ["subagent", "agent"], where);
+    absent(delegator, ["subagent", "agent", ...SUPERVISION], where);
     assert.ok(call?.isError && !notFound.test(call.text) && !/executed/.test(call.text) && /task/.test(call.text), `${where}: schema rejects before execute: ${JSON.stringify(call)}`);
     if (nested) {
       assert.match(delegator.nested.delegate?.text ?? "", /delegate rejected: nested calls cannot delegate/, `${where}: nested delegate: ${JSON.stringify(delegator.nested.delegate)}`);

@@ -73,6 +73,7 @@ import { ConductorEventEmitter } from "./conductor-events.ts";
 import { createRpcDetach } from "./rpc-detach.ts";
 import { executePromptAndSend } from "./prompt-and-send.ts";
 import { CWD_ENTRY_TYPE, createCwdController } from "./conductor-cwd.ts";
+import { LeadPresence } from "./supervision/presence.ts";
 
 export default function (pi: ExtensionAPI): void {
   pi.registerFlag("conductor-launch", { type: "string", description: "Managed child invocation token" });
@@ -268,6 +269,8 @@ export default function (pi: ExtensionAPI): void {
   let conductorModeOn = resolveInitialConductorMode(process.env, {
     defaultMode: initialCfg.defaultMode,
   });
+  // S1: one presence per module instance; it captures this instance's env, pid and start time.
+  const supervision = new LeadPresence({ pi, env: process.env, registry, getMode: () => conductorModeOn });
 
   const opts = {
     getCwd: cwd,
@@ -325,7 +328,10 @@ export default function (pi: ExtensionAPI): void {
     getConductorMode: () => conductorModeOn,
     setConductorMode: (on: boolean) => {
       conductorModeOn = on;
+      supervision.refresh();
     },
+    supervision,
+    getSupervisionStatus: () => supervision.status(),
     /**
      * Slice 7: read the host's current Theme so the foreground stream
      * can colour its rendered transcript. Returns undefined in headless
@@ -426,6 +432,10 @@ export default function (pi: ExtensionAPI): void {
     const cwdWarning = cwdControl.restore(branch);
     if (cwdWarning) ctx.ui.notify(cwdWarning, "warning");
     ctxRef = ctx;
+    // S1: identity is read once, here; a later getter on this ctx may be stale after reload or a switch.
+    let sessionId: string | undefined, sessionFile: string | undefined;
+    try { sessionId = ctx.sessionManager?.getSessionId(); sessionFile = ctx.sessionManager?.getSessionFile(); } catch { /* ineligible */ }
+    supervision.start({ sessionId, sessionFile, cwd: ctx.cwd }, (message, level) => ctx.ui.notify(message, level));
     if (widget) widget.dispose();
     widget = mountEnsembleWidget(registry, () => ctxRef, () => {
       // v0.10 Slice 4: feed live watchdog thresholds to the widget so it
@@ -668,6 +678,8 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async (event) => {
+    // S1: every reason unpublishes only this instance's own record before anything can await.
+    supervision.stop();
     registry.herdrAdmissionOpen = false;
     if (unsubFocusedShortcut) {
       unsubFocusedShortcut();
@@ -727,6 +739,8 @@ export default function (pi: ExtensionAPI): void {
 
   // Inject the conductor system prompt at every turn start when on.
   pi.on("before_agent_start", async (event) => {
+    // A transcript restore (resume, /tree) may have re-set the active tools; keep `peer` matching presence.
+    supervision.syncTools();
     if (!conductorModeOn) return undefined;
     try {
       const cfg = loadConfig(cwd());

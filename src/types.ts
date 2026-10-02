@@ -57,6 +57,13 @@ export const CONDUCTOR_LLM_TOOL_NAMES: readonly string[] = Object.values(CONDUCT
  */
 export const FOREIGN_SPAWN_TOOLS: readonly string[] = ["subagent", "agent"];
 
+/**
+ * Lead supervision tools (v0.19 section 6). Only a conductor-ON herdr lead
+ * registers one, and only once its behaviour lands (S1: `peer`). Every child
+ * excludes all three, so another extension's same-named tool never reaches it.
+ */
+export const SUPERVISION_TOOL_NAMES: readonly string[] = ["chief", "peer", "staff"];
+
 /** 1: spawned by the lead. 2: a read-only leaf the lead broker spawns for a depth-1 delegator. */
 export type ChildDepth = 1 | 2;
 

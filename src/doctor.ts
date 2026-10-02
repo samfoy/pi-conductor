@@ -23,6 +23,20 @@ import { lastGcMarkerPath, readLastGcMtime } from "./gc/last-gc.ts";
 import { walkInventory } from "./gc/inventory.ts";
 import { planReclaim } from "./gc/policy.ts";
 import type { PostStartupReconcileResult } from "./reconcile-startup.ts";
+import type { PresenceStatus } from "./supervision/presence.ts";
+
+/** Reads only this session's in-memory presence state: no herdr CLI, socket or peer probe. */
+function supervisionLines(status: PresenceStatus | undefined): string[] {
+  if (!status) return ["  · unavailable in this context"];
+  const lines = [status.state === "published"
+    ? `  presence: published (session ${status.sessionId}, epoch ${status.generation})`
+    : `  presence: ${status.state}${status.reason ? ` — ${status.reason}` : ""}`];
+  if (status.path) lines.push(`  record: ${status.path}`);
+  if (status.lastError) lines.push(`  ⚠ last refresh failed: ${status.lastError}`);
+  lines.push(`  peer tool: ${!status.toolOwned ? "not registered (needs a conductor lead in a herdr pane)" : status.toolActive ? "active" : "inactive"}`);
+  lines.push("  · S1 only: presence plus read-only `peer list`; no coordination messages, chief lease or staff tools yet");
+  return lines;
+}
 
 export interface DoctorReportOptions {
   env?: RuntimeEnvironment;
@@ -59,6 +73,8 @@ export interface DoctorReportOptions {
    * the check.
    */
   loadedToolNames?: readonly string[];
+  /** S1 lead presence state; undefined renders the section as unavailable. */
+  supervision?: PresenceStatus;
 }
 
 const SPAWN_NAME_TOKENS = new Set(["agent", "agents", "subagent", "subagents", "spawn", "delegate"]);
@@ -266,6 +282,10 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
   if (delegators.length === 0) lines.push("  · none (opt in with `agents:` frontmatter or personaOverrides.<name>.agents)");
   for (const p of delegators) lines.push(`  ${p.name}: ${p.agents!.join(", ")}`);
   lines.push("  · validated and frozen on depth-1 runs; subprocess delegators get the lead-brokered delegate tool (opt-in; no admission lanes before N3)");
+
+  lines.push("");
+  lines.push("## Supervision");
+  lines.push(...supervisionLines(opts.supervision));
 
   // v0.9 Slice 7: Run-record disk usage + next-eviction preview.
   // Reads the runs/ directory once via walkInventory, then runs a

@@ -27,7 +27,7 @@ import { EFFORT_NOTICE } from "./effort/policy.ts";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { Persona, PersonaResolution, Run, RunRecord, RunStatus } from "./types.ts";
-import { CONDUCTOR_LLM_TOOL_NAMES, FOREIGN_SPAWN_TOOLS } from "./types.ts";
+import { CONDUCTOR_LLM_TOOL_NAMES, FOREIGN_SPAWN_TOOLS, SUPERVISION_TOOL_NAMES } from "./types.ts";
 import { STATUS_GLYPH } from "./status-glyph.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig, projectConfigPath, userConfigPath } from "./config.ts";
@@ -92,6 +92,8 @@ interface RegisterCommandsOpts {
    * as "never run."
    */
   getLastReconcile?: () => import("./reconcile-startup.ts").PostStartupReconcileResult | undefined;
+  /** S1: lead presence state for the doctor's `## Supervision` section. */
+  getSupervisionStatus?: () => import("./supervision/presence.ts").PresenceStatus;
 }
 
 export const SUBCOMMANDS = [
@@ -301,7 +303,7 @@ export function formatPersonaDetail(p: Persona): string {
   );
   lines.push(
     `always excluded: ${CONDUCTOR_LLM_TOOL_NAMES.join(", ")} (conductor tools), ` +
-      `${FOREIGN_SPAWN_TOOLS.join(", ")} (foreign spawn tools)`,
+      `${FOREIGN_SPAWN_TOOLS.join(", ")} (foreign spawn tools), ${SUPERVISION_TOOL_NAMES.join(", ")} (supervision tools)`,
   );
   lines.push("");
   lines.push("## System prompt");
@@ -322,6 +324,7 @@ async function runDoctor(
     conductorMode: opts.getConductorMode(),
     lastReconcile: opts.getLastReconcile?.(),
     loadedToolNames: pi.getAllTools?.().map((t) => t.name),
+    supervision: opts.getSupervisionStatus?.(),
   });
   ctx.ui.notify(report, "info");
 }

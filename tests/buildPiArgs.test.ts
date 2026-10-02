@@ -69,7 +69,8 @@ test("buildPiArgs(fresh, steerable=false): emits today's argv EXACTLY (regressio
     steerable: false,
   });
   // Tool-policy slice: every argv now carries --exclude-tools with the
-  // conductor's own LLM tools, the foreign spawn tools and `delegate`,
+  // conductor's own LLM tools, the foreign spawn tools, the S1 supervision
+  // tools and `delegate`,
   // which only an eligible delegator keeps (see tests/tool-policy.test.ts).
   assert.deepEqual(args, [
     "--mode",
@@ -78,7 +79,7 @@ test("buildPiArgs(fresh, steerable=false): emits today's argv EXACTLY (regressio
     "--session-dir",
     "/tmp/sess",
     "--exclude-tools",
-    [...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS, "delegate"].join(","),
+    [...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS, "chief", "peer", "staff", "delegate"].join(","),
     "--append-system-prompt",
     "SYS",
     "PROMPT",
@@ -115,7 +116,7 @@ test("buildPiArgs(resume, steerable=false): emits today's resume argv EXACTLY (r
     "--session",
     "/tmp/sess/abc.jsonl",
     "--exclude-tools",
-    [...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS, "delegate"].join(","),
+    [...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS, "chief", "peer", "staff", "delegate"].join(","),
     "another question",
   ]);
 });
@@ -139,7 +140,7 @@ test("buildPiArgs(fresh, eligible delegator): keeps the conductor's own delegate
     "--tools",
     "read,ask_owner,delegate",
     "--exclude-tools",
-    [...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS].join(","),
+    [...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS, "chief", "peer", "staff"].join(","),
     "--append-system-prompt",
     "SYS",
     "PROMPT",
@@ -154,5 +155,22 @@ test("H6 core argv strips only subprocess framing and task", async () => {
     const opts = { kind: "fresh" as const, sessionDir: "/private/session", systemPrompt: "system", prompt: "task", steerable,
       model: "provider/model", thinking: "high" as const, skillPaths: ["/skills/one"], tools: ["read"], excludeTools: ["write"] };
     assert.deepEqual(builders.buildPiArgs(opts), [...(steerable ? ["--mode", "rpc"] : ["--mode", "json", "-p"]), ...builders.buildPiCoreArgs(opts), ...(steerable ? [] : [opts.prompt])]);
+  }
+});
+
+// S1: the only change to any child argv is the three supervision names, inserted
+// after the foreign spawn tools; the rest of the exclusion is the pre-S1 list.
+test("S1 child argv delta is exactly chief, peer and staff in --exclude-tools", () => {
+  const S1 = ["chief", "peer", "staff"];
+  const LEAF_ONLY = ["ask_owner", "edit", "write", "insert_before", "insert_after"];
+  for (const scope of [undefined, { depth: 1 as const, delegateAllow: [] }, { depth: 1 as const, delegateAllow: ["inspector"] }, { depth: 2 as const, delegateAllow: [] }]) {
+    const preS1 = [...new Set(["write", ...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS, ...(scope?.delegateAllow.length ? [] : ["delegate"]), ...(scope?.depth === 2 ? LEAF_ONLY : [])])];
+    for (const base of [{ kind: "fresh" as const, sessionDir: "/s", systemPrompt: "S", prompt: "P", steerable: false }, { kind: "resume" as const, sessionPath: "/s/a.jsonl", prompt: "P", steerable: true }]) {
+      const args = buildPiArgs({ ...base, tools: ["read"], excludeTools: ["write"], scope });
+      const excluded = args[args.indexOf("--exclude-tools") + 1]!.split(",");
+      assert.deepEqual(excluded.filter(n => S1.includes(n)), S1, `${JSON.stringify(scope)}: all three, once each, in order`);
+      assert.equal(excluded.indexOf("chief"), excluded.indexOf("agent") + 1, "inserted right after the foreign spawn tools");
+      assert.deepEqual(excluded.filter(n => !S1.includes(n)), preS1, `${JSON.stringify(scope)}: nothing else in the exclusion changed`);
+    }
   }
 });

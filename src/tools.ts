@@ -17,7 +17,7 @@ import { Type } from "@sinclair/typebox";
 import { readFileSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Persona, PersonaOverride, Run, RunStatus, ThinkingLevel, MergeStrategy } from "./types.ts";
-import { CONDUCTOR_LLM_TOOLS, CONDUCTOR_LLM_TOOL_NAMES, FOREIGN_SPAWN_TOOLS, WRITE_CAPABLE_PERSONAS } from "./types.ts";
+import { CONDUCTOR_LLM_TOOLS, CONDUCTOR_LLM_TOOL_NAMES, FOREIGN_SPAWN_TOOLS, SUPERVISION_TOOL_NAMES, WRITE_CAPABLE_PERSONAS } from "./types.ts";
 import { resolvePersonas } from "./personas.ts";
 import { loadConfig } from "./config.ts";
 import { appendFileEvidence, resultRef } from "./file-evidence.ts";
@@ -36,6 +36,8 @@ import { resolveRetryPolicy } from "./retry.ts";
 import { collapseSteerableCascade } from "./steerable.ts";
 import { prepareSpawnRuntime, prepareSpawnEffort, availableActions, observeRunActions, computeAvailableActions, supportsFocus, validateRunAction, elapsedStr, failBeforeSpawn, forceTerminate, formatUsage, getCompletionText, keptBranchHint, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendCwd, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
 import { registerAskOwner } from "./ask-owner.ts";
+import { herdrLeadEnv, type LeadPresence } from "./supervision/presence.ts";
+import { registerPeerTool } from "./supervision/tools.ts";
 import { registerDelegate } from "./delegate-tool.ts";
 import { awaitingChildren, childrenOf, subtreeCost } from "./delegation.ts";
 import { isSettled, isTerminal } from "./types.ts";
@@ -120,6 +122,8 @@ interface RegisterToolsOpts {
   getTheme?: () => ThemeFg | undefined;
   /** v0.16 event bus adapter — threaded into SpawnOptions/SendToRunOptions. */
   getEvents?: () => ConductorEventEmitter;
+  /** S1 lead presence; with a herdr lead env it backs the `peer` tool. */
+  supervision?: LeadPresence;
 }
 
 export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts, env: NodeJS.ProcessEnv = process.env): void {
@@ -159,6 +163,11 @@ export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts, env: No
   registerAutoTool(pi, opts, env);
   registerCwdTool(pi, opts);
   registerEffortTool(pi, opts);
+  // S1: only a herdr lead whose Pi can (de)activate tools gets `peer`; presence keeps it inactive until eligible.
+  const activation = pi as Partial<Pick<ExtensionAPI, "getActiveTools" | "setActiveTools" | "getAllTools">>;
+  if (opts.supervision && herdrLeadEnv(env) && [activation.getActiveTools, activation.setActiveTools, activation.getAllTools].every(f => typeof f === "function")) {
+    registerPeerTool(pi, opts.supervision);
+  }
 }
 
 /** A per-spawn `cwd` arg, resolved against the conductor's default; omitted → the default. */
@@ -1577,7 +1586,7 @@ export function formatPersonaListForLLM(personas: Persona[]): string {
   }
   const lines: string[] = [
     `${personas.length} personas:`,
-    `(every sub-agent also runs with the conductor tools excluded: ${CONDUCTOR_LLM_TOOL_NAMES.join(", ")}; and the foreign spawn tools: ${FOREIGN_SPAWN_TOOLS.join(", ")})`,
+    `(every sub-agent also runs with the conductor tools excluded: ${CONDUCTOR_LLM_TOOL_NAMES.join(", ")}; the foreign spawn tools: ${FOREIGN_SPAWN_TOOLS.join(", ")}; and the supervision tools: ${SUPERVISION_TOOL_NAMES.join(", ")})`,
     "",
   ];
   for (const p of personas) {

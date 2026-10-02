@@ -18,6 +18,7 @@ import {
   CONDUCTOR_LLM_TOOL_NAMES,
   FOREIGN_SPAWN_TOOLS,
   LEGACY_CHILD_SCOPE,
+  SUPERVISION_TOOL_NAMES,
   toRunRecord,
   type ChildToolScope,
   type Persona,
@@ -40,8 +41,8 @@ import { SpawnQueue } from "../src/queue.ts";
 import { FocusedStreamModel } from "../src/focused-stream-model.ts";
 
 const READ_ONLY_EXCLUSIONS = ["edit", "write", "insert_before", "insert_after"];
-/** What every depth-1 child, a delegator included, excludes after the persona's own list. */
-const ALWAYS_EXCLUDED = [...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS, "delegate"];
+/** What every depth-1 child excludes after the persona's own list (a delegator keeps only `delegate`). */
+const ALWAYS_EXCLUDED = [...CONDUCTOR_LLM_TOOL_NAMES, ...FOREIGN_SPAWN_TOOLS, "chief", "peer", "staff", "delegate"];
 
 /** Value following `flag`, asserting the flag appears at most once. */
 function flagValue(args: string[], flag: string): string | undefined {
@@ -86,12 +87,14 @@ async function resolveOne(
 }
 
 /** Tool names `registerTools` registers under an injected env (the lead's by default). */
-function captureRegisteredToolNames(env: NodeJS.ProcessEnv = {}): string[] {
+function captureRegisteredToolNames(env: NodeJS.ProcessEnv = {}, supervision?: unknown): string[] {
   const names: string[] = [];
   const reg = new RunRegistry();
   const queue = new SpawnQueue(reg, 4);
   const model = new FocusedStreamModel(reg);
-  registerTools({ registerTool: (t: { name: string }) => names.push(t.name) } as any, {
+  const activation = supervision ? { getActiveTools: () => [], setActiveTools() {}, getAllTools: () => [] } : {};
+  registerTools({ registerTool: (t: { name: string }) => names.push(t.name), ...activation } as any, {
+    ...(supervision ? { supervision: supervision as never } : {}),
     getCwd: () => tmpdir(),
     getRegistry: () => reg,
     getQueue: () => queue,
@@ -147,6 +150,36 @@ for (const [label, env, expected] of [
     assert.deepEqual(captureRegisteredToolNames(env).sort(), [...expected].sort());
   });
 }
+
+// S1: set equality per injected env with a presence; only a herdr lead (never a child) adds `peer`,
+// and `chief`/`staff` are never registered before their behaviour lands.
+const HERDR = { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane-1" };
+const LEAD_TOOLS = [...CONDUCTOR_LLM_TOOL_NAMES];
+for (const [label, env, expected] of [
+  ["plain lead", {}, LEAD_TOOLS],
+  ["herdr lead", HERDR, [...LEAD_TOOLS, "peer"]],
+  ["herdr lead with a non-exact child flag", { ...HERDR, CONDUCTOR_SUBAGENT: "true" }, [...LEAD_TOOLS, "peer"]],
+  ["lead whose HERDR_ENV is not exactly 1", { ...HERDR, HERDR_ENV: "true" }, LEAD_TOOLS],
+  ["lead with an empty socket", { ...HERDR, HERDR_SOCKET_PATH: "" }, LEAD_TOOLS],
+  ["lead without a pane id", { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock" }, LEAD_TOOLS],
+  ["depth-1 child in a herdr pane", { ...HERDR, CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: "1" }, ["ask_owner"]],
+  ["depth-1 delegator in a herdr pane", { ...HERDR, CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: "1", CONDUCTOR_DELEGATE_ALLOW: "inspector", CONDUCTOR_RUN_ID: "lead-a", CONDUCTOR_RUN_DIR: "/runs/lead-a" }, ["ask_owner", "delegate"]],
+  ["depth-2 leaf in a herdr pane", { ...HERDR, CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: "2" }, []],
+] as const) {
+  test(`S1 registerTools with a presence under ${label} registers exactly ${expected.includes("peer" as never) ? "the lead tools plus peer" : expected.length > 2 ? "the lead tools" : expected.join(",") || "nothing"}`, () => {
+    const names = captureRegisteredToolNames(env, { ownTool() {} });
+    assert.deepEqual([...names].sort(), [...expected].sort());
+    for (const name of ["chief", "staff"]) assert.ok(!names.includes(name), `${name} is not registered in S1`);
+  });
+}
+
+test("S1 registerTools: a herdr lead without a presence or tool activation registers no peer", () => {
+  assert.deepEqual(captureRegisteredToolNames(HERDR).sort(), [...LEAD_TOOLS].sort());
+});
+
+test("SUPERVISION_TOOL_NAMES is chief, peer and staff", () => {
+  assert.deepEqual([...SUPERVISION_TOOL_NAMES], ["chief", "peer", "staff"]);
+});
 
 test("effectiveExcludeTools: persona exclusions first, then every conductor tool, then the foreign spawn tools, deduped", () => {
   assert.deepEqual(effectiveExcludeTools(undefined), ALWAYS_EXCLUDED);
@@ -486,6 +519,7 @@ test("ensemble_list lines show each persona's tool policy and the always-exclude
   assert.match(block("builder"), /tools=default/);
   assert.match(text, /ensemble_spawn/, "always-excluded conductor tools are named");
   assert.match(text, /subagent, agent/, "always-excluded foreign spawn tools are named");
+  assert.match(text, /supervision tools: chief, peer, staff/, "always-excluded supervision tools are named");
 });
 
 test("/conductor show: renders tools, exclude_tools, and the always-excluded conductor tools", () => {
@@ -493,7 +527,7 @@ test("/conductor show: renders tools, exclude_tools, and the always-excluded con
   assert.match(withPolicy, /^tools: read$/m);
   assert.match(withPolicy, /^exclude_tools: edit$/m);
   assert.match(withPolicy, new RegExp(`^always excluded: ${CONDUCTOR_LLM_TOOL_NAMES.join(", ")}`, "m"));
-  assert.match(withPolicy, /^always excluded: .*\bsubagent, agent \(foreign spawn tools\)$/m);
+  assert.match(withPolicy, /^always excluded: .*\bsubagent, agent \(foreign spawn tools\), chief, peer, staff \(supervision tools\)$/m);
 
   const bare = formatPersonaDetail(makePersona());
   assert.match(bare, /^tools: \(pi default set\)$/m);

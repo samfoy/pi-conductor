@@ -390,7 +390,7 @@ You are the oracle: …
 Adapted from … with the following changes …
 ```
 
-**Tool policy is enforced by pi.** `tools` is an allowlist (`pi --tools <csv>`) that replaces the child's default active set, builtin and extension tools alike; omit it to keep pi's defaults. `exclude_tools` is a denylist (`pi --exclude-tools <csv>`). Both are block lists of tool names (`^[A-Za-z0-9_.:-]+$`); unknown names are harmless. Every sub-agent also runs with the conductor's own `ensemble_*` tools, the foreign spawn tools (`subagent`, `agent`) and, except in an eligible delegator, `delegate` (below) excluded, on fresh spawns and `ensemble_send` resumes alike, so a child can't start agents the conductor doesn't supervise. `/conductor doctor` warns when another loaded tool's name looks spawn-capable. The nine read-only builtins exclude `edit`, `write`, `insert_before`, and `insert_after`. `personaOverrides.<name>.tools` / `.exclude_tools` replace the persona's whole list. `ensemble_list` and `/conductor show <name>` display the effective policy.
+**Tool policy is enforced by pi.** `tools` is an allowlist (`pi --tools <csv>`) that replaces the child's default active set, builtin and extension tools alike; omit it to keep pi's defaults. `exclude_tools` is a denylist (`pi --exclude-tools <csv>`). Both are block lists of tool names (`^[A-Za-z0-9_.:-]+$`); unknown names are harmless. Every sub-agent also runs with the conductor's own `ensemble_*` tools, the foreign spawn tools (`subagent`, `agent`), the supervision tools (`chief`, `peer`, `staff`) and, except in an eligible delegator, `delegate` (below) excluded, on fresh spawns and `ensemble_send` resumes alike, so a child can't start agents the conductor doesn't supervise. `/conductor doctor` warns when another loaded tool's name looks spawn-capable. The nine read-only builtins exclude `edit`, `write`, `insert_before`, and `insert_after`. `personaOverrides.<name>.tools` / `.exclude_tools` replace the persona's whole list. `ensemble_list` and `/conductor show <name>` display the effective policy.
 
 This is **partial enforcement**, not a sandbox: `bash` stays available unless a persona excludes it, so a read-only persona can still write through the shell.
 
@@ -811,6 +811,47 @@ silently restarting the plan. Kill abandons the ask and preserves work under the
 existing killed-run TTL policy. Retirement prevents continuation consistently;
 if the saved session is retired, use a fresh child with the transcript/handoff.
 The parent can do independent work; **do not poll** for questions or answers.
+
+## Lead presence and `peer list` (S1; not rolled out)
+
+A **lead** is a conductor-ON pi running in a herdr pane: `CONDUCTOR_SUBAGENT` is
+not `1`, `HERDR_ENV` is exactly `1`, `HERDR_SOCKET_PATH` and `HERDR_PANE_ID` are
+set, and the session is saved (not `--no-session`). A pi typed by hand into a
+managed pane inherits `CONDUCTOR_SUBAGENT=1` and is not a lead. Only a lead
+registers `peer`, and it stays inactive until the lead is eligible.
+
+While eligible, the lead publishes one record at
+`~/.pi/agent/conductor/supervision/leads/<sha256(session id)>.json` (at most
+4 KiB and 24 run briefs; directory 0700, file 0600). It publishes on session
+start and `/conductor on`, refreshes 2 s after a registry change and every 30 s,
+and removes its own record on `/conductor off`, on every shutdown reason (quit,
+reload, new, resume, fork) and on a session switch. `/reload` republishes under
+a fresh epoch only if conductor mode is ON by default: as before, a `/conductor on`
+toggle does not survive reload. A second live pi on the same session stays
+inactive and says so.
+
+```json
+{"action":"list"}
+```
+
+returns `{"self": "<this session id>", "peers": [{"lead", "name", "cwd", "repo", "branch", "workspace_label", "state"}]}`.
+Leads on any herdr socket appear, but not this one. `lead` is the exact full pi
+session id; every other field is self-reported presentation and grants nothing.
+`workspace_label` is empty because supervision never calls the herdr CLI.
+`state` is `live` or, when the process cannot be proven (off Linux after 90 s
+without a refresh), `unknown`. The listing scans at most 1024 entries and returns
+at most 16 KiB. It deletes records whose process is proven dead (on Linux:
+ESRCH or a different start time), and off Linux records more than 10 min stale.
+Each call rechecks that this lead is still eligible and still owns its record.
+
+**Limits.** `peer` only lists: no messages, no chief lease, no `chief` or `staff`
+tool yet. Supervision makes no herdr CLI call and never scans panes, agents or
+processes. Records guard against accidents between same-user processes (private
+files, bounded no-follow reads), not against a hostile local process. Every child
+excludes `chief`, `peer` and `staff`, even another extension's; pi-herdsman
+co-loaded in a herdr lead conflicts on `peer` (accepted risk R8). `/conductor doctor`
+shows `## Supervision`. Automated evidence only: native Pi 0.87.1 and 1.0.0
+with a faux model and a fake herdr env. Human TUI acceptance is unverified.
 
 ## Configuration
 

@@ -40,7 +40,9 @@ const LEAD: ChildToolScope = { depth: 1, delegateAllow: [] };
 const DELEGATOR: ChildToolScope = { depth: 1, delegateAllow: ["inspector", "oracle"] };
 const LEAF: ChildToolScope = { depth: 2, delegateAllow: [] };
 /** What every non-delegating child excludes after its own list. */
-const ALWAYS = [...CONDUCTOR_LLM_TOOL_NAMES, "subagent", "agent", "delegate"];
+const ALWAYS = [...CONDUCTOR_LLM_TOOL_NAMES, "subagent", "agent", "chief", "peer", "staff", "delegate"];
+/** S1: no child scope ever keeps a supervision tool, even another extension's. */
+const SUPERVISION = ["chief", "peer", "staff"];
 /** An eligible delegator keeps `delegate`, the conductor's own lead-brokered tool (N2). */
 const DELEGATOR_ALWAYS = ALWAYS.filter((n) => n !== "delegate");
 const LEAF_ONLY = ["ask_owner", "edit", "write", "insert_before", "insert_after"];
@@ -248,6 +250,20 @@ test("N1 depth-2 argv excludes ask_owner and every write tool even when the pers
     assert.ok(excluded.includes(name), `depth 2 must exclude ${name}`);
   }
   assert.deepEqual(effectiveAllowTools(["read"], LEAF, excluded), ["read"], "no owner tool is added at depth 2");
+});
+
+test("S1 every child scope excludes chief, peer and staff; delegators keep delegate; an allowlist naming them gains nothing", () => {
+  for (const scope of [LEGACY_CHILD_SCOPE, LEAD, DELEGATOR, LEAF]) {
+    const excluded = effectiveExcludeTools(undefined, scope);
+    for (const name of SUPERVISION) assert.ok(excluded.includes(name), `${JSON.stringify(scope)} must exclude ${name}`);
+    assert.deepEqual(effectiveExcludeTools(SUPERVISION, scope), [...SUPERVISION, ...excluded.filter(n => !SUPERVISION.includes(n))], "a persona naming them is deduped, not doubled");
+    const allowed = effectiveAllowTools(["read", ...SUPERVISION], scope, excluded)!;
+    assert.deepEqual(allowed.filter(n => !["read", ...SUPERVISION].includes(n)), [...(scope.depth === 1 ? ["ask_owner"] : []), ...(scope === DELEGATOR ? ["delegate"] : [])],
+      "the scope's own additions never include a supervision name");
+    const args = buildPiArgs({ kind: "fresh", sessionDir: "/tmp/s", systemPrompt: "S", prompt: "P", steerable: false, scope, tools: ["read", "peer"] });
+    for (const name of SUPERVISION) assert.ok(flag(args, "--exclude-tools")!.split(",").includes(name), `argv excludes ${name} even when allowlisted`);
+  }
+  assert.ok(!effectiveExcludeTools(undefined, DELEGATOR).includes("delegate"), "a delegator still keeps delegate");
 });
 
 // ── Registration-independent prompt guard ────────────────────────────

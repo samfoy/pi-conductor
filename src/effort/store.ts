@@ -98,12 +98,12 @@ export function adoptEffort(record: EffortRecord, identity: EffortOwner): Effort
   return updated;
 }
 /** Link publishes complete fsynced bytes create-only, unlike writing directly into a wx claim. */
-export function publishJson(path: string, value: unknown, fence: () => void): void {
+export function publishJson(path: string, value: unknown, fence: () => void, mode?: number): void {
   mkdirSync(dirname(path), { recursive: true });
   const temp = `${path}-${randomUUID()}.claim`;
   try {
     fence();
-    const file = openSync(temp, "wx");
+    const file = openSync(temp, "wx", mode);
     try { writeFileSync(file, JSON.stringify(value)); fsyncSync(file); } finally { closeSync(file); }
     fence(); linkSync(temp, path);
     const fd = openSync(dirname(path), "r");
@@ -114,12 +114,12 @@ export function publishJson(path: string, value: unknown, fence: () => void): vo
 export function writeDurableJson(path: string, value: unknown, fence: () => void): void {
   writeDurableFile(path, JSON.stringify(value, null, 2), fence);
 }
-export function writeDurableFile(path: string, contents: string, fence: () => void): void {
+export function writeDurableFile(path: string, contents: string, fence: () => void, mode?: number): void {
   const temp = `${path}-${randomUUID()}.tmp`;
   let fd: number | undefined;
   try {
     fence();
-    fd = openSync(temp, "wx");
+    fd = openSync(temp, "wx", mode);
     writeFileSync(fd, contents);
     fsyncSync(fd); closeSync(fd); fd = undefined;
     fence();
