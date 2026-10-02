@@ -555,3 +555,118 @@ for (const piRoot of LIVE ? (piRoots.length ? piRoots : [""]) : ["(gated)"]) {
     assert.equal(ambientSnapshot(parent), ambient, "ambient herdr processes and real session registry unchanged");
   });
 }
+
+// ── Opt-in live N5 scenario (own private session per Pi root) ───────────────
+for (const piRoot of LIVE ? (piRoots.length ? piRoots : [""]) : ["(gated)"]) {
+  const version = LIVE && piRoot ? JSON.parse(readFileSync(join(piRoot, "package.json"), "utf8")).version : piRoot;
+  test(`H11 live N5: real herdr ${version} delegating parent splits two read-only leaves, survives lead /reload, quit closes own panes`, { skip: LIVE ? false : "set CONDUCTOR_LIVE_TESTS=1 and CONDUCTOR_H11_PI_ROOTS for isolated real herdr", timeout: 240000 }, async t => {
+    assert.ok(piRoot, "CONDUCTOR_H11_PI_ROOTS must name explicit Pi package roots; a missing prerequisite is a failure, not a skip");
+    const herdrBin = realpathSync(process.env.CONDUCTOR_H11_HERDR_BIN ?? execFileSync("sh", ["-c", "command -v herdr"], { encoding: "utf8" }).trim());
+    const integration = process.env.CONDUCTOR_H11_HERDR_INTEGRATION ?? join(userInfo().homedir, ".pi", "agent", "extensions", "herdr-agent-state.ts");
+    assert.match(readFileSync(integration, "utf8"), /HERDR_INTEGRATION_ID=pi\n\/\/ HERDR_INTEGRATION_VERSION=9/);
+    const parentRoot = liveParentRoot(); // removed only by a clean teardown
+    const ambient = ambientSnapshot(parentRoot);
+    t.diagnostic(`N5 live versions ${JSON.stringify({ pi: version, piCli: piEntry(piRoot), conductor: join(worktree, "dist", "index.js"), herdr: execFileSync(herdrBin, ["--version"], { encoding: "utf8" }).trim() })}`);
+    const fx = await startLiveFixture({ piRoot, worktree, herdrBin, integration }, randomUUID().replace(/-/g, "").slice(0, 12), parentRoot);
+    const root = fx.id.root, runs = join(root, "home", ".pi", "agent", "conductor", "runs"), work = join(root, "work");
+    t.diagnostic(`N5 fixture ${fx.id.name} server pid ${fx.server.pid}/${fx.server.startTime} netns server=${readlinkSync(`/proc/${fx.server.pid}/ns/net`)} test=${readlinkSync("/proc/self/ns/net")}`);
+    let report: Awaited<ReturnType<typeof fx.teardown>> | undefined;
+    try {
+      const cliVersion = execFileSync(join(root, "bin", "pi"), ["--version"], { env: fx.env, cwd: work, encoding: "utf8", timeout: 30000 }).trim();
+      assert.match(cliVersion, new RegExp(`\\b${version.replace(/\./g, "\\.")}\\b`), "the pinned executable reports its own version");
+      const record = (id: string) => JSON.parse(readFileSync(join(runs, id, "record.json"), "utf8"));
+      const obs = (name: string) => join(root, "obs", `${name}.json`);
+      const leadStarts = () => readdirSync(join(root, "obs")).filter(f => f.startsWith("lead-") && f.includes("-start-")).sort((a, b) => Number(a.split("-").at(-1)!.slice(0, -5)) - Number(b.split("-").at(-1)!.slice(0, -5))).map(f => JSON.parse(readFileSync(join(root, "obs", f), "utf8")));
+      const leadPane = await fx.createWorkspace(work, "n5-lead");
+      const leadName = "lead";
+      const before = leadStarts().length;
+      const started = await fx.cli(["agent", "start", leadName, "--kind", "pi", "--pane", leadPane, "--timeout", "60000", "--", "--session-dir", join(root, "lead-sessions")], 65000);
+      assert.equal(started.result?.agent?.agent, "pi", JSON.stringify(started));
+      const lead = await until("lead session_start", 20000, () => leadStarts().length > before && leadStarts().at(-1));
+      assert.equal(lead.version, version);
+      let step = 0;
+      const leadTool = async (tool: string, args: Record<string, unknown>) => {
+        const name = `s${++step}`;
+        writeFileSync(join(root, "script", `${name}.json`), JSON.stringify({ tool, args }));
+        await fx.cli(["agent", "wait", leadName, "--until", "idle", "--until", "done", "--timeout", "30000"], 35000);
+        await fx.cli(["agent", "prompt", leadName, `H11 ${name}`], 15000);
+        return until(`lead ${tool} result`, 60000, () => existsSync(obs(`lead-tool-h11_${name}`)) && JSON.parse(readFileSync(obs(`lead-tool-h11_${name}`), "utf8")));
+      };
+      const notifications = (id: string) => jsonLines(lead.sessionFile).filter(e => e.type === "custom_message" && JSON.stringify(e).includes("<sub-agent-completed>") && JSON.stringify(e).includes(`<agent-id>${id}</agent-id>`)).length;
+      const leavesOf = (id: string) => existsSync(runs) ? readdirSync(runs).filter(r => existsSync(join(runs, r, "record.json")) && record(r).parentRunId === id).sort() : [];
+      const pane = (id: string) => fx.cli(["pane", "get", id]).then(r => r.result.pane, e => ({ error: String(e) }));
+      const environ = (pid: number) => readFileSync(`/proc/${pid}/environ`, "utf8").split("\0");
+
+      const spawned = await leadTool("ensemble_spawn", { persona: "investigator", task: "H11-CHILD n5 n5", runtime: "herdr", foreground: false });
+      assert.equal(spawned.isError, false, JSON.stringify(spawned.result));
+      const id = spawned.result.details.agent_id as string;
+      // Fan-out: both leaves are held mid-turn at once.
+      const heldA = await until("leaf n5a held", 60000, () => existsSync(obs("child-n5a-held")) && JSON.parse(readFileSync(obs("child-n5a-held"), "utf8")));
+      const heldB = await until("leaf n5b held", 60000, () => existsSync(obs("child-n5b-held")) && JSON.parse(readFileSync(obs("child-n5b-held"), "utf8")));
+      const parent = record(id), pb = parent.herdr;
+      fx.adopt(pb);
+      const leaves = leavesOf(id).map(record);
+      assert.equal(leaves.length, 2, "exactly two leaves");
+      for (const leaf of leaves) {
+        fx.adopt(leaf.herdr);
+        assert.deepEqual([leaf.runtime, leaf.depth, leaf.parentRunId, leaf.herdr.createdTab, leaf.herdr.tabId, leaf.herdr.workspaceId, leaf.herdr.placementWarning],
+          ["herdr", 2, id, false, pb.tabId, pb.workspaceId, undefined], `${leaf.id} split inside the parent's tab`);
+        assert.notEqual(leaf.herdr.paneId, pb.paneId); assert.notEqual(leaf.herdr.terminalId, pb.terminalId);
+      }
+      assert.notEqual(leaves[0].herdr.paneId, leaves[1].herdr.paneId);
+      for (const held of [heldA, heldB]) {
+        assert.equal(held.depth, "2");
+        const env = environ(held.pid);
+        assert.ok(env.includes("CONDUCTOR_DEPTH=2") && !env.some(e => e.startsWith("CONDUCTOR_DELEGATE_ALLOW=")), "a leaf pane carries depth 2 and no allowlist");
+      }
+      const parentNow = await pane(pb.paneId);
+      assert.deepEqual([parentNow.pane_id, parentNow.terminal_id, parentNow.tab_id, parentNow.workspace_id, parentNow.agent], [pb.paneId, pb.terminalId, pb.tabId, pb.workspaceId, "pi"], "the parent's pane is unchanged and still runs it");
+      assert.equal((await fx.cli(["tab", "get", pb.tabId])).result.tab.pane_count, 3);
+      const delegateDir = join(runs, id, "delegate");
+      assert.deepEqual(readdirSync(delegateDir).sort(), ["n5_n5_a.claim.json", "n5_n5_b.claim.json"], "claimed, not yet answered");
+
+      // Lead /reload while the parent awaits both leaves: the next module instance rebinds them.
+      await fx.cli(["agent", "prompt", leadName, "/reload"], 15000);
+      for (const run of [id, ...leaves.map(l => l.id)]) {
+        await until(`${run} owner handoff`, 30000, () => existsSync(join(runs, run, "owner", "000000.json.released")) && existsSync(join(runs, run, "owner", "000001.json")));
+      }
+      writeFileSync(join(root, "script", "release-n5a"), "go"); writeFileSync(join(root, "script", "release-n5b"), "go");
+      const done = await until(`${id} completed`, 90000, () => { const r = record(id); return ["completed", "failed", "killed"].includes(r.status) && existsSync(join(runs, id, "final.md")) && r; },
+        () => JSON.stringify({ status: record(id).status, error: record(id).errorMessage }));
+      assert.equal(done.status, "completed", done.errorMessage);
+      const final = readFileSync(join(runs, id, "final.md"), "utf8");
+      t.diagnostic(`N5 parent final: ${final}`);
+      assert.match(final, /H11 n5 parent n5 saw 2: n5_n5_a=H11 leaf n5a done depth=2; n5_n5_b=H11 leaf n5b done depth=2/);
+      assert.deepEqual(readdirSync(delegateDir).sort(), ["n5_n5_a.claim.json", "n5_n5_a.json", "n5_n5_b.claim.json", "n5_n5_b.json"]);
+      for (const [call, leaf] of [["n5_n5_a", leaves.find(l => l.delegateToolCallId === "n5_n5_a")], ["n5_n5_b", leaves.find(l => l.delegateToolCallId === "n5_n5_b")]] as const) {
+        const answer = JSON.parse(readFileSync(join(delegateDir, `${call}.json`), "utf8"));
+        assert.deepEqual([answer.ok, answer.agentId, answer.status], [true, leaf.id, "completed"], call);
+        assert.equal(record(leaf.id).herdr.ownerGeneration, 1, "settled by the post-reload owner");
+      }
+      assert.deepEqual(leavesOf(id), leaves.map(l => l.id).sort(), "the reload re-spawned nothing");
+      await until("single parent notification", 20000, () => notifications(id) === 1);
+      assert.equal(notifications(leaves[0].id) + notifications(leaves[1].id), 0, "no leaf card, live or readopted");
+      for (const held of [heldA, heldB]) await until(`leaf ${held.pid} exit`, 15000, () => procStartTime(held.pid) !== held.startTime);
+
+      // Quit: the lead closes each of its own panes once; herdr drops the emptied tab; the fixture's lead pane stays.
+      // The conductor closes only a proven-empty pane, so first let herdr release each exited agent.
+      for (const p of [pb.paneId, ...leaves.map(l => l.herdr.paneId)]) {
+        await until(`pane ${p} agent release`, 20000, async () => { const x = await pane(p); return !x.error && !x.agent && !x.agent_session; });
+      }
+      await fx.cli(["agent", "send-keys", leadName, "ctrl+c"]); await fx.cli(["agent", "send-keys", leadName, "ctrl+c"]);
+      await until("lead quit", 30000, async () => !(await pane(leadPane)).agent);
+      for (const p of [pb.paneId, ...leaves.map(l => l.herdr.paneId)]) {
+        await until(`own pane ${p} closed`, 20000, async () => /pane_not_found/.test((await pane(p)).error ?? ""));
+        fx.panes.delete(p);
+      }
+      assert.match(await fx.cli(["tab", "get", pb.tabId]).then(() => "present", e => String(e)), /tab_not_found/, "the emptied tab is gone");
+      assert.equal((await pane(leadPane)).pane_id, leadPane, "the fixture's own lead pane remains");
+    } finally {
+      for (const f of ["n5a", "n5b"]) if (existsSync(join(root, "script"))) writeFileSync(join(root, "script", `release-${f}`), "teardown");
+      report = await fx.teardown();
+      t.diagnostic(`N5 teardown ${JSON.stringify({ clean: report.clean, server: report.server, captured: report.captured.length, leftovers: report.leftovers, notes: report.notes, preserved: report.preserved })}`);
+    }
+    assert.equal(report.clean, true, `teardown preserved evidence at ${report.preserved}: ${report.notes.join("; ")}`);
+    assert.equal(ambientSnapshot(parentRoot), ambient, "ambient herdr processes and real session registry unchanged");
+  });
+}

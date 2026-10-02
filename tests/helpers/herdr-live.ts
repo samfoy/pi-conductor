@@ -254,7 +254,9 @@ export function writeFixtureFiles(id: LiveIdentity, cfg: LiveConfig): void {
     packages: [cfg.worktree], extensions: [join(cfg.worktree, "tests/fixtures/herdr-faux-provider.ts"), cfg.integration],
   }, null, 2));
   writeFileSync(join(r, "home/.pi/agent/extensions/conductor/config.json"), JSON.stringify({
-    contextRetirement: true, chains: { builder: { then: "" }, simplifier: { then: "" } }, personaOverrides: { analyst: { model: "faux/h11-small" } },
+    contextRetirement: true, chains: { builder: { then: "" }, simplifier: { then: "" } },
+    // N5: the only delegator, opted in by override; no builtin persona declares agents.
+    personaOverrides: { analyst: { model: "faux/h11-small" }, investigator: { agents: ["inspector", "critic"] } },
     efforts: { verify: "sh verify.sh", verifyTimeoutSeconds: 60, verifyRetries: 0, generated: { paths: ["gen/**"], command: "sh gen.sh" }, maxParallel: 1 },
   }, null, 2));
 }

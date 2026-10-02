@@ -19,6 +19,8 @@ export interface HerdrBinding extends HerdrInvocation {
   agentName?: string;
   /** Lead/child host Pi versions differ or cannot be proven. Advisory, persisted for the card. */
   versionWarning?: string;
+  /** N5: why a delegated leaf got its own tab instead of a split of its parent's pane. Advisory. */
+  placementWarning?: string;
   childPid?: number;
   childStartTime?: number;
 }

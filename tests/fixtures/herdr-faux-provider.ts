@@ -40,6 +40,16 @@ function lead(messages: Message[]) {
 const RETIRING = "retiring because of context pressure";
 async function child(messages: Message[], calls: number) {
   const users = messages.filter(m => m.role === "user").map(text);
+  // N5 leaf (depth 2): "H11-LEAF hold <token>" holds its first call on release-<token>, then answers.
+  const leafTask = users.find(t => /H11-LEAF /.test(t));
+  if (leafTask) {
+    const [, mode = "", token = ""] = leafTask.match(/H11-LEAF ([a-z0-9]+) ([a-z0-9]+)/) ?? [];
+    if (mode === "hold" && calls === 1) {
+      observe(`child-${token}-held`, { pid: process.pid, startTime: startTime(), depth: process.env.CONDUCTOR_DEPTH, runId: process.env.CONDUCTOR_RUN_ID });
+      if (!await barrier(token)) return fauxAssistantMessage("", { stopReason: "error", errorMessage: "H11 barrier expired" });
+    }
+    return fauxAssistantMessage(`H11 leaf ${token} done depth=${process.env.CONDUCTOR_DEPTH}`);
+  }
   const task = users.find(t => /H11-CHILD /.test(t)) ?? "";
   const [, scenario = "", token = ""] = task.match(/H11-CHILD ([a-z0-9]+) ([a-z0-9]+)/) ?? [];
   observe(`child-${token}-${process.pid}-call-${calls}`, { users, version: VERSION, pid: process.pid });
@@ -51,6 +61,15 @@ async function child(messages: Message[], calls: number) {
     observe(`child-${name}-held`, { pid: process.pid, startTime: startTime() });
     if (!await barrier(name)) return fauxAssistantMessage("", { stopReason: "error", errorMessage: "H11 barrier expired" });
     if (scenario !== "holdwrite" && calls === 1) return fauxAssistantMessage(`H11 held turn complete ${token}`);
+  }
+  // N5 delegating parent: two parallel read-only leaves, then one summary of both envelopes.
+  if (scenario === "n5" && process.env.CONDUCTOR_DEPTH === "1" && process.env.CONDUCTOR_DELEGATE_ALLOW) {
+    const results = messages.filter(m => m.role === "toolResult");
+    if (!results.length) return fauxAssistantMessage([
+      fauxToolCall("delegate", { persona: "inspector", task: `H11-LEAF hold ${token}a` }, { id: `n5_${token}_a` }),
+      fauxToolCall("delegate", { persona: "critic", task: `H11-LEAF hold ${token}b` }, { id: `n5_${token}_b` }),
+    ], { stopReason: "toolUse" });
+    return fauxAssistantMessage(`H11 n5 parent ${token} saw ${results.length}: ` + results.map(r => `${r.toolCallId}=${text(r).match(/H11 leaf [a-z0-9]+ done depth=\d/)?.[0] ?? `UNEXPECTED ${text(r).slice(0, 300)}`}`).join("; "));
   }
   if (scenario === "ask" && !answered) {
     return fauxAssistantMessage([fauxToolCall("ask_owner", { question: `H11 question ${token}?`, evidence: `H11 evidence ${token}` }, { id: `ask_${token}` })], { stopReason: "toolUse" });

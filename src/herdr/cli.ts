@@ -17,7 +17,7 @@ export function resolveHerdrBin(env: NodeJS.ProcessEnv): string {
   return env.CONDUCTOR_HERDR_BIN || env.HERDR_BIN_PATH || "herdr";
 }
 const jsonCommands: Record<string, string> = {
-  "tab create": "tab_created", "pane get": "pane_info", "pane close": "ok", "agent start": "agent_started",
+  "tab create": "tab_created", "pane get": "pane_info", "pane split": "pane_info", "pane close": "ok", "agent start": "agent_started",
 };
 const remoteCodes = new Set(["agent_pane_busy", "agent_not_ready", "pane_not_found", "tab_not_found", "workspace_not_found"]);
 export function isRecord(value: unknown): value is Record<string, unknown> {

@@ -343,6 +343,8 @@ export interface RegistryLike {
 export interface PostStartupReconcileDeps {
   herdrProbe?: (record: RunRecord) => Promise<"alive" | "settled" | "gone" | "unknown" | "other-socket">;
   attachHerdr?: (record: RunRecord) => void | Promise<void>;
+  /** N5: stop an attached herdr leaf whose parent is terminal or missing (through its proven pane child). */
+  stopOrphanLeaf?: (run: Run) => void;
   admit?: () => boolean;
   /** Root containing per-run dirs (e.g. `~/.pi/agent/conductor/runs`). */
   runsRoot: string;
@@ -482,6 +484,7 @@ export async function reconcileOrphansAtStartup(
   }
 
   const readoptedLeaves: { record: RunRecord; recordPath: string }[] = [];
+  const attachedLeaves: RunRecord[] = [];
   for (const id of entries) {
     const recordPath = join(deps.runsRoot, id, "record.json");
 
@@ -539,6 +542,7 @@ export async function reconcileOrphansAtStartup(
           if (!deps.attachHerdr) { result.errors.push({ id, message: "herdr attachment unavailable; preserved" }); break; }
           if (record.id !== id || record.recordPath !== recordPath || record.transcriptPath !== join(deps.runsRoot, id, "transcript.jsonl") || record.finalPath !== join(deps.runsRoot, id, "final.md")) throw new Error("noncanonical herdr run record");
           if (!dryRun) await deps.attachHerdr(record);
+          if (!dryRun && isDelegatedLeaf(record) && herdrProbe === "alive") attachedLeaves.push(record);
           result.readopted.push(id);
           break;
         case "skip-unsupported-runtime":
@@ -701,6 +705,23 @@ export async function reconcileOrphansAtStartup(
       deps.registry.register(buildOrphanRun({ ...record, status: "killed", finishedAt: deps.now, errorMessage }, "killed"));
       result.readopted = result.readopted.filter(id => id !== record.id);
       result.reclassified.push(record.id);
+    } catch (e: unknown) {
+      result.errors.push({ id: record.id, message: (e as Error)?.message ?? String(e) });
+    }
+  }
+
+  // N5: an attached herdr leaf has a proven child, so an orphan is stopped through that proof once attached,
+  // never by its recorded pid. One that settled while the lead was down just finalizes.
+  for (const record of attachedLeaves) {
+    try {
+      const why = await leafOrphanReason(record, deps);
+      const run = deps.registry.get(record.id), transport = run?.transport;
+      if (!why || !run || transport?.kind !== "herdr") continue;
+      void transport.ready.then(() => {
+        if (deps.registry.get(record.id) !== run || run.transport !== transport || isTerminal(run.status)) return;
+        run.errorMessage = `orphaned: parent ${record.parentRunId ?? "(none)"} ${why}; stopped through its proven pane child`;
+        deps.stopOrphanLeaf?.(run);
+      }, () => {});
     } catch (e: unknown) {
       result.errors.push({ id: record.id, message: (e as Error)?.message ?? String(e) });
     }

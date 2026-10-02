@@ -33,6 +33,12 @@ The remainder of this document is a historical v0.10 map, not current line-numbe
 - The gate's known-exit test is the transport's `closed` (stdio), bounded by `CHILD_EXIT_BOUND_MS` (2.5 s); an exit seen without close is `stdio-open` and proceeds, while the N3 reservation (`processOpen`) still waits for close. A run with no handle (readopted) is never signalled and its exit is never confirmed.
 - `runActionError` makes depth-2 runs kill-only for every caller; `pushCompletionCard` (used by `index.ts`) posts no leaf card; `handleSessionShutdown` cancels queued leaves through `removeQueued` and stops leaves before parents on quit; startup reconcile orphans leaves whose parent is terminal, missing or replaced, after the whole scan.
 
+## Current N5 herdr delegation addendum
+
+- The broker (`src/delegation-broker.ts`) takes a herdr delegator's tee through the same `onEvent`; `createRunPipeline` now passes reattach replays to it too (`readoptHerdrRun` wires only the delegation observer). Every await re-checks the parent's registry entry, owner generation and launch nonce (`Call.owned`). `reconciling()` defers decisions for readopted parents until `index.ts` finishes reconcile and effort recovery; `rebind` applies the N5 readopt table; `close()` hands launched herdr leaves over and keeps the R6 fallback for subprocess parents.
+- Placement (`src/herdr/placement.ts`): `leafPlacement` proves the parent's pane (and the previous leaf's) with `provePaneOurs`; `createSplitPane` runs `pane split` (`pane_info` in herdr 0.9.1, probed in a private session) and proves the new pane empty. `HerdrRuntime.connect` only chooses the pane source; the rest of the launch is unchanged. `Run.herdrParent` (leaf) and `Run.herdrLeafPlacement` (parent) are in-memory.
+- A herdr leaf holds `processOpen` until its transport proves exit. The reattached N4 gate (`settleOwnedChildren(…, reattached)`) owns only unanswered leaves; reconcile stops an attached orphaned herdr leaf through `stopOrphanLeaf`.
+
 ## 1. Overview
 
 The runtime is the delivery vehicle for the persona library and the

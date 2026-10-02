@@ -4,6 +4,8 @@ const statePath = process.env.FAKE_HERDR_STATE;
 if (!statePath || process.env.HERDR_SOCKET_PATH !== `${statePath}.socket`) process.exit(90);
 const state = JSON.parse(readFileSync(statePath, "utf8"));
 const args = process.argv.slice(2);
+// N5: several tabs and split panes, each with its own agent child. The single-pane model below is unchanged.
+if (state.v === 2) { await (await import("./fake-herdr-panes.mjs")).main(statePath, args); process.exit(); }
 state.calls.push({args, socket: process.env.HERDR_SOCKET_PATH,
   routingNames: Object.keys(process.env).filter(k => k.startsWith("HERDR_"))});
 const save = () => writeFileSync(statePath, JSON.stringify(state));

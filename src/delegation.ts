@@ -5,7 +5,8 @@
  * child-first kill cascade and the finalization gate). Read-only leaves are a tool and prompt boundary,
  * not an OS sandbox; same-uid forgery of `delegate/*` is out of scope.
  */
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { compactEnvelopeBlock, summarizeResultText } from "./compaction-hook.ts";
 import { resultRef } from "./file-evidence.ts";
 import { formatCompletionNotification } from "./notifications.ts";
@@ -75,7 +76,6 @@ export function validateDelegateRequest(input: DelegateRequestInput): { ok: true
   const { parent, target } = input;
   const scope = { depth: parent.depth ?? 1, delegateAllow: parent.delegateAllow ?? [] };
   if (!isDelegating(scope)) return { ok: false, reason: "only a depth-1 delegator may delegate" };
-  if (parent.runtime === "herdr") return { ok: false, reason: "delegation supports subprocess parents only until N5" };
   if (parent.status !== "running") return { ok: false, reason: `parent ${parent.id} is ${parent.status}, not running` };
   if (parent.delegationClosed) return { ok: false, reason: `parent ${parent.id} is finalizing; it starts no new delegation` };
   if (!input.current) return { ok: false, reason: `parent ${parent.id} is not the current registered run` };
@@ -169,10 +169,10 @@ function noteAbandoned(parent: Run, leaves: readonly Run[], exits: readonly Aban
  * launches a leaf about to be cancelled. A stale or replaced parent object owns
  * nothing. Closes delegation for the parent and records what it abandoned.
  */
-export function terminateChildren(parent: Run, registry: RunRegistry): void {
+export function terminateChildren(parent: Run, registry: RunRegistry, only?: readonly Run[]): void {
   if (parent.depth !== 1 || registry.get(parent.id) !== parent) return;
   parent.delegationClosed = true;
-  const live = childrenOf(parent, registry.list()).filter(c => !isTerminal(c.status));
+  const live = (only ?? childrenOf(parent, registry.list())).filter(c => !isTerminal(c.status));
   const ordered = [...live.filter(c => c.status === "queued"), ...live.filter(c => c.status !== "queued")];
   for (const leaf of ordered) {
     leaf.errorMessage ??= `cancelled: parent ${parent.id} stopped before this leaf finished`;
@@ -185,16 +185,19 @@ export function terminateChildren(parent: Run, registry: RunRegistry): void {
  * N4 finalization gate, before any of the parent's hook, merge, footprint,
  * integration, final.md, terminal record or card: cancel this invocation's
  * unsettled leaves (started at or after `since`) and wait, bounded, for each
- * process to exit. A terminal status is not an exit.
+ * process to exit. A terminal status is not an exit. A reattached invocation (N5)
+ * owns only leaves whose call is still unanswered: an answered leaf's outcome is
+ * already published, and re-finalizing it after a restart is not a live leaf.
  */
-export async function settleOwnedChildren(parent: Run, registry: RunRegistry, since: number): Promise<void> {
+export async function settleOwnedChildren(parent: Run, registry: RunRegistry, since: number, reattached = false): Promise<void> {
   if (parent.depth !== 1 || registry.get(parent.id) !== parent) return;
   const invocation = parent.transport;
   parent.delegationClosed = true;
   const abandoned = new Set(parent.abandonedChildren?.map(c => c.id));
-  const owned = childrenOf(parent, registry.list(), since).filter(c => abandoned.has(c.id) || !isTerminal(c.status) || observedExit(c) !== "confirmed");
+  const answered = (c: Run) => reattached && !!c.delegateToolCallId && existsSync(delegatePaths(dirname(parent.recordPath), c.delegateToolCallId).response);
+  const owned = childrenOf(parent, registry.list(), since).filter(c => !answered(c) && (abandoned.has(c.id) || !isTerminal(c.status) || observedExit(c) !== "confirmed"));
   if (!owned.length) return;
-  terminateChildren(parent, registry);
+  terminateChildren(parent, registry, reattached ? owned : undefined);
   const exits = await Promise.all(owned.map(awaitExit));
   // A resume replaced the invocation these leaves belonged to; its record is not this one's.
   if (parent.transport !== invocation) return;

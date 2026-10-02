@@ -1177,20 +1177,16 @@ export interface SpawnOptions {
   delegation?: { parentRunId: string; delegateToolCallId: string };
 }
 
-/** Until N5 a delegating run is subprocess-only; refuse herdr by name rather than downgrade it. */
-export function assertDelegationRuntime(persona: Persona, runtime: RuntimeKind, delegation?: SpawnOptions["delegation"]): void {
-  if (!delegation && (persona.agents ?? []).length > 0 && runtime === "herdr") {
-    throw new Error(`delegating persona ${persona.name} resolves to the herdr runtime; delegation supports subprocess parents only until N5`);
-  }
-}
-
-/** A broker leaf's fixed options; caller-supplied privileges are dropped, never honored. */
+/**
+ * A broker leaf's fixed options; caller-supplied privileges are dropped, never honored.
+ * Its runtime comes from the normal cascade (the broker passes no per-call layer).
+ */
 export function leafSpawnOptions<T extends Partial<SpawnOptions>>(opts: T): T {
   if (!opts.delegation) return opts;
   if (opts.persona && (opts.persona.readOnly !== true || isWriteCapable(opts.persona.name))) {
     throw new Error(`delegated leaves must be read_only, non-write-capable personas; ${opts.persona.name} is not`);
   }
-  return { ...opts, runtime: "subprocess", mode: "background", worktree: false, mergeStrategy: "none", onCompleteHook: "", onCompleteHookTimeoutSeconds: undefined,
+  return { ...opts, mode: "background", worktree: false, mergeStrategy: "none", onCompleteHook: "", onCompleteHookTimeoutSeconds: undefined,
     effort: undefined, touches: undefined, onChain: undefined, onRetry: undefined, retryMaxAttempts: 1, retryAttempt: 0, inheritContextOverride: "none",
     parentMessages: undefined, steerable: false };
 }
@@ -1330,7 +1326,6 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
   // Only the lead broker's leaf spawns are depth 2, and they never delegate.
   const scope = childToolScope(opts.delegation ? { depth: 2, delegateAllow: [] } : { depth: 1, delegateAllow: opts.persona.agents ?? [] });
   opts = prepareSpawnRuntime(opts);
-  assertDelegationRuntime(opts.persona, opts.runtime as RuntimeKind, opts.delegation);
   if (opts.runtime === "herdr" && !opts.registry.herdrAdmissionOpen) throw new Error("herdr runtime shutting down; launch refused");
   opts = prepareSpawnEvidence(opts, opts.registry);
   const effort = prepareSpawnEffort(opts);
@@ -1374,6 +1369,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     delegateAllow: [...scope.delegateAllow],
     parentRunId: opts.delegation?.parentRunId,
     delegateToolCallId: opts.delegation?.delegateToolCallId,
+    herdrParent: opts.delegation ? opts.registry.get(opts.delegation.parentRunId) : undefined,
     // Item 15: per-invocation markers. Initial spawn IS the start of
     // the (sole, so far) invocation, so:
     //   - thisInvocationStartedAt mirrors startTime
@@ -1641,9 +1637,9 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
   }
 }
 
-/** A subprocess delegator's parsed events go to this instance's broker, with the parent's effective cwd. */
-function delegationObserver(run: Run, registry: RunRegistry, cwd: string): ((run: Run, event: unknown) => void) | undefined {
-  if (run.runtime === "herdr" || !isDelegating(childToolScope(run))) return undefined;
+/** A delegator's parsed events (stdout or the herdr tee) go to this instance's broker, with the parent's effective cwd. */
+export function delegationObserver(run: Run, registry: RunRegistry, cwd: string): ((run: Run, event: unknown) => void) | undefined {
+  if (runScopeError(run) || !isDelegating(childToolScope(run))) return undefined;
   return (r, event) => registry.delegation?.observe(r, event, cwd);
 }
 
@@ -2229,9 +2225,6 @@ export function sendToRun(
       kind: "rejected",
       reason: `cannot send an empty message to sub-agent ${run.id}.`,
     };
-  }
-  if (run.runtime === "herdr" && !runScopeError(run) && isDelegating(childToolScope(run))) {
-    return { kind: "rejected", reason: `delegating run ${run.id} is on the herdr runtime; delegation supports subprocess parents only until N5` };
   }
   const behavior: StreamingBehavior = opts.streamingBehavior ?? "auto";
   const check = validateSendable(run, behavior, opts.sessionId);

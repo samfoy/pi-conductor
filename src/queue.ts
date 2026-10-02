@@ -10,7 +10,6 @@
  */
 
 import {
-  assertDelegationRuntime,
   leafSpawnOptions,
   forceTerminate,
   failEffortLaunch,
@@ -26,7 +25,6 @@ import { addEffortMember, listEfforts, readEffort, type EffortRecord } from "./e
 import { admitEffortWriter } from "./effort/admit.ts";
 import { awaitingChildren, delegationLoad } from "./delegation.ts";
 import type { Run, SpawnMode } from "./types.ts";
-import type { RuntimeKind } from "./runtime.ts";
 import { emptyUsage } from "./types.ts";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -104,7 +102,6 @@ export class SpawnQueue {
     opts: QueuedSpawnOptions & { registry?: RunRegistry },
   ): SpawnOrQueueResult {
     opts = prepareSpawnRuntime(leafSpawnOptions(opts));
-    assertDelegationRuntime(opts.persona, opts.runtime as RuntimeKind, opts.delegation);
     opts = prepareSpawnEvidence(opts, opts.registry ?? this.registry);
     const effort = prepareSpawnEffort(opts);
     if (opts.touches) opts = { ...opts, touches: [...opts.touches] };

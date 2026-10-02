@@ -125,6 +125,7 @@ test("N2 validateDelegateRequest: one fail-closed reason per check", () => {
   const base = { args: ask("scout"), parent, current: true, target: scout, personaTimeoutMs: 7 * 60_000, outstanding: 0, now };
   const reason = (over: object) => { const v = validateDelegateRequest({ ...base, ...over }); return v.ok ? "ok" : v.reason; };
   assert.equal(reason({}), "ok");
+  assert.equal(reason({ parent: { ...parent, runtime: "herdr" } }), "ok", "N5: a herdr parent delegates through the same checks");
   const cases: [string, object, RegExp][] = [
     ["not an object", { args: "scout" }, /arguments must be an object/],
     ["missing persona", { args: { task: "x" } }, /persona must be a non-empty string/],
@@ -135,7 +136,6 @@ test("N2 validateDelegateRequest: one fail-closed reason per check", () => {
     ["zero timeout", { args: ask("scout", "t", { timeout_minutes: 0 }) }, /timeout_minutes must be a positive integer/],
     ["depth 2 parent", { parent: { ...parent, depth: 2, delegateAllow: [] } }, /only a depth-1 delegator may delegate/],
     ["non-delegating parent", { parent: { ...parent, delegateAllow: [] } }, /only a depth-1 delegator may delegate/],
-    ["herdr parent", { parent: { ...parent, runtime: "herdr" } }, /subprocess parents only until N5/],
     ["paused parent", { parent: { ...parent, status: "paused" } }, /parent .* is paused, not running/],
     ["stale parent", { current: false }, /not the current registered run/],
     ["outside allowlist", { args: ask("inspector"), target: { name: "inspector", readOnly: true } }, /inspector is not in this run's delegation allowlist \(scout, auditor\)/],
@@ -312,27 +312,42 @@ test("N2 A5 files resolve against the parent's effective cwd and run refs name o
   assert.equal(spawned[1]!.files, undefined, "evidence is a snapshot taken before spawn, not a second read");
 });
 
-test("N2 a target that resolves to herdr is refused by name, never silently run on subprocess", async () => {
-  const cwd = project();
-  const { registry, spawned, broker } = harness({ env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/n2-no-socket", HERDR_PANE_ID: "pane" } });
-  const parent = parentRun(registry, cwd);
-  broker.observe(parent, start("to_herdr", ask("scout")), cwd);
-  broker.observe(parent, update("to_herdr"), cwd);
-  const r = await response(parent, "to_herdr");
+test("N5 a leaf's runtime comes from the cascade with no per-call layer: herdr inside herdr, never a silent downgrade", async () => {
+  const cwd = project({ "pinned.md": doc("pinned", "read_only: true\nruntime: herdr\n"), "lead.md": doc("lead", "agents:\n  - scout\n  - pinned\n") });
+  const inside = { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/n5-no-socket", HERDR_PANE_ID: "pane" };
+  const h = harness({ env: inside });
+  const parent = parentRun(h.registry, cwd, { delegateAllow: ["scout", "pinned"] });
+  // A model-supplied runtime key is not an input: the broker never passes a per-call layer.
+  h.broker.observe(parent, start("to_herdr", { persona: "scout", task: "inspect", runtime: "subprocess" }), cwd);
+  h.broker.observe(parent, update("to_herdr"), cwd);
+  await settle();
+  assert.equal(h.spawned.length, 1);
+  assert.equal(h.spawned[0]!.runtime, "herdr", "auto resolves to herdr inside herdr");
+  // Outside herdr, a persona pinned to herdr is a named rejection, not a subprocess leaf.
+  const out = harness({ env: {} });
+  const p2 = parentRun(out.registry, cwd, { delegateAllow: ["scout", "pinned"] });
+  out.broker.observe(p2, start("pinned", ask("pinned")), cwd);
+  out.broker.observe(p2, update("pinned"), cwd);
+  const r = await response(p2, "pinned");
   assert.equal(r.ok, false);
-  assert.match(r.reason, /scout resolves to the herdr runtime; delegated leaves run on subprocess only until N5/);
-  assert.equal(spawned.length, 0);
+  assert.match(r.reason, /delegation failed: runtime herdr requested but HERDR_ENV\/HERDR_SOCKET_PATH\/HERDR_PANE_ID are not all set/);
+  assert.equal(out.spawned.length, 0);
 });
 
-test("N2 a delegating persona that resolves to herdr is refused at spawn and at enqueue with a named reason", () => {
+test("N5 a delegating persona that resolves to herdr is accepted at enqueue; a herdr delegator is sendable again", () => {
   const registry = new RunRegistry();
   const lead: Persona = { name: "lead", description: "probe", inheritContext: "none", inheritSkills: false, defaultReads: [], worktree: false, timeoutMinutes: 1,
     systemPrompt: "You are lead.", source: "project", sourcePath: "/fake/lead.md", readOnly: false, agents: ["scout"] };
-  const env = { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/n2-no-socket", HERDR_PANE_ID: "pane" };
-  const opts = { registry, persona: lead, task: "t", cwd: tmpDir("n2-herdr-"), mode: "background" as const, timeoutMs: 1000, runtimeEnv: env };
-  assert.throws(() => spawnRun(opts), /delegating persona lead resolves to the herdr runtime; delegation supports subprocess parents only until N5/);
-  assert.throws(() => new SpawnQueue(registry, 1).enqueueOrSpawn(opts), /subprocess parents only until N5/);
-  assert.equal(registry.list().length, 0);
+  const env = { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/n5-no-socket", HERDR_PANE_ID: "pane" };
+  const seen: SpawnOptions[] = [];
+  const queue = new SpawnQueue(registry, 1, 1, (o: SpawnOptions) => { seen.push(o); return { run: { id: "lead-x" } as Run, done: new Promise<Run>(() => {}) }; });
+  queue.enqueueOrSpawn({ registry, persona: lead, task: "t", cwd: tmpDir("n5-herdr-"), mode: "background" as const, timeoutMs: 1000, runtimeEnv: env });
+  assert.deepEqual(seen.map(o => o.runtime), ["herdr"]);
+  const dir = join(runsRoot(), "lead-herdr-blocked"); mkdirSync(dir, { recursive: true });
+  const blocked = parentRun(registry, tmpDir("n5-send-"), { id: "lead-herdr-blocked", runtime: "herdr", status: "completed", sessionPath: undefined, recordPath: join(dir, "record.json") } as Partial<Run>);
+  const r = sendToRun(blocked, "again", { registry, timeoutMs: 1000 });
+  assert.equal(r.kind, "rejected");
+  assert.doesNotMatch((r as { reason: string }).reason, /until N5/, "no delegation-specific herdr refusal remains");
 });
 
 test("N2 a pre-existing claim is never re-spawned; the call gets a truthful uncertain answer", async () => {
@@ -384,8 +399,8 @@ test("N2 an end while queued removes only that placeholder; while running kills 
   const cwd = project();
   const { registry, spawned, broker, queue } = harness({ maxConcurrent: 1 });
   const parent = parentRun(registry, cwd);
-  for (const id of ["run_one", "run_two", "queued_three"]) { broker.observe(parent, start(id, ask("scout", id)), cwd); broker.observe(parent, update(id), cwd); }
-  await settle();
+  // One at a time: concurrent roster resolutions may finish in any order under load.
+  for (const id of ["run_one", "run_two", "queued_three"]) { broker.observe(parent, start(id, ask("scout", id)), cwd); broker.observe(parent, update(id), cwd); await settle(); }
   assert.equal(spawned.length, 1, "the awaiting parent's lent slot (N3) runs one leaf at a cap of 1");
   assert.equal(queue.size(), 2);
   const placeholder = registry.list().find((r) => r.delegateToolCallId === "queued_three")!;

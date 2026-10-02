@@ -12,10 +12,15 @@ import { classifyFailure } from "./failure-classify.ts";
 import { contextRetirementNotice } from "./context-retirement.ts";
 import { recordRunOutcome } from "./memory.ts";
 import type { ConductorEventEmitter } from "./conductor-events.ts";
-import { childExitUnconfirmed, isTerminal, type Run, type RunStatus, type ResolvedHook } from "./types.ts";
+import { childExitUnconfirmed, isDelegatedLeaf, isTerminal, type Run, type RunStatus, type ResolvedHook } from "./types.ts";
 import { settleOwnedChildren } from "./delegation.ts";
+import { readFileSync } from "node:fs";
+import { loadConfig } from "./config.ts";
+import { buildOrphanRun } from "./reconcile-startup.ts";
+import { sessionHeaderCwd } from "./session-seed.ts";
+import type { RunRecord } from "./types.ts";
 import {
-  type RunRegistry, attachSpawnedProc, stampSpawnStreamingMode, forceTerminate,
+  type RunRegistry, attachSpawnedProc, stampSpawnStreamingMode, forceTerminate, delegationObserver, resolveTimeoutMs,
   discoverSessionPathIfMissing, discoverContextRetirement, applyHookToTerminal,
   applyCloseHandlerTerminal, emitFinalizeEvent, applyRetryIfNeeded, applySubstanceCheck,
   failEffortLaunch, settleWorktree, writeRecord, writeFinal, getFinalText, applyChainIfPresent, applyCompactionLine, checkTurnLimit,
@@ -25,7 +30,10 @@ export interface RunPipelineOpts {
   registry: RunRegistry;
   reattach?: boolean;
   runtime?: RunRuntime;
-  /** Invoked once per parsed event, before state application, including the decoded tail. */
+  /**
+   * Invoked once per parsed event, before state application, including the decoded tail.
+   * A reattach replays from the launch boundary, so pass only the idempotent delegation observer there.
+   */
   onEvent?: (run: Run, event: unknown) => void;
   cwd: string;
   timeoutMs: number;
@@ -52,8 +60,9 @@ export function createRunPipeline(
   if (opts.reattach && run.integration) throw new Error("durable integration belongs to M5 recovery, not stream attachment");
   if (run.runtime === "herdr" && !opts.registry.herdrAdmissionOpen) throw new Error("herdr runtime shutting down; launch/attach refused");
   const runtime = opts.runtime ?? runtimeFor(run);
-  // N4: this invocation's leaves are the ones started from here on.
-  const launchedAt = Date.now();
+  // N4: this invocation's leaves are the ones started from here on. A reattached launch's leaves
+  // predate this pipeline; its gate covers the run's still-unanswered leaves instead (N5).
+  const launchedAt = opts.reattach ? run.startTime : Date.now();
   if (run.runtime === "herdr") run.herdrResultUnavailable = true;
   if (opts.reattach) {
     run.messages = []; run.usage = { ...(run.herdrUsageBaseline?.launchNonce === run.herdr?.launchNonce ? run.herdrUsageBaseline!.usage : emptyUsage()) };
@@ -144,7 +153,7 @@ export function createRunPipeline(
     if (opts.answer) await answerRecord;
     check();
     // N4: leaves stop and exit first, before any blocked or terminal hook, merge, footprint, integration, final, record or card.
-    if (!replaced()) await settleOwnedChildren(run, opts.registry, launchedAt);
+    if (!replaced()) await settleOwnedChildren(run, opts.registry, launchedAt, opts.reattach === true);
     check();
     // A resume of the killed run replaced this invocation before or during the gate: the run, its
     // record and callbacks are the new invocation's. Only this one's process is still ours.
@@ -325,7 +334,7 @@ export function createRunPipeline(
       return;
     }
 
-    if (!opts.reattach) opts.onEvent?.(run, event);
+    opts.onEvent?.(run, event);
 
     if (run.runtime !== "herdr" && !finalized && awaitingAnswer && ((!rpc && event.type === "agent_start") ||
         (rpc && event.type === "response" && event.command === "prompt" && event.id === `init-${run.id}` && event.success === true))) {
@@ -432,6 +441,13 @@ export function createRunPipeline(
   } else {
     run.proc = undefined; run.pid = undefined; run.streamingMode = undefined;
     const launch = transport;
+    if (isDelegatedLeaf(run)) {
+      // N3 on herdr: a leaf has no process handle, so its slot is held until its pane child's exit is proven.
+      run.processOpen = true;
+      const exited = () => { if (run.transport !== launch || !launch.childExited) return; run.processOpen = undefined; opts.registry.notify(run); };
+      void launch.closed.then(exited);
+      void launch.ready.then(undefined, exited);
+    }
     const launchFailed = async (error: Error) => {
       if (!current() || finalized || run.transport !== launch) return;
       finalized = true;
@@ -509,6 +525,23 @@ export function createRunPipeline(
     void finalize("failed", 1);
   };
   return done;
+}
+
+/**
+ * H10 readopt of a herdr record by this lead. N5: a delegator's replay from the launch
+ * boundary also reaches this instance's broker, with the parent's effective cwd (its
+ * session header), so claimed calls are rebound rather than re-spawned.
+ */
+export function readoptHerdrRun(record: RunRecord, deps: Pick<RunPipelineOpts, "registry" | "runtime" | "onComplete" | "events"> & { sessionId?: string }): { run: Run; done: Promise<Run> } {
+  const run = buildOrphanRun(record, "running");
+  run.parentPid = process.pid; run.parentSessionId = deps.sessionId;
+  let cwd: string | undefined;
+  try { cwd = record.herdr ? sessionHeaderCwd(readFileSync(record.herdr.sessionFile, "utf8")) : undefined; } catch { /* the pipeline refuses a missing session */ }
+  const done = createRunPipeline(run, [], { registry: deps.registry, runtime: deps.runtime, reattach: true, cwd: run.cwd,
+    timeoutMs: resolveTimeoutMs(undefined, undefined, loadConfig(run.cwd)), steerable: false, onEvent: delegationObserver(run, deps.registry, cwd ?? run.cwd),
+    onComplete: deps.onComplete, events: deps.events });
+  deps.registry.register(run);
+  return { run, done };
 }
 
 /** Track the terminal I/O tail, never the lifetime of a still-running child or verifier. */

@@ -8,10 +8,11 @@ import { emptyUsage, type Run } from "../../src/types.ts";
 import { RunRegistry } from "../../src/runs.ts";
 import type { HerdrCli } from "../../src/herdr/cli.ts";
 
-export function herdrFixture(mode = "healthy") {
-  const cwd = tmpDir("h7-pipeline-"), dir = join(cwd, "oracle-h7"); mkdirSync(dir);
-  const run: Run = { id: "oracle-h7", runtime: "herdr", persona: "oracle", task: "probe", mode: "background", status: "running", startTime: Date.now(), lastEventAt: Date.now(), cwd,
-    messages: [], usage: emptyUsage(), recordPath: join(dir, "record.json"), transcriptPath: join(dir, "transcript.jsonl"), finalPath: join(dir, "final.md") };
+/** `opts` (N5): a run id and directory (e.g. under the runs root) and extra run fields such as a delegation scope. */
+export function herdrFixture(mode = "healthy", opts: { id?: string; cwd?: string; dir?: string; run?: Partial<Run> } = {}) {
+  const id = opts.id ?? "oracle-h7", cwd = opts.cwd ?? tmpDir("h7-pipeline-"), dir = opts.dir ?? join(cwd, id); mkdirSync(dir, { recursive: true });
+  const run: Run = { id, runtime: "herdr", persona: "oracle", task: "probe", mode: "background", status: "running", startTime: Date.now(), lastEventAt: Date.now(), cwd,
+    messages: [], usage: emptyUsage(), recordPath: join(dir, "record.json"), transcriptPath: join(dir, "transcript.jsonl"), finalPath: join(dir, "final.md"), ...opts.run };
   const registry = new RunRegistry(); registry.register(run);
   const pane = { pane_id: "owned", terminal_id: "term", workspace_id: "workspace", tab_id: "tab", agent: null as string | null, agent_session: null as unknown };
   let time = 0, gone = false, unknown = false;

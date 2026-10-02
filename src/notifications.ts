@@ -216,6 +216,7 @@ export function formatCompletionNotification(run: Run, actions: RunAction[] = av
     lines.push("  </hook>");
   }
   if (run.herdr?.versionWarning) lines.push(`  <warning reason="pi-version">${escapeXml(run.herdr.versionWarning)}</warning>`);
+  if (run.herdr?.placementWarning) lines.push(`  <warning reason="placement">${escapeXml(run.herdr.placementWarning)}</warning>`);
   if (run.nonSubstantiveFinal) {
     lines.push(
       `  <warning reason="${run.nonSubstantiveFinal.reason}">` +

@@ -981,6 +981,10 @@ export interface Run {
   delegateToolCallId?: string;
   /** In memory: `delegate` calls the lead broker has claimed and not yet answered. */
   pendingDelegations?: number;
+  /** In memory (N5): on a leaf, its delegating parent as registered at spawn; the herdr pane placement source. */
+  herdrParent?: Run;
+  /** In memory (N5): on a herdr parent, the latest leaf pane placed in its tab; serializes leaf placement. */
+  herdrLeafPlacement?: Promise<import("./herdr/identity.ts").HerdrBinding | undefined>;
   /** In memory (N3): the launched subprocess has not closed; its admission slot outlives a terminal status until it does. */
   processOpen?: boolean;
   /** In memory: when the current invocation's hard-timeout timer fires. */

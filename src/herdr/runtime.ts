@@ -18,7 +18,7 @@ import { createLineDecoder, terminateHook } from "../subprocess-runtime.ts";
 import { boundStallText, redactPaneEvidence } from "../stall-evidence.ts";
 import { createHerdrCli, HerdrCliError, isRecord, type HerdrCli } from "./cli.ts";
 import { sameHerdrBinding, proveChildProcess, provePaneOurs, type HerdrBinding, type HerdrInvocation, type LaunchHello } from "./identity.ts";
-import { buildHerdrEnv, closeEmptyPane, createRunTab } from "./placement.ts";
+import { buildHerdrEnv, closeEmptyPane, createRunTab, createSplitPane, leafPlacement } from "./placement.ts";
 import { hasPreparedInboxRequest, prepareInboxRequest, publishPreparedInboxRequest, readControlRecord, readInboxAck, writeInboxRequest, type InboxRequest } from "./inbox.ts";
 
 export const HERDR_LAUNCH_BUDGET = { start: 65000, hello: 15000, ack: 30000, agentStart: 30000, busy: 2000, diagnostic: 2000 } as const;
@@ -180,6 +180,11 @@ export class HerdrRuntime implements RunRuntime {
     if (reattach) claimOwnership();
     const owned = () => !detached && !!ownership && run.herdrOwnership === ownership && ownsHerdrRun(run);
     const previous = run.herdr;
+    // N5: a herdr parent's leaves take placement turns in spawn order, so "previous leaf" is well defined.
+    const parentRun = !reattach && !previous && run.depth === 2 ? run.herdrParent : undefined;
+    const priorLeaf = parentRun?.runtime === "herdr" ? parentRun.herdrLeafPlacement : undefined;
+    let placed: (leaf: HerdrBinding | undefined | Promise<HerdrBinding | undefined>) => void = () => {};
+    if (parentRun?.runtime === "herdr") parentRun.herdrLeafPlacement = new Promise(resolve => { placed = resolve; });
     run.herdrPrompts = undefined;
     const alias = herdrAgentName(run.id, nonce);
     let binding: HerdrBinding | undefined, hello: LaunchHello | undefined, provenPane: unknown;
@@ -301,12 +306,27 @@ export class HerdrRuntime implements RunRuntime {
       if (run.herdr !== previous) throw failure("launch binding replaced; preserving resources");
       if (run.effort) mkdirSync(join(dir, "tmp"), { recursive: true });
       if (!binding) {
-        const workspace = workspaceId ?? (await cli.json(["pane", "get", env.HERDR_PANE_ID!], { timeoutMs: 2000, signal: abort.signal })).pane;
-        const targetWorkspace = typeof workspace === "string" ? workspace : isRecord(workspace) ? workspace.workspace_id : undefined;
-        if (typeof targetWorkspace !== "string") throw failure("parent workspace unavailable");
-        check();
-        binding = await createRunTab(cli, { workspaceId: targetWorkspace, cwd, invocation, env: buildHerdrEnv(env, { runId: run.id, runDir: dir, configCwd: run.cwd, scope,
-          ...(run.effort ? { tmpDir: join(dir, "tmp") } : {}) }) }, { timeoutMs: 5000, signal: abort.signal });
+        const paneEnv = buildHerdrEnv(env, { runId: run.id, runDir: dir, configCwd: run.cwd, scope, ...(run.effort ? { tmpDir: join(dir, "tmp") } : {}) });
+        let placement: Awaited<ReturnType<typeof leafPlacement>> | undefined;
+        if (run.depth === 2) {
+          const prior = await priorLeaf; check();
+          const parentBinding = parentRun?.herdr;
+          placement = await leafPlacement(cli, { parentId: run.parentRunId ?? "(none)", parentRuntime: parentRun?.runtime ?? "missing", parent: parentBinding, previous: prior,
+            current: () => !!parentRun && parentRun.herdr === parentBinding && !isTerminal(parentRun.status) && ownsHerdrRun(parentRun) }, { timeoutMs: 2000, signal: abort.signal });
+          check();
+          if ("anchor" in placement) {
+            binding = await createSplitPane(cli, { ...placement, cwd, invocation, env: paneEnv, known: [parentBinding, prior] }, { timeoutMs: 5000, signal: abort.signal });
+            placed(binding);
+          } else placed(prior);
+        }
+        if (!binding) {
+          const workspace = workspaceId ?? (await cli.json(["pane", "get", env.HERDR_PANE_ID!], { timeoutMs: 2000, signal: abort.signal })).pane;
+          const targetWorkspace = typeof workspace === "string" ? workspace : isRecord(workspace) ? workspace.workspace_id : undefined;
+          if (typeof targetWorkspace !== "string") throw failure("parent workspace unavailable");
+          check();
+          binding = await createRunTab(cli, { workspaceId: targetWorkspace, cwd, invocation, env: paneEnv }, { timeoutMs: 5000, signal: abort.signal });
+          if (placement && "warning" in placement) binding.placementWarning = placement.warning;
+        }
         fresh = true;
       }
       if (run.herdr !== previous) throw failure("launch binding replaced; preserving resources");
@@ -401,6 +421,7 @@ export class HerdrRuntime implements RunRuntime {
       if (!finalIdentity.ok && finalIdentity.state === "gone") { childExited = true; resolveClosed(); }
       return { binding, request, launchOffset };
     }).catch(async (e: unknown) => {
+      placed(priorLeaf); // a failed placement leaves the previous leaf as the next anchor
       diagnostic(e instanceof Error && e.message.startsWith("herdr:") ? e.message : "herdr: launch failed");
       if (!startAttempted) childExited = true;
       if (!detached && !reattach) await stopOwned(true);

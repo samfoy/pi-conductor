@@ -1,6 +1,6 @@
 import { HerdrRuntime } from "./herdr/runtime.ts";
 import { createHerdrCli } from "./herdr/cli.ts";
-import { createRunPipeline } from "./run-pipeline.ts";
+import { readoptHerdrRun } from "./run-pipeline.ts";
 import { buildOrphanRun } from "./reconcile-startup.ts";
 import { recoverEffort } from "./effort/reconcile.ts";
 import { listEfforts } from "./effort/store.ts";
@@ -94,7 +94,8 @@ export default function (pi: ExtensionAPI): void {
 
   const registry = new RunRegistry();
   const queue = new SpawnQueue(registry, 4, 1);
-  registry.delegation = new DelegationBroker({ registry, queue, env: process.env });
+  const delegation = new DelegationBroker({ registry, queue, env: process.env });
+  registry.delegation = delegation;
   const focusModel = new FocusedStreamModel(registry);
   // v0.16 event bus: construct once at extension init; `pi.events` is the
   // shared cross-extension EventBus. The `?.` in each emit* method makes
@@ -485,6 +486,9 @@ export default function (pi: ExtensionAPI): void {
       // by the next tick a reload or print-mode exit can make ctx stale.
       const selfSessionId = opts.getSessionId();
       const herdrRuntime = process.env.HERDR_SOCKET_PATH ? new HerdrRuntime({ cli: createHerdrCli({ env: process.env, socketPath: process.env.HERDR_SOCKET_PATH }), env: process.env }) : undefined;
+      // N5: a readopted delegator's claimed calls are decided only once readoption and effort recovery are done.
+      let reconciled!: () => void;
+      delegation.reconciling(new Promise<void>(resolve => { reconciled = resolve; }));
       setImmediate(() =>
         // Promise.resolve().then turns a synchronous throw into the
         // rejection .catch reports; thrown from setImmediate, it kills pi.
@@ -499,13 +503,10 @@ export default function (pi: ExtensionAPI): void {
               herdrProbe: record => herdrRuntime?.probeRecord(buildOrphanRun(record, record.status)) ?? Promise.resolve("other-socket"),
               attachHerdr: record => {
                 if (!herdrRuntime || !registry.herdrAdmissionOpen) throw new Error("herdr attachment unavailable");
-                const run = buildOrphanRun(record, "running");
-                run.parentPid = process.pid; run.parentSessionId = selfSessionId;
-                const done = createRunPipeline(run, [], { registry, runtime: herdrRuntime, reattach: true, cwd: run.cwd,
-                  timeoutMs: resolveTimeoutMs(undefined, undefined, loadConfig(run.cwd)), steerable: false, onComplete: opts.pushCompletionNotification, events: conductorEvents });
-                registry.register(run);
+                const { done } = readoptHerdrRun(record, { registry, runtime: herdrRuntime, sessionId: selfSessionId, onComplete: opts.pushCompletionNotification, events: conductorEvents });
                 void done.catch(error => console.error(`herdr recovery: ${error.message}`));
               },
+              stopOrphanLeaf: run => forceTerminate(run, "killed", registry),
               now: Date.now(),
             }),
           )
@@ -527,7 +528,8 @@ export default function (pi: ExtensionAPI): void {
             console.error(
               `reconcile-startup: failed: ${(err as Error)?.message ?? String(err)}`,
             );
-          }),
+          })
+          .finally(reconciled),
       );
     }
 

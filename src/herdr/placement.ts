@@ -19,17 +19,22 @@ export function buildHerdrEnv(source: NodeJS.ProcessEnv, owned: {
     ...(owned.tmpDir === undefined ? {} : {TMPDIR: owned.tmpDir}),
   };
 }
-export function tabCreateArgs(opts: {workspaceId: string; cwd: string; runId: string; env: Record<string, string>}): string[] {
-  if (![opts.workspaceId, opts.cwd, opts.runId].every(value => typeof value === "string" && value.trim() && !value.includes("\0"))) {
-    throw new HerdrCliError("configuration");
-  }
-  const envArgs = Object.entries(opts.env).flatMap(([key, value]) => {
+const validText = (value: unknown) => typeof value === "string" && value.trim() !== "" && !value.includes("\0");
+function paneEnvArgs(env: Record<string, string>): string[] {
+  return Object.entries(env).flatMap(([key, value]) => {
     if (![...HERDR_FORWARD_ENV, ...ownedNames].includes(key) || typeof value !== "string" || value.includes("\0")) {
       throw new Error("herdr: invalid pane environment");
     }
     return ["--env", `${key}=${value}`];
   });
-  return ["tab", "create", "--workspace", opts.workspaceId, "--cwd", opts.cwd, "--label", opts.runId, ...envArgs, "--no-focus"];
+}
+export function tabCreateArgs(opts: {workspaceId: string; cwd: string; runId: string; env: Record<string, string>}): string[] {
+  if (![opts.workspaceId, opts.cwd, opts.runId].every(validText)) throw new HerdrCliError("configuration");
+  return ["tab", "create", "--workspace", opts.workspaceId, "--cwd", opts.cwd, "--label", opts.runId, ...paneEnvArgs(opts.env), "--no-focus"];
+}
+export function paneSplitArgs(opts: {paneId: string; direction: "right" | "down"; cwd: string; env: Record<string, string>}): string[] {
+  if (![opts.paneId, opts.cwd].every(validText) || !["right", "down"].includes(opts.direction)) throw new HerdrCliError("configuration");
+  return ["pane", "split", "--pane", opts.paneId, "--direction", opts.direction, "--cwd", opts.cwd, ...paneEnvArgs(opts.env), "--no-focus"];
 }
 
 export async function createRunTab(cli: HerdrCli, opts: {
@@ -48,6 +53,57 @@ export async function createRunTab(cli: HerdrCli, opts: {
     throw new HerdrCliError("protocol");
   }
   return binding;
+}
+
+/** N5: a fresh pane in the anchor's tab, proven empty before anything runs in it. Never a tab. */
+export async function createSplitPane(cli: HerdrCli, opts: {
+  anchor: HerdrBinding; direction: "right" | "down"; cwd: string; invocation: HerdrInvocation; env: Record<string, string>; known: readonly (HerdrBinding | undefined)[];
+}, limits?: CliLimits): Promise<HerdrBinding> {
+  const created = (await cli.json(paneSplitArgs({paneId: opts.anchor.paneId, direction: opts.direction, cwd: opts.cwd, env: opts.env}), limits)).pane;
+  const known = [opts.anchor, ...opts.known].filter((b): b is HerdrBinding => !!b);
+  if (!isHerdrPane(created) || created.workspace_id !== opts.anchor.workspaceId || created.tab_id !== opts.anchor.tabId ||
+      known.some(b => b.paneId === created.pane_id || b.terminalId === created.terminal_id)) throw new HerdrCliError("protocol");
+  const binding: HerdrBinding = {...opts.invocation, socketPath: cli.socketPath,
+    workspaceId: created.workspace_id, tabId: created.tab_id, paneId: created.pane_id, terminalId: created.terminal_id, createdTab: false};
+  const observed = await cli.json(["pane", "get", binding.paneId], limits);
+  if (!provePaneOurs({binding, current: opts.invocation, socketPath: cli.socketPath, pane: observed.pane, requireNoAgent: true}).ok) {
+    throw new HerdrCliError("protocol");
+  }
+  return binding;
+}
+
+export type LeafPlacement = {anchor: HerdrBinding; direction: "right" | "down"} | {warning: string};
+/**
+ * N5: split only from a pane whose pane, terminal, workspace and tab match its binding
+ * right now. The parent first (right); a later leaf splits down from the previous
+ * leaf while that pane is proven in the parent's tab. Otherwise the caller opens an
+ * own tab: a split target is never guessed. `current` fences the parent after each await.
+ */
+export async function leafPlacement(cli: HerdrCli, opts: {
+  parentId: string; parentRuntime: string; parent?: HerdrBinding; previous?: HerdrBinding; current: () => boolean;
+}, limits?: CliLimits): Promise<LeafPlacement> {
+  const own = (why: string) => ({warning: `${why}; leaf placed in its own tab`});
+  const parent = opts.parent;
+  if (opts.parentRuntime !== "herdr" || !parent) return own(`parent ${opts.parentId} has no herdr pane (${opts.parentRuntime} runtime)`);
+  if (parent.socketPath !== cli.socketPath) return own(`parent ${opts.parentId} pane is on another herdr socket`);
+  const prove = async (binding: HerdrBinding) => {
+    try {
+      const pane = (await cli.json(["pane", "get", binding.paneId], limits)).pane;
+      return provePaneOurs({binding, current: binding, socketPath: cli.socketPath, pane, requireNoAgent: false});
+    } catch { return {ok: false as const, reason: "pane observation unavailable"}; }
+  };
+  const fenced = own(`parent ${opts.parentId} is no longer this lead's current owned run`);
+  if (!opts.current()) return fenced;
+  const proof = await prove(parent);
+  if (!opts.current()) return fenced;
+  if (!proof.ok) return own(`parent pane unproven (${proof.reason})`);
+  const previous = opts.previous;
+  if (previous && previous.socketPath === parent.socketPath && previous.workspaceId === parent.workspaceId && previous.tabId === parent.tabId) {
+    const ok = (await prove(previous)).ok;
+    if (!opts.current()) return fenced;
+    if (ok) return {anchor: previous, direction: "down"};
+  }
+  return {anchor: parent, direction: "right"};
 }
 
 export async function closeEmptyPane(cli: HerdrCli, binding: HerdrBinding,
