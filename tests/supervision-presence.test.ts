@@ -6,6 +6,8 @@
  * nor delete. No herdr CLI call is ever made.
  */
 import test, { after } from "node:test";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -19,7 +21,7 @@ import { emptyUsage, type Run } from "../src/types.ts";
 import { probeHerdrOwner } from "../src/herdr/ownership.ts";
 import { readProcessStartTime } from "../src/reconcile-startup.ts";
 import { LeadPresence, leadEligibility } from "../src/supervision/presence.ts";
-import { buildLeadRecord, createLeadRecord, leadPath, leadsDir, readLeadRecord, replaceLeadRecord, supervisionRoot, type LeadRecord } from "../src/supervision/store.ts";
+import { buildLeadRecord, createLeadRecord, leadPath, leadsDir, readLeadRecord, replaceLeadRecord, scanLeads, supervisionRoot, type LeadRecord } from "../src/supervision/store.ts";
 import conductor from "../src/index.ts";
 
 sandboxPi();
@@ -32,7 +34,7 @@ const session = (over: { sessionId?: string; sessionFile?: string; cwd?: string 
 const reset = () => rmSync(supervisionRoot(), { recursive: true, force: true });
 const onDisk = (id: string) => readLeadRecord(leadPath(id));
 
-function fakePi(registered = ["read", "bash", "peer", "foreign_tool"]) {
+function fakePi(registered = ["read", "bash", "peer", "foreign_tool"], name = "api lead") {
   let active = [...registered];
   const sets: string[][] = [];
   return {
@@ -40,19 +42,19 @@ function fakePi(registered = ["read", "bash", "peer", "foreign_tool"]) {
       getActiveTools: () => [...active],
       setActiveTools: (names: string[]) => { sets.push([...names]); active = names.filter(n => registered.includes(n)); },
       getAllTools: () => registered.map(name => ({ name })),
-      getSessionName: () => "api lead",
+      getSessionName: () => name,
     },
     active: () => active, sets,
   };
 }
 
-function presence(over: { env?: NodeJS.ProcessEnv; mode?: () => boolean; pi?: ReturnType<typeof fakePi>; registry?: RunRegistry; clock?: ReturnType<typeof makeFakeClock>; timers?: unknown; liveness?: object; own?: boolean } = {}) {
+function presence(over: { env?: NodeJS.ProcessEnv; mode?: () => boolean; pi?: ReturnType<typeof fakePi>; registry?: RunRegistry; clock?: ReturnType<typeof makeFakeClock>; timers?: unknown; liveness?: object; own?: boolean; repo?: { repo?: string; branch?: string } } = {}) {
   const pi = over.pi ?? fakePi();
   const registry = over.registry ?? new RunRegistry();
   const clock = over.clock ?? makeFakeClock(1_000_000);
   const notes: string[] = [];
   const p = new LeadPresence({ pi: pi.api as never, env: over.env ?? HERDR, registry, getMode: over.mode ?? (() => true), now: clock.deps.now,
-    timers: (over.timers ?? clock.deps) as never, liveness: over.liveness as never, describeRepo: () => ({ repo: "api", branch: "main" }) });
+    timers: (over.timers ?? clock.deps) as never, liveness: over.liveness as never, describeRepo: () => over.repo ?? { repo: "api", branch: "main" } });
   if (over.own !== false) p.ownTool("peer");
   return { p, pi, registry, clock, notes, notify: (m: string) => void notes.push(m) };
 }
@@ -257,6 +259,93 @@ test("S1 presence: a proven-dead predecessor of the same session is replaced; an
   ageOnly.p.start(s, ageOnly.notify);
   assert.equal(ageOnly.p.status().state, "duplicate", "off Linux an old record of a live pid is not taken over on age alone");
 });
+
+// Critic finding: presentation text was clipped by code points but validated by bytes, so an eligible lead failed to publish.
+const UTF8_CAP = 256;
+const wellFormed = (s: string) => !s.includes("\uFFFD") && Buffer.from(s, "utf8").toString("utf8") === s;
+for (const [label, name, repo] of [
+  ["86 CJK characters in the session name", "界".repeat(86), {}],
+  ["65 emoji in the session name", "😀".repeat(65), {}],
+  ["a branch and repo over 256 bytes", "api lead", { repo: "仓".repeat(90), branch: `feature/${"分支".repeat(60)}` }],
+] as [string, string, { repo?: string; branch?: string }][]) {
+  test(`S1 presence: ${label} publishes, clipped on whole code points to at most 256 UTF-8 bytes`, () => {
+    reset();
+    const ctx = presence({ pi: fakePi(undefined, name), repo: { repo: "api", branch: "main", ...repo } });
+    const s = session();
+    ctx.p.start(s, ctx.notify);
+    assert.equal(ctx.p.status().state, "published", `an eligible lead must publish: ${JSON.stringify(ctx.p.status())}`);
+    const record = onDisk(s.sessionId)!;
+    for (const [field, input] of [["displayName", name], ["repo", repo.repo ?? "api"], ["branch", repo.branch ?? "main"]] as const) {
+      const kept = record[field]!, points = Array.from(input);
+      assert.ok(wellFormed(kept), `${field} is valid Unicode with no replacement character`);
+      assert.ok(Buffer.byteLength(kept) <= UTF8_CAP, `${field} is within ${UTF8_CAP} bytes: ${Buffer.byteLength(kept)}`);
+      assert.ok(input.startsWith(kept), `${field} is a prefix of the input`);
+      if (kept !== input) assert.ok(Buffer.byteLength(points.slice(0, Array.from(kept).length + 1).join("")) > UTF8_CAP, `${field} keeps every code point that fits`);
+    }
+    if (!("branch" in repo)) assert.deepEqual([record.repo, record.branch], ["api", "main"], "ordinary ASCII is unchanged");
+    ctx.p.stop();
+  });
+}
+
+test("S1 presence: ordinary ASCII presentation text is unchanged", () => {
+  reset();
+  const ctx = presence({ repo: { repo: "pi-conductor", branch: "feature/s1-supervision-presence" } });
+  const s = session();
+  ctx.p.start(s, ctx.notify);
+  assert.deepEqual([onDisk(s.sessionId)!.displayName, onDisk(s.sessionId)!.repo, onDisk(s.sessionId)!.branch], ["api lead", "pi-conductor", "feature/s1-supervision-presence"]);
+  ctx.p.stop();
+});
+
+// Critic finding: the sweep's rename-aside -> restore window. A dead predecessor is judged, a successor replaces it
+// before the sweep's rename, and the rename sets the successor's record aside. If a duplicate of the same session
+// publishes inside that window, the restore must keep the newer record (create-only link), never overwrite it.
+for (const duplicate of [false, true]) {
+  test(`S1 presence: a sweep restoring a successor's record ${duplicate ? "keeps a duplicate published inside the window and drops the aside copy" : "with no intervening publisher puts it back intact"}`, (t) => {
+    reset();
+    const s = session();
+    const deadPid = 999_993;
+    const liveness = { platform: "linux", probe: (pid: number) => pid === deadPid ? { state: "gone" as const } : probeHerdrOwner(pid) };
+    createLeadRecord(buildLeadRecord({ ...s, generation: randomUUID(), pid: deadPid, pidStartTime: 5, socketPath: "/old.sock", paneId: "p", cwd: "/old", displayName: "old",
+      runs: { active: 0, blocked: 0, total: 0 }, runsBrief: [], updatedAt: 1 }), () => {});
+    const successor = presence({ liveness }), dup = presence({ liveness });
+    const path = leadPath(s.sessionId);
+    const realRename = fs.renameSync;
+    let phase: "scan" | "busy" | "done" = "scan";
+    t.mock.method(fs, "renameSync", (from: string, to: string) => {
+      if (phase !== "scan" || from !== path || !to.endsWith(".sweep")) return realRename(from, to);
+      phase = "busy";
+      successor.p.start(s, successor.notify); // replaces the judged predecessor before the sweep's rename
+      assert.equal(successor.p.status().state, "published");
+      realRename(from, to); // the sweep sets the successor's record aside
+      if (duplicate) dup.p.start(s, dup.notify); // the path is empty: a create-only publish succeeds
+      phase = "done";
+    });
+    syncBuiltinESMExports();
+    let scan;
+    try { scan = scanLeads(liveness); } finally { t.mock.restoreAll(); syncBuiltinESMExports(); }
+    assert.equal(phase, "done", "the rename window was exercised");
+    assert.equal(scan.swept, 0, "the changed record is not swept");
+    assert.deepEqual(readdirSync(leadsDir()), [path.split("/").pop()], "the aside copy is removed; no tomb remains");
+    const winner = duplicate ? dup : successor, loser = duplicate ? successor : undefined;
+    assert.equal(winner.p.status().state, "published");
+    assert.equal(onDisk(s.sessionId)!.generation, winner.p.status().generation, duplicate ? "the newer duplicate record survives the restore" : "the successor's record is restored");
+    assert.equal(winner.p.assertOwned().generation, winner.p.status().generation);
+    if (loser) {
+      assert.throws(() => loser.p.assertOwned(), /not its own/, "the successor no longer owns the record on disk");
+      loser.clock.advance(30_000);
+      assert.equal(loser.p.status().state, "duplicate", "its next heartbeat sees the other identity and goes inactive");
+      assert.match(loser.notes.join("\n"), /another instance/);
+      assert.ok(!loser.pi.active().includes("peer"));
+      loser.p.stop();
+      assert.equal(onDisk(s.sessionId)!.generation, dup.p.status().generation, "its stop leaves the duplicate's record alone");
+    } else {
+      successor.clock.advance(30_000);
+      assert.equal(successor.p.status().state, "published", "the heartbeat keeps a restored owner published");
+    }
+    winner.p.stop();
+    assert.equal(onDisk(s.sessionId), undefined);
+  });
+}
 
 test("S1 presence: exactly one of several concurrent real processes publishing the same session wins", { timeout: 60000 }, async () => {
   reset();

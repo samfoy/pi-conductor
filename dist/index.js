@@ -11670,6 +11670,7 @@ import { dirname as dirname20, isAbsolute as isAbsolute6, join as join27 } from 
 var LEAD_RECORD_MAX_BYTES = 4096;
 var LEAD_RUNS_BRIEF_MAX = 24;
 var LEAD_SCAN_MAX = 1024;
+var PRESENTATION_MAX_BYTES = 256;
 var LEAD_FRESH_MS = 9e4;
 var LEAD_STALE_MS = 6e5;
 var supervisionRoot = () => join27(homedir9(), ".pi", "agent", "conductor", "supervision");
@@ -11707,17 +11708,25 @@ var onlyKeys = (v, keys) => Object.keys(v).every((k) => keys.has(k));
 function validLeadRecord(v) {
   if (!isRecord(v) || !onlyKeys(v, KEYS)) return false;
   const { runs, runsBrief } = v;
-  return v.v === 1 && text2(v.sessionId, 256) && text2(v.sessionFile, 1024) && isAbsolute6(v.sessionFile) && typeof v.generation === "string" && UUID.test(v.generation) && Number.isSafeInteger(v.pid) && v.pid > 1 && (v.pidStartTime === void 0 || Number.isSafeInteger(v.pidStartTime) && v.pidStartTime > 0) && text2(v.socketPath, 1024) && text2(v.paneId, 256) && optional(v.tabId, 256) && optional(v.workspaceId, 256) && text2(v.cwd, 1024) && isAbsolute6(v.cwd) && optional(v.repo, 256) && optional(v.branch, 256) && text2(v.displayName, 256) && v.role === "lead" && isRecord(runs) && onlyKeys(runs, /* @__PURE__ */ new Set(["active", "blocked", "total"])) && count(runs.active) && count(runs.blocked) && count(runs.total) && Array.isArray(runsBrief) && runsBrief.length <= LEAD_RUNS_BRIEF_MAX && runsBrief.every((b) => isRecord(b) && onlyKeys(b, BRIEF_KEYS) && text2(b.id, 128) && text2(b.persona, 128) && typeof b.status === "string" && /^[a-z_]{1,32}$/.test(b.status) && optional(b.parentRunId, 128)) && count(v.updatedAt) && Buffer.byteLength(JSON.stringify(v)) <= LEAD_RECORD_MAX_BYTES;
+  return v.v === 1 && text2(v.sessionId, 256) && text2(v.sessionFile, 1024) && isAbsolute6(v.sessionFile) && typeof v.generation === "string" && UUID.test(v.generation) && Number.isSafeInteger(v.pid) && v.pid > 1 && (v.pidStartTime === void 0 || Number.isSafeInteger(v.pidStartTime) && v.pidStartTime > 0) && text2(v.socketPath, 1024) && text2(v.paneId, 256) && optional(v.tabId, 256) && optional(v.workspaceId, 256) && text2(v.cwd, 1024) && isAbsolute6(v.cwd) && optional(v.repo, PRESENTATION_MAX_BYTES) && optional(v.branch, PRESENTATION_MAX_BYTES) && text2(v.displayName, PRESENTATION_MAX_BYTES) && v.role === "lead" && isRecord(runs) && onlyKeys(runs, /* @__PURE__ */ new Set(["active", "blocked", "total"])) && count(runs.active) && count(runs.blocked) && count(runs.total) && Array.isArray(runsBrief) && runsBrief.length <= LEAD_RUNS_BRIEF_MAX && runsBrief.every((b) => isRecord(b) && onlyKeys(b, BRIEF_KEYS) && text2(b.id, 128) && text2(b.persona, 128) && typeof b.status === "string" && /^[a-z_]{1,32}$/.test(b.status) && optional(b.parentRunId, 128)) && count(v.updatedAt) && Buffer.byteLength(JSON.stringify(v)) <= LEAD_RECORD_MAX_BYTES;
 }
-var clip = (s, max) => Array.from(s ?? "").map((c) => /[\u0000-\u001f\u007f]/.test(c) ? " " : c).slice(0, max).join("").trim() || void 0;
+function clip(s) {
+  let kept = "", bytes = 0;
+  for (const c of Array.from(s ?? "").slice(0, 128)) {
+    const char = /[\u0000-\u001f\u007f]/.test(c) ? " " : c;
+    if ((bytes += Buffer.byteLength(char)) > PRESENTATION_MAX_BYTES) break;
+    kept += char;
+  }
+  return kept.trim() || void 0;
+}
 function buildLeadRecord(fields) {
   let record = {
     ...fields,
     v: 1,
     role: "lead",
-    displayName: clip(fields.displayName, 128) ?? "lead",
-    repo: clip(fields.repo, 128),
-    branch: clip(fields.branch, 128),
+    displayName: clip(fields.displayName) ?? "lead",
+    repo: clip(fields.repo),
+    branch: clip(fields.branch),
     runsBrief: fields.runsBrief.slice(0, LEAD_RUNS_BRIEF_MAX)
   };
   while (record.runsBrief.length > 0 && Buffer.byteLength(JSON.stringify(record)) > LEAD_RECORD_MAX_BYTES) {

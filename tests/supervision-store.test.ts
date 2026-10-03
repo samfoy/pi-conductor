@@ -14,6 +14,7 @@ import {
   LEAD_RECORD_MAX_BYTES, LEAD_RUNS_BRIEF_MAX, LEAD_SCAN_MAX, buildLeadRecord, createLeadRecord, ensureLeadsDir, leadLiveness, leadPath, leadsDir,
   readLeadRecord, removeLeadRecordIf, replaceLeadRecord, sameLeadIdentity, scanLeads, supervisionRoot, validLeadRecord, type LeadRecord,
 } from "../src/supervision/store.ts";
+import { PEER_LIST_MAX_BYTES, peerListing } from "../src/supervision/tools.ts";
 
 const { home } = sandboxPi();
 const SELF_START = 4242;
@@ -216,4 +217,55 @@ test("S1 store: a scan is bounded at 1024 entries and clears abandoned temp file
   assert.throws(() => scanLeads(LINUX), /cap 1024/, "an over-full directory fails closed");
   assert.equal(readFileSync(leadPath(r.sessionId), "utf8").length > 0, true, "nothing is deleted on refusal");
   reset();
+});
+
+// Critic finding: the exact sha256(sessionId) file name is part of the record's identity.
+test("S1 store: a valid record under another session's file name is invalid and never listed or swept", () => {
+  reset();
+  ensureLeadsDir(true);
+  const own = record(), misplaced = record({ pid: 200 });
+  publish(own);
+  const elsewhere = leadPath(`not-${misplaced.sessionId}`);
+  writeFileSync(elsewhere, JSON.stringify(misplaced), { mode: 0o600 });
+  assert.equal(validLeadRecord(JSON.parse(readFileSync(elsewhere, "utf8"))), true, "the record itself is valid; only its path is wrong");
+  for (const probe of [probeWith(), probeWith([200])]) {
+    const scan = scanLeads({ platform: "linux", probe });
+    assert.deepEqual(scan.leads.map(l => l.record.sessionId), [own.sessionId], "only the correctly named record is listed");
+    assert.deepEqual([scan.invalid, scan.swept], [1, 0], "counted invalid; a misnamed record is preserved, even with a dead pid");
+    assert.ok(lstatSync(elsewhere).isFile());
+  }
+  reset();
+});
+
+// Critic finding: the 16 KiB output cap, with multibyte presentation text.
+test("S1 peer list: a multibyte listing past 16 KiB is valid JSON of at most 16384 bytes and says truncated", () => {
+  // Entries stay under ~200 bytes, so the 240 self id lengths tried below cover every byte offset of the last entry.
+  const peers = Array.from({ length: 150 }, (_, i) => record({ sessionId: `peer-${String(i).padStart(4, "0")}`, displayName: "界".repeat(10),
+    cwd: `/工作/${"界".repeat(8)}`, repo: "仓库", branch: "分支".repeat(5) }));
+  const bytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
+  const scanFor = (self: LeadRecord) => ({ leads: [self, ...peers].map(r => ({ record: r, state: "live" as const })), invalid: 0, swept: 0 });
+  // Choose the self id length so that packing peers up to the cap and only then appending `"truncated":true`
+  // would overflow: only an implementation that reserves room for the marker stays within the cap here.
+  let fixture: { self: LeadRecord; listing: ReturnType<typeof peerListing> } | undefined;
+  for (let k = 0; k < 240 && !fixture; k++) {
+    const self = record({ sessionId: `self-${"s".repeat(k)}` });
+    const listing = peerListing(self, scanFor(self));
+    const entry = listing.peers[0]!;
+    assert.ok(bytes(entry) < 239, "the search range spans an entry");
+    const packed = (n: number) => ({ self: self.sessionId, peers: Array(n).fill(entry) });
+    let n = 0;
+    while (bytes(packed(n + 1)) <= PEER_LIST_MAX_BYTES) n++;
+    if (bytes(packed(n)) < PEER_LIST_MAX_BYTES && bytes({ ...packed(n), truncated: true }) > PEER_LIST_MAX_BYTES) fixture = { self, listing };
+  }
+  assert.ok(fixture, "a self id length puts a cap-then-marker packer over the cap");
+  const { self, listing } = fixture;
+  const text = JSON.stringify(listing);
+  assert.equal(PEER_LIST_MAX_BYTES, 16384);
+  assert.ok(Buffer.byteLength(text) <= 16384, `output is ${Buffer.byteLength(text)} bytes`);
+  assert.deepEqual(JSON.parse(text), listing, "valid JSON");
+  assert.equal(listing.truncated, true);
+  assert.equal(listing.self, self.sessionId);
+  assert.ok(listing.peers.length > 0 && listing.peers.length < peers.length);
+  assert.deepEqual(listing.peers.map(p => p.lead), peers.slice(0, listing.peers.length).map(p => p.sessionId), "a sorted prefix of exact ids; self excluded");
+  assert.ok(listing.peers.every(p => p.name === "界".repeat(10) && p.branch === "分支".repeat(5)), "multibyte text is carried whole");
 });

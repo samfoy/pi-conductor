@@ -17,6 +17,8 @@ import type { RunStatus } from "../types.ts";
 export const LEAD_RECORD_MAX_BYTES = 4096;
 export const LEAD_RUNS_BRIEF_MAX = 24;
 export const LEAD_SCAN_MAX = 1024;
+/** One bound for display name, repo and branch, shared by the builder's clip and the validator. */
+const PRESENTATION_MAX_BYTES = 256;
 /** Off Linux, a pid that is not ESRCH counts as the lead only while its record is this fresh. */
 export const LEAD_FRESH_MS = 90_000;
 /** Off Linux, an unproven record this old is swept; on Linux age alone never sweeps. */
@@ -63,19 +65,29 @@ export function validLeadRecord(v: unknown): v is LeadRecord {
     typeof v.generation === "string" && UUID.test(v.generation) && Number.isSafeInteger(v.pid) && (v.pid as number) > 1 &&
     (v.pidStartTime === undefined || (Number.isSafeInteger(v.pidStartTime) && (v.pidStartTime as number) > 0)) &&
     text(v.socketPath, 1024) && text(v.paneId, 256) && optional(v.tabId, 256) && optional(v.workspaceId, 256) &&
-    text(v.cwd, 1024) && isAbsolute(v.cwd as string) && optional(v.repo, 256) && optional(v.branch, 256) && text(v.displayName, 256) &&
+    text(v.cwd, 1024) && isAbsolute(v.cwd as string) && optional(v.repo, PRESENTATION_MAX_BYTES) && optional(v.branch, PRESENTATION_MAX_BYTES) &&
+    text(v.displayName, PRESENTATION_MAX_BYTES) &&
     v.role === "lead" && isRecord(runs) && onlyKeys(runs, new Set(["active", "blocked", "total"])) && count(runs.active) && count(runs.blocked) && count(runs.total) &&
     Array.isArray(runsBrief) && runsBrief.length <= LEAD_RUNS_BRIEF_MAX && runsBrief.every(b => isRecord(b) && onlyKeys(b, BRIEF_KEYS) &&
       text(b.id, 128) && text(b.persona, 128) && typeof b.status === "string" && /^[a-z_]{1,32}$/.test(b.status) && optional(b.parentRunId, 128)) &&
     count(v.updatedAt) && Buffer.byteLength(JSON.stringify(v)) <= LEAD_RECORD_MAX_BYTES;
 }
 
-const clip = (s: string | undefined, max: number) => Array.from(s ?? "").map(c => /[\u0000-\u001f\u007f]/.test(c) ? " " : c).slice(0, max).join("").trim() || undefined;
+/** Control characters become spaces; then at most 128 code points and the validator's byte bound, cut on whole code points. */
+function clip(s: string | undefined): string | undefined {
+  let kept = "", bytes = 0;
+  for (const c of Array.from(s ?? "").slice(0, 128)) {
+    const char = /[\u0000-\u001f\u007f]/.test(c) ? " " : c;
+    if ((bytes += Buffer.byteLength(char)) > PRESENTATION_MAX_BYTES) break;
+    kept += char;
+  }
+  return kept.trim() || undefined;
+}
 
 /** Clips presentation text and drops run briefs until the record fits; identity that cannot fit fails closed. */
 export function buildLeadRecord(fields: Omit<LeadRecord, "v" | "role">): LeadRecord {
-  let record: LeadRecord = { ...fields, v: 1, role: "lead", displayName: clip(fields.displayName, 128) ?? "lead",
-    repo: clip(fields.repo, 128), branch: clip(fields.branch, 128), runsBrief: fields.runsBrief.slice(0, LEAD_RUNS_BRIEF_MAX) };
+  let record: LeadRecord = { ...fields, v: 1, role: "lead", displayName: clip(fields.displayName) ?? "lead",
+    repo: clip(fields.repo), branch: clip(fields.branch), runsBrief: fields.runsBrief.slice(0, LEAD_RUNS_BRIEF_MAX) };
   while (record.runsBrief.length > 0 && Buffer.byteLength(JSON.stringify(record)) > LEAD_RECORD_MAX_BYTES) {
     record = { ...record, runsBrief: record.runsBrief.slice(0, -1) };
   }
