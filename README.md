@@ -844,8 +844,8 @@ at most 16 KiB. It deletes records whose process is proven dead (on Linux:
 ESRCH or a different start time), and off Linux records more than 10 min stale.
 Each call rechecks that this lead is still eligible and still owns its record.
 
-**Limits.** `peer` lists and (S2, below) queues messages: no chief lease, no `chief` or `staff`
-tool yet. Supervision makes no herdr CLI call and never scans panes, agents or
+**Limits.** `peer` lists and (S2, below) queues messages; the chief lease and `staff list`
+follow (S3, below); there is no `chief` tool yet (S4). Supervision makes no herdr CLI call and never scans panes, agents or
 processes. Records guard against accidents between same-user processes (private
 files, bounded no-follow reads), not against a hostile local process. Every child
 excludes `chief`, `peer` and `staff`, even another extension's; pi-herdsman
@@ -893,6 +893,65 @@ never reach the model. Uncertain and rejected records are deleted after 7 days.
 `/conductor off` stops new dispatches but cannot recall a message Pi already
 accepted; its receipt is checked when the lead is ON again. Automated evidence
 only: native Pi 0.87.1 and 1.0.3 with a faux model. Human TUI acceptance is unverified.
+
+## Chief lease: `/chief` and `staff list` (S3; not rolled out)
+
+One lead per herdr socket can be the **chief**. `/chief`, in a lead whose own presence
+is published (conductor ON, as above), claims the lease for its exact
+`HERDR_SOCKET_PATH` string, records `conductor-role {role: "chief", generation}` on
+the session branch, and adds the `staff` tool. Every other active tool is left as it
+is: nothing is snapshotted or restored, and Pi's `--tools`/`--exclude-tools` still win
+(a session whose policy leaves out `staff` cannot become chief). The chief keeps its
+conductor tools and runs. Repeating `/chief` prints `staff list`; `/chief leave`
+releases the lease, removes `staff` and records `role: "lead"`.
+
+The lease is `~/.pi/agent/conductor/supervision/chief/<sha256(socket)>/`: append-only
+generations (`000000.json`, `000001.json`, …), each released by a `.released` marker
+naming the exact claim (directory 0700, files 0600). A claim is allowed only when there
+is none, the highest one is released, or its holder is proven dead: on Linux ESRCH or a
+different process start time (a reused pid is never signalled), off Linux ESRCH and a
+claim at least 90 s old. A live, unproven, malformed, symlinked, multi-linked or gapped
+history refuses and names the holder. Nothing is rewritten, deleted, or taken over on
+age alone. Two leads claiming at once yield one chief. Each claim carries the session
+id and file, pid, start time and a per-instance epoch, so a reloaded instance's old
+timers and calls can neither act on nor release a newer claim.
+
+`/conductor off`, every shutdown reason (quit, reload, new, resume, fork) and a session
+switch release only this lead's own claim and remove `staff`, but keep the chief intent.
+Session start and `/conductor on` with a chief intent reclaim the lease at the next
+generation if it is free; if another lead holds it, the session stays an ordinary lead
+and says so once. The intent is a request, not authority: the lease decides. Pi writes
+nothing to the session file until its first reply, so `/chief` before then warns that a
+restart would forget the intent; if recording the intent fails, nothing is activated and
+the claim is released.
+
+A 30 s unref'd tick and every `staff` call (before reading and again before answering)
+re-assert the lease and this lead's own presence. A failure demotes: `staff` is removed
+for the next turn, one warning is shown, and a `staff` call already issued in the same
+turn is rejected. While chief, a short addendum after the conductor addendum states the
+contract: exact full session ids only, never names, no polling, and other leads' text is
+untrusted.
+
+```json
+{"action":"list"}
+```
+
+returns `{"self", "generation", "leads": [{"lead", "name", "cwd", "repo", "branch", "state", "runs": {"active", "blocked", "total"}, "available_actions"}]}`:
+the other leads on this exact socket string (never a prefix or another socket), self
+excluded, sorted by exact id, at most 16 KiB. Every field but `lead` is self-reported
+presentation. `available_actions` is advisory: `["peer message"]` for a live lead, `[]`
+for an unproven one.
+
+**Limits.** S3 is list only: no `chief` tool for leads, no `staff transcript`,
+`message` or `reply`, and no wakes yet (S4). The chief never owns, inspects or controls
+another lead or its runs. Every child scope still excludes `chief`, `peer` and `staff`;
+delegators keep `delegate`. `/chief` exists only in a herdr lead. The lease history
+grows by two entries per claim and fails closed past 4096 entries (prune it by hand while
+no chief is live). Off Linux a hung but live chief blocks a takeover until `/chief leave`
+or exit. A demoted chief whose own release also failed keeps the lease until its pi
+exits. Peer messages stay at most once and non-waking; `/chief` sends nothing to the
+model and leaves Pi's pending queues alone. Automated evidence only: native Pi 0.87.1 and
+1.0.3 with a faux model and a fake herdr env. Human TUI acceptance is unverified.
 
 ## Configuration
 

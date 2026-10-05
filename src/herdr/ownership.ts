@@ -49,6 +49,13 @@ export function probeHerdrOwner(pid: number): { state: "alive" | "gone" | "unkno
   try { process.kill(pid, 0); return { state: "alive", startTime: readProcessStartTime(pid) }; }
   catch (e) { return { state: (e as NodeJS.ErrnoException).code === "ESRCH" ? "gone" : "unknown" }; }
 }
+/** Pure: on Linux dead is ESRCH or a start-time mismatch; off Linux it is ESRCH and a claim at least 90 s old. Age alone never proves death. */
+export function ownerProvenDead(owner: Pick<HerdrOwner, "startTime" | "at">, proof: ReturnType<typeof probeHerdrOwner>,
+  options: { platform?: string; now?: () => number } = {}): boolean {
+  return (options.platform ?? process.platform) === "linux"
+    ? proof.state === "gone" || (proof.state === "alive" && owner.startTime !== undefined && proof.startTime !== undefined && proof.startTime !== owner.startTime)
+    : proof.state === "gone" && (options.now ?? Date.now)() - owner.at >= 90000;
+}
 export function claimHerdrOwner(dir: string, identity: Omit<HerdrOwner, "generation">,
   options: { platform?: string; now?: () => number; probe?: typeof probeHerdrOwner } = {}): HerdrOwnership {
   const previous = readHerdrOwner(dir);
@@ -56,11 +63,7 @@ export function claimHerdrOwner(dir: string, identity: Omit<HerdrOwner, "generat
     if (previous.runId !== identity.runId || previous.socketPath !== identity.socketPath) throw new Error("herdr run/socket ownership mismatch");
     if (!released(dir, previous)) {
       const proof = (options.probe ?? probeHerdrOwner)(previous.pid);
-      const linux = (options.platform ?? process.platform) === "linux";
-      const dead = linux
-        ? proof.state === "gone" || (proof.state === "alive" && previous.startTime !== undefined && proof.startTime !== undefined && proof.startTime !== previous.startTime)
-        : proof.state === "gone" && (options.now ?? Date.now)() - previous.at >= 90000;
-      if (!dead) throw new Error(`herdr owner ${proof.state}; takeover refused`);
+      if (!ownerProvenDead(previous, proof, options)) throw new Error(`herdr owner ${proof.state}; takeover refused`);
     }
   }
   const owner: HerdrOwner = { ...identity, generation: previous ? previous.generation + 1 : 0 };

@@ -59,7 +59,7 @@ export const FOREIGN_SPAWN_TOOLS: readonly string[] = ["subagent", "agent"];
 
 /**
  * Lead supervision tools (v0.19 section 6). Only a conductor-ON herdr lead
- * registers one, and only once its behaviour lands (S1: `peer`). Every child
+ * registers one, and only once its behaviour lands (S1 `peer`, S3 `staff`). Every child
  * excludes all three, so another extension's same-named tool never reaches it.
  */
 export const SUPERVISION_TOOL_NAMES: readonly string[] = ["chief", "peer", "staff"];

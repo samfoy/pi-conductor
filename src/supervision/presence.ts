@@ -85,7 +85,8 @@ export class LeadPresence {
   private readonly env: NodeJS.ProcessEnv;
   private readonly pid = process.pid;
   private readonly pidStartTime = readProcessStartTime(process.pid);
-  private readonly owned = new Set<string>();
+  /** Owned supervision tool names, each active only while published and its own condition (if any) holds. */
+  private readonly owned = new Map<string, (() => boolean) | undefined>();
   private session?: Readonly<SessionFacts>;
   private notify?: (message: string, level: "info" | "warning" | "error") => void;
   private active?: Activation;
@@ -101,8 +102,8 @@ export class LeadPresence {
   private readonly timers: Timers;
   livenessOptions(): LivenessOptions { return { now: this.now, ...this.deps.liveness }; }
 
-  /** Marks a supervision tool name this lead registered; only owned names are ever (de)activated. */
-  ownTool(name: string): void { this.owned.add(name); }
+  /** Marks a supervision tool name this lead registered; only owned names are ever (de)activated. `when` narrows it (S3: `staff` only for the chief). */
+  ownTool(name: string, when?: () => boolean): void { this.owned.set(name, when); }
 
   start(session: SessionFacts, notify?: (message: string, level: "info" | "warning" | "error") => void): void {
     this.stop();
@@ -132,7 +133,8 @@ export class LeadPresence {
   status(): PresenceStatus {
     const eligibility = this.eligibility();
     let toolActive: boolean | undefined;
-    try { toolActive = this.owned.size ? this.deps.pi.getActiveTools().some(n => this.owned.has(n)) : undefined; } catch { /* not bound */ }
+    // The unconditional names (`peer`); a conditional one reports through its own owner.
+    try { toolActive = this.owned.size ? this.deps.pi.getActiveTools().some(n => this.owned.has(n) && !this.owned.get(n)) : undefined; } catch { /* not bound */ }
     return { ...this.state, ...(this.state.state === "inactive" && !eligibility.ok ? { reason: eligibility.reason } : {}), toolOwned: this.owned.size > 0, toolActive };
   }
 
@@ -154,10 +156,9 @@ export class LeadPresence {
     try {
       const active = pi.getActiveTools();
       const available = new Set(pi.getAllTools().map(t => t.name));
-      const next = this.active
-        ? [...active, ...[...this.owned].filter(n => !active.includes(n) && available.has(n))]
-        : active.filter(n => !this.owned.has(n));
-      if (next.length !== active.length) pi.setActiveTools(next);
+      const wanted = (n: string) => !!this.active && (this.owned.get(n)?.() ?? true);
+      const next = [...active.filter(n => !this.owned.has(n) || wanted(n)), ...[...this.owned.keys()].filter(n => wanted(n) && !active.includes(n) && available.has(n))];
+      if (next.join("\0") !== active.join("\0")) pi.setActiveTools(next);
     } catch (e) { this.state = { ...this.state, lastError: `tool sync failed: ${message(e)}` }; }
   }
 

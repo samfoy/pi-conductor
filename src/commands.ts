@@ -69,6 +69,7 @@ import { awaitingChildren } from "./delegation.ts";
 import { mergeWorktree, buildMergeCommitMessage } from "./worktree.ts";
 import { isTerminal } from "./types.ts";
 import { formatCwdInfo, type CwdController } from "./conductor-cwd.ts";
+import { staffList } from "./supervision/tools.ts";
 
 interface RegisterCommandsOpts {
   pushCompletionNotification?: (run: Run) => void;
@@ -93,7 +94,10 @@ interface RegisterCommandsOpts {
    */
   getLastReconcile?: () => import("./reconcile-startup.ts").PostStartupReconcileResult | undefined;
   /** S1: lead presence state for the doctor's `## Supervision` section. */
-  getSupervisionStatus?: () => import("./supervision/presence.ts").PresenceStatus & import("./supervision/delivery.ts").DeliveryStatus;
+  getSupervisionStatus?: () => import("./doctor.ts").SupervisionStatus;
+  /** S3: with a herdr lead's presence, backs `/chief` and `/chief leave`. */
+  supervision?: import("./supervision/presence.ts").LeadPresence;
+  chief?: import("./supervision/lease.ts").ChiefRole;
 }
 
 export const SUBCOMMANDS = [
@@ -121,6 +125,7 @@ export const SUBCOMMANDS = [
 ];
 
 export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): void {
+  if (opts.chief && opts.supervision) registerChiefCommand(pi, opts.supervision, opts.chief);
   pi.registerCommand("conductor", {
     description: "pi-conductor: list, show, doctor, on/off, status, stop/pause/resume/queue, cwd",
     getArgumentCompletions: (prefix: string) => {
@@ -211,6 +216,22 @@ export function registerCommands(pi: ExtensionAPI, opts: RegisterCommandsOpts): 
             "warning",
           );
       }
+    },
+  });
+}
+
+/** S3 `/chief` (claim, or print `staff list` when already chief) and `/chief leave`; only a herdr lead registers it. */
+function registerChiefCommand(pi: ExtensionAPI, presence: import("./supervision/presence.ts").LeadPresence, chief: import("./supervision/lease.ts").ChiefRole): void {
+  pi.registerCommand("chief", {
+    description: "Claim this herdr socket's chief lease and add `staff` (repeat: staff list); `/chief leave` releases it",
+    getArgumentCompletions: (prefix: string) => "leave".startsWith(prefix.trim()) ? [{ value: "leave", label: "leave" }] : null,
+    handler: async (rawArgs, ctx) => {
+      const arg = (rawArgs ?? "").trim();
+      if (arg === "leave") { ctx.ui.notify(chief.leave(), "info"); return; }
+      if (arg) { ctx.ui.notify("usage: /chief [leave]", "warning"); return; }
+      try {
+        ctx.ui.notify(chief.holds() ? JSON.stringify(staffList(presence, chief), null, 2) : chief.become(), "info");
+      } catch (e) { ctx.ui.notify((e as Error).message, "warning"); }
     },
   });
 }

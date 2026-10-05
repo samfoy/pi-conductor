@@ -415,13 +415,16 @@ test("S1 real factory: OFF at start, /conductor on publishes and activates peer,
   const cwd = tmpDir("s1-factory-cwd-"), elsewhere = tmpDir("s1-factory-override-");
   const f = loadFactory();
   assert.ok(f.tools.has("peer"), "a herdr lead registers peer");
-  for (const name of ["chief", "staff"]) assert.ok(!f.tools.has(name), `${name} lands with its behaviour (S3/S4), not as a stub`);
+  assert.ok(!f.tools.has("chief"), "the chief tool lands with its behaviour (S4), not as a stub");
+  assert.ok(f.tools.has("staff"), "S3 registers staff for a herdr lead");
   const id = randomUUID(), ctx = ctxFor(id, cwd);
   await f.fire("session_start", { reason: "startup" }, ctx);
   assert.ok(!f.active().includes("peer"), "OFF: peer inactive");
+  assert.ok(!f.active().includes("staff"), "staff is inactive for a lead that is not the chief");
   assert.equal(onDisk(id), undefined);
   await command(f, "on", ctx);
   assert.ok(f.active().includes("peer"));
+  assert.ok(!f.active().includes("staff"), "ON alone does not make a chief");
   await command(f, `cwd ${elsewhere}`, ctx);
   assert.equal(onDisk(id)!.cwd, cwd, "the record reports the native session cwd, not the spawn override");
   const listed = await f.tools.get("peer").execute("call-1", { action: "list" }, undefined, undefined, ctx);

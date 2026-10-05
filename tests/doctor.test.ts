@@ -842,13 +842,19 @@ test("S1 doctor: ## Supervision shows presence state, reason, record and peer to
   const fx = setup();
   try {
     const reg = new RunRegistry();
-    const report = (supervision?: import("../src/supervision/presence.ts").PresenceStatus & import("../src/supervision/delivery.ts").DeliveryStatus) =>
+    const report = (supervision?: import("../src/doctor.ts").SupervisionStatus) =>
       buildDoctorReport({ cwd: fx.projectDir, registry: reg, queue: new SpawnQueue(reg, 4), conductorMode: true, supervision, env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/nonexistent/sock", HERDR_PANE_ID: "p" } });
     const published = section(await report({ state: "published", sessionId: "s-1", generation: "g-1", path: "/home/x/leads/abc.json", toolOwned: true, toolActive: true }), "Supervision");
     assert.match(published, /presence: published \(session s-1, epoch g-1\)/);
     assert.match(published, /record: \/home\/x\/leads\/abc\.json/);
     assert.match(published, /peer tool: active/);
-    assert.match(published, /S2: presence, `peer list` and non-waking `peer message` \(queued, at most once\); no chief lease or staff tools yet/);
+    assert.match(published, /S3: presence, `peer list`, non-waking `peer message` \(queued, at most once\), the chief lease \(\/chief\) and `staff list`; no `chief` tool or staff transcript, message or reply yet/);
+    assert.doesNotMatch(published, /chief:/, "no chief line without a chief role");
+    const chief = section(await report({ state: "published", sessionId: "s-1", generation: "g-1", toolOwned: true, toolActive: true, chief: { role: "chief", generation: 4, staffActive: true } }), "Supervision");
+    assert.match(chief, /chief: lease generation 4 held for this herdr socket; staff tool: active/);
+    const lost = section(await report({ state: "published", sessionId: "s-1", generation: "g-1", toolOwned: true, toolActive: true, chief: { role: "lead", staffActive: false, lastError: "chief lease generation 4 fenced: no longer this lead's" } }), "Supervision");
+    assert.match(lost, /chief: lead \(no chief lease held\); staff tool: inactive/);
+    assert.match(lost, /⚠ chief: chief lease generation 4 fenced/);
     const off = section(await report({ state: "inactive", reason: "conductor mode OFF", toolOwned: true, toolActive: false }), "Supervision");
     assert.match(off, /presence: inactive — conductor mode OFF/);
     assert.match(off, /peer tool: inactive/);

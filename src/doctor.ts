@@ -24,10 +24,13 @@ import { walkInventory } from "./gc/inventory.ts";
 import { planReclaim } from "./gc/policy.ts";
 import type { PostStartupReconcileResult } from "./reconcile-startup.ts";
 import type { DeliveryStatus } from "./supervision/delivery.ts";
+import type { ChiefStatus } from "./supervision/lease.ts";
 import type { PresenceStatus } from "./supervision/presence.ts";
 
-/** Reads only this session's in-memory presence state: no herdr CLI, socket or peer probe. */
-function supervisionLines(status: (PresenceStatus & DeliveryStatus) | undefined): string[] {
+export type SupervisionStatus = PresenceStatus & DeliveryStatus & { chief?: ChiefStatus };
+
+/** Reads only this session's in-memory presence and chief state: no herdr CLI, socket or peer probe. */
+function supervisionLines(status: SupervisionStatus | undefined): string[] {
   if (!status) return ["  · unavailable in this context"];
   const lines = [status.state === "published"
     ? `  presence: published (session ${status.sessionId}, epoch ${status.generation})`
@@ -36,7 +39,12 @@ function supervisionLines(status: (PresenceStatus & DeliveryStatus) | undefined)
   if (status.lastError) lines.push(`  ⚠ last refresh failed: ${status.lastError}`);
   lines.push(`  peer tool: ${!status.toolOwned ? "not registered (needs a conductor lead in a herdr pane)" : status.toolActive ? "active" : "inactive"}`);
   if (status.inboxError) lines.push(`  ⚠ inbox: ${status.inboxError}`);
-  lines.push("  · S2: presence, `peer list` and non-waking `peer message` (queued, at most once); no chief lease or staff tools yet");
+  if (status.chief) {
+    const c = status.chief;
+    lines.push(`  chief: ${c.role === "chief" ? `lease generation ${c.generation} held for this herdr socket` : "lead (no chief lease held)"}; staff tool: ${c.staffActive ? "active" : "inactive"}`);
+    if (c.lastError) lines.push(`  ⚠ chief: ${c.lastError}`);
+  }
+  lines.push("  · S3: presence, `peer list`, non-waking `peer message` (queued, at most once), the chief lease (/chief) and `staff list`; no `chief` tool or staff transcript, message or reply yet");
   return lines;
 }
 
@@ -76,7 +84,7 @@ export interface DoctorReportOptions {
    */
   loadedToolNames?: readonly string[];
   /** S1 lead presence state; undefined renders the section as unavailable. */
-  supervision?: PresenceStatus & DeliveryStatus;
+  supervision?: SupervisionStatus;
 }
 
 const SPAWN_NAME_TOKENS = new Set(["agent", "agents", "subagent", "subagents", "spawn", "delegate"]);

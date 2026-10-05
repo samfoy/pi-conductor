@@ -87,7 +87,7 @@ async function resolveOne(
 }
 
 /** Tool names `registerTools` registers under an injected env (the lead's by default). */
-function captureRegisteredToolNames(env: NodeJS.ProcessEnv = {}, supervision?: unknown): string[] {
+function captureRegisteredToolNames(env: NodeJS.ProcessEnv = {}, supervision?: unknown, chief?: unknown): string[] {
   const names: string[] = [];
   const reg = new RunRegistry();
   const queue = new SpawnQueue(reg, 4);
@@ -95,6 +95,7 @@ function captureRegisteredToolNames(env: NodeJS.ProcessEnv = {}, supervision?: u
   const activation = supervision ? { getActiveTools: () => [], setActiveTools() {}, getAllTools: () => [] } : {};
   registerTools({ registerTool: (t: { name: string }) => names.push(t.name), ...activation } as any, {
     ...(supervision ? { supervision: supervision as never } : {}),
+    ...(chief ? { chief: chief as never } : {}),
     getCwd: () => tmpdir(),
     getRegistry: () => reg,
     getQueue: () => queue,
@@ -152,7 +153,7 @@ for (const [label, env, expected] of [
 }
 
 // S1: set equality per injected env with a presence; only a herdr lead (never a child) adds `peer`,
-// and `chief`/`staff` are never registered before their behaviour lands.
+// and `chief`/`staff` are never registered before their behaviour lands (S3 `staff` needs a chief role, below).
 const HERDR = { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock", HERDR_PANE_ID: "pane-1" };
 const LEAD_TOOLS = [...CONDUCTOR_LLM_TOOL_NAMES];
 for (const [label, env, expected] of [
@@ -170,6 +171,21 @@ for (const [label, env, expected] of [
     const names = captureRegisteredToolNames(env, { ownTool() {} });
     assert.deepEqual([...names].sort(), [...expected].sort());
     for (const name of ["chief", "staff"]) assert.ok(!names.includes(name), `${name} is not registered in S1`);
+  });
+}
+
+// S3: with a chief role too, only a herdr lead also registers `staff` (kept inactive unless chief); `chief` waits for S4.
+for (const [label, env, expected] of [
+  ["plain lead", {}, LEAD_TOOLS],
+  ["herdr lead", HERDR, [...LEAD_TOOLS, "peer", "staff"]],
+  ["depth-1 child in a herdr pane", { ...HERDR, CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: "1" }, ["ask_owner"]],
+  ["depth-1 delegator in a herdr pane", { ...HERDR, CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: "1", CONDUCTOR_DELEGATE_ALLOW: "inspector", CONDUCTOR_RUN_ID: "lead-a", CONDUCTOR_RUN_DIR: "/runs/lead-a" }, ["ask_owner", "delegate"]],
+  ["depth-2 leaf in a herdr pane", { ...HERDR, CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: "2" }, []],
+] as const) {
+  test(`S3 registerTools with a presence and a chief role under ${label} registers exactly ${expected.includes("staff" as never) ? "the lead tools plus peer and staff" : expected.length > 2 ? "the lead tools" : expected.join(",") || "nothing"}`, () => {
+    const names = captureRegisteredToolNames(env, { ownTool() {} }, {});
+    assert.deepEqual([...names].sort(), [...expected].sort());
+    assert.ok(!names.includes("chief"), "the chief tool is not registered in S3");
   });
 }
 

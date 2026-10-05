@@ -1227,6 +1227,14 @@ From the critic-opus-h11-6ptr review of N4 direct ownership. The stale-invocatio
 - **`ensemble_status` cost per call is O(runs × children)** (`src/tools.ts:1639-1646`). Every lifetime child of every run is listed, and each child's `resultRef` reads its `final.md`. Lifetime children accumulate across resumes without a bound.
 - **The `ensemble_auto` budget is not an exact bill** (`src/tools.ts:583`). `subtreeCost` is charged when the step settles; a leaf still closing (`stdio-open` or `unconfirmed`) can add usage afterwards.
 
+## S3 follow-ups (2026-10-05, non-blocking)
+
+Accepted residuals of the S3 chief lease; each needs its own test-first slice if pursued.
+
+- **Lease history only grows.** Each claim adds a claim file and, when released, a marker; `readChiefLease` fails closed past 4096 entries. Pruning needs a design that keeps "never reuse a generation" (for example a durable floor marker), not deletion of old claims.
+- **A demoted chief whose release also failed keeps the lease until exit.** Demotion drops the in-memory claim first; if the fenced release then fails (an I/O error while the claim is still ours), `/chief` in the same instance sees its own claim as a live holder and refuses until pi exits. The epoch could identify the instance's own stale claim for a release-then-reclaim; not built.
+- **`/tree` navigation does not re-read the role intent.** Intent is read at session start and on ON; navigating to a branch before `/chief` leaves the lease held until leave, OFF or shutdown.
+
 ## S1 review follow-ups (2026-10-02, non-blocking)
 
 From the critic-opus-h11-22ct review of S1 lead presence. Its blockers are fixed: presentation text is clipped to the validator's 256-byte bound on whole code points, and the 16 KiB `peer list` cap, the exact `sha256(sessionId)` file name and the sweep's create-only restore each have a test that a mutation reds. These are accepted residuals; each needs its own test-first slice if pursued.

@@ -37,7 +37,8 @@ import { collapseSteerableCascade } from "./steerable.ts";
 import { prepareSpawnRuntime, prepareSpawnEffort, availableActions, observeRunActions, computeAvailableActions, supportsFocus, validateRunAction, elapsedStr, failBeforeSpawn, forceTerminate, formatUsage, getCompletionText, keptBranchHint, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendCwd, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
 import { registerAskOwner } from "./ask-owner.ts";
 import { herdrLeadEnv, type LeadPresence } from "./supervision/presence.ts";
-import { registerPeerTool } from "./supervision/tools.ts";
+import { registerPeerTool, registerStaffTool } from "./supervision/tools.ts";
+import type { ChiefRole } from "./supervision/lease.ts";
 import { registerDelegate } from "./delegate-tool.ts";
 import { awaitingChildren, childrenOf, subtreeCost } from "./delegation.ts";
 import { isSettled, isTerminal } from "./types.ts";
@@ -124,6 +125,8 @@ interface RegisterToolsOpts {
   getEvents?: () => ConductorEventEmitter;
   /** S1 lead presence; with a herdr lead env it backs the `peer` tool. */
   supervision?: LeadPresence;
+  /** S3 chief role; with presence and a herdr lead env it backs `staff` (active only while chief). */
+  chief?: ChiefRole;
 }
 
 export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts, env: NodeJS.ProcessEnv = process.env): void {
@@ -164,9 +167,11 @@ export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts, env: No
   registerCwdTool(pi, opts);
   registerEffortTool(pi, opts);
   // S1: only a herdr lead whose Pi can (de)activate tools gets `peer`; presence keeps it inactive until eligible.
+  // S3: `staff` too, kept inactive unless this lead holds the chief lease.
   const activation = pi as Partial<Pick<ExtensionAPI, "getActiveTools" | "setActiveTools" | "getAllTools">>;
   if (opts.supervision && herdrLeadEnv(env) && [activation.getActiveTools, activation.setActiveTools, activation.getAllTools].every(f => typeof f === "function")) {
     registerPeerTool(pi, opts.supervision, { getRegistry: opts.getRegistry, getCwd: opts.getCwd });
+    if (opts.chief) registerStaffTool(pi, opts.supervision, opts.chief);
   }
 }
 

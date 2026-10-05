@@ -22,6 +22,8 @@ export interface Lead {
   command(text: string): Promise<void>;
   /** The faux model issues one `peer` call (default `{action:"list"}`), then answers. */
   callPeer(args?: Record<string, unknown>): Promise<ToolEnd | undefined>;
+  /** The faux model issues these calls in one assistant message (one turn), then answers; every tool end, in order. */
+  callTools(calls: { name: string; args?: Record<string, unknown> }[]): Promise<ToolEnd[]>;
   /** One user prompt answered by the given faux steps (default: one text reply). */
   prompt(text: string, responses?: unknown[]): Promise<void>;
   /** Queues faux steps for a model call this lead makes without a prompt (compaction). */
@@ -76,6 +78,15 @@ export async function openLead(root: string, label: string, opts: { session?: "m
       faux.setResponses([fauxAssistantMessage([fauxToolCall("peer", args, { id: `s1-peer-${Date.now()}` })], { stopReason: "toolUse" }), fauxAssistantMessage("S1 listed peers.")]);
       try { await s().prompt("S1 list the other leads"); } finally { unsubscribe(); }
       return ends[0];
+    },
+    callTools: async calls => {
+      const ends: ToolEnd[] = [];
+      const unsubscribe = s().subscribe((e: any) => {
+        if (e.type === "tool_execution_end") ends.push({ name: e.toolName, isError: e.isError, text: textOf(e.result), details: e.result?.details });
+      });
+      faux.setResponses([fauxAssistantMessage(calls.map((c, i) => fauxToolCall(c.name, c.args ?? {}, { id: `s3-${i}-${c.name}-${Date.now()}` })), { stopReason: "toolUse" }), fauxAssistantMessage("S3 done.")]);
+      try { await s().prompt("S3 call the tools"); } finally { unsubscribe(); }
+      return ends;
     },
     prompt: async (text, responses) => { faux.setResponses((responses ?? [fauxAssistantMessage("ok")]) as never); await s().prompt(text); },
     respond: responses => faux.setResponses(responses as never),

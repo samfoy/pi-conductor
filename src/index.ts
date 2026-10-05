@@ -75,6 +75,7 @@ import { executePromptAndSend } from "./prompt-and-send.ts";
 import { CWD_ENTRY_TYPE, createCwdController } from "./conductor-cwd.ts";
 import { CoordinationDelivery } from "./supervision/delivery.ts";
 import { herdrLeadEnv, LeadPresence } from "./supervision/presence.ts";
+import { ChiefRole } from "./supervision/lease.ts";
 
 export default function (pi: ExtensionAPI): void {
   pi.registerFlag("conductor-launch", { type: "string", description: "Managed child invocation token" });
@@ -274,6 +275,8 @@ export default function (pi: ExtensionAPI): void {
   const supervision = new LeadPresence({ pi, env: process.env, registry, getMode: () => conductorModeOn });
   // S2: a herdr lead drains only its own inbox, and only while that presence is owned.
   const delivery = herdrLeadEnv(process.env) ? new CoordinationDelivery({ pi, presence: supervision }) : undefined;
+  // S3: the chief lease is held only by an owned lead; its epoch is this module instance's.
+  const chief = herdrLeadEnv(process.env) ? new ChiefRole({ pi, presence: supervision }) : undefined;
 
   const opts = {
     getCwd: cwd,
@@ -332,10 +335,12 @@ export default function (pi: ExtensionAPI): void {
     setConductorMode: (on: boolean) => {
       conductorModeOn = on;
       supervision.refresh();
+      chief?.refresh();
       delivery?.drain();
     },
     supervision,
-    getSupervisionStatus: () => ({ ...supervision.status(), ...delivery?.status() }),
+    chief,
+    getSupervisionStatus: () => ({ ...supervision.status(), ...delivery?.status(), ...(chief ? { chief: chief.status() } : {}) }),
     /**
      * Slice 7: read the host's current Theme so the foreground stream
      * can colour its rendered transcript. Returns undefined in headless
@@ -440,6 +445,8 @@ export default function (pi: ExtensionAPI): void {
     let sessionId: string | undefined, sessionFile: string | undefined;
     try { sessionId = ctx.sessionManager?.getSessionId(); sessionFile = ctx.sessionManager?.getSessionFile(); } catch { /* ineligible */ }
     supervision.start({ sessionId, sessionFile, cwd: ctx.cwd }, (message, level) => ctx.ui.notify(message, level));
+    // S3: the branch's chief intent asks for the lease; the lease, not the intent, decides.
+    chief?.start({ getBranch: () => ctx.sessionManager.getBranch() }, (message, level) => ctx.ui.notify(message, level));
     delivery?.start({ isIdle: () => ctx.isIdle(), hasPendingMessages: () => ctx.hasPendingMessages() }, (message, level) => ctx.ui.notify(message, level));
     if (widget) widget.dispose();
     widget = mountEnsembleWidget(registry, () => ctxRef, () => {
@@ -683,8 +690,9 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async (event) => {
-    // S1/S2: every reason stops this instance's drain, then unpublishes only its own record, before anything can await.
+    // S1-S3: every reason stops this instance's drain, releases only its own chief claim, then unpublishes only its own record, before anything can await.
     delivery?.stop();
+    chief?.stop();
     supervision.stop();
     registry.herdrAdmissionOpen = false;
     if (unsubFocusedShortcut) {
@@ -745,7 +753,7 @@ export default function (pi: ExtensionAPI): void {
 
   // Inject the conductor system prompt at every turn start when on.
   pi.on("before_agent_start", async (event) => {
-    // A transcript restore (resume, /tree) may have re-set the active tools; keep `peer` matching presence.
+    // A transcript restore (resume, /tree) may have re-set the active tools; keep `peer` and `staff` matching presence and the lease.
     supervision.syncTools();
     if (!conductorModeOn) return undefined;
     try {
@@ -764,7 +772,9 @@ export default function (pi: ExtensionAPI): void {
         maxConcurrent: cfg.maxConcurrent,
       });
       const merged = `${event.systemPrompt}\n\n${addendum}`;
-      return { systemPrompt: merged };
+      // S3: after the conductor addendum, and only while this lead's chief lease still asserts.
+      const chiefNote = chief?.addendum();
+      return { systemPrompt: chiefNote ? `${merged}\n\n${chiefNote}` : merged };
     } catch {
       // never break the session if persona resolution fails
       return undefined;

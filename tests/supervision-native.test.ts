@@ -60,7 +60,8 @@ async function witness(t: test.TestContext, pi: Harness) {
     const a = await lead("a");
     assert.deepEqual(a.errors, [], "the real factory loads without conflicts");
     assert.ok(a.registered().includes("peer"), "a herdr lead registers peer");
-    for (const name of ["chief", "staff"]) assert.ok(!a.registered().includes(name), `${name} lands with its behaviour, not as a stub`);
+    assert.ok(!a.registered().includes("chief"), "the chief tool lands with its behaviour (S4), not as a stub");
+    assert.ok(a.registered().includes("staff") && !a.active().includes("staff"), "S3 staff is registered but inactive for a lead that is not the chief");
     assert.ok(!a.active().includes("peer"), "OFF: peer inactive");
     assert.equal(record(a.sessionId()), undefined, "OFF: nothing published");
     await a.command("/conductor on");
