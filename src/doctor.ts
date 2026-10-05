@@ -23,10 +23,11 @@ import { lastGcMarkerPath, readLastGcMtime } from "./gc/last-gc.ts";
 import { walkInventory } from "./gc/inventory.ts";
 import { planReclaim } from "./gc/policy.ts";
 import type { PostStartupReconcileResult } from "./reconcile-startup.ts";
+import type { DeliveryStatus } from "./supervision/delivery.ts";
 import type { PresenceStatus } from "./supervision/presence.ts";
 
 /** Reads only this session's in-memory presence state: no herdr CLI, socket or peer probe. */
-function supervisionLines(status: PresenceStatus | undefined): string[] {
+function supervisionLines(status: (PresenceStatus & DeliveryStatus) | undefined): string[] {
   if (!status) return ["  · unavailable in this context"];
   const lines = [status.state === "published"
     ? `  presence: published (session ${status.sessionId}, epoch ${status.generation})`
@@ -34,7 +35,8 @@ function supervisionLines(status: PresenceStatus | undefined): string[] {
   if (status.path) lines.push(`  record: ${status.path}`);
   if (status.lastError) lines.push(`  ⚠ last refresh failed: ${status.lastError}`);
   lines.push(`  peer tool: ${!status.toolOwned ? "not registered (needs a conductor lead in a herdr pane)" : status.toolActive ? "active" : "inactive"}`);
-  lines.push("  · S1 only: presence plus read-only `peer list`; no coordination messages, chief lease or staff tools yet");
+  if (status.inboxError) lines.push(`  ⚠ inbox: ${status.inboxError}`);
+  lines.push("  · S2: presence, `peer list` and non-waking `peer message` (queued, at most once); no chief lease or staff tools yet");
   return lines;
 }
 
@@ -74,7 +76,7 @@ export interface DoctorReportOptions {
    */
   loadedToolNames?: readonly string[];
   /** S1 lead presence state; undefined renders the section as unavailable. */
-  supervision?: PresenceStatus;
+  supervision?: PresenceStatus & DeliveryStatus;
 }
 
 const SPAWN_NAME_TOKENS = new Set(["agent", "agents", "subagent", "subagents", "spawn", "delegate"]);

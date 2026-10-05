@@ -842,19 +842,20 @@ test("S1 doctor: ## Supervision shows presence state, reason, record and peer to
   const fx = setup();
   try {
     const reg = new RunRegistry();
-    const report = (supervision?: import("../src/supervision/presence.ts").PresenceStatus) =>
+    const report = (supervision?: import("../src/supervision/presence.ts").PresenceStatus & import("../src/supervision/delivery.ts").DeliveryStatus) =>
       buildDoctorReport({ cwd: fx.projectDir, registry: reg, queue: new SpawnQueue(reg, 4), conductorMode: true, supervision, env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/nonexistent/sock", HERDR_PANE_ID: "p" } });
     const published = section(await report({ state: "published", sessionId: "s-1", generation: "g-1", path: "/home/x/leads/abc.json", toolOwned: true, toolActive: true }), "Supervision");
     assert.match(published, /presence: published \(session s-1, epoch g-1\)/);
     assert.match(published, /record: \/home\/x\/leads\/abc\.json/);
     assert.match(published, /peer tool: active/);
-    assert.match(published, /S1 only: presence plus read-only `peer list`; no coordination messages, chief lease or staff tools yet/);
+    assert.match(published, /S2: presence, `peer list` and non-waking `peer message` \(queued, at most once\); no chief lease or staff tools yet/);
     const off = section(await report({ state: "inactive", reason: "conductor mode OFF", toolOwned: true, toolActive: false }), "Supervision");
     assert.match(off, /presence: inactive — conductor mode OFF/);
     assert.match(off, /peer tool: inactive/);
-    const dup = section(await report({ state: "duplicate", reason: "session s-1 already has a live lead presence (pid 7)", toolOwned: true, toolActive: false, lastError: "EIO" }), "Supervision");
+    const dup = section(await report({ state: "duplicate", reason: "session s-1 already has a live lead presence (pid 7)", toolOwned: true, toolActive: false, lastError: "EIO", inboxError: "inbox holds 2000 entries (cap 1024)" }), "Supervision");
     assert.match(dup, /presence: duplicate — session s-1 already has a live lead presence \(pid 7\)/);
     assert.match(dup, /⚠ last refresh failed: EIO/);
+    assert.match(dup, /⚠ inbox: inbox holds 2000 entries \(cap 1024\)/);
     assert.match(section(await report({ state: "inactive", reason: "not a herdr pane (HERDR_ENV is not 1)", toolOwned: false }), "Supervision"), /peer tool: not registered/);
     assert.match(section(await report(undefined), "Supervision"), /unavailable in this context/);
   } finally {

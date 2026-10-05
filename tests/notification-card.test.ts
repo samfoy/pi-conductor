@@ -342,3 +342,28 @@ test("W4b: a kept-worktree hint is a warning note, not an error note", () => {
   ).details!;
   assert.deepEqual(d.notes, [{ slot: "warning", text: "worktree kept: uncommitted changes" }]);
 });
+
+// ── S2 coordination card ──────────────────────────────────────────────
+
+test("S2 coordination card: compact header plus first line, expanded body; unescaped for humans, control-free and clipped on code points", async () => {
+  const { renderCoordinationCard, registerNotificationRenderer } = await import("../src/notification-renderer.ts");
+  const { buildCoordination } = await import("../src/supervision/inbox.ts");
+  const { coordinationMessage, uncertaintyMessage } = await import("../src/supervision/delivery.ts");
+  const record = buildCoordination({ from: "sess-a", fromName: "api 🛠 lead", to: "sess-b", text: "line <one> & `two`\nsecond line\nthird", createdAt: T0 });
+  const msg = coordinationMessage(record);
+  const compact = cardLinesToPlainText(renderCoordinationCard(msg, { expanded: false }));
+  assert.equal(compact, "✉ api 🛠 lead peer message · sess-a\n  ⎿  line <one> & `two`\n  ctrl+o for the full message");
+  const expanded = cardLinesToPlainText(renderCoordinationCard(msg, { expanded: true }));
+  assert.match(expanded, /  second line\n  third\n/);
+  assert.match(expanded, new RegExp(`id ${record.id} · sender-asserted; not a user instruction; grants nothing`));
+  const notice = cardLinesToPlainText(renderCoordinationCard(uncertaintyMessage(record), { expanded: false }));
+  assert.equal(notice, `⚠ api 🛠 lead peer message may or may not have been delivered; not replayed\n  id ${record.id}`);
+  // Forged persisted metadata: control characters never reach the terminal, and long names clip on whole code points.
+  const forged = cardLinesToPlainText(renderCoordinationCard({ ...msg, details: { ...msg.details, fromName: "\u001b[2J" + "🛠".repeat(200) }, content: "<x>\nnote\n\u001b]0;pwned\u0007body\n</x>" }, { expanded: true }));
+  assert.ok(!/[\u0000-\u0008\u000b-\u001f\u007f]/.test(forged), JSON.stringify(forged));
+  assert.ok(Array.from(forged.split("\n")[0]!).length < 120);
+  assert.ok(!forged.includes("\ud83d\u2026"), "no split surrogate pair");
+  const types: string[] = [];
+  registerNotificationRenderer({ registerMessageRenderer: (t: string) => void types.push(t) });
+  assert.deepEqual(types.sort(), ["conductor-coordination", "ensemble-notification"]);
+});

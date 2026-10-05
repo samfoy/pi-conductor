@@ -44,7 +44,7 @@ async function harness(t: TestContext) {
     on: (ev: string, h: (event: unknown, ctx: unknown) => unknown) => handlers.set(ev, [...(handlers.get(ev) ?? []), h]),
     registerFlag() {}, getFlag() {},
     registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand() {}, registerShortcut() {}, appendEntry() {},
-    registerMessageRenderer: (_type: string, r: typeof notificationRenderer) => { renderer = r; },
+    registerMessageRenderer: (type: string, r: typeof notificationRenderer) => { if (type === "ensemble-notification") renderer = r; },
     sendMessage: (m: NotificationMessage, opts: unknown) => { messages.push(m); options.push(opts); },
   } as any);
   const ctx = { ...stubCtx(cwd), mode: "tui", hasUI: true };

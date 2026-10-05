@@ -100,10 +100,12 @@ export const sameLeadIdentity = (a: LeadIdentity, b: LeadIdentity) =>
 /** Both parsed from file bytes, so key order is stable: equal means the exact version that was judged. */
 export const sameLeadVersion = (a: LeadRecord, b: LeadRecord) => JSON.stringify(a) === JSON.stringify(b);
 
-/** Creates (or, read-only, verifies) the 0700 owner-only directories; anything else fails closed. */
-export function ensureLeadsDir(create: boolean): string {
-  if (create) mkdirSync(dirname(supervisionRoot()), { recursive: true });
-  for (const dir of [supervisionRoot(), leadsDir()]) {
+export const ensureLeadsDir = (create: boolean): string => ensurePrivateDirs([supervisionRoot(), leadsDir()], create);
+
+/** Creates (or, read-only, verifies) a chain of 0700 owner-only directories; anything else fails closed. */
+export function ensurePrivateDirs(dirs: readonly string[], create: boolean): string {
+  if (create) mkdirSync(dirname(dirs[0]!), { recursive: true });
+  for (const dir of dirs) {
     if (create) {
       try { mkdirSync(dir, { mode: 0o700 }); } catch (e) { if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; }
     }
@@ -112,7 +114,7 @@ export function ensureLeadsDir(create: boolean): string {
       throw new Error(`supervision directory ${dir} is not a private directory; preserved for inspection`);
     }
   }
-  return leadsDir();
+  return dirs[dirs.length - 1]!;
 }
 
 /** Undefined when absent; throws on anything malformed, oversize, symlinked or multi-linked. */

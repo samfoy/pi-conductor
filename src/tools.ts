@@ -166,7 +166,7 @@ export function registerTools(pi: ExtensionAPI, opts: RegisterToolsOpts, env: No
   // S1: only a herdr lead whose Pi can (de)activate tools gets `peer`; presence keeps it inactive until eligible.
   const activation = pi as Partial<Pick<ExtensionAPI, "getActiveTools" | "setActiveTools" | "getAllTools">>;
   if (opts.supervision && herdrLeadEnv(env) && [activation.getActiveTools, activation.setActiveTools, activation.getAllTools].every(f => typeof f === "function")) {
-    registerPeerTool(pi, opts.supervision);
+    registerPeerTool(pi, opts.supervision, { getRegistry: opts.getRegistry, getCwd: opts.getCwd });
   }
 }
 

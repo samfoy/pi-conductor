@@ -93,7 +93,7 @@ interface RegisterCommandsOpts {
    */
   getLastReconcile?: () => import("./reconcile-startup.ts").PostStartupReconcileResult | undefined;
   /** S1: lead presence state for the doctor's `## Supervision` section. */
-  getSupervisionStatus?: () => import("./supervision/presence.ts").PresenceStatus;
+  getSupervisionStatus?: () => import("./supervision/presence.ts").PresenceStatus & import("./supervision/delivery.ts").DeliveryStatus;
 }
 
 export const SUBCOMMANDS = [

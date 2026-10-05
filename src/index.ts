@@ -73,7 +73,8 @@ import { ConductorEventEmitter } from "./conductor-events.ts";
 import { createRpcDetach } from "./rpc-detach.ts";
 import { executePromptAndSend } from "./prompt-and-send.ts";
 import { CWD_ENTRY_TYPE, createCwdController } from "./conductor-cwd.ts";
-import { LeadPresence } from "./supervision/presence.ts";
+import { CoordinationDelivery } from "./supervision/delivery.ts";
+import { herdrLeadEnv, LeadPresence } from "./supervision/presence.ts";
 
 export default function (pi: ExtensionAPI): void {
   pi.registerFlag("conductor-launch", { type: "string", description: "Managed child invocation token" });
@@ -271,6 +272,8 @@ export default function (pi: ExtensionAPI): void {
   });
   // S1: one presence per module instance; it captures this instance's env, pid and start time.
   const supervision = new LeadPresence({ pi, env: process.env, registry, getMode: () => conductorModeOn });
+  // S2: a herdr lead drains only its own inbox, and only while that presence is owned.
+  const delivery = herdrLeadEnv(process.env) ? new CoordinationDelivery({ pi, presence: supervision }) : undefined;
 
   const opts = {
     getCwd: cwd,
@@ -329,9 +332,10 @@ export default function (pi: ExtensionAPI): void {
     setConductorMode: (on: boolean) => {
       conductorModeOn = on;
       supervision.refresh();
+      delivery?.drain();
     },
     supervision,
-    getSupervisionStatus: () => supervision.status(),
+    getSupervisionStatus: () => ({ ...supervision.status(), ...delivery?.status() }),
     /**
      * Slice 7: read the host's current Theme so the foreground stream
      * can colour its rendered transcript. Returns undefined in headless
@@ -436,6 +440,7 @@ export default function (pi: ExtensionAPI): void {
     let sessionId: string | undefined, sessionFile: string | undefined;
     try { sessionId = ctx.sessionManager?.getSessionId(); sessionFile = ctx.sessionManager?.getSessionFile(); } catch { /* ineligible */ }
     supervision.start({ sessionId, sessionFile, cwd: ctx.cwd }, (message, level) => ctx.ui.notify(message, level));
+    delivery?.start({ isIdle: () => ctx.isIdle(), hasPendingMessages: () => ctx.hasPendingMessages() }, (message, level) => ctx.ui.notify(message, level));
     if (widget) widget.dispose();
     widget = mountEnsembleWidget(registry, () => ctxRef, () => {
       // v0.10 Slice 4: feed live watchdog thresholds to the widget so it
@@ -678,7 +683,8 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async (event) => {
-    // S1: every reason unpublishes only this instance's own record before anything can await.
+    // S1/S2: every reason stops this instance's drain, then unpublishes only its own record, before anything can await.
+    delivery?.stop();
     supervision.stop();
     registry.herdrAdmissionOpen = false;
     if (unsubFocusedShortcut) {
@@ -769,6 +775,16 @@ export default function (pi: ExtensionAPI): void {
   // installSanitizerHook). Wiring is intentionally co-located with the
   // session-scoped state declaration so its `reset()` handle is captured
   // before any of pi's lifecycle events can fire.
+
+  if (delivery) {
+    // Receipt scans and drains at turn boundaries; none inside the native compaction window.
+    pi.on("session_before_compact", () => { delivery.compaction("start"); });
+    pi.on("session_compact", () => { delivery.compaction("end"); });
+    pi.on("session_compact_failed", () => { delivery.compaction("end"); });
+    pi.on("turn_start", () => { delivery.boundary(); });
+    pi.on("turn_end", () => { delivery.drain(); });
+    pi.on("agent_settled", () => { delivery.boundary(); delivery.drain(); });
+  }
 
   registerTools(pi, opts);
   registerCommands(pi, opts);

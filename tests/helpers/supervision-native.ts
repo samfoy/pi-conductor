@@ -9,7 +9,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import conductor from "../../src/index.ts";
 
-export { VERSION };
+export { VERSION, fauxAssistantMessage };
 
 export interface ToolEnd { name: string; isError: boolean; text: string; details?: any }
 export interface Lead {
@@ -20,8 +20,16 @@ export interface Lead {
   errors: string[];
   shutdowns: string[];
   command(text: string): Promise<void>;
-  /** The faux model issues `peer {action:"list"}` once, then answers. */
-  callPeer(): Promise<ToolEnd | undefined>;
+  /** The faux model issues one `peer` call (default `{action:"list"}`), then answers. */
+  callPeer(args?: Record<string, unknown>): Promise<ToolEnd | undefined>;
+  /** One user prompt answered by the given faux steps (default: one text reply). */
+  prompt(text: string, responses?: unknown[]): Promise<void>;
+  /** Queues faux steps for a model call this lead makes without a prompt (compaction). */
+  respond(responses: unknown[]): void;
+  /** The faux model's call count: a wake would raise it. */
+  calls(): number;
+  /** The live AgentSession, for native tree navigation, compaction and in-memory entries. */
+  session(): any;
   reload(): Promise<void>;
   newSession(): Promise<void>;
   resume(path: string): Promise<void>;
@@ -31,7 +39,7 @@ export interface Lead {
 
 const textOf = (result: any) => (result?.content ?? []).map((p: any) => p.text ?? "").join("");
 
-export async function openLead(root: string, label: string, opts: { session?: "memory" | string; tools?: string[] } = {}): Promise<Lead> {
+export async function openLead(root: string, label: string, opts: { session?: "memory" | string; tools?: string[]; extra?: (pi: any) => void; keepRecentTokens?: number } = {}): Promise<Lead> {
   const cwd = join(root, label), agentDir = join(cwd, "agent"), sessionDir = join(cwd, "sessions");
   mkdirSync(sessionDir, { recursive: true });
   const faux = fauxProvider({ tokensPerSecond: Infinity });
@@ -39,9 +47,9 @@ export async function openLead(root: string, label: string, opts: { session?: "m
   modelRuntime.registerNativeProvider(faux.provider);
   const errors: string[] = [], shutdowns: string[] = [];
   const createRuntime = async ({ cwd, agentDir, sessionManager, sessionStartEvent }: any) => {
-    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+    const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false, ...(opts.keepRecentTokens ? { keepRecentTokens: opts.keepRecentTokens } : {}) }, retry: { enabled: false } });
     const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-      extensionFactories: [pi => { pi.on("session_shutdown", (e: { reason: string }) => void shutdowns.push(e.reason)); }, conductor] });
+      extensionFactories: [pi => { pi.on("session_shutdown", (e: { reason: string }) => void shutdowns.push(e.reason)); }, conductor, ...(opts.extra ? [opts.extra] : [])] });
     await resourceLoader.reload();
     for (const e of resourceLoader.getExtensions().errors) errors.push(e.error);
     const { session } = await createAgentSession({ cwd, agentDir, modelRuntime, model: faux.getModel(), resourceLoader, settingsManager, sessionManager, sessionStartEvent, tools: opts.tools });
@@ -60,15 +68,19 @@ export async function openLead(root: string, label: string, opts: { session?: "m
     registered: () => s().getAllTools().map(t => t.name),
     errors, shutdowns,
     command: async text => { await s().prompt(text); },
-    callPeer: async () => {
+    callPeer: async (args = { action: "list" }) => {
       const ends: ToolEnd[] = [];
       const unsubscribe = s().subscribe((e: any) => {
         if (e.type === "tool_execution_end" && e.toolName === "peer") ends.push({ name: e.toolName, isError: e.isError, text: textOf(e.result), details: e.result?.details });
       });
-      faux.setResponses([fauxAssistantMessage([fauxToolCall("peer", { action: "list" }, { id: `s1-peer-${Date.now()}` })], { stopReason: "toolUse" }), fauxAssistantMessage("S1 listed peers.")]);
+      faux.setResponses([fauxAssistantMessage([fauxToolCall("peer", args, { id: `s1-peer-${Date.now()}` })], { stopReason: "toolUse" }), fauxAssistantMessage("S1 listed peers.")]);
       try { await s().prompt("S1 list the other leads"); } finally { unsubscribe(); }
       return ends[0];
     },
+    prompt: async (text, responses) => { faux.setResponses((responses ?? [fauxAssistantMessage("ok")]) as never); await s().prompt(text); },
+    respond: responses => faux.setResponses(responses as never),
+    calls: () => faux.state.callCount,
+    session: () => s(),
     reload: async () => { await s().reload(); },
     newSession: async () => { await runtime.newSession(); },
     resume: async path => { await runtime.switchSession(path); },

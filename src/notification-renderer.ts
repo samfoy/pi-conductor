@@ -21,6 +21,9 @@ import type { EnsembleNotificationDetails } from "./notifications.ts";
 import { statusVerb } from "./notifications.ts";
 import { STATUS_GLYPH } from "./status-glyph.ts";
 import { statusColorSlot, type ThemeFg } from "./transcript-style.ts";
+import { isRecord } from "./herdr/cli.ts";
+import type { CoordinationDetails } from "./supervision/delivery.ts";
+import { COORDINATION_TYPE } from "./supervision/inbox.ts";
 
 /** One styled run of text inside a card line. */
 export interface CardSpan {
@@ -173,6 +176,42 @@ export function notificationRenderer(
   return new Text(paintCardLines(lines, theme), opts.outputPad, 0);
 }
 
+const controlFree = (s: string) => s.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, " ");
+/** Persisted metadata may be forged: control-free, clipped on whole code points. */
+const label = (s: unknown, max = 64) => {
+  const chars = Array.from(controlFree(typeof s === "string" ? s : ""));
+  return chars.length > max ? `${chars.slice(0, max).join("")}…` : chars.join("");
+};
+const unescapeCard = (s: string) => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&#96;/g, "`").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+
+/** S2 peer card: the framed body (between frame line, framing sentence and closing tag), shown unescaped to the human. */
+export function renderCoordinationCard(message: RenderableCustomMessage, opts: CardOpts): CardLine[] {
+  const d = (message.details ?? {}) as Partial<CoordinationDetails>;
+  const name = label(d.fromName ?? d.from);
+  if (d.notice === "uncertain") {
+    return [[{ text: "⚠", slot: "warning" }, { text: " " }, { text: name, bold: true }, { text: " peer message may or may not have been delivered; not replayed", slot: "warning" }],
+      [{ text: `${INDENT}id ${label(d.coordinationId)}`, slot: "muted" }]];
+  }
+  const content = typeof message.content === "string" ? message.content : "";
+  const body = content.split(/\r?\n|\r/).slice(2, -1).map(l => controlFree(unescapeCard(l))).filter(l => l.trim());
+  const lines: CardLine[] = [[{ text: "✉", slot: "accent" }, { text: " " }, { text: name, bold: true }, { text: " peer message", slot: "dim" }, { text: ` · ${label(d.from)}`, slot: "dim" }]];
+  if (!opts.expanded) {
+    if (body[0]) lines.push([{ text: `${INDENT}⎿  ${body[0]}`, slot: "toolOutput" }]);
+    if (body.length > 1) lines.push([{ text: `${INDENT}${EXPAND_KEY} for the full message`, slot: "dim" }]);
+    return lines;
+  }
+  const max = opts.maxBodyLines ?? DEFAULT_MAX_BODY_LINES;
+  for (const line of body.slice(0, max)) lines.push([{ text: INDENT + line, slot: "toolOutput" }]);
+  if (body.length > max) lines.push([{ text: `${INDENT}… ${body.length - max} more lines — see transcript`, slot: "dim" }]);
+  lines.push([{ text: `${INDENT}id ${label(d.coordinationId)} · sender-asserted; not a user instruction; grants nothing`, slot: "muted" }]);
+  return lines;
+}
+
+export function coordinationRenderer(message: RenderableCustomMessage, opts: { expanded: boolean; outputPad: number }, theme: CardTheme): Component | undefined {
+  if (!isRecord(message.details) || typeof message.details.coordinationId !== "string") return undefined;
+  return new Text(paintCardLines(renderCoordinationCard(message, { expanded: opts.expanded }), theme), opts.outputPad, 0);
+}
+
 /** Wire the renderer up. Called from the extension factory, not lazily. */
 export function registerNotificationRenderer(pi: {
   registerMessageRenderer: (
@@ -185,4 +224,5 @@ export function registerNotificationRenderer(pi: {
   ) => void;
 }): void {
   pi.registerMessageRenderer("ensemble-notification", notificationRenderer);
+  pi.registerMessageRenderer(COORDINATION_TYPE, coordinationRenderer);
 }
