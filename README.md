@@ -844,8 +844,8 @@ at most 16 KiB. It deletes records whose process is proven dead (on Linux:
 ESRCH or a different start time), and off Linux records more than 10 min stale.
 Each call rechecks that this lead is still eligible and still owns its record.
 
-**Limits.** `peer` lists and (S2, below) queues messages; the chief lease and `staff list`
-follow (S3, below); there is no `chief` tool yet (S4). Supervision makes no herdr CLI call and never scans panes, agents or
+**Limits.** `peer` lists and (S2, below) queues messages; the chief lease, `staff` and
+`chief` follow (S3 and S4, below). Supervision makes no herdr CLI call and never scans panes, agents or
 processes. Records guard against accidents between same-user processes (private
 files, bounded no-follow reads), not against a hostile local process. Every child
 excludes `chief`, `peer` and `staff`, even another extension's; pi-herdsman
@@ -939,12 +939,12 @@ untrusted.
 returns `{"self", "generation", "leads": [{"lead", "name", "cwd", "repo", "branch", "state", "runs": {"active", "blocked", "total"}, "available_actions"}]}`:
 the other leads on this exact socket string (never a prefix or another socket), self
 excluded, sorted by exact id, at most 16 KiB. Every field but `lead` is self-reported
-presentation. `available_actions` is advisory: `["peer message"]` for a live lead, `[]`
-for an unproven one.
+presentation. `available_actions` is advisory: `["staff transcript", "staff message"]`
+for a live lead (plus `"staff reply"` while it shows a pending ask, S4 below), `[]` for an
+unproven one.
 
-**Limits.** S3 is list only: no `chief` tool for leads, no `staff transcript`,
-`message` or `reply`, and no wakes yet (S4). The chief never owns, inspects or controls
-another lead or its runs. Every child scope still excludes `chief`, `peer` and `staff`;
+**Limits.** The other `staff` actions, the `chief` tool and wakes are S4 (below). The chief
+never owns or controls another lead or its runs. Every child scope still excludes `chief`, `peer` and `staff`;
 delegators keep `delegate`. `/chief` exists only in a herdr lead. The lease history
 grows by two entries per claim and fails closed past 4096 entries (prune it by hand while
 no chief is live). Off Linux a hung but live chief blocks a takeover until `/chief leave`
@@ -952,6 +952,86 @@ or exit. A demoted chief whose own release also failed keeps the lease until its
 exits. Peer messages stay at most once and non-waking; `/chief` sends nothing to the
 model and leaves Pi's pending queues alone. Automated evidence only: native Pi 0.87.1 and
 1.0.3 with a faux model and a fake herdr env. Human TUI acceptance is unverified.
+
+## Chief messages and asks: `chief` and `staff transcript/message/reply` (S4; not rolled out)
+
+Every lead other than the chief gets `chief` (inactive while it holds the lease, where
+`staff` takes its place):
+
+```json
+{"action":"message","message":"…","files":["notes.md"]}
+{"action":"ask","question":"…","files":["notes.md"]}
+```
+
+Both need a live chief for this lead's exact `HERDR_SOCKET_PATH`: the highest, unreleased
+lease claim of a process proven live (on Linux, the same pid and start time). A released,
+dead, unproven or unreadable lease means no chief, and the lease never names this lead
+itself; the call is refused before anything is written. The queued record names the chief's
+session id, the exact socket and the full claim judged current, and the publication fence
+re-proves this lead's presence and that exact claim. `ask` takes a question of at most 1024
+characters and 1024 UTF-8 bytes, must be the only tool call in its assistant message with no
+queued messages (the A6 sole-call check, now shared), returns `terminate: true` and uses its
+tool call id as the `ask_id`. Both answer **queued**, never delivered.
+
+**The branch decides the outstanding ask.** It is the newest successful `chief ask` tool
+result on this session's current branch: a newer ask supersedes it, an error result
+supersedes nothing, and after a rewind, fork or restart it is whatever that branch holds. It
+is answered only when a delivered chief reply card for its `ask_id` follows it on the branch
+and that delivery's persisted receipt has retired its inbox record. A reply that is only
+queued, in flight (`.sending`), uncertain, or held in memory after a failed session write
+does not answer it. The lead record mirrors the ask as `pendingAsk` (presentation for
+`staff list`), refreshed after each turn, reply and `/tree`, and the panel shows one
+`⧗ waiting on chief: <question>` line (at most 80 code points). No record, message or
+presence file can create an ask.
+
+The chief's `staff` gains three actions. Each asserts the lease and the chief's own presence
+first, and again, with the target, before returning or at the publication fence, so a lease,
+presence or target generation that changes meanwhile is an error, never a stale result:
+
+```json
+{"action":"transcript","lead":"<exact full session id>"}
+{"action":"message","lead":"<exact full session id>","message":"…","files":["notes.md"]}
+{"action":"reply","lead":"<exact full session id>","ask_id":"<ask id>","message":"…"}
+```
+
+The target must be a live lead on the same exact socket string, and not the chief itself.
+Names, labels, prefixes and other sockets never match. `transcript` opens that lead's own
+session file no-follow and requires a single-link regular file whose header names the
+target. It reads at most the last 512 KiB, starting after a line break (so a UTF-8 sequence
+never splits), drops a partial last line, skips unreadable lines and says so, and errors if
+the file was replaced while it was read. A newest entry larger than the window is reported,
+never parsed from a fragment. The tail renders through the A4 recent-activity builder
+(assistant text, tool calls and results), escaped and framed as
+`<lead-transcript … untrusted="true">`, at most 16 KiB. `reply` needs the target's record to
+show that `ask_id` pending; the lead's branch still decides. `staff list` shows each lead's
+`pending_ask`. There is still no run-level action: `staff` cannot spawn, send to, kill or own
+another lead or its runs.
+
+**Delivery and wakes.** All four kinds reuse the S2 inbox, bounds and state machine: 8 KiB
+records, 64 queued, a `.sending` claim before a `pi.sendMessage` custom message with
+`deliverAs: "followUp"`, persisted receipts, and `.uncertain` without replay. Never `steer`,
+`nextTurn` or `sendUserMessage`. At dispatch the recipient revalidates against the lease on
+disk. A message or question to the chief wakes it (`triggerTurn: true`) only while it still
+holds the exact claim named in the record. A chief message or reply wakes a lead only while
+that claim is still the live holder on the lead's socket. A later generation, even of the
+same session, is a different chief. A stale ordinary message arrives without waking,
+labelled "former chief". A reply that is stale, from another socket, or not the outstanding
+ask on the branch is kept as `.rejected.json` with one warning; it never reaches the model
+and never clears the ask. A reply that arrives while the asking turn is still running waits
+for that turn to end, and a second reply to an ask with one in flight waits until the first
+settles. A woken dispatch is not classified uncertain before Pi has started its turn. Peer
+messages still never wake. A wake asks for a turn; nothing reports that the model read or
+acted on a message.
+
+**Limits.** No S5 multiprocess or live acceptance yet. Off Linux no chief can be proven
+live, so `chief` refuses, chief messages arrive as non-waking "former chief" cards and chief
+replies are rejected. A question delivered under a lease generation its recipient no longer
+holds is a non-waking card; the current chief can still answer it from `staff list`. A fork
+keeps the parent's outstanding ask, but replies go to the session id that asked. If the same
+process keeps an in-memory reply whose `.uncertain` record is swept after 7 days, that reply
+then counts as an answer. Delivery is at most once and never resent automatically.
+Automated evidence only: native Pi 0.87.1 and 1.0.3 with a faux model and a fake herdr env.
+Human TUI acceptance is unverified.
 
 ## Configuration
 

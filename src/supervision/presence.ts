@@ -13,7 +13,7 @@ import { readProcessStartTime } from "../reconcile-startup.ts";
 import type { RunRegistry } from "../runs.ts";
 import {
   buildLeadRecord, createLeadRecord, leadLiveness, leadPath, readLeadRecord, removeLeadRecordIf, replaceLeadRecord, sameLeadIdentity, sameLeadVersion,
-  type LeadIdentity, type LeadRecord, type LivenessOptions,
+  type LeadIdentity, type LeadPendingAsk, type LeadRecord, type LivenessOptions,
 } from "./store.ts";
 
 export const HEARTBEAT_MS = 30_000;
@@ -58,6 +58,8 @@ export interface PresenceDeps {
   timers?: Timers;
   liveness?: LivenessOptions;
   describeRepo?: (cwd: string) => { repo?: string; branch?: string };
+  /** S4: the branch's outstanding `chief ask`, mirrored as presentation. */
+  pendingAsk?: () => LeadPendingAsk | undefined;
 }
 
 interface Activation {
@@ -69,6 +71,8 @@ interface Activation {
   timer?: unknown;
   due: number;
   unsubscribe?: () => void;
+  /** The pending ask in the last record built, to republish only on change. */
+  ask?: string;
 }
 
 const errno = (e: unknown) => (e as NodeJS.ErrnoException)?.code;
@@ -149,6 +153,16 @@ export class LeadPresence {
     return record;
   }
 
+  /** S4: republish now when the branch's pending ask differs from the published one (after a turn, a reply or a rewind). */
+  touch(): void {
+    const act = this.active;
+    if (act && this.askKey() !== act.ask) this.republish(act);
+  }
+
+  private askKey(): string | undefined {
+    try { const ask = this.deps.pendingAsk?.(); return ask && JSON.stringify([ask.askId, ask.question, ask.askedAt]); } catch { return undefined; }
+  }
+
   /** Adds or removes only owned names in the current native active set; Pi's allow/exclude filtering wins. */
   syncTools(): void {
     if (this.owned.size === 0) return;
@@ -209,14 +223,17 @@ export class LeadPresence {
 
   private record(act: Activation): LeadRecord {
     const runs = this.deps.registry.list();
-    let name: string | undefined;
+    let name: string | undefined, ask: LeadPendingAsk | undefined;
     try { name = this.deps.pi.getSessionName(); } catch { /* presentation only */ }
+    try { ask = this.deps.pendingAsk?.(); } catch { /* presentation only */ }
+    act.ask = ask && JSON.stringify([ask.askId, ask.question, ask.askedAt]);
     return buildLeadRecord({ ...act.identity, socketPath: act.placement.socketPath, paneId: act.placement.paneId,
       ...(act.placement.tabId ? { tabId: act.placement.tabId } : {}), ...(act.placement.workspaceId ? { workspaceId: act.placement.workspaceId } : {}),
       cwd: act.cwd, ...act.repo, displayName: name ?? basename(act.cwd),
       runs: { active: this.deps.registry.countActive(), blocked: runs.filter(r => r.status === "blocked").length, total: runs.length },
       runsBrief: [...runs].sort((a, b) => b.startTime - a.startTime)
         .map(r => ({ id: r.id, persona: r.persona, status: r.status, ...(r.parentRunId ? { parentRunId: r.parentRunId } : {}) })),
+      ...(ask ? { pendingAsk: { askId: ask.askId, question: ask.question, askedAt: ask.askedAt } } : {}),
       updatedAt: this.now() });
   }
 

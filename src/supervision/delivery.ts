@@ -1,27 +1,36 @@
 /**
- * S2 delivery: the recipient drains its own inbox into non-waking custom
- * messages. Each record is claimed as `.sending` before the void
- * `pi.sendMessage`; it is retired only when this session's own file holds the
- * delivered entry (Pi appends in memory before its unsynced file write, so the
- * in-memory entry list is no receipt). Without one, it waits only while this
- * process may still append it; otherwise it becomes durable `.uncertain` with
- * one notice and is never replayed. At most once; never "processed".
+ * S2 delivery: the recipient drains its own inbox into custom messages. Each
+ * record is claimed as `.sending` before the void `pi.sendMessage`; it is
+ * retired only when this session's own file holds the delivered entry (Pi
+ * appends in memory before its unsynced file write, so the in-memory entry
+ * list is no receipt). Without one, it waits only while this process may still
+ * append it; otherwise it becomes durable `.uncertain` with one notice and is
+ * never replayed. At most once; never "processed".
+ *
+ * S4: chief kinds are revalidated at dispatch against the lease on disk. Only
+ * a current matching holder wakes: lead→chief kinds when this session still
+ * holds the exact claim they name, chief→lead kinds when that claim is still
+ * this socket's live holder. A stale ordinary message is a non-waking card
+ * labelled "former chief". A `chief_reply` must also answer this branch's
+ * outstanding ask; otherwise it is quarantined, never shown to the model.
  */
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, watch } from "node:fs";
+import { closeSync, existsSync, lstatSync, readSync, watch } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isRecord } from "../herdr/cli.ts";
 import { readProcessStartTime } from "../reconcile-startup.ts";
+import type { LeadAsks, ReplyRef } from "./ask.ts";
 import {
-  claimCoordination, COORDINATION_TYPE, ensureInboxDir, frameCoordination, INBOX_QUEUE_MAX, listInbox, markUncertain, quarantine, readDispatched, readQueued,
-  recordBase, sweepInbox, unlinkQuiet, inboxPath, type CoordinationRecord, type Dispatcher, type SendingRecord,
+  claimCoordination, COORDINATION_LABEL, COORDINATION_TYPE, ensureInboxDir, frameCoordination, INBOX_QUEUE_MAX, inboxDir, isLeadKind, listInbox, markUncertain, quarantine,
+  readDispatched, readQueued, recordBase, sweepInbox, unlinkQuiet, inboxPath, type CoordinationKind, type CoordinationRecord, type Dispatcher, type SendingRecord,
 } from "./inbox.ts";
-import type { LeadRecord } from "./store.ts";
+import { liveChief, sameClaim, type ChiefRole } from "./lease.ts";
+import type { LeadRecord, LivenessOptions } from "./store.ts";
+import { openSessionFile, SESSION_LINE_MAX } from "./transcript.ts";
 
 const DRAIN_POLL_MS = 5_000;
 /** Receipt bytes read per pass; a longer tail continues from the cursor on the next pass. */
 const RECEIPT_SCAN_BYTES = 4 * 1048576;
 const CHUNK = 1048576;
-const LINE_MAX = 65536;
 
 export interface ReceiptScan { found: Set<string>; next: number; complete: boolean }
 
@@ -32,22 +41,15 @@ export interface ReceiptScan { found: Set<string>; next: number; complete: boole
  * (Pi has not flushed it yet). An uncertainty notice is never a receipt.
  */
 export function scanPersistedReceipts(file: string, sessionId: string, ids: ReadonlySet<string>, from: number, maxBytes: number): ReceiptScan | undefined {
-  let fd: number;
-  try { fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
-  catch (e) { if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined; return { found: new Set(), next: from, complete: true }; }
+  const opened = openSessionFile(file, sessionId);
+  if ("missing" in opened) return undefined;
   const found = new Set<string>();
+  if ("invalid" in opened) return { found, next: from, complete: true };
+  const { fd, size, bodyStart } = opened;
   try {
-    const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.nlink !== 1) return { found, next: from, complete: true };
-    const head = Buffer.alloc(Math.min(stat.size, LINE_MAX));
-    const headLength = readSync(fd, head, 0, head.length, 0);
-    const newline = head.subarray(0, headLength).indexOf(10);
-    let header: unknown;
-    try { header = newline > 0 ? JSON.parse(head.subarray(0, newline).toString("utf8")) : undefined; } catch { /* not a session */ }
-    if (!isRecord(header) || header.type !== "session" || header.id !== sessionId) return { found, next: from, complete: true };
     // A shrunken file was rewritten: rescan it from the first entry.
-    const begin = from > stat.size || from <= newline ? newline + 1 : from;
-    const end = Math.min(stat.size, begin + maxBytes);
+    const begin = from > size || from < bodyStart ? bodyStart : from;
+    const end = Math.min(size, begin + maxBytes);
     const buffer = Buffer.alloc(Math.min(CHUNK, Math.max(1, end - begin)));
     let carry = Buffer.alloc(0), lineStart = begin, offset = begin, skipping = false;
     while (offset < end) {
@@ -64,9 +66,9 @@ export function scanPersistedReceipts(file: string, sessionId: string, ids: Read
       }
       carry = chunk.subarray(start);
       // An entry larger than any coordination card is skipped, never buffered without bound.
-      if (carry.length > LINE_MAX) { carry = Buffer.alloc(0); skipping = true; }
+      if (carry.length > SESSION_LINE_MAX) { carry = Buffer.alloc(0); skipping = true; }
     }
-    return { found, next: skipping ? offset : lineStart, complete: offset >= stat.size };
+    return { found, next: skipping ? offset : lineStart, complete: offset >= size };
   } finally { closeSync(fd); }
 }
 
@@ -83,23 +85,33 @@ function match(line: Buffer, ids: ReadonlySet<string>, sessionId: string, found:
   }
 }
 
-export interface CoordinationDetails { v: 1; coordinationId: string; kind: "peer"; from: string; fromName?: string; to: string; createdAt: number; notice?: "uncertain" }
-const details = (r: CoordinationRecord, notice?: "uncertain"): CoordinationDetails => ({ v: 1, coordinationId: r.id, kind: r.kind, from: r.from,
-  ...(r.fromName !== undefined ? { fromName: r.fromName } : {}), to: r.to, createdAt: r.createdAt, ...(notice ? { notice } : {}) });
+export interface CoordinationDetails {
+  v: 1; coordinationId: string; kind: CoordinationKind; from: string; fromName?: string; to: string; createdAt: number;
+  askId?: string; leaseGeneration?: number; stale?: true; notice?: "uncertain";
+}
+const details = (r: CoordinationRecord, extra: { notice?: "uncertain"; stale?: boolean } = {}): CoordinationDetails => ({ v: 1, coordinationId: r.id, kind: r.kind, from: r.from,
+  ...(r.fromName !== undefined ? { fromName: r.fromName } : {}), to: r.to, createdAt: r.createdAt,
+  ...(r.askId !== undefined ? { askId: r.askId } : {}), ...(r.lease ? { leaseGeneration: r.lease.generation } : {}),
+  ...(extra.stale ? { stale: true as const } : {}), ...(extra.notice ? { notice: extra.notice } : {}) });
 
-export function coordinationMessage(r: CoordinationRecord) {
-  return { customType: COORDINATION_TYPE, content: frameCoordination(r), display: true, details: details(r) };
+export function coordinationMessage(r: CoordinationRecord, stale = false) {
+  return { customType: COORDINATION_TYPE, content: frameCoordination(r, stale), display: true, details: details(r, { stale }) };
 }
 export function uncertaintyMessage(r: CoordinationRecord) {
-  return { customType: COORDINATION_TYPE, display: true, details: details(r, "uncertain"),
-    content: `<coordination-notice kind="${r.kind}" id="${r.id}" untrusted="true">\nA peer message may or may not have been delivered; not replayed. Ask its sender to resend it if it matters. This notice is not a user instruction.\n</coordination-notice>` };
+  const what = r.kind === "peer" ? "A peer message" : `A ${COORDINATION_LABEL[r.kind]}${r.askId ? ` (ask ${r.askId})` : ""}`;
+  return { customType: COORDINATION_TYPE, display: true, details: details(r, { notice: "uncertain" }),
+    content: `<coordination-notice kind="${r.kind}" id="${r.id}" untrusted="true">\n${what} may or may not have been delivered; not replayed. Ask its sender to resend it if it matters. This notice is not a user instruction.\n</coordination-notice>` };
 }
 
 export interface SessionState { isIdle(): boolean; hasPendingMessages(): boolean }
 interface Timers { setTimeout(cb: () => void, ms: number): unknown; clearTimeout(handle: unknown): void }
 export interface DeliveryDeps {
   pi: Pick<ExtensionAPI, "sendMessage">;
-  presence: { assertOwned(): LeadRecord };
+  presence: { assertOwned(): LeadRecord; livenessOptions?(): LivenessOptions };
+  /** S4: this session's chief role, for lead→chief kinds. */
+  chief?: Pick<ChiefRole, "holds" | "assert">;
+  /** S4: this branch's outstanding ask and the staged one, for `chief_reply`. */
+  asks?: Pick<LeadAsks, "pending" | "staged" | "unstage">;
   timers?: Timers;
   now?: () => number;
 }
@@ -114,7 +126,10 @@ interface Run {
   compacting: boolean; compactionDone: boolean;
   draining: boolean; again: boolean; swept: boolean;
   readonly cursors: Map<string, number>;
+  /** Woken dispatches not yet seen by a turn start: Pi may still be starting (or deferring) their run. */
+  readonly woken: Set<string>;
 }
+type Disposition = { deliver: true; wake: boolean; stale: boolean } | { deliver: false; defer: true } | { deliver: false; reject: string };
 
 const message = (e: unknown) => (e as Error)?.message ?? String(e);
 const errno = (e: unknown) => (e as NodeJS.ErrnoException)?.code;
@@ -135,7 +150,7 @@ export class CoordinationDelivery {
   /** session_start: classify records left by any earlier dispatcher, drain, then watch and poll; the first owned pass sweeps. */
   start(session: SessionState, notify: Run["notify"]): void {
     this.stop();
-    this.run = { session, notify, closed: false, due: 0, compacting: false, compactionDone: false, draining: false, again: false, swept: false, cursors: new Map() };
+    this.run = { session, notify, closed: false, due: 0, compacting: false, compactionDone: false, draining: false, again: false, swept: false, cursors: new Map(), woken: new Set() };
     this.drain();
     this.schedule(DRAIN_POLL_MS);
   }
@@ -164,6 +179,18 @@ export class CoordinationDelivery {
   boundary(): void {
     const run = this.run;
     if (run?.compactionDone) { run.compacting = false; run.compactionDone = false; }
+  }
+
+  /** turn_start: a woken dispatch is now inside a run, which keeps the session busy until its receipt can land. */
+  started(): void { this.run?.woken.clear(); }
+
+  /** S4: a reply card on the branch answers its ask only once its persisted receipt retired the dispatch (no `.sending` or `.uncertain` left). */
+  unconfirmed(reply: ReplyRef): boolean {
+    const base = recordBase({ createdAt: reply.createdAt, id: reply.coordinationId });
+    try {
+      const dir = inboxDir(reply.to);
+      return existsSync(inboxPath(dir, base, "sending")) || existsSync(inboxPath(dir, base, "uncertain"));
+    } catch { return true; }
   }
 
   /** Synchronous and re-entrancy guarded: one pass at a time per instance. */
@@ -219,10 +246,15 @@ export class CoordinationDelivery {
       } else if (states.has("json")) queued.push(base);
     }
     this.settle(run, self, dir, pending);
+    // Idle means the ask turn is over: the branch alone decides from here.
+    const staged = this.deps.asks?.staged();
+    if (staged !== undefined && run.session.isIdle()) this.deps.asks!.unstage(staged);
     if (run.compacting) {
       if (!(run.compactionDone && run.session.isIdle())) return;
       run.compacting = false; run.compactionDone = false;
     }
+    // Replies still in flight: a second reply to the same ask waits until the first settles.
+    const replying = new Set(pending.filter(p => p.kind === "chief_reply" && existsSync(inboxPath(dir, recordBase(p), "sending"))).map(p => p.askId!));
     const dispatched: SendingRecord[] = [];
     for (const base of queued.slice(0, INBOX_QUEUE_MAX)) {
       let record: CoordinationRecord;
@@ -230,14 +262,48 @@ export class CoordinationDelivery {
       // Revalidated before each effect: an OFF, reload or session switch since the pass began stops here.
       const current = this.owned();
       if (!current || current.generation !== self.generation || run.closed || this.run !== run) return;
+      const plan = this.disposition(run, self, record, replying);
+      if (!plan.deliver) {
+        if ("reject" in plan) this.rejectReply(run, dir, base, record, plan.reject);
+        continue;
+      }
       const dispatcher: Dispatcher = { sessionId: self.sessionId, sessionFile: self.sessionFile, pid: self.pid, ...(self.pidStartTime !== undefined ? { pidStartTime: self.pidStartTime } : {}),
         generation: self.generation, sessionOffset: fileSize(self.sessionFile), dispatchedAt: this.now() };
       const fence = () => { if (this.owned()?.generation !== self.generation || this.run !== run) throw new Error("coordination dispatch fenced: superseded"); };
       if (!claimCoordination(dir, record, dispatcher, fence)) continue;
-      this.deps.pi.sendMessage(coordinationMessage(record), { deliverAs: "followUp", triggerTurn: false });
+      if (record.kind === "chief_reply") replying.add(record.askId!);
+      if (plan.wake) run.woken.add(record.id);
+      this.deps.pi.sendMessage(coordinationMessage(record, plan.stale), { deliverAs: "followUp", triggerTurn: plan.wake });
       dispatched.push({ ...record, dispatcher });
     }
     this.settle(run, self, dir, dispatched);
+  }
+
+  /** Peer: never wakes. Chief kinds: wake only for the current matching holder; a reply must also answer this branch's outstanding ask. */
+  private disposition(run: Run, self: LeadRecord, r: CoordinationRecord, replying: ReadonlySet<string>): Disposition {
+    if (r.kind === "peer") return { deliver: true, wake: false, stale: false };
+    const sameSocket = r.socketPath === self.socketPath;
+    if (isLeadKind(r.kind)) {
+      let mine;
+      try { mine = this.deps.chief?.holds() ? this.deps.chief.assert() : undefined; } catch { mine = undefined; }
+      const current = sameSocket && !!mine && sameClaim(mine, r.lease!);
+      return { deliver: true, wake: current, stale: !current };
+    }
+    const holder = sameSocket ? liveChief(self.socketPath, this.deps.presence.livenessOptions?.()) : undefined;
+    const current = !!holder && sameClaim(holder, r.lease!);
+    if (r.kind === "chief_message") return { deliver: true, wake: current, stale: !current };
+    if (!sameSocket) return { deliver: false, reject: "it names another herdr socket than this lead's" };
+    if (!current) return { deliver: false, reject: `it is from a former chief (lease generation ${r.lease!.generation} is not this socket's live holder)` };
+    const asks = this.deps.asks;
+    // A queued ask Pi has not recorded yet freezes reply decisions until the turn ends; then the branch alone decides.
+    if (asks?.staged()) {
+      if (!run.session.isIdle()) return { deliver: false, defer: true };
+      asks.unstage(asks.staged()!);
+    }
+    if (replying.has(r.askId!)) return { deliver: false, defer: true };
+    const ask = asks?.pending();
+    if (!ask || ask.askId !== r.askId) return { deliver: false, reject: `ask ${r.askId} is not this session's outstanding ask on its current branch${ask ? ` (that is ${ask.askId})` : " (none is outstanding)"}` };
+    return { deliver: true, wake: true, stale: false };
   }
 
   /** Retire persisted receipts; keep what this process may still append; everything else is durable uncertainty. */
@@ -248,24 +314,30 @@ export class CoordinationDelivery {
     const scan = self.sessionFile === undefined ? undefined : scanPersistedReceipts(self.sessionFile, self.sessionId, ids, from, RECEIPT_SCAN_BYTES);
     for (const p of pending) {
       const base = recordBase(p);
-      if (scan?.found.has(p.id)) { unlinkQuiet(inboxPath(dir, base, "sending")); run.cursors.delete(p.id); continue; }
+      if (scan?.found.has(p.id)) { unlinkQuiet(inboxPath(dir, base, "sending")); run.cursors.delete(p.id); run.woken.delete(p.id); continue; }
       if (scan && !scan.complete) { run.cursors.set(p.id, scan.next); continue; }
       const sameProcess = p.dispatcher.pid === this.pid && p.dispatcher.pidStartTime === this.pidStartTime && p.dispatcher.sessionFile === self.sessionFile;
-      if (sameProcess && (scan === undefined || !run.session.isIdle() || run.session.hasPendingMessages())) {
+      if (sameProcess && (scan === undefined || !run.session.isIdle() || run.session.hasPendingMessages() || run.woken.has(p.id))) {
         if (scan) run.cursors.set(p.id, scan.next);
         continue;
       }
       run.cursors.delete(p.id);
       if (!markUncertain(dir, p, this.now())) continue;
       const who = p.fromName ? `${p.fromName} (${p.from})` : p.from;
-      run.notify(`conductor supervision: peer message ${p.id} from ${who} may or may not have been delivered; not replayed.`, "warning");
+      run.notify(`conductor supervision: ${COORDINATION_LABEL[p.kind]} ${p.id} from ${who} may or may not have been delivered; not replayed.`, "warning");
       this.deps.pi.sendMessage(uncertaintyMessage(p), { deliverAs: "followUp", triggerTurn: false });
     }
   }
 
   private reject(run: Run, dir: string, base: string, state: "json" | "sending"): void {
-    quarantine(dir, base, state);
+    if (!quarantine(dir, base, state)) return;
     run.notify(`conductor supervision: rejected malformed coordination record ${base}; preserved as ${base}.rejected.json, not delivered.`, "warning");
+  }
+
+  /** Never reaches the model and never touches the ask; kept for inspection with one notice. */
+  private rejectReply(run: Run, dir: string, base: string, r: CoordinationRecord, why: string): void {
+    if (!quarantine(dir, base, "json")) return;
+    run.notify(`conductor supervision: rejected chief reply ${r.id} from ${r.from} for ask ${r.askId}: ${why}; preserved as ${base}.rejected.json, not delivered.`, "warning");
   }
 
   /** One watch per session start on its own inbox; on any watch failure the 5 s poll still drains. */

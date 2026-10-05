@@ -44,7 +44,7 @@ function supervisionLines(status: SupervisionStatus | undefined): string[] {
     lines.push(`  chief: ${c.role === "chief" ? `lease generation ${c.generation} held for this herdr socket` : "lead (no chief lease held)"}; staff tool: ${c.staffActive ? "active" : "inactive"}`);
     if (c.lastError) lines.push(`  ⚠ chief: ${c.lastError}`);
   }
-  lines.push("  · S3: presence, `peer list`, non-waking `peer message` (queued, at most once), the chief lease (/chief) and `staff list`; no `chief` tool or staff transcript, message or reply yet");
+  lines.push("  · S4: presence, `peer list`, non-waking `peer message`, the chief lease (/chief), `staff list/transcript/message/reply` and `chief message/ask`; all queued and at most once; only the current chief's kinds wake");
   return lines;
 }
 

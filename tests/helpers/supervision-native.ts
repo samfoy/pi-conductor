@@ -9,7 +9,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import conductor from "../../src/index.ts";
 
-export { VERSION, fauxAssistantMessage };
+export { VERSION, fauxAssistantMessage, fauxToolCall };
 
 export interface ToolEnd { name: string; isError: boolean; text: string; details?: any }
 export interface Lead {

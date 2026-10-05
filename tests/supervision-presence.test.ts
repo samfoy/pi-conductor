@@ -415,7 +415,7 @@ test("S1 real factory: OFF at start, /conductor on publishes and activates peer,
   const cwd = tmpDir("s1-factory-cwd-"), elsewhere = tmpDir("s1-factory-override-");
   const f = loadFactory();
   assert.ok(f.tools.has("peer"), "a herdr lead registers peer");
-  assert.ok(!f.tools.has("chief"), "the chief tool lands with its behaviour (S4), not as a stub");
+  assert.ok(f.tools.has("chief"), "S4 registers chief for a herdr lead, with its behaviour");
   assert.ok(f.tools.has("staff"), "S3 registers staff for a herdr lead");
   const id = randomUUID(), ctx = ctxFor(id, cwd);
   await f.fire("session_start", { reason: "startup" }, ctx);

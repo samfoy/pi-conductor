@@ -78,14 +78,14 @@ async function witness(t: test.TestContext, pi: Harness) {
     process.env.HERDR_SOCKET_PATH = SOCKET;
     for (const l of [a, b, c]) { assert.deepEqual(l.errors, []); await l.command("/conductor on"); }
     for (const l of [a, b, c]) assert.ok(l.registered().includes("staff") && !l.active().includes("staff") && l.active().includes("peer"), "staff is inactive for every lead that is not the chief");
-    assert.ok(!a.registered().includes("chief"), "the chief tool waits for S4");
+    for (const l of [a, b, c]) assert.ok(l.active().includes("chief"), "S4: chief is active for every lead that is not the chief");
 
-    // Additive: a foreign change made before /chief survives; /chief adds exactly staff.
+    // Additive: a foreign change made before /chief survives; /chief adds exactly staff (and S4 drops its own chief tool).
     probe.pi.setActiveTools(probe.pi.getActiveTools().filter((n: string) => n !== "bash"));
     const before = a.active();
     assert.ok(!before.includes("bash") && before.includes("demote_probe"));
     await a.command("/chief");
-    assert.deepEqual(sorted(a.active()), sorted([...before, "staff"]), "staff added; every other tool, including the foreign change, untouched");
+    assert.deepEqual(sorted(a.active()), sorted([...before.filter(n => n !== "chief"), "staff"]), "staff added, chief removed; every other tool, including the foreign change, untouched");
     assert.deepEqual(leaseFiles(), ["000000.json"]);
     assert.equal(claim(0).sessionId, a.sessionId());
     assert.equal(claim(0).socketPath, SOCKET);
@@ -93,7 +93,7 @@ async function witness(t: test.TestContext, pi: Harness) {
     assert.equal(listed[0]?.isError, false, JSON.stringify(listed));
     assert.equal(listed[0]!.details.self, a.sessionId());
     assert.deepEqual(listed[0]!.details.leads.map((l: { lead: string }) => l.lead), [b.sessionId()], "this exact socket's other lead; self and the prefix-extended socket excluded");
-    assert.deepEqual(listed[0]!.details.leads[0].available_actions, ["peer message"]);
+    assert.deepEqual(listed[0]!.details.leads[0].available_actions, ["staff transcript", "staff message"]);
     t.diagnostic(`Pi ${v} staff list: ${listed[0]!.text}`);
     assert.deepEqual(roleEntries(a.sessionFile()!), [{ role: "chief", generation: 0 }], "the role intent is in the session file once Pi has flushed it");
 

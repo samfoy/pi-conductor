@@ -23,7 +23,7 @@ import { STATUS_GLYPH } from "./status-glyph.ts";
 import { statusColorSlot, type ThemeFg } from "./transcript-style.ts";
 import { isRecord } from "./herdr/cli.ts";
 import type { CoordinationDetails } from "./supervision/delivery.ts";
-import { COORDINATION_TYPE } from "./supervision/inbox.ts";
+import { COORDINATION_LABEL, COORDINATION_TYPE } from "./supervision/inbox.ts";
 
 /** One styled run of text inside a card line. */
 export interface CardSpan {
@@ -184,17 +184,20 @@ const label = (s: unknown, max = 64) => {
 };
 const unescapeCard = (s: string) => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&#96;/g, "`").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
 
-/** S2 peer card: the framed body (between frame line, framing sentence and closing tag), shown unescaped to the human. */
+/** S2 peer and S4 chief cards: the framed body (between frame line, framing sentence and closing tag), shown unescaped to the human. */
 export function renderCoordinationCard(message: RenderableCustomMessage, opts: CardOpts): CardLine[] {
   const d = (message.details ?? {}) as Partial<CoordinationDetails>;
   const name = label(d.fromName ?? d.from);
+  const title = (COORDINATION_LABEL as Record<string, string>)[d.kind ?? "peer"] ?? "coordination message";
+  const meta = `${d.askId !== undefined ? ` · ask ${label(d.askId)}` : ""}${d.leaseGeneration !== undefined ? ` · lease ${label(String(d.leaseGeneration))}` : ""}`;
   if (d.notice === "uncertain") {
-    return [[{ text: "⚠", slot: "warning" }, { text: " " }, { text: name, bold: true }, { text: " peer message may or may not have been delivered; not replayed", slot: "warning" }],
-      [{ text: `${INDENT}id ${label(d.coordinationId)}`, slot: "muted" }]];
+    return [[{ text: "⚠", slot: "warning" }, { text: " " }, { text: name, bold: true }, { text: ` ${title} may or may not have been delivered; not replayed`, slot: "warning" }],
+      [{ text: `${INDENT}id ${label(d.coordinationId)}${meta}`, slot: "muted" }]];
   }
   const content = typeof message.content === "string" ? message.content : "";
   const body = content.split(/\r?\n|\r/).slice(2, -1).map(l => controlFree(unescapeCard(l))).filter(l => l.trim());
-  const lines: CardLine[] = [[{ text: "✉", slot: "accent" }, { text: " " }, { text: name, bold: true }, { text: " peer message", slot: "dim" }, { text: ` · ${label(d.from)}`, slot: "dim" }]];
+  const lines: CardLine[] = [[{ text: "✉", slot: d.stale ? "muted" : "accent" }, { text: " " }, { text: name, bold: true }, { text: ` ${title}`, slot: "dim" },
+    ...(d.stale ? [{ text: " (former chief; informational)", slot: "warning" as const }] : []), { text: ` · ${label(d.from)}${meta}`, slot: "dim" }]];
   if (!opts.expanded) {
     if (body[0]) lines.push([{ text: `${INDENT}⎿  ${body[0]}`, slot: "toolOutput" }]);
     if (body.length > 1) lines.push([{ text: `${INDENT}${EXPAND_KEY} for the full message`, slot: "dim" }]);

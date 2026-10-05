@@ -26,6 +26,8 @@ export const LEAD_STALE_MS = 600_000;
 
 export interface LeadIdentity { sessionId: string; sessionFile: string; pid: number; pidStartTime?: number; generation: string }
 export interface LeadRunBrief { id: string; persona: string; status: RunStatus; parentRunId?: string }
+/** S4: a mirror of the lead's branch for `staff list` and `staff reply`'s early check; the branch, not this, decides a reply. */
+export interface LeadPendingAsk { askId: string; question: string; askedAt: number }
 export interface LeadRecord extends LeadIdentity {
   v: 1;
   socketPath: string; paneId: string; tabId?: string; workspaceId?: string;
@@ -33,6 +35,7 @@ export interface LeadRecord extends LeadIdentity {
   role: "lead";
   runs: { active: number; blocked: number; total: number };
   runsBrief: LeadRunBrief[];
+  pendingAsk?: LeadPendingAsk;
   updatedAt: number;
 }
 export type LeadLiveness = "live" | "dead" | "unknown";
@@ -50,8 +53,11 @@ const RECORD_FILE = /^[0-9a-f]{64}\.json$/;
 const TEMP_FILE = /^[0-9a-f]{64}\.json-[0-9a-f-]{36}\.(claim|tmp|sweep)$/;
 
 const KEYS = new Set(["v", "sessionId", "sessionFile", "generation", "pid", "pidStartTime", "socketPath", "paneId", "tabId", "workspaceId",
-  "cwd", "repo", "branch", "displayName", "role", "runs", "runsBrief", "updatedAt"]);
+  "cwd", "repo", "branch", "displayName", "role", "runs", "runsBrief", "pendingAsk", "updatedAt"]);
 const BRIEF_KEYS = new Set(["id", "persona", "status", "parentRunId"]);
+const ASK_KEYS = new Set(["askId", "question", "askedAt"]);
+/** The ask question bound (chars and bytes), shared with `chief ask`. */
+export const ASK_QUESTION_MAX = 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const text = (v: unknown, max: number) => typeof v === "string" && v.length > 0 && Buffer.byteLength(v) <= max && !/[\u0000-\u001f\u007f]/.test(v);
 const optional = (v: unknown, max: number) => v === undefined || text(v, max);
@@ -70,26 +76,33 @@ export function validLeadRecord(v: unknown): v is LeadRecord {
     v.role === "lead" && isRecord(runs) && onlyKeys(runs, new Set(["active", "blocked", "total"])) && count(runs.active) && count(runs.blocked) && count(runs.total) &&
     Array.isArray(runsBrief) && runsBrief.length <= LEAD_RUNS_BRIEF_MAX && runsBrief.every(b => isRecord(b) && onlyKeys(b, BRIEF_KEYS) &&
       text(b.id, 128) && text(b.persona, 128) && typeof b.status === "string" && /^[a-z_]{1,32}$/.test(b.status) && optional(b.parentRunId, 128)) &&
+    (v.pendingAsk === undefined || (isRecord(v.pendingAsk) && onlyKeys(v.pendingAsk, ASK_KEYS) && text(v.pendingAsk.askId, 256) &&
+      text(v.pendingAsk.question, ASK_QUESTION_MAX) && Array.from(v.pendingAsk.question as string).length <= ASK_QUESTION_MAX && count(v.pendingAsk.askedAt))) &&
     count(v.updatedAt) && Buffer.byteLength(JSON.stringify(v)) <= LEAD_RECORD_MAX_BYTES;
 }
 
-/** Control characters become spaces; then at most 128 code points and the validator's byte bound, cut on whole code points. */
-function clip(s: string | undefined): string | undefined {
+/** Control characters become spaces; then at most `chars` code points and `max` bytes, cut on whole code points. */
+function clip(s: string | undefined, chars = 128, max = PRESENTATION_MAX_BYTES): string | undefined {
   let kept = "", bytes = 0;
-  for (const c of Array.from(s ?? "").slice(0, 128)) {
+  for (const c of Array.from(s ?? "").slice(0, chars)) {
     const char = /[\u0000-\u001f\u007f]/.test(c) ? " " : c;
-    if ((bytes += Buffer.byteLength(char)) > PRESENTATION_MAX_BYTES) break;
+    if ((bytes += Buffer.byteLength(char)) > max) break;
     kept += char;
   }
   return kept.trim() || undefined;
 }
 
-/** Clips presentation text and drops run briefs until the record fits; identity that cannot fit fails closed. */
+/** Clips presentation text, then drops run briefs and shortens an ask's question until the record fits; identity that cannot fit fails closed. */
 export function buildLeadRecord(fields: Omit<LeadRecord, "v" | "role">): LeadRecord {
+  const ask = fields.pendingAsk;
   let record: LeadRecord = { ...fields, v: 1, role: "lead", displayName: clip(fields.displayName) ?? "lead",
-    repo: clip(fields.repo), branch: clip(fields.branch), runsBrief: fields.runsBrief.slice(0, LEAD_RUNS_BRIEF_MAX) };
-  while (record.runsBrief.length > 0 && Buffer.byteLength(JSON.stringify(record)) > LEAD_RECORD_MAX_BYTES) {
-    record = { ...record, runsBrief: record.runsBrief.slice(0, -1) };
+    repo: clip(fields.repo), branch: clip(fields.branch), runsBrief: fields.runsBrief.slice(0, LEAD_RUNS_BRIEF_MAX),
+    ...(ask ? { pendingAsk: { askId: ask.askId, question: clip(ask.question, ASK_QUESTION_MAX, ASK_QUESTION_MAX) ?? "(question)", askedAt: ask.askedAt } } : {}) };
+  const over = () => Buffer.byteLength(JSON.stringify(record)) > LEAD_RECORD_MAX_BYTES;
+  while (record.runsBrief.length > 0 && over()) record = { ...record, runsBrief: record.runsBrief.slice(0, -1) };
+  // Presentation only: the askId stays exact; the question shrinks to fit.
+  for (let chars = ASK_QUESTION_MAX / 2; record.pendingAsk && over() && chars >= 1; chars = Math.floor(chars / 2)) {
+    record = { ...record, pendingAsk: { ...record.pendingAsk, question: `${clip(ask!.question, chars, ASK_QUESTION_MAX - 3) ?? ""}…` } };
   }
   if (!validLeadRecord(record)) throw new Error("lead record is outside its bounds; presence not published");
   return record;

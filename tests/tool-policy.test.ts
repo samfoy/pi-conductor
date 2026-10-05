@@ -174,18 +174,18 @@ for (const [label, env, expected] of [
   });
 }
 
-// S3: with a chief role too, only a herdr lead also registers `staff` (kept inactive unless chief); `chief` waits for S4.
+// S3/S4: with a chief role too, only a herdr lead also registers `staff` (inactive unless chief) and `chief` (inactive while chief).
 for (const [label, env, expected] of [
   ["plain lead", {}, LEAD_TOOLS],
-  ["herdr lead", HERDR, [...LEAD_TOOLS, "peer", "staff"]],
+  ["herdr lead", HERDR, [...LEAD_TOOLS, "peer", "staff", "chief"]],
   ["depth-1 child in a herdr pane", { ...HERDR, CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: "1" }, ["ask_owner"]],
   ["depth-1 delegator in a herdr pane", { ...HERDR, CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: "1", CONDUCTOR_DELEGATE_ALLOW: "inspector", CONDUCTOR_RUN_ID: "lead-a", CONDUCTOR_RUN_DIR: "/runs/lead-a" }, ["ask_owner", "delegate"]],
   ["depth-2 leaf in a herdr pane", { ...HERDR, CONDUCTOR_SUBAGENT: "1", CONDUCTOR_DEPTH: "2" }, []],
 ] as const) {
-  test(`S3 registerTools with a presence and a chief role under ${label} registers exactly ${expected.includes("staff" as never) ? "the lead tools plus peer and staff" : expected.length > 2 ? "the lead tools" : expected.join(",") || "nothing"}`, () => {
+  test(`S3/S4 registerTools with a presence and a chief role under ${label} registers exactly ${expected.includes("staff" as never) ? "the lead tools plus peer, staff and chief" : expected.length > 2 ? "the lead tools" : expected.join(",") || "nothing"}`, () => {
     const names = captureRegisteredToolNames(env, { ownTool() {} }, {});
     assert.deepEqual([...names].sort(), [...expected].sort());
-    assert.ok(!names.includes("chief"), "the chief tool is not registered in S3");
+    if ((env as NodeJS.ProcessEnv).CONDUCTOR_SUBAGENT === "1") for (const name of ["chief", "peer", "staff"]) assert.ok(!names.includes(name), `a child never registers ${name}`);
   });
 }
 

@@ -19,7 +19,7 @@ import { RunRegistry } from "../src/runs.ts";
 import { probeHerdrOwner } from "../src/herdr/ownership.ts";
 import { readProcessStartTime } from "../src/reconcile-startup.ts";
 import { LeadPresence } from "../src/supervision/presence.ts";
-import { buildLeadRecord, createLeadRecord, supervisionRoot } from "../src/supervision/store.ts";
+import { buildLeadRecord, createLeadRecord, leadPath, readLeadRecord, supervisionRoot } from "../src/supervision/store.ts";
 import { ChiefRole, chiefLeaseDir, claimChiefLease, readChiefLease, releaseChiefLease, CHIEF_ROLE_ENTRY, branchRole } from "../src/supervision/lease.ts";
 import { registerStaffTool, STAFF_LIST_MAX_BYTES } from "../src/supervision/tools.ts";
 import conductor from "../src/index.ts";
@@ -68,7 +68,7 @@ function lead(over: { pi?: ReturnType<typeof fakePi>; env?: NodeJS.ProcessEnv; c
     timers: (over.timers ?? clock.deps) as never, liveness: over.liveness as never, describeRepo: () => ({ repo: "api", branch: "main" }) });
   presence.ownTool("peer");
   const chief = new ChiefRole({ pi: pi.api as never, presence, timers: (over.timers ?? clock.deps) as never });
-  registerStaffTool(pi.api as never, presence, chief);
+  registerStaffTool(pi.api as never, presence, chief, { getRegistry: () => new RunRegistry(), getCwd: () => fixtures });
   const s = over.s ?? session(over.flushed);
   const notify = (m: string) => void notes.push(m);
   return {
@@ -276,13 +276,13 @@ test("S3 staff list: this exact socket's other leads by exact full id with state
   assert.equal(details.self, ctx.s.sessionId);
   assert.equal(details.generation, 0);
   assert.deepEqual(details.leads.map((l: { lead: string }) => l.lead), [same, unknown], "exact socket only, self excluded, sorted by exact id");
-  assert.deepEqual(details.leads[0], { lead: same, name: ctx.s.sessionId, cwd: "/work/peer", repo: "peer", branch: "dev", state: "live", runs: { active: 2, blocked: 1, total: 5 }, available_actions: ["peer message"] });
+  assert.deepEqual(details.leads[0], { lead: same, name: ctx.s.sessionId, cwd: "/work/peer", repo: "peer", branch: "dev", state: "live", runs: { active: 2, blocked: 1, total: 5 }, available_actions: ["staff transcript", "staff message"] });
   assert.deepEqual([details.leads[1].state, details.leads[1].available_actions], ["unknown", []], "an unproven lead offers no action");
   assert.equal(JSON.parse(content[0].text).self, ctx.s.sessionId);
   for (let i = 0; i < 120; i++) peerRecord({ displayName: "x".repeat(200) });
   const big = await ctx.staff();
   assert.ok(Buffer.byteLength(JSON.stringify(big.details)) <= STAFF_LIST_MAX_BYTES && big.details.truncated === true, "bounded at 16 KiB");
-  assert.deepEqual(Object.keys(ctx.pi.tools.get("staff").parameters.properties), ["action"], "S3 advertises list only");
+  assert.deepEqual(Object.keys(ctx.pi.tools.get("staff").parameters.properties), ["action", "lead", "message", "ask_id", "files"], "S4 adds transcript, message and reply");
   ctx.stop();
 });
 
@@ -364,7 +364,7 @@ test("S3 real factory: /chief claims, records the role, adds staff; repeat /chie
   const branch: Entry[] = [], notes: string[] = [];
   const f = loadFactory(branch);
   assert.ok(f.tools.has("staff") && f.commands.has("chief"), "a herdr lead registers staff and /chief");
-  assert.ok(!f.tools.has("chief"), "the chief tool lands in S4, not as a stub");
+  assert.ok(f.tools.has("chief"), "S4 registers the chief tool with its behaviour");
   const id = randomUUID(), ctx = ctxFor(id, tmpDir("s3-factory-"), branch, notes);
   await f.fire("session_start", { reason: "startup" }, ctx);
   await slash(f, "conductor", "on", ctx);
@@ -457,4 +457,33 @@ test("S3 doctor reports the chief role and the staff tool", async () => {
   await slash(f, "conductor", "doctor", ctx);
   assert.match(notes.at(-1)!, /chief: lease generation 0 held for this herdr socket; staff tool: active/);
   await f.fire("session_shutdown", { reason: "quit" }, ctx);
+});
+
+test("S4 real factory: a lead gets chief, not staff; the presence mirror and the panel footer follow the branch ask at turn end and after /tree", async () => {
+  reset();
+  const branch: Entry[] = [], notes: string[] = [];
+  const f = loadFactory(branch);
+  const id = randomUUID(), ctx = ctxFor(id, tmpDir("s4-factory-"), branch, notes);
+  let panel: ((tui: unknown, theme: unknown) => { render(width: number): string[] }) | undefined;
+  (ctx.ui as { setWidget: unknown }).setWidget = (_key: string, w: typeof panel) => { panel = w; };
+  await f.fire("session_start", { reason: "startup" }, ctx);
+  await slash(f, "conductor", "on", ctx);
+  assert.ok(f.active().includes("chief") && !f.active().includes("staff"));
+  const record = () => readLeadRecord(leadPath(id));
+  assert.equal(record()?.pendingAsk, undefined);
+  // Pi recorded a successful `chief ask` result on the branch.
+  branch.push({ type: "message", message: { role: "toolResult", toolCallId: "call-1", toolName: "chief", isError: false, content: [],
+    details: { action: "ask", askId: "call-1", question: "main or dev?", askedAt: 7, chief: "c", leaseGeneration: 0 } } } as never);
+  await f.fire("turn_end", {}, ctx);
+  assert.deepEqual(record()?.pendingAsk, { askId: "call-1", question: "main or dev?", askedAt: 7 });
+  const theme = { fg: (_s: string, t: string) => t, bold: (t: string) => t };
+  assert.match(panel!(undefined, theme).render(120).join("\n"), /⧗ waiting on chief: main or dev\?/);
+  branch.pop(); // /tree back to before the ask
+  await f.fire("session_tree", {}, ctx);
+  assert.equal(record()?.pendingAsk, undefined, "the mirror follows the rewind");
+  assert.equal(panel, undefined, "no runs and no ask: the panel clears");
+  await slash(f, "chief", "", ctx);
+  assert.ok(f.active().includes("staff") && !f.active().includes("chief"), "the holder: staff, and its own chief tool removed");
+  await f.fire("session_shutdown", { reason: "quit" }, ctx);
+  assert.deepEqual(JSON.parse(readFileSync(fakeHerdrState, "utf8")).calls, [], "S4 never invokes the herdr CLI");
 });

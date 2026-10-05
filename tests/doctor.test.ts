@@ -848,7 +848,7 @@ test("S1 doctor: ## Supervision shows presence state, reason, record and peer to
     assert.match(published, /presence: published \(session s-1, epoch g-1\)/);
     assert.match(published, /record: \/home\/x\/leads\/abc\.json/);
     assert.match(published, /peer tool: active/);
-    assert.match(published, /S3: presence, `peer list`, non-waking `peer message` \(queued, at most once\), the chief lease \(\/chief\) and `staff list`; no `chief` tool or staff transcript, message or reply yet/);
+    assert.match(published, /S4: presence, `peer list`, non-waking `peer message`, the chief lease \(\/chief\), `staff list\/transcript\/message\/reply` and `chief message\/ask`; all queued and at most once; only the current chief's kinds wake/);
     assert.doesNotMatch(published, /chief:/, "no chief line without a chief role");
     const chief = section(await report({ state: "published", sessionId: "s-1", generation: "g-1", toolOwned: true, toolActive: true, chief: { role: "chief", generation: 4, staffActive: true } }), "Supervision");
     assert.match(chief, /chief: lease generation 4 held for this herdr socket; staff tool: active/);

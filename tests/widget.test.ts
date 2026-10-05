@@ -163,3 +163,25 @@ test("widget isActiveRun: terminal statuses are excluded from active (v0.17-S1 c
   }
 });
 
+
+// ── S4 footer ─────────────────────────────────────────────────────────
+
+test("S4 footer: one bounded `⧗ waiting on chief` line, control-free and clipped to 80 code points", async () => {
+  const { formatChiefWait, mountEnsembleWidget, CHIEF_WAIT_MAX_CHARS } = await import("../src/widget.ts");
+  assert.equal(formatChiefWait("Which base?", stubTheme), "<warning>⧗ waiting on chief: Which base?</warning>");
+  const long = formatChiefWait(`a\u001b[2J\nb ${"🦊".repeat(200)}`, stubTheme);
+  assert.ok(!/[\u0000-\u001f]/.test(long));
+  assert.equal(Array.from(long.replace(/^<warning>⧗ waiting on chief: |<\/warning>$/g, "")).length, CHIEF_WAIT_MAX_CHARS + 1, "80 code points plus an ellipsis");
+  // Mounted with no runs at all: the panel shows only because of the ask, and clears with it.
+  const { RunRegistry } = await import("../src/runs.ts");
+  let widget: ((tui: unknown, theme: typeof stubTheme) => { render(width: number): string[] }) | undefined;
+  const ctx = { ui: { setWidget: (_k: string, w: typeof widget) => { widget = w; } } };
+  let ask: { question: string } | undefined = { question: "main or dev?" };
+  const w = mountEnsembleWidget(new RunRegistry(), () => ctx as never, undefined, undefined, () => ask);
+  assert.ok(widget, "an outstanding ask mounts the panel");
+  assert.match(widget!(undefined, stubTheme).render(200).join("\n"), /⧗ waiting on chief: main or dev\?/);
+  ask = undefined;
+  w.refresh();
+  assert.equal(widget, undefined, "no ask, no runs: no panel");
+  w.dispose();
+});

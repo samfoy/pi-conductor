@@ -76,6 +76,7 @@ import { CWD_ENTRY_TYPE, createCwdController } from "./conductor-cwd.ts";
 import { CoordinationDelivery } from "./supervision/delivery.ts";
 import { herdrLeadEnv, LeadPresence } from "./supervision/presence.ts";
 import { ChiefRole } from "./supervision/lease.ts";
+import { LeadAsks } from "./supervision/ask.ts";
 
 export default function (pi: ExtensionAPI): void {
   pi.registerFlag("conductor-launch", { type: "string", description: "Managed child invocation token" });
@@ -271,12 +272,21 @@ export default function (pi: ExtensionAPI): void {
   let conductorModeOn = resolveInitialConductorMode(process.env, {
     defaultMode: initialCfg.defaultMode,
   });
+  // S4: the branch decides the outstanding `chief ask`; a reply card counts only once its receipt retired the dispatch.
+  const asks: LeadAsks | undefined = herdrLeadEnv(process.env) ? new LeadAsks((reply): boolean => delivery?.unconfirmed(reply) ?? true) : undefined;
   // S1: one presence per module instance; it captures this instance's env, pid and start time.
-  const supervision = new LeadPresence({ pi, env: process.env, registry, getMode: () => conductorModeOn });
-  // S2: a herdr lead drains only its own inbox, and only while that presence is owned.
-  const delivery = herdrLeadEnv(process.env) ? new CoordinationDelivery({ pi, presence: supervision }) : undefined;
+  const supervision = new LeadPresence({ pi, env: process.env, registry, getMode: () => conductorModeOn, pendingAsk: () => asks?.pending() });
   // S3: the chief lease is held only by an owned lead; its epoch is this module instance's.
   const chief = herdrLeadEnv(process.env) ? new ChiefRole({ pi, presence: supervision }) : undefined;
+  // S2: a herdr lead drains only its own inbox, and only while that presence is owned; S4 revalidates chief kinds against the lease.
+  const delivery: CoordinationDelivery | undefined = herdrLeadEnv(process.env) ? new CoordinationDelivery({ pi, presence: supervision, chief, asks }) : undefined;
+  // S4: the ask mirror (presence record, panel footer) follows the branch after turns, replies and rewinds.
+  let shownAsk: string | undefined;
+  const syncAsk = () => {
+    supervision.touch();
+    const ask = asks?.pending()?.askId;
+    if (ask !== shownAsk) { shownAsk = ask; widget?.refresh(); }
+  };
 
   const opts = {
     getCwd: cwd,
@@ -340,6 +350,7 @@ export default function (pi: ExtensionAPI): void {
     },
     supervision,
     chief,
+    asks,
     getSupervisionStatus: () => ({ ...supervision.status(), ...delivery?.status(), ...(chief ? { chief: chief.status() } : {}) }),
     /**
      * Slice 7: read the host's current Theme so the foreground stream
@@ -441,6 +452,7 @@ export default function (pi: ExtensionAPI): void {
     const cwdWarning = cwdControl.restore(branch);
     if (cwdWarning) ctx.ui.notify(cwdWarning, "warning");
     ctxRef = ctx;
+    asks?.start(() => ctx.sessionManager.getBranch());
     // S1: identity is read once, here; a later getter on this ctx may be stale after reload or a switch.
     let sessionId: string | undefined, sessionFile: string | undefined;
     try { sessionId = ctx.sessionManager?.getSessionId(); sessionFile = ctx.sessionManager?.getSessionFile(); } catch { /* ineligible */ }
@@ -458,7 +470,9 @@ export default function (pi: ExtensionAPI): void {
         hardThresholdSeconds: cfg.watchdog.defaultHardSeconds,
         graceSeconds: cfg.watchdog.graceSeconds,
       };
-    }, getCwdOverride);
+    }, getCwdOverride, () => asks?.pending());
+    // Receipts found by the first drain may have confirmed a reply card the first record still counted as unconfirmed.
+    syncAsk();
     if (unsubFocusedShortcut) unsubFocusedShortcut();
     unsubFocusedShortcut = installFocusedOverlayShortcut(ctx, {
       openFocusedOverlay: () => openFocusedOverlay(),
@@ -694,6 +708,7 @@ export default function (pi: ExtensionAPI): void {
     delivery?.stop();
     chief?.stop();
     supervision.stop();
+    asks?.stop();
     registry.herdrAdmissionOpen = false;
     if (unsubFocusedShortcut) {
       unsubFocusedShortcut();
@@ -744,7 +759,7 @@ export default function (pi: ExtensionAPI): void {
   pi.on("turn_start", async (_event, ctx) => {
     cwdControl.setSessionCwd(ctx.cwd);
     ctxRef = ctx;
-    if (!widget) widget = mountEnsembleWidget(registry, () => ctxRef, undefined, getCwdOverride);
+    if (!widget) widget = mountEnsembleWidget(registry, () => ctxRef, undefined, getCwdOverride, () => asks?.pending());
     // Item 11 dead-man-switch: a turn fired — the wake notification
     // chain is proven to be working. Drop every pending entry; we don't
     // need to re-fire any of them.
@@ -791,9 +806,10 @@ export default function (pi: ExtensionAPI): void {
     pi.on("session_before_compact", () => { delivery.compaction("start"); });
     pi.on("session_compact", () => { delivery.compaction("end"); });
     pi.on("session_compact_failed", () => { delivery.compaction("end"); });
-    pi.on("turn_start", () => { delivery.boundary(); });
-    pi.on("turn_end", () => { delivery.drain(); });
-    pi.on("agent_settled", () => { delivery.boundary(); delivery.drain(); });
+    pi.on("turn_start", () => { delivery.boundary(); delivery.started(); });
+    pi.on("turn_end", () => { delivery.drain(); syncAsk(); });
+    pi.on("agent_settled", () => { delivery.boundary(); delivery.drain(); syncAsk(); });
+    pi.on("session_tree", () => { syncAsk(); });
   }
 
   registerTools(pi, opts);

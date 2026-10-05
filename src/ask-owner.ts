@@ -5,6 +5,19 @@ import { hasRetirement } from "./context-retirement.ts";
 import { appendFileEvidence } from "./file-evidence.ts";
 import type { RunRegistry } from "./runs.ts";
 
+/**
+ * A6 sole-call check, shared by `ask_owner` and S4 `chief ask`: Pi persists the
+ * finalized assistant message before executing its tools, so the latest assistant
+ * message on the branch must hold exactly this one call.
+ */
+export function isSoleToolCall(branch: readonly unknown[], name: string, id: string): boolean {
+  const last = [...branch].reverse().find(e => (e as { type?: unknown }).type === "message" && (e as { message?: { role?: unknown } }).message?.role === "assistant") as
+    { message: { content?: unknown } } | undefined;
+  const content = last?.message.content;
+  const calls = Array.isArray(content) ? content.filter(p => (p as { type?: unknown })?.type === "toolCall") as { name?: unknown; id?: unknown }[] : [];
+  return calls.length === 1 && calls[0]!.name === name && calls[0]!.id === id;
+}
+
 export function registerAskOwner(pi: ExtensionAPI, getRegistry: () => RunRegistry, env: NodeJS.ProcessEnv): void {
   let outstanding = false;
   pi.registerTool({
@@ -17,10 +30,7 @@ export function registerAskOwner(pi: ExtensionAPI, getRegistry: () => RunRegistr
       if (outstanding) throw new Error("An owner question is already outstanding");
       if (typeof params.question !== "string" || !params.question.trim()) throw new Error("question must contain non-whitespace text");
       if (ctx.hasPendingMessages()) throw new Error("Cannot ask with queued messages; process the owner messages first");
-      // Pi persists the finalized assistant message before executing its tools.
-      const last = [...ctx.sessionManager.getBranch()].reverse().find(e => e.type === "message" && e.message.role === "assistant");
-      const calls = last?.type === "message" && last.message.role === "assistant" ? last.message.content.filter(p => p.type === "toolCall") : [];
-      if (calls.length !== 1 || calls[0].name !== "ask_owner" || calls[0].id !== id) throw new Error("Call ask_owner alone as the only tool call in the assistant turn");
+      if (!isSoleToolCall(ctx.sessionManager.getBranch(), "ask_owner", id)) throw new Error("Call ask_owner alone as the only tool call in the assistant turn");
       const config = loadConfig(env.CONDUCTOR_CONFIG_CWD || ctx.cwd);
       if (config.contextRetirement && hasRetirement(ctx.sessionManager.getEntries(), ctx.sessionManager.getSessionId())) throw new Error("Session retired; return a handoff for a fresh child instead of asking for an impossible continuation");
       const question = params.question.trim();

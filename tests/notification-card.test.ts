@@ -367,3 +367,19 @@ test("S2 coordination card: compact header plus first line, expanded body; unesc
   registerNotificationRenderer({ registerMessageRenderer: (t: string) => void types.push(t) });
   assert.deepEqual(types.sort(), ["conductor-coordination", "ensemble-notification"]);
 });
+
+// ── S4 chief cards ────────────────────────────────────────────────────
+
+test("S4 coordination card: chief kinds name themselves, the ask and the lease; a former chief's card says so", async () => {
+  const { renderCoordinationCard } = await import("../src/notification-renderer.ts");
+  const { buildCoordination } = await import("../src/supervision/inbox.ts");
+  const { coordinationMessage, uncertaintyMessage } = await import("../src/supervision/delivery.ts");
+  const lease = { v: 1 as const, socketPath: "/s.sock", sessionId: "chief-a", sessionFile: "/s/a.jsonl", pid: 4242, startTime: 7, epoch: "e", generation: 3, at: 1 };
+  const reply = buildCoordination({ kind: "chief_reply", from: "chief-a", fromName: "chief", to: "lead-b", socketPath: "/s.sock", lease, askId: "call-9", text: "use main", createdAt: T0 });
+  assert.equal(cardLinesToPlainText(renderCoordinationCard(coordinationMessage(reply), { expanded: false })), "✉ chief chief reply · chief-a · ask call-9 · lease 3\n  ⎿  use main");
+  const message = buildCoordination({ kind: "chief_message", from: "chief-a", to: "lead-b", socketPath: "/s.sock", lease, text: "rebase", createdAt: T0 });
+  assert.equal(cardLinesToPlainText(renderCoordinationCard(coordinationMessage(message, true), { expanded: false })).split("\n")[0], "✉ chief-a message from the chief (former chief; informational) · chief-a · lease 3");
+  const ask = buildCoordination({ kind: "lead_ask", from: "lead-b", to: "chief-a", socketPath: "/s.sock", lease, askId: "call-9", text: "which?", createdAt: T0 });
+  assert.match(cardLinesToPlainText(renderCoordinationCard(coordinationMessage(ask), { expanded: false })), /^✉ lead-b question to the chief · lead-b · ask call-9 · lease 3/);
+  assert.match(cardLinesToPlainText(renderCoordinationCard(uncertaintyMessage(reply), { expanded: false })), /^⚠ chief chief reply may or may not have been delivered; not replayed\n  id .* · ask call-9 · lease 3$/);
+});

@@ -45,11 +45,21 @@ export function isActiveRun(run: Run): boolean {
  * Mount the ensemble widget. It reactively re-renders when the registry
  * notifies of any change, and again when finished-linger entries expire.
  */
+/** S4 footer: one line, the question clipped to 80 code points with control characters blanked. Presentation only. */
+export const CHIEF_WAIT_MAX_CHARS = 80;
+export function formatChiefWait(question: string, theme: { fg(slot: string, text: string): string }): string {
+  const chars = Array.from(question.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim());
+  const clipped = chars.length > CHIEF_WAIT_MAX_CHARS ? `${chars.slice(0, CHIEF_WAIT_MAX_CHARS).join("")}…` : chars.join("");
+  return theme.fg("warning", `⧗ waiting on chief: ${clipped}`);
+}
+
 export function mountEnsembleWidget(
   registry: RunRegistry,
   getCtx: () => ExtensionContext | null,
   getWatchdogConfig?: () => WatchdogConfig,
   getCwdOverride?: () => string | undefined,
+  /** S4: this branch's outstanding `chief ask`, if any. */
+  getChiefWait?: () => { question: string } | undefined,
 ): EnsembleWidget {
   const recentlyFinished: RecentlyFinished[] = [];
   let lingerTimer: NodeJS.Timeout | undefined;
@@ -68,8 +78,10 @@ export function mountEnsembleWidget(
     const active = runs.filter(isActiveRun);
     const linger = recentlyFinished.map((e) => e.run);
     const cwdOverride = getCwdOverride?.();
+    let wait: { question: string } | undefined;
+    try { wait = getChiefWait?.(); } catch { /* presentation only */ }
 
-    if (active.length === 0 && linger.length === 0 && !cwdOverride) {
+    if (active.length === 0 && linger.length === 0 && !cwdOverride && !wait) {
       ctx.ui.setWidget(WIDGET_KEY, undefined);
       if (lingerTimer) {
         clearTimeout(lingerTimer);
@@ -87,6 +99,7 @@ export function mountEnsembleWidget(
         const wdCfg = getWatchdogConfig?.();
         for (const r of active) lines.push(formatRow(r, theme, now, wdCfg, runs));
         for (const r of linger) lines.push(formatRow(r, theme, now, wdCfg, runs));
+        if (wait) lines.push(formatChiefWait(wait.question, theme));
         return new Text(lines.join("\n"), 0, 0);
       },
       { placement: "belowEditor" },
