@@ -299,8 +299,9 @@ test("S4 reply: an in-flight (.sending) or uncertain reply is no answer; a secon
   await a.staff({ action: "reply", lead: b.sessionId, ask_id: id, message: "second" });
   b.delivery.drain();
   assert.equal(cards(b).length, 1, "a second reply to an ask with one in flight waits");
+  b.begin("chief_reply"); // Pi started the first (it is on the in-memory branch); its file write failed
   b.state.idle = true; b.state.persist = true;
-  b.delivery.drain(); // dispatched while busy (not held): its run ended without the first card reaching the file // the first settles uncertain; only then is the second decided, against the branch
+  b.delivery.drain(); // its run ended without the first card reaching the file: the first settles uncertain; only then is the second decided, against the branch
   assert.match(b.notes.join("\n"), /chief reply .* may or may not have been delivered; not replayed/);
   assert.deepEqual(cards(b).map(s => s.message.details.askId), [id, id], "the second is accepted only after the first settled uncertain");
   assert.deepEqual(persistedReplies(b).map(e => e.content.includes("second")), [true], "only the second card is in the file: the first never answered");
@@ -394,6 +395,33 @@ test("S4 woken dispatch: a card Pi deferred stays pending until its OWN message_
   a.state.idle = true;
   a.delivery.drain();
   assert.deepEqual(suffixes(a.sessionId), [".uncertain.json"], "after the run, still no persisted entry: uncertain");
+  stop();
+});
+
+test("S4 woken dispatch while busy: Pi queues it behind the run; an abort that keeps it queued (idle, nothing pending by Pi's count) holds it, and a second reply waits until its own start", async () => {
+  const { a, b, stop } = pair();
+  const { id } = await asked(a, b);
+  b.state.idle = false; b.state.persist = false; // B is busy: Pi queues the woken card as an agent follow-up, unstarted
+  await a.staff({ action: "reply", lead: b.sessionId, ask_id: id, message: "answer one" });
+  b.delivery.drain();
+  assert.deepEqual(suffixes(b.sessionId), [".sending.json"]);
+  b.state.idle = true; // an SDK/RPC abort without clearQueue(): the run ends with the card still queued, and hasPendingMessages() is false
+  b.delivery.drain();
+  assert.deepEqual(suffixes(b.sessionId), [".sending.json"], "held: not started, so not uncertain");
+  assert.equal(b.delivery.status().heldWakes, 1, "the doctor sees it");
+  await a.staff({ action: "reply", lead: b.sessionId, ask_id: id, message: "answer two" });
+  b.delivery.drain();
+  assert.deepEqual(suffixes(b.sessionId), [".json", ".sending.json", ".slot"], "reply 2 waits behind the held reply 1");
+  assert.equal(b.notes.filter(n => /may or may not have been delivered/.test(n)).length, 0);
+  // B's next run pulls the queued card: its own start, then its persisted entry.
+  const [first] = cards(b).filter(s => s.message.details.kind === "chief_reply").map(s => s.message);
+  b.delivery.messageStarted({ role: "custom", ...first });
+  appendFileSync(b.sessionFile, JSON.stringify({ type: "custom_message", customType: first.customType, content: first.content, display: true, details: first.details }) + "\n");
+  b.state.persist = true;
+  b.delivery.drain();
+  assert.deepEqual(persistedReplies(b).map(e => /answer one/.test(e.content)), [true], "one answer: reply 1");
+  assert.deepEqual(suffixes(b.sessionId), [".rejected.json"], "reply 2 rejected");
+  assert.equal(b.notes.filter(n => /may or may not have been delivered/.test(n)).length, 0, "no notice");
   stop();
 });
 

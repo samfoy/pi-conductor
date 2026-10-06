@@ -37,7 +37,7 @@ export interface CoordinationRecord {
   /** `lead_ask` and `chief_reply`: the asking tool call's id. */
   askId?: string;
 }
-/** `woken`: dispatched with `triggerTurn: true`, so Pi may hold it as a deferred prompt (S4). */
+/** `woken`: dispatched with `triggerTurn: true`, so Pi may defer or queue it unstarted (S4). */
 export interface Dispatcher extends LeadIdentity { sessionOffset: number; dispatchedAt: number; woken?: true }
 export interface SendingRecord extends CoordinationRecord { dispatcher: Dispatcher }
 export type InboxState = "json" | "slot" | "sending" | "uncertain" | "rejected";

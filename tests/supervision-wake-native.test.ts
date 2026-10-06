@@ -16,6 +16,11 @@
  *          notice, reply 2 waits) through unrelated turns and /reload, until
  *          a session start that replaces Pi's session; then it is uncertain
  *          and reply 2 is the one answer.
+ *  abort:  reply 1 reaches B while B is busy, so Pi queues it as an agent
+ *          follow-up; an SDK/RPC `session.abort()` without `clearQueue()`
+ *          ends that run with the card still queued, and Pi's
+ *          `hasPendingMessages()` does not count it. It stays held (reply 2
+ *          waits) until Pi starts it with B's next run: one answer, reply 1.
  * The fake herdr CLI log stays empty. Pi 0.87.1 from CONDUCTOR_NATIVE_PI_ROOT
  * is required (missing fails, never skips); CONDUCTOR_H11_PI_ROOTS adds roots.
  */
@@ -76,7 +81,7 @@ const coordination = (l: Lead) => lines(l.sessionFile()).filter(e => e.type === 
 const replies = (l: Lead, askId: string) => coordination(l).filter(e => e.details?.kind === "chief_reply" && e.details.notice === undefined && e.details.askId === askId);
 const notices = (l: Lead) => coordination(l).filter(e => e.details?.notice === "uncertain");
 
-type Case = "QM" | "Q" | "user" | "reload" | "failed";
+type Case = "QM" | "Q" | "user" | "reload" | "failed" | "abort";
 
 async function witness(t: test.TestContext, pi: Harness, kase: Case) {
   const v = pi.VERSION;
@@ -101,6 +106,39 @@ async function witness(t: test.TestContext, pi: Harness, kase: Case) {
     };
     const reply = (message: string) => staff({ action: "reply", ask_id: ASK, message });
     const calls = b.calls();
+
+    if (kase === "abort") {
+      let release!: () => void;
+      const gate = new Promise<void>(r => { release = r; });
+      const held = async (_c: unknown, o?: { signal?: AbortSignal }) => {
+        await Promise.race([gate, new Promise(r => o?.signal?.addEventListener("abort", r, { once: true }))]);
+        return pi.fauxAssistantMessage("work done");
+      };
+      const spare = [1, 2, 3, 4].map(i => pi.fauxAssistantMessage(`spare ${i}`));
+      const run = b.prompt("work", [held, ...spare]);
+      await until("B streaming", () => b.session().isStreaming);
+      await reply("answer one");
+      await until("reply 1 claimed while B is busy", () => states(B).includes(".sending.json"));
+      await b.session().abort(); // the SDK/RPC abort: no clearQueue()
+      await run;
+      release();
+      await sleep(150);
+      const afterAbort = { states: states(B), notices: notices(b).length, answers: replies(b, ASK).length };
+      await reply("answer two");
+      await sleep(150);
+      await until("B idle after reply 2", () => b.session().isIdle);
+      const afterReply2 = { states: states(B), notices: notices(b).length, answers: replies(b, ASK).length };
+      await b.prompt("unrelated turn", [pi.fauxAssistantMessage("did something else"), pi.fauxAssistantMessage("read the answer"), pi.fauxAssistantMessage("an unexpected extra wake")]);
+      await until("settled", () => b.session().isIdle && !states(B).some(s => s === ".json" || s === ".sending.json"));
+      await sleep(100);
+      const final = { states: states(B), notices: notices(b).length, answers: replies(b, ASK).map(e => /answer one/.test(e.content) ? "one" : /answer two/.test(e.content) ? "two" : "?"), calls: b.calls() - calls };
+      t.diagnostic(`Pi ${v} abort: after abort ${JSON.stringify(afterAbort)}; after reply 2 ${JSON.stringify(afterReply2)}; final ${JSON.stringify(final)}`);
+      assert.deepEqual(afterAbort, { states: [".sending.json"], notices: 0, answers: 0 }, "held: Pi still queues it");
+      assert.deepEqual(afterReply2, { states: [".json", ".sending.json", ".slot"], notices: 0, answers: 0 }, "reply 2 waits behind the held reply 1");
+      assert.deepEqual(final, { states: [".rejected.json"], notices: 0, answers: ["one"], calls: 3 }, "one answer: reply 1, started by B's next run; reply 2 rejected");
+      await until("answered", () => record(B) && record(B).pendingAsk === undefined);
+      return;
+    }
 
     if (kase === "failed") {
       // Reply 1's deferred run throws before Pi starts it (an injected failure: Pi also drops every later deferred prompt).
@@ -177,6 +215,7 @@ const CASES: [Case, string][] = [
   ["user", "a user prompt deferred ahead of the replies releases nothing: one answer"],
   ["reload", "a same-process reload keeps a deferred reply held: one answer"],
   ["failed", "a wake that never starts is held, then released by a replacing session start"],
+  ["abort", "a busy-queued reply survives an SDK abort held, and the next run starts it: one answer"],
 ];
 
 for (const [kase, title] of CASES) {

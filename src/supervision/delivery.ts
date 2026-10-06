@@ -118,7 +118,7 @@ export interface DeliveryDeps {
   timers?: Timers;
   now?: () => number;
 }
-/** `heldWakes`: deferred woken cards Pi has not started; they wait (no notice) until they start or a session start replaces Pi's session. */
+/** `heldWakes`: woken cards Pi deferred or queued and has not started; they wait (no notice) until they start or a session start replaces Pi's session. */
 export interface DeliveryStatus { inboxError?: string; heldWakes?: number }
 
 interface Run {
@@ -131,11 +131,11 @@ interface Run {
   draining: boolean; again: boolean; swept: boolean;
   readonly cursors: Map<string, number>;
   /**
-   * Woken cards Pi deferred (idle with nothing queued right after the send: it
-   * holds them as prompts to run after agent_settled) whose own message_start
-   * has not been seen. Pi exposes no deferred queue, so only that card's start
-   * releases one; Pi keeps the queue across /reload, so a reloaded instance
-   * inherits same-process woken claims it did not see start.
+   * Woken cards whose own message_start has not been seen: Pi defers them
+   * (inside agent_settled) or queues them behind a busy run, and an abort that
+   * does not clear the queue keeps them there. Pi exposes neither queue, so only
+   * that card's start releases one; Pi keeps both across /reload, so a reloaded
+   * instance inherits same-process woken claims it did not see start.
    */
   readonly held: Set<string>;
   /** Set by a reload start until the first owned pass inherits; starts seen before then are not inherited. */
@@ -295,9 +295,10 @@ export class CoordinationDelivery {
       const fence = () => { if (this.owned()?.generation !== self.generation || this.run !== run) throw new Error("coordination dispatch fenced: superseded"); };
       if (!claimCoordination(dir, record, dispatcher, fence)) continue;
       if (record.kind === "chief_reply") replying.add(record.askId!);
+      // Unstarted until its own message_start: Pi defers it inside agent_settled, or queues it behind a busy run,
+      // where an SDK/RPC abort without clearQueue() keeps it and hasPendingMessages() does not count it.
+      if (plan.wake) run.held.add(record.id);
       this.deps.pi.sendMessage(coordinationMessage(record, plan.stale), { deliverAs: "followUp", triggerTurn: plan.wake });
-      // Started now, Pi is busy; queued now, it is pending. Idle with nothing queued means Pi deferred it.
-      if (plan.wake && run.session.isIdle() && !run.session.hasPendingMessages()) run.held.add(record.id);
       dispatched.push({ ...record, dispatcher });
     }
     this.settle(run, self, dir, dispatched);

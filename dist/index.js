@@ -9378,7 +9378,7 @@ function supervisionLines(status) {
   if (status.lastError) lines.push(`  \u26A0 last refresh failed: ${status.lastError}`);
   lines.push(`  peer tool: ${!status.toolOwned ? "not registered (needs a conductor lead in a herdr pane)" : status.toolActive ? "active" : "inactive"}`);
   if (status.inboxError) lines.push(`  \u26A0 inbox: ${status.inboxError}`);
-  if (status.heldWakes) lines.push(`  \u29D7 ${status.heldWakes} woken coordination card(s) Pi deferred and has not started: no notice, and replies to their ask wait, until each starts or a session start replaces Pi's session`);
+  if (status.heldWakes) lines.push(`  \u29D7 ${status.heldWakes} woken coordination card(s) Pi deferred or queued and has not started: no notice, and replies to their ask wait, until each starts or a session start replaces Pi's session`);
   if (status.chief) {
     const c = status.chief;
     lines.push(`  chief: ${c.role === "chief" ? `lease generation ${c.generation} held for this herdr socket` : "lead (no chief lease held)"}; staff tool: ${c.staffActive ? "active" : "inactive"}`);
@@ -11610,8 +11610,8 @@ var CoordinationDelivery = class {
       };
       if (!claimCoordination(dir, record, dispatcher, fence)) continue;
       if (record.kind === "chief_reply") replying.add(record.askId);
+      if (plan.wake) run.held.add(record.id);
       this.deps.pi.sendMessage(coordinationMessage(record, plan.stale), { deliverAs: "followUp", triggerTurn: plan.wake });
-      if (plan.wake && run.session.isIdle() && !run.session.hasPendingMessages()) run.held.add(record.id);
       dispatched.push({ ...record, dispatcher });
     }
     this.settle(run, self, dir, dispatched);
