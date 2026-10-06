@@ -118,6 +118,20 @@ export class HerdrLiveFixture {
     if (pane?.pane_id !== paneId || pane.agent) throw new Error(`H11 refuses to close pane ${paneId}: not an idle fixture shell`);
     await this.cli(["pane", "close", paneId]);
   }
+  /**
+   * Crash injection (S5): signals one process only after proving the socket, and only an owned fixture
+   * process (exact start identity, not the server) inside the server's own private network namespace.
+   */
+  async signalOwned(target: { pid: number; startTime: number }, signal: NodeJS.Signals): Promise<void> {
+    await this.prove();
+    const owned = this.effects.processes(this.id.root, { pid: this.server.pid, startTime: this.server.startTime });
+    if (!owned.some(p => p.pid === target.pid && p.startTime === target.startTime)) throw new Error(`H11 refuses to signal pid ${target.pid}: not an owned fixture process with that start identity`);
+    if (target.pid === this.server.pid) throw new Error("H11 refuses to signal the fixture server directly");
+    const net = this.effects.netns(target.pid);
+    if (!net || net !== this.effects.netns(this.server.pid) || net === this.effects.netns(process.pid)) throw new Error(`H11 refuses to signal pid ${target.pid}: outside the fixture's private network namespace`);
+    if (this.effects.startTime(target.pid) !== target.startTime) throw new Error(`H11 refuses to signal pid ${target.pid}: its start identity changed`);
+    this.effects.signal(target.pid, signal);
+  }
   async teardown(waitMs = 10000): Promise<TeardownReport> {
     const notes: string[] = [];
     const server = { pid: this.server.pid, startTime: this.server.startTime };

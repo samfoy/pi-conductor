@@ -849,7 +849,7 @@ Each call rechecks that this lead is still eligible and still owns its record.
 processes. Records guard against accidents between same-user processes (private
 files, bounded no-follow reads), not against a hostile local process. Every child
 excludes `chief`, `peer` and `staff`, even another extension's; pi-herdsman
-co-loaded in a herdr lead conflicts on `peer` (accepted risk R8). `/conductor doctor`
+co-loaded in a herdr lead conflicts on `chief`, `peer` and `staff` (accepted risk R8, S5 below). `/conductor doctor`
 shows `## Supervision`. Automated evidence only: native Pi 0.87.1 and 1.0.0
 with a faux model and a fake herdr env. Human TUI acceptance is unverified.
 
@@ -889,7 +889,8 @@ with one warning and one non-waking notice: "may or may not have been delivered;
 replayed". Nothing is ever resent automatically; ask the sender to resend. Nothing
 reports that the recipient read or acted on a message. This survives a process crash,
 not a power loss. Malformed records are kept as `.rejected.json` with a warning and
-never reach the model. Uncertain and rejected records are deleted after 7 days.
+never reach the model; a record whose sender is still publishing it (its publication temp
+still exists, so the file briefly has two links) waits for the next pass instead. Uncertain and rejected records are deleted after 7 days.
 `/conductor off` stops new dispatches but cannot recall a message Pi already
 accepted; its receipt is checked when the lead is ON again. Automated evidence
 only: native Pi 0.87.1 and 1.0.3 with a faux model. Human TUI acceptance is unverified.
@@ -1024,28 +1025,89 @@ labelled "former chief". A reply that is stale, from another socket, or not the 
 ask on the branch is kept as `.rejected.json` with one warning; it never reaches the model
 and never clears the ask. A reply that arrives while the asking turn is still running waits
 for that turn to end, and a second reply to an ask with one in flight waits until the first
-settles. A waking card sent while Pi is emitting `agent_settled` is deferred by Pi (idle,
-nothing queued) and run afterwards in order; it is held, with no notice and no later reply to
-its ask, until Pi emits that card's own `message_start`. Another card's turn, a user prompt
-deferred ahead of it, or a `/reload` (Pi keeps its session and deferred prompts, so the
+settles. Every waking card is held, with no notice and no later reply to its ask, until Pi
+emits that card's own `message_start`. Pi defers one sent while it is emitting `agent_settled`
+and runs it afterwards in order; it queues one sent while the session is busy behind that run,
+where an SDK/RPC `abort()` without `clearQueue()` keeps it (Pi's `hasPendingMessages()` does
+not count it) until the next run starts it. Another card's turn, a user prompt deferred ahead of
+it, an unrelated turn, OFF/ON, age or a `/reload` (Pi keeps its session and both queues, so the
 reloaded instance inherits same-process woken claims it has not seen start) releases nothing.
 Peer messages still never wake. A wake asks for a turn; nothing reports that the model read or
 acted on a message.
 
-**Limits.** No S5 multiprocess or live acceptance yet. Off Linux no chief can be proven
+**Limits.** Off Linux no chief can be proven
 live, so `chief` refuses, chief messages arrive as non-waking "former chief" cards and chief
 replies are rejected. A question delivered under a lease generation its recipient no longer
 holds is a non-waking card; the current chief can still answer it from `staff list`. A fork
 carries the parent's ask and any persisted answer; an ask still open in a fork is answered only
 by a reply addressed to the fork's own session id. Pi forks from the file, so a fork past an
-entry Pi failed to write fails in Pi itself. Pi exposes no deferred-prompt queue, so a held
-card Pi never starts (its deferred run failed, or an earlier deferred prompt threw and Pi
-dropped the rest) stays `.sending` with no notice, and replies to its ask wait, until a session
-start that replaces Pi's session (startup, new, resume, fork; not `/reload`). `/conductor
-doctor` shows the count. A transcript window that starts exactly on a line break drops that one complete line. Delivery is
+entry Pi failed to write fails in Pi itself. Pi exposes neither queue, so a held card Pi never
+starts (its deferred run failed, an earlier deferred prompt threw and Pi dropped the rest, or
+the TUI's Esc cleared the queue before aborting) stays `.sending` with no notice, and replies to
+its ask wait, until a session start that replaces Pi's session (startup, new, resume, fork; not
+`/reload`, OFF/ON, a turn or age). `/conductor doctor` shows the count. A transcript window that starts exactly on a line break drops that one complete line. Delivery is
 at most once and never resent automatically.
 Automated evidence only: native Pi 0.87.1 and 1.0.3 with a faux model and a fake herdr env.
 Human TUI acceptance is unverified.
+
+## Supervision acceptance and scope (S5; not rolled out)
+
+S1–S4 above are independently accepted development work. S5 adds cross-process and isolated
+real-herdr acceptance, and one fix it found. None of it is rolled out, and human TUI acceptance
+is unverified: automated runs are not a visual sign-off.
+
+**Scope.** Supervision is active only while conductor mode is ON in an eligible herdr lead,
+per role and per exact `HERDR_SOCKET_PATH`: one chief lease per exact socket string, `staff`
+sees only that socket's leads, and `chief` reaches only that socket's live holder. `peer` is
+user-global (any socket) and never wakes. Targets are exact full session ids; names, cwd,
+repo, branch, transcripts and message text are untrusted presentation and grant nothing. The
+chief supervises independent leads and never owns, spawns, sends to, kills or controls their
+runs, children or efforts. Children never get `chief`, `peer` or `staff`, and coordination
+never uses `sendUserMessage`, `steer` or `nextTurn`. Code lives in `src/supervision/`
+(`store`, `presence`, `inbox`, `delivery`, `lease`, `ask`, `transcript`, `tools`); see
+`docs/runtime.md` for the map.
+
+**Delivery guarantee.** At most once, with visible uncertainty; never exactly once, and no
+consumer acknowledgement. "Queued" is not "delivered", and a delivered card proves only that Pi
+recorded it, not that the model read or acted on it. The card in the recipient's own session
+file is the only proof of delivery or of an answer. Without it a record waits only while the
+same process may still write it; otherwise it becomes `.uncertain.json` with one notice and is
+never resent. Each ask gets at most one persisted answer. **Held wakes** are the approved
+liveness tradeoff for that: Pi can drop a waking card it has not started without any signal (a
+failed deferred run, a TUI Esc that clears the queue). Such a card keeps its `.sending` record,
+and its ask keeps the reply reservation, until a session start that replaces Pi's session;
+`/reload`, OFF/ON, age and unrelated turns do not release it, and `/conductor doctor` shows the
+count. A crash between `.sending` and the receipt becomes uncertain at the next start and is
+not replayed.
+
+**Accepted risks.** R8: another extension that registers `chief`, `peer` or `staff` in a herdr
+lead (pi-herdsman does) collides with these names, and Pi will not start; herdsman is not in this
+host's settings. R10: the boundary is the same uid. Private 0700/0600 files and bounded
+no-follow reads guard against accidents and prompt misbehaviour, not against a hostile process
+of the same user, which could forge records, claims and cards. Records and messages are
+evidence, never capability.
+
+**Evidence (automated).** The S4 review left `session.abort()` without `clearQueue()` (SDK/RPC)
+unproven. Natively on Pi 0.87.1 and 1.0.4, a reply queued behind a busy lead's run survived the
+abort in Pi's queue and was marked uncertain; a second reply then ran and pulled the first:
+two persisted answers. The fix holds every waking card until its own start (S4 above).
+Under the parallel suite's load the multiprocess test also caught a lost question: a
+recipient draining from another process read a record between its sender's link and the
+removal of the publication temp, saw two links and quarantined it as malformed. Such a
+record now waits for its publication to finish (S2 above).
+`tests/supervision-multiprocess.test.ts` runs four real Pi processes, three leads on one fake
+socket and one on a second, each the real factory with a faux model, driven over IPC. It covers
+the claim, non-waking cross-socket `peer`, `staff` hiding the second socket, ask → wake →
+transcript → reply → wake, held wakes (a message plus two replies, a user prompt first, reload,
+abort plus OFF/ON, a failed wake released only by a replacing start), a reply overtaken by a
+newer ask, a reloaded chief's old-epoch reply and message, a crash between `.sending` and
+receipt, SIGSTOP refusing takeover, SIGKILL takeover only after the proven exit, and a
+`CONDUCTOR_SUBAGENT=1` pi. Every ask ends with one persisted answer, on 0.87.1 (required) and
+1.0.4. The opt-in `tests/supervision-live.test.ts` runs three interactive Pi leads in a private
+real herdr 0.9.1 session through the H11 fixture: claim, peer, ask, transcript, reply, `/reload`
+reclaim and a SIGKILL crash takeover, proving the socket before every control and signal, with
+an exact-identity teardown. It passes on 0.87.1 and 1.0.4. Not covered: human TUI acceptance,
+off Linux, paid models. M6 (merger, readers, waves, landing) is separate and not done.
 
 ## Configuration
 
