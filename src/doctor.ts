@@ -39,6 +39,7 @@ function supervisionLines(status: SupervisionStatus | undefined): string[] {
   if (status.lastError) lines.push(`  ⚠ last refresh failed: ${status.lastError}`);
   lines.push(`  peer tool: ${!status.toolOwned ? "not registered (needs a conductor lead in a herdr pane)" : status.toolActive ? "active" : "inactive"}`);
   if (status.inboxError) lines.push(`  ⚠ inbox: ${status.inboxError}`);
+  if (status.heldWakes) lines.push(`  ⧗ ${status.heldWakes} woken coordination card(s) Pi deferred and has not started: no notice, and replies to their ask wait, until each starts or a session start replaces Pi's session`);
   if (status.chief) {
     const c = status.chief;
     lines.push(`  chief: ${c.role === "chief" ? `lease generation ${c.generation} held for this herdr socket` : "lead (no chief lease held)"}; staff tool: ${c.staffActive ? "active" : "inactive"}`);

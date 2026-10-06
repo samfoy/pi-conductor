@@ -9378,6 +9378,7 @@ function supervisionLines(status) {
   if (status.lastError) lines.push(`  \u26A0 last refresh failed: ${status.lastError}`);
   lines.push(`  peer tool: ${!status.toolOwned ? "not registered (needs a conductor lead in a herdr pane)" : status.toolActive ? "active" : "inactive"}`);
   if (status.inboxError) lines.push(`  \u26A0 inbox: ${status.inboxError}`);
+  if (status.heldWakes) lines.push(`  \u29D7 ${status.heldWakes} woken coordination card(s) Pi deferred and has not started: no notice, and replies to their ask wait, until each starts or a session start replaces Pi's session`);
   if (status.chief) {
     const c = status.chief;
     lines.push(`  chief: ${c.role === "chief" ? `lease generation ${c.generation} held for this herdr socket` : "lead (no chief lease held)"}; staff tool: ${c.staffActive ? "active" : "inactive"}`);
@@ -11050,7 +11051,7 @@ var COORDINATION_LABEL = {
   chief_message: "message from the chief",
   chief_reply: "chief reply"
 };
-var DISPATCHER_KEYS = /* @__PURE__ */ new Set(["sessionId", "sessionFile", "pid", "pidStartTime", "generation", "sessionOffset", "dispatchedAt"]);
+var DISPATCHER_KEYS = /* @__PURE__ */ new Set(["sessionId", "sessionFile", "pid", "pidStartTime", "generation", "sessionOffset", "dispatchedAt", "woken"]);
 var errno = (e) => e?.code;
 var wellFormed = (s) => Buffer.from(s, "utf8").toString("utf8") === s;
 var ident = (v, max = 256) => typeof v === "string" && v.length > 0 && Buffer.byteLength(v) <= max && !/[\u0000-\u001f\u007f]/.test(v) && wellFormed(v);
@@ -11164,7 +11165,7 @@ function readDispatched(dir, base, sessionId) {
   const v = read(inboxPath(dir, base, "sending"), DISPATCH_RECORD_MAX_BYTES);
   if (!isRecord(v) || !isRecord(v.dispatcher)) throw new Error("invalid dispatch record");
   const { dispatcher: d, ...record } = v;
-  if (!validCoordination(record) || record.to !== sessionId || recordBase(record) !== base || !onlyKeys2(d, DISPATCHER_KEYS) || d.sessionId !== sessionId || !ident(d.sessionFile, 1024) || !isAbsolute7(d.sessionFile) || typeof d.generation !== "string" || !UUID2.test(d.generation) || !Number.isSafeInteger(d.pid) || d.pid <= 1 || d.pidStartTime !== void 0 && !(Number.isSafeInteger(d.pidStartTime) && d.pidStartTime > 0) || !count2(d.sessionOffset) || !count2(d.dispatchedAt)) throw new Error("invalid dispatch record");
+  if (!validCoordination(record) || record.to !== sessionId || recordBase(record) !== base || !onlyKeys2(d, DISPATCHER_KEYS) || d.sessionId !== sessionId || !ident(d.sessionFile, 1024) || !isAbsolute7(d.sessionFile) || typeof d.generation !== "string" || !UUID2.test(d.generation) || !Number.isSafeInteger(d.pid) || d.pid <= 1 || d.pidStartTime !== void 0 && !(Number.isSafeInteger(d.pidStartTime) && d.pidStartTime > 0) || !count2(d.sessionOffset) || !count2(d.dispatchedAt) || d.woken !== void 0 && d.woken !== true) throw new Error("invalid dispatch record");
   return v;
 }
 function claimCoordination(dir, record, dispatcher, fence) {
@@ -11431,10 +11432,27 @@ var CoordinationDelivery = class {
   pidStartTime = readProcessStartTime(process.pid);
   timers;
   now;
-  /** session_start: classify records left by any earlier dispatcher, drain, then watch and poll; the first owned pass sweeps. */
-  start(session, notify) {
+  /**
+   * session_start: classify records left by any earlier dispatcher, drain, then watch and poll; the first owned pass sweeps.
+   * Only `reason: "reload"` keeps Pi's session (and its deferred prompts); every other start replaces it, so nothing is inherited.
+   */
+  start(session, notify, reason) {
     this.stop();
-    this.run = { session, notify, closed: false, due: 0, compacting: false, compactionDone: false, draining: false, again: false, swept: false, cursors: /* @__PURE__ */ new Map(), woken: /* @__PURE__ */ new Set() };
+    this.run = {
+      session,
+      notify,
+      closed: false,
+      due: 0,
+      compacting: false,
+      compactionDone: false,
+      draining: false,
+      again: false,
+      swept: false,
+      cursors: /* @__PURE__ */ new Map(),
+      held: /* @__PURE__ */ new Set(),
+      inherit: reason === "reload",
+      startedEarly: /* @__PURE__ */ new Set()
+    };
     this.drain();
     this.schedule(DRAIN_POLL_MS);
   }
@@ -11448,7 +11466,8 @@ var CoordinationDelivery = class {
     this.run = void 0;
   }
   status() {
-    return this.lastError ? { inboxError: this.lastError } : {};
+    const held = this.run?.held.size ?? 0;
+    return { ...this.lastError ? { inboxError: this.lastError } : {}, ...held ? { heldWakes: held } : {} };
   }
   /** session_before_compact opens the window; session_compact or _failed ends it, cleared once idle or at a turn boundary. */
   compaction(phase) {
@@ -11469,9 +11488,14 @@ var CoordinationDelivery = class {
       run.compactionDone = false;
     }
   }
-  /** turn_start: a woken dispatch is now inside a run, which keeps the session busy until its receipt can land. */
-  started() {
-    this.run?.woken.clear();
+  /** message_start: Pi began this coordination card, so from here its run (or its receipt) decides; no other card is released. */
+  messageStarted(message4) {
+    const run = this.run;
+    if (!run || !isRecord(message4) || message4.role !== "custom" || message4.customType !== COORDINATION_TYPE || !isRecord(message4.details)) return;
+    const d = message4.details;
+    if (d.notice !== void 0 || typeof d.coordinationId !== "string") return;
+    run.held.delete(d.coordinationId);
+    if (run.inherit) run.startedEarly.add(d.coordinationId);
   }
   /** Synchronous and re-entrancy guarded: one pass at a time per instance. */
   drain() {
@@ -11541,6 +11565,11 @@ var CoordinationDelivery = class {
         for (const state of ["json", "slot"]) if (states.has(state)) unlinkQuiet(inboxPath(dir, base, state));
       } else if (states.has("json")) queued.push(base);
     }
+    if (run.inherit) {
+      run.inherit = false;
+      for (const p of pending) if (p.dispatcher.woken && this.sameProcess(p, self) && !run.startedEarly.has(p.id)) run.held.add(p.id);
+      run.startedEarly.clear();
+    }
     this.settle(run, self, dir, pending);
     const staged = this.deps.asks?.staged();
     if (staged !== void 0 && run.session.isIdle()) this.deps.asks.unstage(staged);
@@ -11573,15 +11602,16 @@ var CoordinationDelivery = class {
         ...self.pidStartTime !== void 0 ? { pidStartTime: self.pidStartTime } : {},
         generation: self.generation,
         sessionOffset: fileSize(self.sessionFile),
-        dispatchedAt: this.now()
+        dispatchedAt: this.now(),
+        ...plan.wake ? { woken: true } : {}
       };
       const fence = () => {
         if (this.owned()?.generation !== self.generation || this.run !== run) throw new Error("coordination dispatch fenced: superseded");
       };
       if (!claimCoordination(dir, record, dispatcher, fence)) continue;
       if (record.kind === "chief_reply") replying.add(record.askId);
-      if (plan.wake) run.woken.add(record.id);
       this.deps.pi.sendMessage(coordinationMessage(record, plan.stale), { deliverAs: "followUp", triggerTurn: plan.wake });
+      if (plan.wake && run.session.isIdle() && !run.session.hasPendingMessages()) run.held.add(record.id);
       dispatched.push({ ...record, dispatcher });
     }
     this.settle(run, self, dir, dispatched);
@@ -11626,24 +11656,27 @@ var CoordinationDelivery = class {
       if (scan?.found.has(p.id)) {
         unlinkQuiet(inboxPath(dir, base, "sending"));
         run.cursors.delete(p.id);
-        run.woken.delete(p.id);
+        run.held.delete(p.id);
         continue;
       }
       if (scan && !scan.complete) {
         run.cursors.set(p.id, scan.next);
         continue;
       }
-      const sameProcess = p.dispatcher.pid === this.pid && p.dispatcher.pidStartTime === this.pidStartTime && p.dispatcher.sessionFile === self.sessionFile;
-      if (sameProcess && (scan === void 0 || !run.session.isIdle() || run.session.hasPendingMessages() || run.woken.has(p.id))) {
+      if (this.sameProcess(p, self) && (scan === void 0 || !run.session.isIdle() || run.session.hasPendingMessages() || run.held.has(p.id))) {
         if (scan) run.cursors.set(p.id, scan.next);
         continue;
       }
       run.cursors.delete(p.id);
+      run.held.delete(p.id);
       if (!markUncertain(dir, p, this.now())) continue;
       const who = p.fromName ? `${p.fromName} (${p.from})` : p.from;
       run.notify(`conductor supervision: ${COORDINATION_LABEL[p.kind]} ${p.id} from ${who} may or may not have been delivered; not replayed.`, "warning");
       this.deps.pi.sendMessage(uncertaintyMessage(p), { deliverAs: "followUp", triggerTurn: false });
     }
+  }
+  sameProcess(p, self) {
+    return p.dispatcher.pid === this.pid && p.dispatcher.pidStartTime === this.pidStartTime && p.dispatcher.sessionFile === self.sessionFile;
   }
   reject(run, dir, base, state) {
     if (!quarantine(dir, base, state)) return;
@@ -18773,7 +18806,7 @@ function index_default(pi) {
       else completionWakeTracker.track(run.id, Date.now());
     }
   };
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     registry.herdrAdmissionOpen = true;
     cwdControl.setSessionCwd(ctx.cwd);
     let branch = [];
@@ -18793,7 +18826,7 @@ function index_default(pi) {
     asks?.start({ getBranch: () => ctx.sessionManager.getBranch(), sessionId, sessionFile });
     supervision.start({ sessionId, sessionFile, cwd: ctx.cwd }, (message4, level) => ctx.ui.notify(message4, level));
     chief?.start({ getBranch: () => ctx.sessionManager.getBranch() }, (message4, level) => ctx.ui.notify(message4, level));
-    delivery?.start({ isIdle: () => ctx.isIdle(), hasPendingMessages: () => ctx.hasPendingMessages() }, (message4, level) => ctx.ui.notify(message4, level));
+    delivery?.start({ isIdle: () => ctx.isIdle(), hasPendingMessages: () => ctx.hasPendingMessages() }, (message4, level) => ctx.ui.notify(message4, level), event.reason);
     if (widget) widget.dispose();
     widget = mountEnsembleWidget(registry, () => ctxRef, () => {
       const cfg = loadConfig(cwd());
@@ -19068,7 +19101,9 @@ ${chiefNote}` : merged };
     });
     pi.on("turn_start", () => {
       delivery.boundary();
-      delivery.started();
+    });
+    pi.on("message_start", (event) => {
+      delivery.messageStarted(event.message);
     });
     pi.on("turn_end", () => {
       delivery.drain();

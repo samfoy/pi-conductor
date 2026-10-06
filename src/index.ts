@@ -440,7 +440,7 @@ export default function (pi: ExtensionAPI): void {
 
   // ── Lifecycle ────────────────────────────────────────────────────────
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     registry.herdrAdmissionOpen = true;
     cwdControl.setSessionCwd(ctx.cwd);
     let branch: readonly unknown[] = [];
@@ -459,7 +459,7 @@ export default function (pi: ExtensionAPI): void {
     supervision.start({ sessionId, sessionFile, cwd: ctx.cwd }, (message, level) => ctx.ui.notify(message, level));
     // S3: the branch's chief intent asks for the lease; the lease, not the intent, decides.
     chief?.start({ getBranch: () => ctx.sessionManager.getBranch() }, (message, level) => ctx.ui.notify(message, level));
-    delivery?.start({ isIdle: () => ctx.isIdle(), hasPendingMessages: () => ctx.hasPendingMessages() }, (message, level) => ctx.ui.notify(message, level));
+    delivery?.start({ isIdle: () => ctx.isIdle(), hasPendingMessages: () => ctx.hasPendingMessages() }, (message, level) => ctx.ui.notify(message, level), event.reason);
     if (widget) widget.dispose();
     widget = mountEnsembleWidget(registry, () => ctxRef, () => {
       // v0.10 Slice 4: feed live watchdog thresholds to the widget so it
@@ -806,7 +806,9 @@ export default function (pi: ExtensionAPI): void {
     pi.on("session_before_compact", () => { delivery.compaction("start"); });
     pi.on("session_compact", () => { delivery.compaction("end"); });
     pi.on("session_compact_failed", () => { delivery.compaction("end"); });
-    pi.on("turn_start", () => { delivery.boundary(); delivery.started(); });
+    pi.on("turn_start", () => { delivery.boundary(); });
+    // S4: only a card's own start releases its held wake; another card's or a user prompt's turn does not.
+    pi.on("message_start", (event) => { delivery.messageStarted(event.message); });
     pi.on("turn_end", () => { delivery.drain(); syncAsk(); });
     pi.on("agent_settled", () => { delivery.boundary(); delivery.drain(); syncAsk(); });
     pi.on("session_tree", () => { syncAsk(); });

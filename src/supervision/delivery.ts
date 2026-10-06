@@ -118,7 +118,8 @@ export interface DeliveryDeps {
   timers?: Timers;
   now?: () => number;
 }
-export interface DeliveryStatus { inboxError?: string }
+/** `heldWakes`: deferred woken cards Pi has not started; they wait (no notice) until they start or a session start replaces Pi's session. */
+export interface DeliveryStatus { inboxError?: string; heldWakes?: number }
 
 interface Run {
   readonly session: SessionState;
@@ -129,8 +130,17 @@ interface Run {
   compacting: boolean; compactionDone: boolean;
   draining: boolean; again: boolean; swept: boolean;
   readonly cursors: Map<string, number>;
-  /** Woken dispatches not yet seen by a turn start: Pi may still be starting (or deferring) their run. */
-  readonly woken: Set<string>;
+  /**
+   * Woken cards Pi deferred (idle with nothing queued right after the send: it
+   * holds them as prompts to run after agent_settled) whose own message_start
+   * has not been seen. Pi exposes no deferred queue, so only that card's start
+   * releases one; Pi keeps the queue across /reload, so a reloaded instance
+   * inherits same-process woken claims it did not see start.
+   */
+  readonly held: Set<string>;
+  /** Set by a reload start until the first owned pass inherits; starts seen before then are not inherited. */
+  inherit: boolean;
+  readonly startedEarly: Set<string>;
 }
 type Disposition = { deliver: true; wake: boolean; stale: boolean } | { deliver: false; defer: true } | { deliver: false; reject: string };
 
@@ -150,10 +160,14 @@ export class CoordinationDelivery {
     this.now = deps.now ?? Date.now;
   }
 
-  /** session_start: classify records left by any earlier dispatcher, drain, then watch and poll; the first owned pass sweeps. */
-  start(session: SessionState, notify: Run["notify"]): void {
+  /**
+   * session_start: classify records left by any earlier dispatcher, drain, then watch and poll; the first owned pass sweeps.
+   * Only `reason: "reload"` keeps Pi's session (and its deferred prompts); every other start replaces it, so nothing is inherited.
+   */
+  start(session: SessionState, notify: Run["notify"], reason?: string): void {
     this.stop();
-    this.run = { session, notify, closed: false, due: 0, compacting: false, compactionDone: false, draining: false, again: false, swept: false, cursors: new Map(), woken: new Set() };
+    this.run = { session, notify, closed: false, due: 0, compacting: false, compactionDone: false, draining: false, again: false, swept: false, cursors: new Map(),
+      held: new Set(), inherit: reason === "reload", startedEarly: new Set() };
     this.drain();
     this.schedule(DRAIN_POLL_MS);
   }
@@ -168,7 +182,10 @@ export class CoordinationDelivery {
     this.run = undefined;
   }
 
-  status(): DeliveryStatus { return this.lastError ? { inboxError: this.lastError } : {}; }
+  status(): DeliveryStatus {
+    const held = this.run?.held.size ?? 0;
+    return { ...(this.lastError ? { inboxError: this.lastError } : {}), ...(held ? { heldWakes: held } : {}) };
+  }
 
   /** session_before_compact opens the window; session_compact or _failed ends it, cleared once idle or at a turn boundary. */
   compaction(phase: "start" | "end"): void {
@@ -184,8 +201,15 @@ export class CoordinationDelivery {
     if (run?.compactionDone) { run.compacting = false; run.compactionDone = false; }
   }
 
-  /** turn_start: a woken dispatch is now inside a run, which keeps the session busy until its receipt can land. */
-  started(): void { this.run?.woken.clear(); }
+  /** message_start: Pi began this coordination card, so from here its run (or its receipt) decides; no other card is released. */
+  messageStarted(message: unknown): void {
+    const run = this.run;
+    if (!run || !isRecord(message) || message.role !== "custom" || message.customType !== COORDINATION_TYPE || !isRecord(message.details)) return;
+    const d = message.details;
+    if (d.notice !== undefined || typeof d.coordinationId !== "string") return;
+    run.held.delete(d.coordinationId);
+    if (run.inherit) run.startedEarly.add(d.coordinationId);
+  }
 
   /** Synchronous and re-entrancy guarded: one pass at a time per instance. */
   drain(): void {
@@ -239,6 +263,11 @@ export class CoordinationDelivery {
         for (const state of ["json", "slot"] as const) if (states.has(state)) unlinkQuiet(inboxPath(dir, base, state));
       } else if (states.has("json")) queued.push(base);
     }
+    if (run.inherit) {
+      run.inherit = false;
+      for (const p of pending) if (p.dispatcher.woken && this.sameProcess(p, self) && !run.startedEarly.has(p.id)) run.held.add(p.id);
+      run.startedEarly.clear();
+    }
     this.settle(run, self, dir, pending);
     // Idle means the ask turn is over: the branch alone decides from here.
     const staged = this.deps.asks?.staged();
@@ -262,12 +291,13 @@ export class CoordinationDelivery {
         continue;
       }
       const dispatcher: Dispatcher = { sessionId: self.sessionId, sessionFile: self.sessionFile, pid: self.pid, ...(self.pidStartTime !== undefined ? { pidStartTime: self.pidStartTime } : {}),
-        generation: self.generation, sessionOffset: fileSize(self.sessionFile), dispatchedAt: this.now() };
+        generation: self.generation, sessionOffset: fileSize(self.sessionFile), dispatchedAt: this.now(), ...(plan.wake ? { woken: true as const } : {}) };
       const fence = () => { if (this.owned()?.generation !== self.generation || this.run !== run) throw new Error("coordination dispatch fenced: superseded"); };
       if (!claimCoordination(dir, record, dispatcher, fence)) continue;
       if (record.kind === "chief_reply") replying.add(record.askId!);
-      if (plan.wake) run.woken.add(record.id);
       this.deps.pi.sendMessage(coordinationMessage(record, plan.stale), { deliverAs: "followUp", triggerTurn: plan.wake });
+      // Started now, Pi is busy; queued now, it is pending. Idle with nothing queued means Pi deferred it.
+      if (plan.wake && run.session.isIdle() && !run.session.hasPendingMessages()) run.held.add(record.id);
       dispatched.push({ ...record, dispatcher });
     }
     this.settle(run, self, dir, dispatched);
@@ -308,19 +338,23 @@ export class CoordinationDelivery {
     const scan = self.sessionFile === undefined ? undefined : scanPersistedReceipts(self.sessionFile, self.sessionId, ids, from, RECEIPT_SCAN_BYTES);
     for (const p of pending) {
       const base = recordBase(p);
-      if (scan?.found.has(p.id)) { unlinkQuiet(inboxPath(dir, base, "sending")); run.cursors.delete(p.id); run.woken.delete(p.id); continue; }
+      if (scan?.found.has(p.id)) { unlinkQuiet(inboxPath(dir, base, "sending")); run.cursors.delete(p.id); run.held.delete(p.id); continue; }
       if (scan && !scan.complete) { run.cursors.set(p.id, scan.next); continue; }
-      const sameProcess = p.dispatcher.pid === this.pid && p.dispatcher.pidStartTime === this.pidStartTime && p.dispatcher.sessionFile === self.sessionFile;
-      if (sameProcess && (scan === undefined || !run.session.isIdle() || run.session.hasPendingMessages() || run.woken.has(p.id))) {
+      if (this.sameProcess(p, self) && (scan === undefined || !run.session.isIdle() || run.session.hasPendingMessages() || run.held.has(p.id))) {
         if (scan) run.cursors.set(p.id, scan.next);
         continue;
       }
       run.cursors.delete(p.id);
+      run.held.delete(p.id);
       if (!markUncertain(dir, p, this.now())) continue;
       const who = p.fromName ? `${p.fromName} (${p.from})` : p.from;
       run.notify(`conductor supervision: ${COORDINATION_LABEL[p.kind]} ${p.id} from ${who} may or may not have been delivered; not replayed.`, "warning");
       this.deps.pi.sendMessage(uncertaintyMessage(p), { deliverAs: "followUp", triggerTurn: false });
     }
+  }
+
+  private sameProcess(p: SendingRecord, self: LeadRecord): boolean {
+    return p.dispatcher.pid === this.pid && p.dispatcher.pidStartTime === this.pidStartTime && p.dispatcher.sessionFile === self.sessionFile;
   }
 
   private reject(run: Run, dir: string, base: string, state: "json" | "sending"): void {

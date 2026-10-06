@@ -52,7 +52,9 @@ export function s4Lead(opts: { dir: string; socket: string; clock: ReturnType<ty
   return {
     sessionId, sessionFile, branch, sent, notes, state, tools, presence, chief, asks, delivery, api,
     active: () => active,
-    start() { asks.start({ getBranch: () => branch, sessionId, sessionFile }); presence.start({ sessionId, sessionFile, cwd: opts.dir }, notify); chief.start({ getBranch: () => branch }, notify); delivery.start({ isIdle: () => state.idle, hasPendingMessages: () => state.pending }, notify); },
+    start(reason?: string) { asks.start({ getBranch: () => branch, sessionId, sessionFile }); presence.start({ sessionId, sessionFile, cwd: opts.dir }, notify); chief.start({ getBranch: () => branch }, notify); delivery.start({ isIdle: () => state.idle, hasPendingMessages: () => state.pending }, notify, reason); },
+    /** Pi's message_start for each sent card (optionally one kind), as a run beginning it would emit. */
+    begin(kind?: string) { for (const s of sent) if (!kind || s.message.details?.kind === kind) delivery.messageStarted({ role: "custom", ...s.message }); },
     stop() { delivery.stop(); chief.stop(); presence.stop(); asks.stop(); },
     mode(on: boolean) { state.on = on; presence.refresh(); chief.refresh(); delivery.drain(); },
     record(entry: unknown) { branch.push(entry); persist(entry); },

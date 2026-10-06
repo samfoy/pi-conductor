@@ -1024,8 +1024,12 @@ labelled "former chief". A reply that is stale, from another socket, or not the 
 ask on the branch is kept as `.rejected.json` with one warning; it never reaches the model
 and never clears the ask. A reply that arrives while the asking turn is still running waits
 for that turn to end, and a second reply to an ask with one in flight waits until the first
-settles. A woken dispatch is not classified uncertain before Pi has started a turn. Peer
-messages still never wake. A wake asks for a turn; nothing reports that the model read or
+settles. A waking card sent while Pi is emitting `agent_settled` is deferred by Pi (idle,
+nothing queued) and run afterwards in order; it is held, with no notice and no later reply to
+its ask, until Pi emits that card's own `message_start`. Another card's turn, a user prompt
+deferred ahead of it, or a `/reload` (Pi keeps its session and deferred prompts, so the
+reloaded instance inherits same-process woken claims it has not seen start) releases nothing.
+Peer messages still never wake. A wake asks for a turn; nothing reports that the model read or
 acted on a message.
 
 **Limits.** No S5 multiprocess or live acceptance yet. Off Linux no chief can be proven
@@ -1034,12 +1038,11 @@ replies are rejected. A question delivered under a lease generation its recipien
 holds is a non-waking card; the current chief can still answer it from `staff list`. A fork
 carries the parent's ask and any persisted answer; an ask still open in a fork is answered only
 by a reply addressed to the fork's own session id. Pi forks from the file, so a fork past an
-entry Pi failed to write fails in Pi itself. When two wakes are deferred inside one
-`agent_settled`, the first turn's start counts for both, so the second can be classified
-uncertain before its own turn: one spurious notice, though its persisted card still answers,
-and a second reply to the same ask already queued at that moment could also be accepted (not
-reproduced). A wake that fails before its turn starts stays `.sending` until a later turn. A
-transcript window that starts exactly on a line break drops that one complete line. Delivery is
+entry Pi failed to write fails in Pi itself. Pi exposes no deferred-prompt queue, so a held
+card Pi never starts (its deferred run failed, or an earlier deferred prompt threw and Pi
+dropped the rest) stays `.sending` with no notice, and replies to its ask wait, until a session
+start that replaces Pi's session (startup, new, resume, fork; not `/reload`). `/conductor
+doctor` shows the count. A transcript window that starts exactly on a line break drops that one complete line. Delivery is
 at most once and never resent automatically.
 Automated evidence only: native Pi 0.87.1 and 1.0.3 with a faux model and a fake herdr env.
 Human TUI acceptance is unverified.

@@ -37,7 +37,8 @@ export interface CoordinationRecord {
   /** `lead_ask` and `chief_reply`: the asking tool call's id. */
   askId?: string;
 }
-export interface Dispatcher extends LeadIdentity { sessionOffset: number; dispatchedAt: number }
+/** `woken`: dispatched with `triggerTurn: true`, so Pi may hold it as a deferred prompt (S4). */
+export interface Dispatcher extends LeadIdentity { sessionOffset: number; dispatchedAt: number; woken?: true }
 export interface SendingRecord extends CoordinationRecord { dispatcher: Dispatcher }
 export type InboxState = "json" | "slot" | "sending" | "uncertain" | "rejected";
 
@@ -52,7 +53,7 @@ export const isLeadKind = (kind: CoordinationKind) => LEAD_KINDS.has(kind);
 /** One label per kind, for notices and the human card alike. */
 export const COORDINATION_LABEL: Record<CoordinationKind, string> = { peer: "peer message", lead_message: "message to the chief", lead_ask: "question to the chief",
   chief_message: "message from the chief", chief_reply: "chief reply" };
-const DISPATCHER_KEYS = new Set(["sessionId", "sessionFile", "pid", "pidStartTime", "generation", "sessionOffset", "dispatchedAt"]);
+const DISPATCHER_KEYS = new Set(["sessionId", "sessionFile", "pid", "pidStartTime", "generation", "sessionOffset", "dispatchedAt", "woken"]);
 
 const errno = (e: unknown) => (e as NodeJS.ErrnoException)?.code;
 const wellFormed = (s: string) => Buffer.from(s, "utf8").toString("utf8") === s;
@@ -181,7 +182,7 @@ export function readDispatched(dir: string, base: string, sessionId: string): Se
   if (!validCoordination(record) || record.to !== sessionId || recordBase(record) !== base || !onlyKeys(d, DISPATCHER_KEYS) || d.sessionId !== sessionId ||
       !ident(d.sessionFile, 1024) || !isAbsolute(d.sessionFile) || typeof d.generation !== "string" || !UUID.test(d.generation) ||
       !Number.isSafeInteger(d.pid) || (d.pid as number) <= 1 || (d.pidStartTime !== undefined && !(Number.isSafeInteger(d.pidStartTime) && (d.pidStartTime as number) > 0)) ||
-      !count(d.sessionOffset) || !count(d.dispatchedAt)) throw new Error("invalid dispatch record");
+      !count(d.sessionOffset) || !count(d.dispatchedAt) || (d.woken !== undefined && d.woken !== true)) throw new Error("invalid dispatch record");
   return v as unknown as SendingRecord;
 }
 

@@ -300,8 +300,7 @@ test("S4 reply: an in-flight (.sending) or uncertain reply is no answer; a secon
   b.delivery.drain();
   assert.equal(cards(b).length, 1, "a second reply to an ask with one in flight waits");
   b.state.idle = true; b.state.persist = true;
-  b.delivery.started(); // the woken run began and ended without the first card reaching the file
-  b.delivery.drain(); // the first settles uncertain; only then is the second decided, against the branch
+  b.delivery.drain(); // dispatched while busy (not held): its run ended without the first card reaching the file // the first settles uncertain; only then is the second decided, against the branch
   assert.match(b.notes.join("\n"), /chief reply .* may or may not have been delivered; not replayed/);
   assert.deepEqual(cards(b).map(s => s.message.details.askId), [id, id], "the second is accepted only after the first settled uncertain");
   assert.deepEqual(persistedReplies(b).map(e => e.content.includes("second")), [true], "only the second card is in the file: the first never answered");
@@ -373,14 +372,22 @@ test("S4 branchAsk: only a successful chief ask tool result whose details name i
   assert.equal(branchAsk([{ type: "custom", customType: "conductor-role", data: { askId: "a" } }, { type: "custom_message", customType: "conductor-coordination", details: { kind: "lead_ask", askId: "a" } }]), undefined, "no record or card can create an ask");
 });
 
-test("S4 woken dispatch: no false uncertainty while Pi may still be starting the woken run; settled only after a turn start", async () => {
+test("S4 woken dispatch: a card Pi deferred stays pending until its OWN message_start; other cards, notices, user prompts and foreign types release nothing", async () => {
   const { a, b, stop } = pair();
   await b.chiefCall({ action: "message", message: "wake up" });
   a.state.persist = false; // as during agent_settled: Pi defers the woken prompt, so nothing is appended yet and the session looks idle
   a.delivery.drain();
   a.delivery.drain();
-  assert.deepEqual(suffixes(a.sessionId), [".sending.json"], "idle, no receipt, but woken: still pending");
-  a.delivery.started(); // the woken run began
+  assert.deepEqual(suffixes(a.sessionId), [".sending.json"], "idle, no receipt, but held: still pending");
+  assert.equal(a.delivery.status().heldWakes, 1, "the doctor sees it");
+  const [card] = cards(a).map(s => s.message);
+  for (const other of [{ role: "user", content: "a user prompt" }, { role: "custom", customType: "other-extension", details: card.details },
+    { role: "custom", ...card, details: { ...card.details, coordinationId: randomUUID() } }, { role: "custom", ...card, details: { ...card.details, notice: "uncertain" } }]) {
+    a.delivery.messageStarted(other);
+    a.delivery.drain();
+  }
+  assert.deepEqual(suffixes(a.sessionId), [".sending.json"], "no other start releases it");
+  a.begin(); // its own run began
   a.state.idle = false;
   a.delivery.drain();
   assert.deepEqual(suffixes(a.sessionId), [".sending.json"], "busy in that run");
@@ -438,7 +445,7 @@ test("S4 receipt A: a reply held only in memory (its write failed) never answers
   const { id } = await asked(a, b);
   b.state.persist = false; // Pi keeps the card in memory; its file write fails
   await a.staff({ action: "reply", lead: b.sessionId, ask_id: id, message: "first, never written" });
-  b.delivery.drain(); b.delivery.started(); b.delivery.drain();
+  b.delivery.drain(); b.begin("chief_reply"); b.delivery.drain();
   assert.deepEqual(suffixes(b.sessionId), [".uncertain.json"]);
   assert.deepEqual([memoryReplies(b).length, persistedReplies(b).length], [1, 0]);
   assert.equal(b.asks.pending()?.askId, id, "control: outstanding while the record is uncertain");
@@ -541,4 +548,53 @@ test("S4 receipt proof cache: a negative scan resumes where it stopped (append-o
   assert.equal(asks.pending(), undefined);
   asks.start({ getBranch: () => [ask, card], sessionId: "another-session", sessionFile: file });
   assert.equal(asks.pending()?.askId, "call-9", "the header no longer names the current session");
+});
+
+test("S4 held wakes across starts: a reload start inherits same-process woken claims (Pi keeps its deferred prompts) and keeps the reply lock; any other start does not", async () => {
+  for (const reason of ["reload", "resume"] as const) {
+    const { a, b, stop } = pair();
+    const { id } = await asked(a, b);
+    b.state.persist = false; // deferred: nothing appended yet, and the session looks idle
+    await a.staff({ action: "reply", lead: b.sessionId, ask_id: id, message: "answer one" });
+    b.delivery.drain();
+    await a.staff({ action: "reply", lead: b.sessionId, ask_id: id, message: "answer two" });
+    b.delivery.drain();
+    assert.deepEqual(suffixes(b.sessionId), [".json", ".sending.json", ".slot"], "reply 2 waits behind the held reply 1");
+    b.stop(); b.start(reason);
+    if (reason === "resume") {
+      // Pi's session was replaced: its deferred prompts are gone, so reply 1 is uncertain and reply 2 is decided.
+      assert.equal(suffixes(b.sessionId).filter(s => s === ".uncertain.json").length, 1);
+      assert.equal(b.notes.filter(n => /may or may not have been delivered/.test(n)).length, 1);
+      stop();
+      continue;
+    }
+    assert.deepEqual(suffixes(b.sessionId), [".json", ".sending.json", ".slot"], "reload: still held, reply 2 still waits");
+    assert.equal(b.delivery.status().heldWakes, 1);
+    // Pi now runs the deferred reply 1: its own start, then its persisted card.
+    const [first] = cards(b).filter(s => s.message.details.kind === "chief_reply").map(s => s.message);
+    b.delivery.messageStarted({ role: "custom", ...first });
+    appendFileSync(b.sessionFile, JSON.stringify({ type: "custom_message", customType: first.customType, content: first.content, display: true, details: first.details }) + "\n");
+    b.state.persist = true;
+    b.delivery.drain();
+    assert.deepEqual(persistedReplies(b).map(e => /answer one/.test(e.content)), [true], "one answer: reply 1");
+    assert.deepEqual(suffixes(b.sessionId), [".rejected.json"], "reply 2 rejected");
+    assert.equal(b.notes.filter(n => /may or may not have been delivered/.test(n)).length, 0, "no false notice");
+    stop();
+  }
+});
+
+test("S4 held wakes: a reload instance does not inherit a card it already saw start before its first owned pass", async () => {
+  const { a, b, stop } = pair();
+  await b.chiefCall({ action: "message", message: "wake up" });
+  a.state.persist = false;
+  a.delivery.drain();
+  const [card] = cards(a).map(s => s.message);
+  a.stop();
+  a.state.on = false; // the reload instance is not an owned lead yet: no pass runs at start
+  a.start("reload");
+  a.delivery.messageStarted({ role: "custom", ...card }); // Pi started it under the new instance
+  a.state.idle = true;
+  a.mode(true);
+  assert.deepEqual(suffixes(a.sessionId), [".uncertain.json"], "started and never persisted: uncertain, not held");
+  stop();
 });

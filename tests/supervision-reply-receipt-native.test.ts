@@ -9,9 +9,11 @@
  *     removes that record, the ask stays outstanding; a second reply is
  *     accepted and its persisted card answers.
  *  B. A chief message and a chief reply reach the lead inside one
- *     `agent_settled`, so Pi defers both wakes and the reply's record is
- *     classified uncertain before its own turn; Pi persists it anyway. The ask
- *     is answered and a second reply is refused and rejected: one answer.
+ *     `agent_settled`, so Pi defers both wakes. The reply waits through the
+ *     message's turn (no premature uncertainty), then its own turn persists
+ *     it: the persisted card answers, and a second reply is refused and
+ *     rejected: one answer. (A reply with a retained `.uncertain` record whose
+ *     card is persisted still answers: the unit receipt B control.)
  *  Fork: a fork's file has a new header id and copies the reply card addressed
  *     to the parent; that persisted copy answers the fork's ask. A reply held
  *     only in the parent's memory is not copied (Pi forks from the file), so
@@ -148,8 +150,9 @@ async function witness(t: test.TestContext, pi: Harness, probe: Probe) {
     await b.prompt("work", [pi.fauxAssistantMessage("work done"), pi.fauxAssistantMessage("read the heads up"), pi.fauxAssistantMessage("read the answer")]);
     assert.equal(arm, undefined, "the records were queued inside agent_settled");
     await until("both dispatches settled", () => !states(B).some(s => s === ".json" || s === ".sending.json"));
-    assert.deepEqual(states(B), [".uncertain.json"], "precondition: the reply was classified uncertain before its own turn");
-    assert.equal(fileReplies(b, ASK_B).length, 1, "precondition: Pi persisted it anyway");
+    assert.deepEqual(states(B), [], "the deferred reply waited for its own turn: pending, then persisted and retired; nothing uncertain");
+    assert.equal(lines(b.sessionFile()).filter(e => e.details?.notice === "uncertain").length, 0, "no false uncertainty notice");
+    assert.equal(fileReplies(b, ASK_B).length, 1, "its own turn persisted it");
     await until("answered by the persisted card", () => record(B) && record(B).pendingAsk === undefined);
     const again = await reply(B, ASK_B, "second answer");
     assert.equal(again.isError, true);
@@ -207,7 +210,7 @@ async function witness(t: test.TestContext, pi: Harness, probe: Probe) {
 const harnesses = new Map<string, Promise<Harness>>();
 const harnessFor = (t: test.TestContext, piRoot: string) => { if (!harnesses.has(piRoot)) harnesses.set(piRoot, harness(t, piRoot)); return harnesses.get(piRoot)!; };
 const PROBES: [Probe, string][] = [["A", "an unwritten reply never answers, even after its uncertain record is swept"],
-  ["B", "a persisted reply answers although its dispatch was classified uncertain"], ["fork", "a fork's copied persisted card answers; an unwritten parent reply does not"]];
+  ["B", "a deferred reply waits for its own turn, and its persisted card answers"], ["fork", "a fork's copied persisted card answers; an unwritten parent reply does not"]];
 
 for (const [probe, title] of PROBES) {
   test(`S4 native Pi 0.87.1 receipt ${probe}: ${title}`, { timeout: 120000 }, async t => {

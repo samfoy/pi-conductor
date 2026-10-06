@@ -862,6 +862,9 @@ test("S1 doctor: ## Supervision shows presence state, reason, record and peer to
     assert.match(dup, /presence: duplicate — session s-1 already has a live lead presence \(pid 7\)/);
     assert.match(dup, /⚠ last refresh failed: EIO/);
     assert.match(dup, /⚠ inbox: inbox holds 2000 entries \(cap 1024\)/);
+    assert.doesNotMatch(dup, /deferred and has not started/);
+    assert.match(section(await report({ state: "published", sessionId: "s-1", generation: "g-1", toolOwned: true, toolActive: true, heldWakes: 2 }), "Supervision"),
+      /⧗ 2 woken coordination card\(s\) Pi deferred and has not started: no notice, and replies to their ask wait, until each starts or a session start replaces Pi's session/);
     assert.match(section(await report({ state: "inactive", reason: "not a herdr pane (HERDR_ENV is not 1)", toolOwned: false }), "Supervision"), /peer tool: not registered/);
     assert.match(section(await report(undefined), "Supervision"), /unavailable in this context/);
   } finally {
