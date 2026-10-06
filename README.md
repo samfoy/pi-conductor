@@ -976,10 +976,15 @@ tool call id as the `ask_id`. Both answer **queued**, never delivered.
 **The branch decides the outstanding ask.** It is the newest successful `chief ask` tool
 result on this session's current branch: a newer ask supersedes it, an error result
 supersedes nothing, and after a rewind, fork or restart it is whatever that branch holds. It
-is answered only when a delivered chief reply card for its `ask_id` follows it on the branch
-and that delivery's persisted receipt has retired its inbox record. A reply that is only
-queued, in flight (`.sending`), uncertain, or held in memory after a failed session write
-does not answer it. The lead record mirrors the ask as `pendingAsk` (presentation for
+is answered only when a chief reply card for its `ask_id` follows it on the branch and that
+same card is in this session's own file: the S2 receipt scan (no-follow, single-link, header
+naming this session) finds its coordination id addressed to the card's own `to`, so a fork,
+whose file has a new header id but copies the parent's cards, answers consistently. Inbox
+record states are never receipts: a reply that is queued, in flight, or held only in memory
+after a failed session write does not answer, even once its `.uncertain` record is swept, and
+a persisted reply answers even if its dispatch was classified uncertain. A proof (or how far a
+negative scan got) is cached per card for that exact file; a replaced file is scanned afresh,
+and like S2 this assumes Pi only appends to an open session file. The lead record mirrors the ask as `pendingAsk` (presentation for
 `staff list`), refreshed after each turn, reply and `/tree`, and the panel shows one
 `⧗ waiting on chief: <question>` line (at most 80 code points). No record, message or
 presence file can create an ask.
@@ -1019,7 +1024,7 @@ labelled "former chief". A reply that is stale, from another socket, or not the 
 ask on the branch is kept as `.rejected.json` with one warning; it never reaches the model
 and never clears the ask. A reply that arrives while the asking turn is still running waits
 for that turn to end, and a second reply to an ask with one in flight waits until the first
-settles. A woken dispatch is not classified uncertain before Pi has started its turn. Peer
+settles. A woken dispatch is not classified uncertain before Pi has started a turn. Peer
 messages still never wake. A wake asks for a turn; nothing reports that the model read or
 acted on a message.
 
@@ -1027,9 +1032,15 @@ acted on a message.
 live, so `chief` refuses, chief messages arrive as non-waking "former chief" cards and chief
 replies are rejected. A question delivered under a lease generation its recipient no longer
 holds is a non-waking card; the current chief can still answer it from `staff list`. A fork
-keeps the parent's outstanding ask, but replies go to the session id that asked. If the same
-process keeps an in-memory reply whose `.uncertain` record is swept after 7 days, that reply
-then counts as an answer. Delivery is at most once and never resent automatically.
+carries the parent's ask and any persisted answer; an ask still open in a fork is answered only
+by a reply addressed to the fork's own session id. Pi forks from the file, so a fork past an
+entry Pi failed to write fails in Pi itself. When two wakes are deferred inside one
+`agent_settled`, the first turn's start counts for both, so the second can be classified
+uncertain before its own turn: one spurious notice, though its persisted card still answers,
+and a second reply to the same ask already queued at that moment could also be accepted (not
+reproduced). A wake that fails before its turn starts stays `.sending` until a later turn. A
+transcript window that starts exactly on a line break drops that one complete line. Delivery is
+at most once and never resent automatically.
 Automated evidence only: native Pi 0.87.1 and 1.0.3 with a faux model and a fake herdr env.
 Human TUI acceptance is unverified.
 

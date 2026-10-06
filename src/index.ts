@@ -272,8 +272,8 @@ export default function (pi: ExtensionAPI): void {
   let conductorModeOn = resolveInitialConductorMode(process.env, {
     defaultMode: initialCfg.defaultMode,
   });
-  // S4: the branch decides the outstanding `chief ask`; a reply card counts only once its receipt retired the dispatch.
-  const asks: LeadAsks | undefined = herdrLeadEnv(process.env) ? new LeadAsks((reply): boolean => delivery?.unconfirmed(reply) ?? true) : undefined;
+  // S4: the branch decides the outstanding `chief ask`; a reply card counts only once it is in this session's own file.
+  const asks = herdrLeadEnv(process.env) ? new LeadAsks() : undefined;
   // S1: one presence per module instance; it captures this instance's env, pid and start time.
   const supervision = new LeadPresence({ pi, env: process.env, registry, getMode: () => conductorModeOn, pendingAsk: () => asks?.pending() });
   // S3: the chief lease is held only by an owned lead; its epoch is this module instance's.
@@ -452,10 +452,10 @@ export default function (pi: ExtensionAPI): void {
     const cwdWarning = cwdControl.restore(branch);
     if (cwdWarning) ctx.ui.notify(cwdWarning, "warning");
     ctxRef = ctx;
-    asks?.start(() => ctx.sessionManager.getBranch());
     // S1: identity is read once, here; a later getter on this ctx may be stale after reload or a switch.
     let sessionId: string | undefined, sessionFile: string | undefined;
     try { sessionId = ctx.sessionManager?.getSessionId(); sessionFile = ctx.sessionManager?.getSessionFile(); } catch { /* ineligible */ }
+    asks?.start({ getBranch: () => ctx.sessionManager.getBranch(), sessionId, sessionFile });
     supervision.start({ sessionId, sessionFile, cwd: ctx.cwd }, (message, level) => ctx.ui.notify(message, level));
     // S3: the branch's chief intent asks for the lease; the lease, not the intent, decides.
     chief?.start({ getBranch: () => ctx.sessionManager.getBranch() }, (message, level) => ctx.ui.notify(message, level));
@@ -471,7 +471,7 @@ export default function (pi: ExtensionAPI): void {
         graceSeconds: cfg.watchdog.graceSeconds,
       };
     }, getCwdOverride, () => asks?.pending());
-    // Receipts found by the first drain may have confirmed a reply card the first record still counted as unconfirmed.
+    // The first drain may have delivered (and persisted) a reply after the first record was built.
     syncAsk();
     if (unsubFocusedShortcut) unsubFocusedShortcut();
     unsubFocusedShortcut = installFocusedOverlayShortcut(ctx, {

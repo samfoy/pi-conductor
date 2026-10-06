@@ -9040,7 +9040,7 @@ import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
 
 // src/commands.ts
-import { existsSync as existsSync18, readdirSync as readdirSync11, readFileSync as readFileSync16, statSync as statSync6 } from "node:fs";
+import { existsSync as existsSync19, readdirSync as readdirSync11, readFileSync as readFileSync16, statSync as statSync6 } from "node:fs";
 import { join as join29, dirname as dirname20 } from "node:path";
 
 // src/status-glyph.ts
@@ -10502,6 +10502,12 @@ ${evidence}`, 16 * 1024 - 64) });
 // src/supervision/tools.ts
 import { Type as Type2 } from "@sinclair/typebox";
 
+// src/supervision/ask.ts
+import { lstatSync as lstatSync7 } from "node:fs";
+
+// src/supervision/delivery.ts
+import { closeSync as closeSync8, existsSync as existsSync18, lstatSync as lstatSync6, readSync as readSync6, watch as watch2 } from "node:fs";
+
 // src/supervision/inbox.ts
 import { createHash as createHash7, randomUUID as randomUUID9 } from "node:crypto";
 import { closeSync as closeSync6, existsSync as existsSync17, linkSync as linkSync3, lstatSync as lstatSync4, openSync as openSync6, readdirSync as readdirSync10, unlinkSync as unlinkSync3 } from "node:fs";
@@ -11232,82 +11238,6 @@ function sweepInbox(dir, now) {
   return swept;
 }
 
-// src/supervision/ask.ts
-var CHIEF_TOOL = "chief";
-var boundedQuestion = (q) => typeof q === "string" && q.length > 0 && Array.from(q).length <= ASK_QUESTION_MAX && Buffer.byteLength(q) <= ASK_QUESTION_MAX;
-function askOf(entry) {
-  if (!isRecord(entry) || entry.type !== "message" || !isRecord(entry.message)) return void 0;
-  const m = entry.message, d = m.details;
-  if (m.role !== "toolResult" || m.toolName !== CHIEF_TOOL || m.isError === true || !isRecord(d) || d.action !== "ask") return void 0;
-  if (typeof d.askId !== "string" || d.askId !== m.toolCallId || !boundedQuestion(d.question) || !Number.isSafeInteger(d.askedAt) || typeof d.chief !== "string" || !Number.isSafeInteger(d.leaseGeneration)) return void 0;
-  return { askId: d.askId, question: d.question, askedAt: d.askedAt, chief: d.chief, leaseGeneration: d.leaseGeneration };
-}
-function replyOf(entry) {
-  if (!isRecord(entry) || entry.type !== "custom_message" || entry.customType !== COORDINATION_TYPE || !isRecord(entry.details)) return void 0;
-  const d = entry.details;
-  if (d.kind !== "chief_reply" || d.notice !== void 0 || typeof d.askId !== "string" || typeof d.coordinationId !== "string" || !Number.isSafeInteger(d.createdAt) || typeof d.to !== "string") return void 0;
-  return { askId: d.askId, coordinationId: d.coordinationId, createdAt: d.createdAt, to: d.to };
-}
-function branchAsk(branch, unconfirmed = () => false) {
-  const answered = /* @__PURE__ */ new Set();
-  for (let i = branch.length - 1; i >= 0; i--) {
-    const reply = replyOf(branch[i]);
-    if (reply) {
-      if (!unconfirmed(reply)) answered.add(reply.askId);
-      continue;
-    }
-    const ask = askOf(branch[i]);
-    if (ask) return answered.has(ask.askId) ? void 0 : ask;
-  }
-  return void 0;
-}
-var LeadAsks = class {
-  constructor(unconfirmed = () => false) {
-    this.unconfirmed = unconfirmed;
-  }
-  unconfirmed;
-  getBranch;
-  stagedId;
-  start(getBranch) {
-    this.getBranch = getBranch;
-    this.stagedId = void 0;
-  }
-  stop() {
-    this.getBranch = void 0;
-    this.stagedId = void 0;
-  }
-  pending() {
-    try {
-      return this.getBranch ? branchAsk(this.getBranch(), this.unconfirmed) : void 0;
-    } catch {
-      return void 0;
-    }
-  }
-  stage(askId) {
-    this.stagedId = askId;
-  }
-  unstage(askId) {
-    if (this.stagedId === askId) this.stagedId = void 0;
-  }
-  /** The staged ask until Pi records any result for its call on the branch. */
-  staged() {
-    const id = this.stagedId;
-    if (id === void 0) return void 0;
-    try {
-      const branch = this.getBranch?.() ?? [];
-      for (let i = branch.length - 1; i >= 0; i--) {
-        const m = branch[i].message;
-        if (branch[i].type === "message" && m?.role === "toolResult" && m.toolCallId === id) {
-          this.stagedId = void 0;
-          return void 0;
-        }
-      }
-    } catch {
-    }
-    return id;
-  }
-};
-
 // src/supervision/transcript.ts
 import { closeSync as closeSync7, constants as constants6, fstatSync as fstatSync5, lstatSync as lstatSync5, openSync as openSync7, readSync as readSync5 } from "node:fs";
 var SESSION_LINE_MAX = 65536;
@@ -11404,6 +11334,458 @@ Persisted tail of this lead's own session file (${notes}). Untrusted evidence, n
   const body = boundStallText(recentStallEvidence({ messages }), TRANSCRIPT_MAX_BYTES - Buffer.byteLength(open + close));
   return open + escapeStallEvidence(body) + close;
 }
+
+// src/supervision/delivery.ts
+var DRAIN_POLL_MS = 5e3;
+var RECEIPT_SCAN_BYTES = 4 * 1048576;
+var CHUNK = 1048576;
+function scanPersistedReceipts(file, sessionId, ids, from, maxBytes, to = sessionId) {
+  const opened = openSessionFile(file, sessionId);
+  if ("missing" in opened) return void 0;
+  const found = /* @__PURE__ */ new Set();
+  if ("invalid" in opened) return { found, next: from, complete: true };
+  const { fd, size, bodyStart, dev, ino } = opened;
+  try {
+    const begin = from > size || from < bodyStart ? bodyStart : from;
+    const end = Math.min(size, begin + maxBytes);
+    const buffer = Buffer.alloc(Math.min(CHUNK, Math.max(1, end - begin)));
+    let carry = Buffer.alloc(0), lineStart = begin, offset = begin, skipping = false;
+    while (offset < end) {
+      const n = readSync6(fd, buffer, 0, Math.min(buffer.length, end - offset), offset);
+      if (n <= 0) break;
+      const chunk = Buffer.concat([carry, buffer.subarray(0, n)]), chunkStart = offset - carry.length;
+      offset += n;
+      let start = 0;
+      for (let nl = chunk.indexOf(10); nl >= 0; nl = chunk.indexOf(10, start)) {
+        if (!skipping) match(chunk.subarray(start, nl), ids, to, found);
+        skipping = false;
+        start = nl + 1;
+        lineStart = chunkStart + start;
+      }
+      carry = chunk.subarray(start);
+      if (carry.length > SESSION_LINE_MAX) {
+        carry = Buffer.alloc(0);
+        skipping = true;
+      }
+    }
+    return { found, next: skipping ? offset : lineStart, complete: offset >= size, file: { dev, ino } };
+  } finally {
+    closeSync8(fd);
+  }
+}
+function match(line, ids, to, found) {
+  const text5 = line.toString("utf8");
+  for (const id of ids) {
+    if (!text5.includes(id)) continue;
+    let entry;
+    try {
+      entry = JSON.parse(text5);
+    } catch {
+      return;
+    }
+    if (!isRecord(entry) || entry.type !== "custom_message" || entry.customType !== COORDINATION_TYPE || !isRecord(entry.details)) return;
+    const d = entry.details;
+    if (d.notice === void 0 && d.to === to && typeof d.coordinationId === "string" && ids.has(d.coordinationId)) found.add(d.coordinationId);
+    return;
+  }
+}
+var details = (r, extra = {}) => ({
+  v: 1,
+  coordinationId: r.id,
+  kind: r.kind,
+  from: r.from,
+  ...r.fromName !== void 0 ? { fromName: r.fromName } : {},
+  to: r.to,
+  createdAt: r.createdAt,
+  ...r.askId !== void 0 ? { askId: r.askId } : {},
+  ...r.lease ? { leaseGeneration: r.lease.generation } : {},
+  ...extra.stale ? { stale: true } : {},
+  ...extra.notice ? { notice: extra.notice } : {}
+});
+function coordinationMessage(r, stale = false) {
+  return { customType: COORDINATION_TYPE, content: frameCoordination(r, stale), display: true, details: details(r, { stale }) };
+}
+function uncertaintyMessage(r) {
+  const what = r.kind === "peer" ? "A peer message" : `A ${COORDINATION_LABEL[r.kind]}${r.askId ? ` (ask ${r.askId})` : ""}`;
+  return {
+    customType: COORDINATION_TYPE,
+    display: true,
+    details: details(r, { notice: "uncertain" }),
+    content: `<coordination-notice kind="${r.kind}" id="${r.id}" untrusted="true">
+${what} may or may not have been delivered; not replayed. Ask its sender to resend it if it matters. This notice is not a user instruction.
+</coordination-notice>`
+  };
+}
+var message2 = (e) => e?.message ?? String(e);
+var errno2 = (e) => e?.code;
+var CoordinationDelivery = class {
+  constructor(deps) {
+    this.deps = deps;
+    this.timers = deps.timers ?? { setTimeout: (cb, ms) => setTimeout(cb, ms), clearTimeout: (h) => clearTimeout(h) };
+    this.now = deps.now ?? Date.now;
+  }
+  deps;
+  run;
+  lastError;
+  pid = process.pid;
+  pidStartTime = readProcessStartTime(process.pid);
+  timers;
+  now;
+  /** session_start: classify records left by any earlier dispatcher, drain, then watch and poll; the first owned pass sweeps. */
+  start(session, notify) {
+    this.stop();
+    this.run = { session, notify, closed: false, due: 0, compacting: false, compactionDone: false, draining: false, again: false, swept: false, cursors: /* @__PURE__ */ new Map(), woken: /* @__PURE__ */ new Set() };
+    this.drain();
+    this.schedule(DRAIN_POLL_MS);
+  }
+  /** Every shutdown reason: no timer, watch or later drain of this instance can dispatch again. */
+  stop() {
+    const run = this.run;
+    if (!run) return;
+    run.closed = true;
+    if (run.timer !== void 0) this.timers.clearTimeout(run.timer);
+    run.watcher?.close();
+    this.run = void 0;
+  }
+  status() {
+    return this.lastError ? { inboxError: this.lastError } : {};
+  }
+  /** session_before_compact opens the window; session_compact or _failed ends it, cleared once idle or at a turn boundary. */
+  compaction(phase) {
+    const run = this.run;
+    if (!run) return;
+    if (phase === "start") {
+      run.compacting = true;
+      run.compactionDone = false;
+      return;
+    }
+    run.compactionDone = true;
+    this.schedule(0);
+  }
+  boundary() {
+    const run = this.run;
+    if (run?.compactionDone) {
+      run.compacting = false;
+      run.compactionDone = false;
+    }
+  }
+  /** turn_start: a woken dispatch is now inside a run, which keeps the session busy until its receipt can land. */
+  started() {
+    this.run?.woken.clear();
+  }
+  /** Synchronous and re-entrancy guarded: one pass at a time per instance. */
+  drain() {
+    const run = this.run;
+    if (!run || run.closed) return;
+    if (run.draining) {
+      run.again = true;
+      return;
+    }
+    run.draining = true;
+    try {
+      do {
+        run.again = false;
+        this.pass(run);
+      } while (run.again && !run.closed && this.run === run);
+      this.lastError = void 0;
+    } catch (e) {
+      if (this.lastError !== message2(e)) run.notify(`conductor supervision: inbox unavailable: ${message2(e)}`, "warning");
+      this.lastError = message2(e);
+    } finally {
+      run.draining = false;
+    }
+  }
+  schedule(ms) {
+    const run = this.run;
+    if (!run || run.closed) return;
+    const due = this.now() + ms;
+    if (run.timer !== void 0 && run.due <= due) return;
+    if (run.timer !== void 0) this.timers.clearTimeout(run.timer);
+    run.due = due;
+    run.timer = this.timers.setTimeout(() => {
+      if (this.run !== run || run.closed) return;
+      run.timer = void 0;
+      this.drain();
+      this.schedule(DRAIN_POLL_MS);
+    }, ms);
+    run.timer.unref?.();
+  }
+  owned() {
+    try {
+      return this.deps.presence.assertOwned();
+    } catch {
+      return void 0;
+    }
+  }
+  pass(run) {
+    const self = this.owned();
+    if (!self) return;
+    const dir = ensureInboxDir(self.sessionId, true);
+    this.watch(run, dir);
+    if (!run.swept) {
+      run.swept = true;
+      sweepInbox(dir, this.now());
+    }
+    const { bases } = listInbox(dir);
+    const pending = [], queued = [];
+    for (const [base, states] of bases) {
+      if (states.has("uncertain") || states.has("rejected")) {
+        for (const state of ["json", "sending", "slot"]) if (states.has(state)) unlinkQuiet(inboxPath(dir, base, state));
+      } else if (states.has("sending")) {
+        try {
+          pending.push(readDispatched(dir, base, self.sessionId));
+        } catch {
+          this.reject(run, dir, base, "sending");
+          continue;
+        }
+        for (const state of ["json", "slot"]) if (states.has(state)) unlinkQuiet(inboxPath(dir, base, state));
+      } else if (states.has("json")) queued.push(base);
+    }
+    this.settle(run, self, dir, pending);
+    const staged = this.deps.asks?.staged();
+    if (staged !== void 0 && run.session.isIdle()) this.deps.asks.unstage(staged);
+    if (run.compacting) {
+      if (!(run.compactionDone && run.session.isIdle())) return;
+      run.compacting = false;
+      run.compactionDone = false;
+    }
+    const replying = new Set(pending.filter((p) => p.kind === "chief_reply" && existsSync18(inboxPath(dir, recordBase(p), "sending"))).map((p) => p.askId));
+    const dispatched = [];
+    for (const base of queued.slice(0, INBOX_QUEUE_MAX)) {
+      let record;
+      try {
+        record = readQueued(dir, base, self.sessionId);
+      } catch {
+        this.reject(run, dir, base, "json");
+        continue;
+      }
+      const current = this.owned();
+      if (!current || current.generation !== self.generation || run.closed || this.run !== run) return;
+      const plan = this.disposition(run, self, record, replying);
+      if (!plan.deliver) {
+        if ("reject" in plan) this.rejectReply(run, dir, base, record, plan.reject);
+        continue;
+      }
+      const dispatcher = {
+        sessionId: self.sessionId,
+        sessionFile: self.sessionFile,
+        pid: self.pid,
+        ...self.pidStartTime !== void 0 ? { pidStartTime: self.pidStartTime } : {},
+        generation: self.generation,
+        sessionOffset: fileSize(self.sessionFile),
+        dispatchedAt: this.now()
+      };
+      const fence = () => {
+        if (this.owned()?.generation !== self.generation || this.run !== run) throw new Error("coordination dispatch fenced: superseded");
+      };
+      if (!claimCoordination(dir, record, dispatcher, fence)) continue;
+      if (record.kind === "chief_reply") replying.add(record.askId);
+      if (plan.wake) run.woken.add(record.id);
+      this.deps.pi.sendMessage(coordinationMessage(record, plan.stale), { deliverAs: "followUp", triggerTurn: plan.wake });
+      dispatched.push({ ...record, dispatcher });
+    }
+    this.settle(run, self, dir, dispatched);
+  }
+  /** Peer: never wakes. Chief kinds: wake only for the current matching holder; a reply must also answer this branch's outstanding ask. */
+  disposition(run, self, r, replying) {
+    if (r.kind === "peer") return { deliver: true, wake: false, stale: false };
+    const sameSocket = r.socketPath === self.socketPath;
+    if (isLeadKind(r.kind)) {
+      let mine;
+      try {
+        mine = this.deps.chief?.holds() ? this.deps.chief.assert() : void 0;
+      } catch {
+        mine = void 0;
+      }
+      const current2 = sameSocket && !!mine && sameClaim(mine, r.lease);
+      return { deliver: true, wake: current2, stale: !current2 };
+    }
+    const holder = sameSocket ? liveChief(self.socketPath, this.deps.presence.livenessOptions?.()) : void 0;
+    const current = !!holder && sameClaim(holder, r.lease);
+    if (r.kind === "chief_message") return { deliver: true, wake: current, stale: !current };
+    if (!sameSocket) return { deliver: false, reject: "it names another herdr socket than this lead's" };
+    if (!current) return { deliver: false, reject: `it is from a former chief (lease generation ${r.lease.generation} is not this socket's live holder)` };
+    const asks = this.deps.asks;
+    if (asks?.staged()) {
+      if (!run.session.isIdle()) return { deliver: false, defer: true };
+      asks.unstage(asks.staged());
+    }
+    if (replying.has(r.askId)) return { deliver: false, defer: true };
+    const ask = asks?.pending();
+    if (!ask || ask.askId !== r.askId) return { deliver: false, reject: `ask ${r.askId} is not this session's outstanding ask on its current branch${ask ? ` (that is ${ask.askId})` : " (none is outstanding)"}` };
+    return { deliver: true, wake: true, stale: false };
+  }
+  /** Retire persisted receipts; keep what this process may still append; everything else is durable uncertainty. */
+  settle(run, self, dir, pending) {
+    if (pending.length === 0) return;
+    const ids = new Set(pending.map((p) => p.id));
+    const from = Math.min(...pending.map((p) => run.cursors.get(p.id) ?? p.dispatcher.sessionOffset));
+    const scan = self.sessionFile === void 0 ? void 0 : scanPersistedReceipts(self.sessionFile, self.sessionId, ids, from, RECEIPT_SCAN_BYTES);
+    for (const p of pending) {
+      const base = recordBase(p);
+      if (scan?.found.has(p.id)) {
+        unlinkQuiet(inboxPath(dir, base, "sending"));
+        run.cursors.delete(p.id);
+        run.woken.delete(p.id);
+        continue;
+      }
+      if (scan && !scan.complete) {
+        run.cursors.set(p.id, scan.next);
+        continue;
+      }
+      const sameProcess = p.dispatcher.pid === this.pid && p.dispatcher.pidStartTime === this.pidStartTime && p.dispatcher.sessionFile === self.sessionFile;
+      if (sameProcess && (scan === void 0 || !run.session.isIdle() || run.session.hasPendingMessages() || run.woken.has(p.id))) {
+        if (scan) run.cursors.set(p.id, scan.next);
+        continue;
+      }
+      run.cursors.delete(p.id);
+      if (!markUncertain(dir, p, this.now())) continue;
+      const who = p.fromName ? `${p.fromName} (${p.from})` : p.from;
+      run.notify(`conductor supervision: ${COORDINATION_LABEL[p.kind]} ${p.id} from ${who} may or may not have been delivered; not replayed.`, "warning");
+      this.deps.pi.sendMessage(uncertaintyMessage(p), { deliverAs: "followUp", triggerTurn: false });
+    }
+  }
+  reject(run, dir, base, state) {
+    if (!quarantine(dir, base, state)) return;
+    run.notify(`conductor supervision: rejected malformed coordination record ${base}; preserved as ${base}.rejected.json, not delivered.`, "warning");
+  }
+  /** Never reaches the model and never touches the ask; kept for inspection with one notice. */
+  rejectReply(run, dir, base, r, why2) {
+    if (!quarantine(dir, base, "json")) return;
+    run.notify(`conductor supervision: rejected chief reply ${r.id} from ${r.from} for ask ${r.askId}: ${why2}; preserved as ${base}.rejected.json, not delivered.`, "warning");
+  }
+  /** One watch per session start on its own inbox; on any watch failure the 5 s poll still drains. */
+  watch(run, dir) {
+    if (run.watcher) return;
+    try {
+      const w = watch2(dir, { persistent: false }, () => {
+        if (this.run === run && !run.closed) this.schedule(0);
+      });
+      w.on("error", () => w.close());
+      run.watcher = w;
+    } catch {
+      run.watcher = { close() {
+      } };
+    }
+  }
+};
+function fileSize(file) {
+  try {
+    return lstatSync6(file).size;
+  } catch (e) {
+    if (errno2(e) === "ENOENT") return 0;
+    throw e;
+  }
+}
+
+// src/supervision/ask.ts
+var CHIEF_TOOL = "chief";
+var boundedQuestion = (q) => typeof q === "string" && q.length > 0 && Array.from(q).length <= ASK_QUESTION_MAX && Buffer.byteLength(q) <= ASK_QUESTION_MAX;
+function askOf(entry) {
+  if (!isRecord(entry) || entry.type !== "message" || !isRecord(entry.message)) return void 0;
+  const m = entry.message, d = m.details;
+  if (m.role !== "toolResult" || m.toolName !== CHIEF_TOOL || m.isError === true || !isRecord(d) || d.action !== "ask") return void 0;
+  if (typeof d.askId !== "string" || d.askId !== m.toolCallId || !boundedQuestion(d.question) || !Number.isSafeInteger(d.askedAt) || typeof d.chief !== "string" || !Number.isSafeInteger(d.leaseGeneration)) return void 0;
+  return { askId: d.askId, question: d.question, askedAt: d.askedAt, chief: d.chief, leaseGeneration: d.leaseGeneration };
+}
+function replyOf(entry) {
+  if (!isRecord(entry) || entry.type !== "custom_message" || entry.customType !== COORDINATION_TYPE || !isRecord(entry.details)) return void 0;
+  const d = entry.details;
+  if (d.kind !== "chief_reply" || d.notice !== void 0 || typeof d.askId !== "string" || typeof d.coordinationId !== "string" || !Number.isSafeInteger(d.createdAt) || typeof d.to !== "string") return void 0;
+  return { askId: d.askId, coordinationId: d.coordinationId, createdAt: d.createdAt, to: d.to };
+}
+function branchAsk(branch, unconfirmed = () => false) {
+  for (let i = branch.length - 1; i >= 0; i--) {
+    const ask = askOf(branch[i]);
+    if (!ask) continue;
+    for (let j = i + 1; j < branch.length; j++) {
+      const reply = replyOf(branch[j]);
+      if (reply?.askId === ask.askId && !unconfirmed(reply)) return void 0;
+    }
+    return ask;
+  }
+  return void 0;
+}
+var LeadAsks = class {
+  session;
+  getBranch;
+  stagedId;
+  proofs = /* @__PURE__ */ new Map();
+  /** session_start: the identity read once there; a fork or resume starts again with its own. */
+  start(session) {
+    this.stop();
+    this.session = Object.freeze({ ...session });
+    this.getBranch = session.getBranch;
+  }
+  stop() {
+    this.session = void 0;
+    this.getBranch = void 0;
+    this.stagedId = void 0;
+    this.proofs.clear();
+  }
+  pending() {
+    try {
+      return this.getBranch ? branchAsk(this.getBranch(), (reply) => !this.persisted(reply)) : void 0;
+    } catch {
+      return void 0;
+    }
+  }
+  /**
+   * True only when S2's bounded no-follow scan finds this card, addressed to its
+   * own `to`, in this session's own file (header naming this session). An
+   * absent or invalid file proves nothing and is never cached. A proof, or a
+   * negative scan's cursor, is kept per card for that exact file (device and
+   * inode), so a replaced file is scanned afresh and an append-only one only
+   * from where the last scan stopped.
+   */
+  persisted(reply) {
+    const { sessionId, sessionFile } = this.session ?? {};
+    if (!sessionId || !sessionFile) return false;
+    const key = JSON.stringify([sessionId, sessionFile, reply.coordinationId, reply.to]);
+    let path2;
+    try {
+      path2 = lstatSync7(sessionFile);
+    } catch {
+      return false;
+    }
+    const known = this.proofs.get(key);
+    const same2 = known !== void 0 && known.dev === path2.dev && known.ino === path2.ino;
+    if (same2 && known.proven) return true;
+    let scan;
+    try {
+      scan = scanPersistedReceipts(sessionFile, sessionId, /* @__PURE__ */ new Set([reply.coordinationId]), same2 ? known.next : 0, Number.POSITIVE_INFINITY, reply.to);
+    } catch {
+      return false;
+    }
+    if (!scan?.file) return false;
+    const proven = scan.found.has(reply.coordinationId);
+    this.proofs.set(key, { ...scan.file, proven, next: scan.next });
+    return proven;
+  }
+  stage(askId) {
+    this.stagedId = askId;
+  }
+  unstage(askId) {
+    if (this.stagedId === askId) this.stagedId = void 0;
+  }
+  /** The staged ask until Pi records any result for its call on the branch. */
+  staged() {
+    const id = this.stagedId;
+    if (id === void 0) return void 0;
+    try {
+      const branch = this.getBranch?.() ?? [];
+      for (let i = branch.length - 1; i >= 0; i--) {
+        const m = branch[i].message;
+        if (branch[i].type === "message" && m?.role === "toolResult" && m.toolCallId === id) {
+          this.stagedId = void 0;
+          return void 0;
+        }
+      }
+    } catch {
+    }
+    return id;
+  }
+};
 
 // src/supervision/tools.ts
 var PEER_TOOL = "peer";
@@ -12133,7 +12515,7 @@ function formatRunRow(r, livenessProbe = defaultLivenessProbe) {
 }
 function runHistory(_opts, ctx, arg) {
   const root = runsRoot();
-  if (!existsSync18(root)) {
+  if (!existsSync19(root)) {
     ctx.ui.notify(
       "no run history yet. Spawn a sub-agent and it'll show up here.",
       "info"
@@ -12178,8 +12560,8 @@ function runHistory(_opts, ctx, arg) {
           }
         }
       },
-      isPinned: (id) => existsSync18(join29(runDir(id), ".pinned")),
-      isArchived: (id) => existsSync18(join29(runDir(id), ".archived"))
+      isPinned: (id) => existsSync19(join29(runDir(id), ".pinned")),
+      isArchived: (id) => existsSync19(join29(runDir(id), ".archived"))
     },
     { limit }
   );
@@ -12197,7 +12579,7 @@ async function runPin(ctx, arg) {
     return;
   }
   const root = runsRoot();
-  if (!existsSync18(join29(root, id))) {
+  if (!existsSync19(join29(root, id))) {
     ctx.ui.notify(`No such run: ${id}`, "warning");
     return;
   }
@@ -12223,7 +12605,7 @@ async function runUnpin(ctx, arg) {
     return;
   }
   const root = runsRoot();
-  if (!existsSync18(join29(root, id))) {
+  if (!existsSync19(join29(root, id))) {
     ctx.ui.notify(`No such run: ${id}`, "warning");
     return;
   }
@@ -12678,11 +13060,11 @@ Resolve manually in the worktree and run /conductor worktree merge ${runId} agai
 
 // src/tools.ts
 import { Type as Type4 } from "@sinclair/typebox";
-import { readFileSync as readFileSync19, existsSync as existsSync21 } from "node:fs";
+import { readFileSync as readFileSync19, existsSync as existsSync22 } from "node:fs";
 import { dirname as dirname22 } from "node:path";
 
 // src/chain.ts
-import { readFileSync as readFileSync17, existsSync as existsSync19 } from "node:fs";
+import { readFileSync as readFileSync17, existsSync as existsSync20 } from "node:fs";
 var DEFAULT_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nOriginal task:\n{task}\n\n---\nFinal output:\n{final}";
 var WORKTREE_CHAIN_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nThe work is on branch `{worktreeBranch}` (not yet merged to `{baseBranch}`).\nRun the following to inspect the changes:\n\n```bash\ngit diff {baseBranch}...{worktreeBranch}\n```\n\nOriginal task:\n{task}";
 var FINAL_PLACEHOLDER = "(no final output)";
@@ -12702,7 +13084,7 @@ function buildChainTask(taskTemplate, context) {
     template = DEFAULT_TEMPLATE;
   }
   let finalContent = FINAL_PLACEHOLDER;
-  if (existsSync19(context.finalPath)) {
+  if (existsSync20(context.finalPath)) {
     try {
       finalContent = readFileSync17(context.finalPath, "utf-8");
     } catch {
@@ -12894,8 +13276,8 @@ function leadEligibility(env, modeOn, session) {
     ...env.HERDR_WORKSPACE_ID ? { workspaceId: env.HERDR_WORKSPACE_ID } : {}
   };
 }
-var errno2 = (e) => e?.code;
-var message2 = (e) => e?.message ?? String(e);
+var errno3 = (e) => e?.code;
+var message3 = (e) => e?.message ?? String(e);
 var Lost = class extends Error {
 };
 function gitDescription(cwd) {
@@ -12996,7 +13378,7 @@ var LeadPresence = class {
       const next = [...active.filter((n) => !this.owned.has(n) || wanted(n)), ...[...this.owned.keys()].filter((n) => wanted(n) && !active.includes(n) && available.has(n))];
       if (next.join("\0") !== active.join("\0")) pi.setActiveTools(next);
     } catch (e) {
-      this.state = { ...this.state, lastError: `tool sync failed: ${message2(e)}` };
+      this.state = { ...this.state, lastError: `tool sync failed: ${message3(e)}` };
     }
   }
   eligibility() {
@@ -13024,8 +13406,8 @@ var LeadPresence = class {
       this.publishFirst(act);
     } catch (e) {
       this.active = void 0;
-      const duplicate = e instanceof Lost || errno2(e) === "EEXIST";
-      const reason = duplicate ? e instanceof Lost ? e.message : `session ${identity.sessionId} already has a live lead presence` : `presence not published: ${message2(e)}`;
+      const duplicate = e instanceof Lost || errno3(e) === "EEXIST";
+      const reason = duplicate ? e instanceof Lost ? e.message : `session ${identity.sessionId} already has a live lead presence` : `presence not published: ${message3(e)}`;
       this.state = { state: duplicate ? "duplicate" : "error", reason, sessionId: identity.sessionId, path: act.path };
       this.notify?.(`conductor supervision: ${reason}; peer stays inactive.`, "warning");
       return;
@@ -13041,7 +13423,7 @@ var LeadPresence = class {
     try {
       removeLeadRecordIf(act.path, (r) => sameLeadIdentity(r, act.identity));
     } catch (e) {
-      this.state = { ...this.state, lastError: `unpublish failed: ${message2(e)}` };
+      this.state = { ...this.state, lastError: `unpublish failed: ${message3(e)}` };
     }
   }
   dispose(act) {
@@ -13088,7 +13470,7 @@ var LeadPresence = class {
       createLeadRecord(this.record(act), this.fence(act));
       return;
     } catch (e) {
-      if (errno2(e) !== "EEXIST") throw e;
+      if (errno3(e) !== "EEXIST") throw e;
     }
     const existing = readLeadRecord(act.path);
     if (existing) {
@@ -13133,14 +13515,14 @@ var LeadPresence = class {
         try {
           createLeadRecord(this.record(act), fence);
         } catch (again) {
-          throw errno2(again) === "EEXIST" ? lost() : again;
+          throw errno3(again) === "EEXIST" ? lost() : again;
         }
       }
       this.state = { ...this.state, lastError: void 0 };
     } catch (e) {
       if (this.active !== act) return;
       if (!(e instanceof Lost)) {
-        this.state = { ...this.state, lastError: message2(e) };
+        this.state = { ...this.state, lastError: message3(e) };
         return;
       }
       this.dispose(act);
@@ -13152,7 +13534,7 @@ var LeadPresence = class {
 };
 
 // src/delegate-tool.ts
-import { existsSync as existsSync20, mkdirSync as mkdirSync13, readFileSync as readFileSync18, watch as watch2 } from "node:fs";
+import { existsSync as existsSync21, mkdirSync as mkdirSync13, readFileSync as readFileSync18, watch as watch3 } from "node:fs";
 import { dirname as dirname21 } from "node:path";
 import { Type as Type3 } from "@sinclair/typebox";
 var NAME = /^[A-Za-z0-9_.:-]+$/;
@@ -13184,7 +13566,7 @@ function registerDelegate(pi, env) {
       if (!parsed.ok) throw new Error(`delegate rejected: ${parsed.reason}`);
       if (signal?.aborted) throw new Error("delegate aborted");
       const paths = delegatePaths(runDir2, toolCallId);
-      if (existsSync20(paths.claim) || existsSync20(paths.response)) throw new Error(`delegate rejected: call id ${toolCallId} was already used in this run`);
+      if (existsSync21(paths.claim) || existsSync21(paths.response)) throw new Error(`delegate rejected: call id ${toolCallId} was already used in this run`);
       const startedAt = Date.now();
       onUpdate?.({ content: [{ type: "text", text: `delegating to ${parsed.args.persona}; waiting for the lead` }], details: {} });
       let personaTimeoutMs;
@@ -13227,7 +13609,7 @@ function waitForDelegateResponse(path2, expect, deadlineAt, signal) {
       else resolve7(value);
     };
     const check = () => {
-      if (settled || !existsSync20(path2)) return;
+      if (settled || !existsSync21(path2)) return;
       let value;
       try {
         value = JSON.parse(readFileSync18(path2, "utf8"));
@@ -13244,7 +13626,7 @@ function waitForDelegateResponse(path2, expect, deadlineAt, signal) {
     }
     signal?.addEventListener("abort", onAbort, { once: true });
     cleanup.push(() => signal?.removeEventListener("abort", onAbort));
-    const watcher = watch2(dirname21(path2), () => check());
+    const watcher = watch3(dirname21(path2), () => check());
     watcher.on("error", () => {
     });
     cleanup.push(() => watcher.close());
@@ -15144,7 +15526,7 @@ function buildOnChainCallback(args) {
     let overrideTask;
     if (step.reevaluate) {
       let parentFinal = "";
-      if (existsSync21(parentRun.finalPath)) {
+      if (existsSync22(parentRun.finalPath)) {
         try {
           parentFinal = readFileSync19(parentRun.finalPath, "utf-8");
         } catch {
@@ -15464,7 +15846,7 @@ function mapFromRegistry2(r) {
 }
 
 // src/delegation-broker.ts
-import { existsSync as existsSync22, readFileSync as readFileSync20, readdirSync as readdirSync12 } from "node:fs";
+import { existsSync as existsSync23, readFileSync as readFileSync20, readdirSync as readdirSync12 } from "node:fs";
 import { dirname as dirname23, join as join31 } from "node:path";
 var LEAF_OUTCOME_UNCERTAIN = "leaf outcome uncertain after lead restart; not replayed";
 var HERDR_RELOAD_CANCELLED = "lead /reload stopped a leaf it could not hand over (queued, launching or subprocess); delegate again";
@@ -15520,7 +15902,7 @@ var DelegationBroker = class {
     if (!d) return;
     this.deferred.delete(key);
     if (!this.current(d.parent) || d.parent.herdrOwnership !== d.ownership || d.parent.herdr?.launchNonce !== d.nonce || !brokerable(d.parent)) return;
-    if (d.ended && !existsSync22(delegatePaths(dirname23(d.parent.recordPath), d.id).claim)) return;
+    if (d.ended && !existsSync23(delegatePaths(dirname23(d.parent.recordPath), d.id).claim)) return;
     this.claim(d.parent, d.id, key, d.args, d.cwd, d.ended);
   }
   /** Synchronous, before any await: exclusive claim, then count and notify, so a duplicate never spawns twice. */
@@ -15576,7 +15958,7 @@ var DelegationBroker = class {
    */
   rebind(parent, id, key, ended) {
     const paths = delegatePaths(dirname23(parent.recordPath), id);
-    if (existsSync22(paths.response)) return;
+    if (existsSync23(paths.response)) return;
     let claim;
     try {
       claim = read(paths.claim);
@@ -16449,7 +16831,7 @@ If your reason isn't on this list, default back to the canonical chain. "I think
 }
 
 // src/child-bridge.ts
-import { closeSync as closeSync8, constants as constants7, fstatSync as fstatSync6, lstatSync as lstatSync6, mkdirSync as mkdirSync15, openSync as openSync8, readFileSync as readFileSync21, realpathSync as realpathSync8, writeSync as writeSync2 } from "node:fs";
+import { closeSync as closeSync9, constants as constants7, fstatSync as fstatSync6, lstatSync as lstatSync8, mkdirSync as mkdirSync15, openSync as openSync8, readFileSync as readFileSync21, realpathSync as realpathSync8, writeSync as writeSync2 } from "node:fs";
 import { basename as basename4, dirname as dirname24, isAbsolute as isAbsolute8, join as join32, resolve as resolve6 } from "node:path";
 
 // package.json
@@ -16543,7 +16925,7 @@ function readJson(file) {
     if (!fstatSync6(fd).isFile()) throw new Error("invalid identity file");
     return JSON.parse(readFileSync21(fd, "utf8"));
   } finally {
-    closeSync8(fd);
+    closeSync9(fd);
   }
 }
 function sameHello(value, expected) {
@@ -16554,7 +16936,7 @@ function exclusive(file, value) {
   try {
     writeAll(fd, Buffer.from(JSON.stringify(value) + "\n"));
   } finally {
-    closeSync8(fd);
+    closeSync9(fd);
   }
 }
 function statePresent(file, expected) {
@@ -16613,7 +16995,7 @@ function installChildBridge(pi, options = {}) {
       if (fd !== void 0) {
         const owned = fd;
         fd = void 0;
-        closeSync8(owned);
+        closeSync9(owned);
       }
       hello = void 0;
       pending = void 0;
@@ -16763,7 +17145,7 @@ function installChildBridge(pi, options = {}) {
       const b = isRecord(record) && record.herdr;
       if (!isRecord(record) || record.id !== runId || record.runtime !== "herdr" || !isRecord(b) || b.runId !== runId || b.launchNonce !== nonce || b.sessionId !== sessionId || b.sessionFile !== sessionFile || env.HERDR_ENV !== "1" || !path(b.socketPath) || b.socketPath !== env.HERDR_SOCKET_PATH || !text4(b.paneId) || b.paneId !== env.HERDR_PANE_ID || !text4(b.tabId) || b.tabId !== env.HERDR_TAB_ID || !text4(b.workspaceId) || b.workspaceId !== env.HERDR_WORKSPACE_ID || !text4(b.terminalId) || typeof b.createdTab !== "boolean") throw new Error("run binding mismatch");
       try {
-        const stat6 = lstatSync6(sessionFile);
+        const stat6 = lstatSync8(sessionFile);
         if (!stat6.isFile() || stat6.nlink !== 1) throw new Error("invalid session file");
       } catch (error) {
         if (error.code !== "ENOENT") throw error;
@@ -18048,7 +18430,7 @@ var ConductorEventEmitter = class {
 };
 
 // src/rpc-detach.ts
-import { existsSync as existsSync23, unlinkSync as unlinkSync4 } from "node:fs";
+import { existsSync as existsSync24, unlinkSync as unlinkSync4 } from "node:fs";
 function createRpcDetach(filePath, intervalMs = 200) {
   let resolveDetach = () => {
   };
@@ -18056,7 +18438,7 @@ function createRpcDetach(filePath, intervalMs = 200) {
     resolveDetach = res;
   });
   const pollTimer = setInterval(() => {
-    if (existsSync23(filePath)) {
+    if (existsSync24(filePath)) {
       try {
         unlinkSync4(filePath);
       } catch {
@@ -18068,7 +18450,7 @@ function createRpcDetach(filePath, intervalMs = 200) {
   const unregister = () => {
     clearInterval(pollTimer);
     try {
-      if (existsSync23(filePath)) unlinkSync4(filePath);
+      if (existsSync24(filePath)) unlinkSync4(filePath);
     } catch {
     }
   };
@@ -18147,360 +18529,6 @@ async function executePromptAndSend(deps, agentId, presuppliedText) {
       ctx.ui.notify(result.reason, "warning");
     } catch {
     }
-  }
-}
-
-// src/supervision/delivery.ts
-import { closeSync as closeSync9, existsSync as existsSync24, lstatSync as lstatSync7, readSync as readSync6, watch as watch3 } from "node:fs";
-var DRAIN_POLL_MS = 5e3;
-var RECEIPT_SCAN_BYTES = 4 * 1048576;
-var CHUNK = 1048576;
-function scanPersistedReceipts(file, sessionId, ids, from, maxBytes) {
-  const opened = openSessionFile(file, sessionId);
-  if ("missing" in opened) return void 0;
-  const found = /* @__PURE__ */ new Set();
-  if ("invalid" in opened) return { found, next: from, complete: true };
-  const { fd, size, bodyStart } = opened;
-  try {
-    const begin = from > size || from < bodyStart ? bodyStart : from;
-    const end = Math.min(size, begin + maxBytes);
-    const buffer = Buffer.alloc(Math.min(CHUNK, Math.max(1, end - begin)));
-    let carry = Buffer.alloc(0), lineStart = begin, offset = begin, skipping = false;
-    while (offset < end) {
-      const n = readSync6(fd, buffer, 0, Math.min(buffer.length, end - offset), offset);
-      if (n <= 0) break;
-      const chunk = Buffer.concat([carry, buffer.subarray(0, n)]), chunkStart = offset - carry.length;
-      offset += n;
-      let start = 0;
-      for (let nl = chunk.indexOf(10); nl >= 0; nl = chunk.indexOf(10, start)) {
-        if (!skipping) match(chunk.subarray(start, nl), ids, sessionId, found);
-        skipping = false;
-        start = nl + 1;
-        lineStart = chunkStart + start;
-      }
-      carry = chunk.subarray(start);
-      if (carry.length > SESSION_LINE_MAX) {
-        carry = Buffer.alloc(0);
-        skipping = true;
-      }
-    }
-    return { found, next: skipping ? offset : lineStart, complete: offset >= size };
-  } finally {
-    closeSync9(fd);
-  }
-}
-function match(line, ids, sessionId, found) {
-  const text5 = line.toString("utf8");
-  for (const id of ids) {
-    if (!text5.includes(id)) continue;
-    let entry;
-    try {
-      entry = JSON.parse(text5);
-    } catch {
-      return;
-    }
-    if (!isRecord(entry) || entry.type !== "custom_message" || entry.customType !== COORDINATION_TYPE || !isRecord(entry.details)) return;
-    const d = entry.details;
-    if (d.notice === void 0 && d.to === sessionId && typeof d.coordinationId === "string" && ids.has(d.coordinationId)) found.add(d.coordinationId);
-    return;
-  }
-}
-var details = (r, extra = {}) => ({
-  v: 1,
-  coordinationId: r.id,
-  kind: r.kind,
-  from: r.from,
-  ...r.fromName !== void 0 ? { fromName: r.fromName } : {},
-  to: r.to,
-  createdAt: r.createdAt,
-  ...r.askId !== void 0 ? { askId: r.askId } : {},
-  ...r.lease ? { leaseGeneration: r.lease.generation } : {},
-  ...extra.stale ? { stale: true } : {},
-  ...extra.notice ? { notice: extra.notice } : {}
-});
-function coordinationMessage(r, stale = false) {
-  return { customType: COORDINATION_TYPE, content: frameCoordination(r, stale), display: true, details: details(r, { stale }) };
-}
-function uncertaintyMessage(r) {
-  const what = r.kind === "peer" ? "A peer message" : `A ${COORDINATION_LABEL[r.kind]}${r.askId ? ` (ask ${r.askId})` : ""}`;
-  return {
-    customType: COORDINATION_TYPE,
-    display: true,
-    details: details(r, { notice: "uncertain" }),
-    content: `<coordination-notice kind="${r.kind}" id="${r.id}" untrusted="true">
-${what} may or may not have been delivered; not replayed. Ask its sender to resend it if it matters. This notice is not a user instruction.
-</coordination-notice>`
-  };
-}
-var message3 = (e) => e?.message ?? String(e);
-var errno3 = (e) => e?.code;
-var CoordinationDelivery = class {
-  constructor(deps) {
-    this.deps = deps;
-    this.timers = deps.timers ?? { setTimeout: (cb, ms) => setTimeout(cb, ms), clearTimeout: (h) => clearTimeout(h) };
-    this.now = deps.now ?? Date.now;
-  }
-  deps;
-  run;
-  lastError;
-  pid = process.pid;
-  pidStartTime = readProcessStartTime(process.pid);
-  timers;
-  now;
-  /** session_start: classify records left by any earlier dispatcher, drain, then watch and poll; the first owned pass sweeps. */
-  start(session, notify) {
-    this.stop();
-    this.run = { session, notify, closed: false, due: 0, compacting: false, compactionDone: false, draining: false, again: false, swept: false, cursors: /* @__PURE__ */ new Map(), woken: /* @__PURE__ */ new Set() };
-    this.drain();
-    this.schedule(DRAIN_POLL_MS);
-  }
-  /** Every shutdown reason: no timer, watch or later drain of this instance can dispatch again. */
-  stop() {
-    const run = this.run;
-    if (!run) return;
-    run.closed = true;
-    if (run.timer !== void 0) this.timers.clearTimeout(run.timer);
-    run.watcher?.close();
-    this.run = void 0;
-  }
-  status() {
-    return this.lastError ? { inboxError: this.lastError } : {};
-  }
-  /** session_before_compact opens the window; session_compact or _failed ends it, cleared once idle or at a turn boundary. */
-  compaction(phase) {
-    const run = this.run;
-    if (!run) return;
-    if (phase === "start") {
-      run.compacting = true;
-      run.compactionDone = false;
-      return;
-    }
-    run.compactionDone = true;
-    this.schedule(0);
-  }
-  boundary() {
-    const run = this.run;
-    if (run?.compactionDone) {
-      run.compacting = false;
-      run.compactionDone = false;
-    }
-  }
-  /** turn_start: a woken dispatch is now inside a run, which keeps the session busy until its receipt can land. */
-  started() {
-    this.run?.woken.clear();
-  }
-  /** S4: a reply card on the branch answers its ask only once its persisted receipt retired the dispatch (no `.sending` or `.uncertain` left). */
-  unconfirmed(reply) {
-    const base = recordBase({ createdAt: reply.createdAt, id: reply.coordinationId });
-    try {
-      const dir = inboxDir(reply.to);
-      return existsSync24(inboxPath(dir, base, "sending")) || existsSync24(inboxPath(dir, base, "uncertain"));
-    } catch {
-      return true;
-    }
-  }
-  /** Synchronous and re-entrancy guarded: one pass at a time per instance. */
-  drain() {
-    const run = this.run;
-    if (!run || run.closed) return;
-    if (run.draining) {
-      run.again = true;
-      return;
-    }
-    run.draining = true;
-    try {
-      do {
-        run.again = false;
-        this.pass(run);
-      } while (run.again && !run.closed && this.run === run);
-      this.lastError = void 0;
-    } catch (e) {
-      if (this.lastError !== message3(e)) run.notify(`conductor supervision: inbox unavailable: ${message3(e)}`, "warning");
-      this.lastError = message3(e);
-    } finally {
-      run.draining = false;
-    }
-  }
-  schedule(ms) {
-    const run = this.run;
-    if (!run || run.closed) return;
-    const due = this.now() + ms;
-    if (run.timer !== void 0 && run.due <= due) return;
-    if (run.timer !== void 0) this.timers.clearTimeout(run.timer);
-    run.due = due;
-    run.timer = this.timers.setTimeout(() => {
-      if (this.run !== run || run.closed) return;
-      run.timer = void 0;
-      this.drain();
-      this.schedule(DRAIN_POLL_MS);
-    }, ms);
-    run.timer.unref?.();
-  }
-  owned() {
-    try {
-      return this.deps.presence.assertOwned();
-    } catch {
-      return void 0;
-    }
-  }
-  pass(run) {
-    const self = this.owned();
-    if (!self) return;
-    const dir = ensureInboxDir(self.sessionId, true);
-    this.watch(run, dir);
-    if (!run.swept) {
-      run.swept = true;
-      sweepInbox(dir, this.now());
-    }
-    const { bases } = listInbox(dir);
-    const pending = [], queued = [];
-    for (const [base, states] of bases) {
-      if (states.has("uncertain") || states.has("rejected")) {
-        for (const state of ["json", "sending", "slot"]) if (states.has(state)) unlinkQuiet(inboxPath(dir, base, state));
-      } else if (states.has("sending")) {
-        try {
-          pending.push(readDispatched(dir, base, self.sessionId));
-        } catch {
-          this.reject(run, dir, base, "sending");
-          continue;
-        }
-        for (const state of ["json", "slot"]) if (states.has(state)) unlinkQuiet(inboxPath(dir, base, state));
-      } else if (states.has("json")) queued.push(base);
-    }
-    this.settle(run, self, dir, pending);
-    const staged = this.deps.asks?.staged();
-    if (staged !== void 0 && run.session.isIdle()) this.deps.asks.unstage(staged);
-    if (run.compacting) {
-      if (!(run.compactionDone && run.session.isIdle())) return;
-      run.compacting = false;
-      run.compactionDone = false;
-    }
-    const replying = new Set(pending.filter((p) => p.kind === "chief_reply" && existsSync24(inboxPath(dir, recordBase(p), "sending"))).map((p) => p.askId));
-    const dispatched = [];
-    for (const base of queued.slice(0, INBOX_QUEUE_MAX)) {
-      let record;
-      try {
-        record = readQueued(dir, base, self.sessionId);
-      } catch {
-        this.reject(run, dir, base, "json");
-        continue;
-      }
-      const current = this.owned();
-      if (!current || current.generation !== self.generation || run.closed || this.run !== run) return;
-      const plan = this.disposition(run, self, record, replying);
-      if (!plan.deliver) {
-        if ("reject" in plan) this.rejectReply(run, dir, base, record, plan.reject);
-        continue;
-      }
-      const dispatcher = {
-        sessionId: self.sessionId,
-        sessionFile: self.sessionFile,
-        pid: self.pid,
-        ...self.pidStartTime !== void 0 ? { pidStartTime: self.pidStartTime } : {},
-        generation: self.generation,
-        sessionOffset: fileSize(self.sessionFile),
-        dispatchedAt: this.now()
-      };
-      const fence = () => {
-        if (this.owned()?.generation !== self.generation || this.run !== run) throw new Error("coordination dispatch fenced: superseded");
-      };
-      if (!claimCoordination(dir, record, dispatcher, fence)) continue;
-      if (record.kind === "chief_reply") replying.add(record.askId);
-      if (plan.wake) run.woken.add(record.id);
-      this.deps.pi.sendMessage(coordinationMessage(record, plan.stale), { deliverAs: "followUp", triggerTurn: plan.wake });
-      dispatched.push({ ...record, dispatcher });
-    }
-    this.settle(run, self, dir, dispatched);
-  }
-  /** Peer: never wakes. Chief kinds: wake only for the current matching holder; a reply must also answer this branch's outstanding ask. */
-  disposition(run, self, r, replying) {
-    if (r.kind === "peer") return { deliver: true, wake: false, stale: false };
-    const sameSocket = r.socketPath === self.socketPath;
-    if (isLeadKind(r.kind)) {
-      let mine;
-      try {
-        mine = this.deps.chief?.holds() ? this.deps.chief.assert() : void 0;
-      } catch {
-        mine = void 0;
-      }
-      const current2 = sameSocket && !!mine && sameClaim(mine, r.lease);
-      return { deliver: true, wake: current2, stale: !current2 };
-    }
-    const holder = sameSocket ? liveChief(self.socketPath, this.deps.presence.livenessOptions?.()) : void 0;
-    const current = !!holder && sameClaim(holder, r.lease);
-    if (r.kind === "chief_message") return { deliver: true, wake: current, stale: !current };
-    if (!sameSocket) return { deliver: false, reject: "it names another herdr socket than this lead's" };
-    if (!current) return { deliver: false, reject: `it is from a former chief (lease generation ${r.lease.generation} is not this socket's live holder)` };
-    const asks = this.deps.asks;
-    if (asks?.staged()) {
-      if (!run.session.isIdle()) return { deliver: false, defer: true };
-      asks.unstage(asks.staged());
-    }
-    if (replying.has(r.askId)) return { deliver: false, defer: true };
-    const ask = asks?.pending();
-    if (!ask || ask.askId !== r.askId) return { deliver: false, reject: `ask ${r.askId} is not this session's outstanding ask on its current branch${ask ? ` (that is ${ask.askId})` : " (none is outstanding)"}` };
-    return { deliver: true, wake: true, stale: false };
-  }
-  /** Retire persisted receipts; keep what this process may still append; everything else is durable uncertainty. */
-  settle(run, self, dir, pending) {
-    if (pending.length === 0) return;
-    const ids = new Set(pending.map((p) => p.id));
-    const from = Math.min(...pending.map((p) => run.cursors.get(p.id) ?? p.dispatcher.sessionOffset));
-    const scan = self.sessionFile === void 0 ? void 0 : scanPersistedReceipts(self.sessionFile, self.sessionId, ids, from, RECEIPT_SCAN_BYTES);
-    for (const p of pending) {
-      const base = recordBase(p);
-      if (scan?.found.has(p.id)) {
-        unlinkQuiet(inboxPath(dir, base, "sending"));
-        run.cursors.delete(p.id);
-        run.woken.delete(p.id);
-        continue;
-      }
-      if (scan && !scan.complete) {
-        run.cursors.set(p.id, scan.next);
-        continue;
-      }
-      const sameProcess = p.dispatcher.pid === this.pid && p.dispatcher.pidStartTime === this.pidStartTime && p.dispatcher.sessionFile === self.sessionFile;
-      if (sameProcess && (scan === void 0 || !run.session.isIdle() || run.session.hasPendingMessages() || run.woken.has(p.id))) {
-        if (scan) run.cursors.set(p.id, scan.next);
-        continue;
-      }
-      run.cursors.delete(p.id);
-      if (!markUncertain(dir, p, this.now())) continue;
-      const who = p.fromName ? `${p.fromName} (${p.from})` : p.from;
-      run.notify(`conductor supervision: ${COORDINATION_LABEL[p.kind]} ${p.id} from ${who} may or may not have been delivered; not replayed.`, "warning");
-      this.deps.pi.sendMessage(uncertaintyMessage(p), { deliverAs: "followUp", triggerTurn: false });
-    }
-  }
-  reject(run, dir, base, state) {
-    if (!quarantine(dir, base, state)) return;
-    run.notify(`conductor supervision: rejected malformed coordination record ${base}; preserved as ${base}.rejected.json, not delivered.`, "warning");
-  }
-  /** Never reaches the model and never touches the ask; kept for inspection with one notice. */
-  rejectReply(run, dir, base, r, why2) {
-    if (!quarantine(dir, base, "json")) return;
-    run.notify(`conductor supervision: rejected chief reply ${r.id} from ${r.from} for ask ${r.askId}: ${why2}; preserved as ${base}.rejected.json, not delivered.`, "warning");
-  }
-  /** One watch per session start on its own inbox; on any watch failure the 5 s poll still drains. */
-  watch(run, dir) {
-    if (run.watcher) return;
-    try {
-      const w = watch3(dir, { persistent: false }, () => {
-        if (this.run === run && !run.closed) this.schedule(0);
-      });
-      w.on("error", () => w.close());
-      run.watcher = w;
-    } catch {
-      run.watcher = { close() {
-      } };
-    }
-  }
-};
-function fileSize(file) {
-  try {
-    return lstatSync7(file).size;
-  } catch (e) {
-    if (errno3(e) === "ENOENT") return 0;
-    throw e;
   }
 }
 
@@ -18610,7 +18638,7 @@ function index_default(pi) {
   let conductorModeOn = resolveInitialConductorMode(process.env, {
     defaultMode: initialCfg.defaultMode
   });
-  const asks = herdrLeadEnv(process.env) ? new LeadAsks((reply) => delivery?.unconfirmed(reply) ?? true) : void 0;
+  const asks = herdrLeadEnv(process.env) ? new LeadAsks() : void 0;
   const supervision = new LeadPresence({ pi, env: process.env, registry, getMode: () => conductorModeOn, pendingAsk: () => asks?.pending() });
   const chief = herdrLeadEnv(process.env) ? new ChiefRole({ pi, presence: supervision }) : void 0;
   const delivery = herdrLeadEnv(process.env) ? new CoordinationDelivery({ pi, presence: supervision, chief, asks }) : void 0;
@@ -18756,13 +18784,13 @@ function index_default(pi) {
     const cwdWarning = cwdControl.restore(branch);
     if (cwdWarning) ctx.ui.notify(cwdWarning, "warning");
     ctxRef = ctx;
-    asks?.start(() => ctx.sessionManager.getBranch());
     let sessionId, sessionFile;
     try {
       sessionId = ctx.sessionManager?.getSessionId();
       sessionFile = ctx.sessionManager?.getSessionFile();
     } catch {
     }
+    asks?.start({ getBranch: () => ctx.sessionManager.getBranch(), sessionId, sessionFile });
     supervision.start({ sessionId, sessionFile, cwd: ctx.cwd }, (message4, level) => ctx.ui.notify(message4, level));
     chief?.start({ getBranch: () => ctx.sessionManager.getBranch() }, (message4, level) => ctx.ui.notify(message4, level));
     delivery?.start({ isIdle: () => ctx.isIdle(), hasPendingMessages: () => ctx.hasPendingMessages() }, (message4, level) => ctx.ui.notify(message4, level));

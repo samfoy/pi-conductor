@@ -35,13 +35,14 @@ export interface Lead {
   reload(): Promise<void>;
   newSession(): Promise<void>;
   resume(path: string): Promise<void>;
-  fork(): Promise<void>;
+  /** Forks before a user message (default: the first), as /fork does; `at` keeps `entryId` itself as the fork's leaf. */
+  fork(entryId?: string, position?: "before" | "at"): Promise<void>;
   quit(): Promise<void>;
 }
 
 const textOf = (result: any) => (result?.content ?? []).map((p: any) => p.text ?? "").join("");
 
-export async function openLead(root: string, label: string, opts: { session?: "memory" | string; tools?: string[]; extra?: (pi: any) => void; keepRecentTokens?: number } = {}): Promise<Lead> {
+export async function openLead(root: string, label: string, opts: { session?: "memory" | string; tools?: string[]; extra?: (pi: any) => void; before?: (pi: any) => void; keepRecentTokens?: number } = {}): Promise<Lead> {
   const cwd = join(root, label), agentDir = join(cwd, "agent"), sessionDir = join(cwd, "sessions");
   mkdirSync(sessionDir, { recursive: true });
   const faux = fauxProvider({ tokensPerSecond: Infinity });
@@ -51,7 +52,7 @@ export async function openLead(root: string, label: string, opts: { session?: "m
   const createRuntime = async ({ cwd, agentDir, sessionManager, sessionStartEvent }: any) => {
     const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false, ...(opts.keepRecentTokens ? { keepRecentTokens: opts.keepRecentTokens } : {}) }, retry: { enabled: false } });
     const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
-      extensionFactories: [pi => { pi.on("session_shutdown", (e: { reason: string }) => void shutdowns.push(e.reason)); }, conductor, ...(opts.extra ? [opts.extra] : [])] });
+      extensionFactories: [pi => { pi.on("session_shutdown", (e: { reason: string }) => void shutdowns.push(e.reason)); }, ...(opts.before ? [opts.before] : []), conductor, ...(opts.extra ? [opts.extra] : [])] });
     await resourceLoader.reload();
     for (const e of resourceLoader.getExtensions().errors) errors.push(e.error);
     const { session } = await createAgentSession({ cwd, agentDir, modelRuntime, model: faux.getModel(), resourceLoader, settingsManager, sessionManager, sessionStartEvent, tools: opts.tools });
@@ -95,10 +96,10 @@ export async function openLead(root: string, label: string, opts: { session?: "m
     reload: async () => { await s().reload(); },
     newSession: async () => { await runtime.newSession(); },
     resume: async path => { await runtime.switchSession(path); },
-    fork: async () => {
-      const first = s().sessionManager.getEntries().find((e: any) => e.type === "message" && e.message.role === "user");
+    fork: async (entryId, position) => {
+      const first = entryId ?? s().sessionManager.getEntries().find((e: any) => e.type === "message" && e.message.role === "user")?.id;
       if (!first) throw new Error("fork needs a user message");
-      await runtime.fork(first.id);
+      await runtime.fork(first, position ? { position } : undefined);
     },
     quit: async () => { await runtime.dispose(); },
   };

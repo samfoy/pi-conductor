@@ -18,9 +18,9 @@ import { closeSync, existsSync, lstatSync, readSync, watch } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isRecord } from "../herdr/cli.ts";
 import { readProcessStartTime } from "../reconcile-startup.ts";
-import type { LeadAsks, ReplyRef } from "./ask.ts";
+import type { LeadAsks } from "./ask.ts";
 import {
-  claimCoordination, COORDINATION_LABEL, COORDINATION_TYPE, ensureInboxDir, frameCoordination, INBOX_QUEUE_MAX, inboxDir, isLeadKind, listInbox, markUncertain, quarantine,
+  claimCoordination, COORDINATION_LABEL, COORDINATION_TYPE, ensureInboxDir, frameCoordination, INBOX_QUEUE_MAX, isLeadKind, listInbox, markUncertain, quarantine,
   readDispatched, readQueued, recordBase, sweepInbox, unlinkQuiet, inboxPath, type CoordinationKind, type CoordinationRecord, type Dispatcher, type SendingRecord,
 } from "./inbox.ts";
 import { liveChief, sameClaim, type ChiefRole } from "./lease.ts";
@@ -32,20 +32,23 @@ const DRAIN_POLL_MS = 5_000;
 const RECEIPT_SCAN_BYTES = 4 * 1048576;
 const CHUNK = 1048576;
 
-export interface ReceiptScan { found: Set<string>; next: number; complete: boolean }
+/** `file` names the opened file (device and inode) when it was this session's own; an invalid file has none. */
+export interface ReceiptScan { found: Set<string>; next: number; complete: boolean; file?: { dev: number; ino: number } }
 
 /**
  * Persisted receipts only: opens this session's file no-follow, requires a
  * single-link regular file whose header names `sessionId`, and reads at most
- * `maxBytes` of complete lines after `from`. Undefined while the file is absent
- * (Pi has not flushed it yet). An uncertainty notice is never a receipt.
+ * `maxBytes` of complete lines after `from`. A receipt is a delivered card
+ * addressed to `to`: this session for its own dispatches, or a card's own `to`
+ * when a fork's file copies its parent's cards. Undefined while the file is
+ * absent (Pi has not flushed it yet). An uncertainty notice is never a receipt.
  */
-export function scanPersistedReceipts(file: string, sessionId: string, ids: ReadonlySet<string>, from: number, maxBytes: number): ReceiptScan | undefined {
+export function scanPersistedReceipts(file: string, sessionId: string, ids: ReadonlySet<string>, from: number, maxBytes: number, to = sessionId): ReceiptScan | undefined {
   const opened = openSessionFile(file, sessionId);
   if ("missing" in opened) return undefined;
   const found = new Set<string>();
   if ("invalid" in opened) return { found, next: from, complete: true };
-  const { fd, size, bodyStart } = opened;
+  const { fd, size, bodyStart, dev, ino } = opened;
   try {
     // A shrunken file was rewritten: rescan it from the first entry.
     const begin = from > size || from < bodyStart ? bodyStart : from;
@@ -59,7 +62,7 @@ export function scanPersistedReceipts(file: string, sessionId: string, ids: Read
       offset += n;
       let start = 0;
       for (let nl = chunk.indexOf(10); nl >= 0; nl = chunk.indexOf(10, start)) {
-        if (!skipping) match(chunk.subarray(start, nl), ids, sessionId, found);
+        if (!skipping) match(chunk.subarray(start, nl), ids, to, found);
         skipping = false;
         start = nl + 1;
         lineStart = chunkStart + start;
@@ -68,11 +71,11 @@ export function scanPersistedReceipts(file: string, sessionId: string, ids: Read
       // An entry larger than any coordination card is skipped, never buffered without bound.
       if (carry.length > SESSION_LINE_MAX) { carry = Buffer.alloc(0); skipping = true; }
     }
-    return { found, next: skipping ? offset : lineStart, complete: offset >= size };
+    return { found, next: skipping ? offset : lineStart, complete: offset >= size, file: { dev, ino } };
   } finally { closeSync(fd); }
 }
 
-function match(line: Buffer, ids: ReadonlySet<string>, sessionId: string, found: Set<string>): void {
+function match(line: Buffer, ids: ReadonlySet<string>, to: string, found: Set<string>): void {
   const text = line.toString("utf8");
   for (const id of ids) {
     if (!text.includes(id)) continue;
@@ -80,7 +83,7 @@ function match(line: Buffer, ids: ReadonlySet<string>, sessionId: string, found:
     try { entry = JSON.parse(text); } catch { return; }
     if (!isRecord(entry) || entry.type !== "custom_message" || entry.customType !== COORDINATION_TYPE || !isRecord(entry.details)) return;
     const d = entry.details;
-    if (d.notice === undefined && d.to === sessionId && typeof d.coordinationId === "string" && ids.has(d.coordinationId)) found.add(d.coordinationId);
+    if (d.notice === undefined && d.to === to && typeof d.coordinationId === "string" && ids.has(d.coordinationId)) found.add(d.coordinationId);
     return;
   }
 }
@@ -183,15 +186,6 @@ export class CoordinationDelivery {
 
   /** turn_start: a woken dispatch is now inside a run, which keeps the session busy until its receipt can land. */
   started(): void { this.run?.woken.clear(); }
-
-  /** S4: a reply card on the branch answers its ask only once its persisted receipt retired the dispatch (no `.sending` or `.uncertain` left). */
-  unconfirmed(reply: ReplyRef): boolean {
-    const base = recordBase({ createdAt: reply.createdAt, id: reply.coordinationId });
-    try {
-      const dir = inboxDir(reply.to);
-      return existsSync(inboxPath(dir, base, "sending")) || existsSync(inboxPath(dir, base, "uncertain"));
-    } catch { return true; }
-  }
 
   /** Synchronous and re-entrancy guarded: one pass at a time per instance. */
   drain(): void {

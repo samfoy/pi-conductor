@@ -38,12 +38,11 @@ export function s4Lead(opts: { dir: string; socket: string; clock: ReturnType<ty
     },
   };
   const env = { HERDR_ENV: "1", HERDR_SOCKET_PATH: opts.socket, HERDR_PANE_ID: `pane-${opts.label}` };
-  let delivery!: CoordinationDelivery;
-  const asks = new LeadAsks(reply => delivery.unconfirmed(reply));
+  const asks = new LeadAsks();
   const presence = new LeadPresence({ pi: api as never, env, registry: new RunRegistry(), getMode: () => state.on, now: opts.clock.deps.now, timers: opts.clock.deps as never,
     liveness: opts.liveness as never, describeRepo: () => ({ repo: opts.label, branch: "main" }), pendingAsk: () => asks.pending() });
   const chief = new ChiefRole({ pi: api as never, presence, timers: opts.clock.deps as never });
-  delivery = new CoordinationDelivery({ pi: api as never, presence, chief, asks, timers: opts.clock.deps as never, now: opts.clock.deps.now });
+  const delivery = new CoordinationDelivery({ pi: api as never, presence, chief, asks, timers: opts.clock.deps as never, now: opts.clock.deps.now });
   const deps = { getRegistry: () => new RunRegistry(), getCwd: () => opts.dir };
   registerPeerTool(api as never, presence, deps);
   registerStaffTool(api as never, presence, chief, deps);
@@ -53,7 +52,7 @@ export function s4Lead(opts: { dir: string; socket: string; clock: ReturnType<ty
   return {
     sessionId, sessionFile, branch, sent, notes, state, tools, presence, chief, asks, delivery, api,
     active: () => active,
-    start() { asks.start(() => branch); presence.start({ sessionId, sessionFile, cwd: opts.dir }, notify); chief.start({ getBranch: () => branch }, notify); delivery.start({ isIdle: () => state.idle, hasPendingMessages: () => state.pending }, notify); },
+    start() { asks.start({ getBranch: () => branch, sessionId, sessionFile }); presence.start({ sessionId, sessionFile, cwd: opts.dir }, notify); chief.start({ getBranch: () => branch }, notify); delivery.start({ isIdle: () => state.idle, hasPendingMessages: () => state.pending }, notify); },
     stop() { delivery.stop(); chief.stop(); presence.stop(); asks.stop(); },
     mode(on: boolean) { state.on = on; presence.refresh(); chief.refresh(); delivery.drain(); },
     record(entry: unknown) { branch.push(entry); persist(entry); },

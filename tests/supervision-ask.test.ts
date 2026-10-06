@@ -13,14 +13,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { sandboxPi, tmpDir } from "./helpers/tmp.ts";
 import { makeFakeClock } from "./helpers/fake-clock.ts";
 import { s4Lead, type S4Lead } from "./helpers/supervision-s4.ts";
 import { isSoleToolCall } from "../src/ask-owner.ts";
-import { branchAsk, ASK_QUESTION_MAX } from "../src/supervision/ask.ts";
-import { admitCoordination, buildCoordination, inboxDir } from "../src/supervision/inbox.ts";
+import { branchAsk, ASK_QUESTION_MAX, LeadAsks } from "../src/supervision/ask.ts";
+import { admitCoordination, buildCoordination, inboxDir, INBOX_RETENTION_MS, recordBase } from "../src/supervision/inbox.ts";
 import { claimChiefLease, readChiefLease, releaseChiefLease } from "../src/supervision/lease.ts";
 import { leadPath, readLeadRecord, supervisionRoot } from "../src/supervision/store.ts";
 import { readProcessStartTime } from "../src/reconcile-startup.ts";
@@ -33,6 +33,10 @@ const reset = () => rmSync(supervisionRoot(), { recursive: true, force: true });
 const suffixes = (id: string) => existsSync(inboxDir(id)) ? readdirSync(inboxDir(id)).map(n => n.replace(/^\d{13}-[0-9a-f-]{36}/, "")).sort() : [];
 const queuedRecords = (id: string) => existsSync(inboxDir(id)) ? readdirSync(inboxDir(id)).filter(n => /^\d{13}-[0-9a-f-]{36}\.json$/.test(n)).map(n => JSON.parse(readFileSync(join(inboxDir(id), n), "utf8"))) : [];
 const cards = (l: S4Lead) => l.sent.filter(s => s.message.details.notice === undefined);
+/** Reply cards in the lead's session file (not its in-memory branch). */
+const persistedReplies = (l: S4Lead) => existsSync(l.sessionFile) ? readFileSync(l.sessionFile, "utf8").trim().split("\n").slice(1).map(x => JSON.parse(x))
+  .filter(e => e.type === "custom_message" && e.details?.kind === "chief_reply" && e.details.notice === undefined) : [];
+const memoryReplies = (l: S4Lead) => l.branch.filter(e => e.type === "custom_message" && e.details?.kind === "chief_reply" && e.details.notice === undefined);
 
 function pair(o: { clock?: ReturnType<typeof makeFakeClock> } = {}) {
   reset();
@@ -295,13 +299,12 @@ test("S4 reply: an in-flight (.sending) or uncertain reply is no answer; a secon
   await a.staff({ action: "reply", lead: b.sessionId, ask_id: id, message: "second" });
   b.delivery.drain();
   assert.equal(cards(b).length, 1, "a second reply to an ask with one in flight waits");
-  const [first] = cards(b).map(s => s.message.details);
   b.state.idle = true; b.state.persist = true;
   b.delivery.started(); // the woken run began and ended without the first card reaching the file
   b.delivery.drain(); // the first settles uncertain; only then is the second decided, against the branch
   assert.match(b.notes.join("\n"), /chief reply .* may or may not have been delivered; not replayed/);
-  assert.equal(b.delivery.unconfirmed(first), true, "the uncertain first card is no answer");
   assert.deepEqual(cards(b).map(s => s.message.details.askId), [id, id], "the second is accepted only after the first settled uncertain");
+  assert.deepEqual(persistedReplies(b).map(e => e.content.includes("second")), [true], "only the second card is in the file: the first never answered");
   assert.deepEqual(suffixes(b.sessionId), [".uncertain.json"], "the second's persisted entry retired it");
   assert.equal(b.asks.pending(), undefined, "answered only by the confirmed second reply");
   stop();
@@ -425,4 +428,117 @@ test("S4 activation: chief follows presence and the lease additively; a native p
   narrow.chief.leave();
   assert.deepEqual(narrow.active(), ["read", "peer"], "leave never adds chief past the policy");
   narrow.stop();
+});
+
+// ── Receipts: only this session's own file proves an answer ─────────
+
+
+test("S4 receipt A: a reply held only in memory (its write failed) never answers, even after its uncertain record is swept; a second reply is accepted and its persisted card answers", async () => {
+  const { a, b, stop } = pair();
+  const { id } = await asked(a, b);
+  b.state.persist = false; // Pi keeps the card in memory; its file write fails
+  await a.staff({ action: "reply", lead: b.sessionId, ask_id: id, message: "first, never written" });
+  b.delivery.drain(); b.delivery.started(); b.delivery.drain();
+  assert.deepEqual(suffixes(b.sessionId), [".uncertain.json"]);
+  assert.deepEqual([memoryReplies(b).length, persistedReplies(b).length], [1, 0]);
+  assert.equal(b.asks.pending()?.askId, id, "control: outstanding while the record is uncertain");
+  // Eight days later a restart (same in-memory branch, as /reload keeps it) sweeps the uncertain record.
+  const [name] = readdirSync(inboxDir(b.sessionId));
+  const old = (Date.now() - INBOX_RETENTION_MS - 86_400_000) / 1000;
+  utimesSync(join(inboxDir(b.sessionId), name!), old, old);
+  b.state.persist = true;
+  b.stop(); b.start();
+  assert.deepEqual(suffixes(b.sessionId), [], "swept: no inbox record left at all");
+  assert.equal(b.asks.pending()?.askId, id, "no inbox record is no receipt: the ask stays outstanding");
+  assert.equal(readLeadRecord(leadPath(b.sessionId))!.pendingAsk?.askId, id, "the mirror still shows it");
+  await a.staff({ action: "reply", lead: b.sessionId, ask_id: id, message: "second" });
+  b.delivery.drain();
+  assert.deepEqual(persistedReplies(b).map(e => e.details.askId), [id], "exactly one persisted answer");
+  assert.match(persistedReplies(b)[0].content, /second/);
+  assert.equal(b.asks.pending(), undefined, "the persisted second reply answers it");
+  stop();
+});
+
+test("S4 receipt B: a persisted reply answers even when its dispatch was classified uncertain; a second reply is refused and rejected, so only one answer is persisted", async () => {
+  const { a, b, stop } = pair();
+  const { id } = await asked(a, b);
+  await a.staff({ action: "reply", lead: b.sessionId, ask_id: id, message: "first" });
+  b.delivery.drain();
+  const [card] = persistedReplies(b);
+  assert.equal(card?.details.askId, id);
+  // The record was misclassified uncertain before Pi persisted the card (two wakes in one agent_settled).
+  writeFileSync(join(inboxDir(b.sessionId), `${recordBase({ createdAt: card.details.createdAt, id: card.details.coordinationId })}.uncertain.json`), "{}", { mode: 0o600 });
+  b.presence.touch();
+  assert.equal(b.asks.pending(), undefined, "the persisted card is the answer; an uncertain record does not reopen the ask");
+  assert.equal(readLeadRecord(leadPath(b.sessionId))!.pendingAsk, undefined);
+  await assert.rejects(a.staff({ action: "reply", lead: b.sessionId, ask_id: id, message: "second" }), /shows no pending ask/);
+  admitCoordination(buildCoordination({ kind: "chief_reply", from: a.sessionId, to: b.sessionId, socketPath: SOCKET, lease: readChiefLease(SOCKET).holder!, askId: id, text: "second, forced", createdAt: Date.now() }), () => {});
+  b.delivery.drain();
+  assert.match(b.notes.at(-1)!, /none is outstanding/, "rejected at dispatch by the branch too");
+  assert.equal(persistedReplies(b).length, 1, "only one persisted answer");
+  stop();
+});
+
+test("S4 receipt proof: a fork's file (new header id) holding the copied card addressed to the parent answers; absent, unpersisted, foreign-header, wrong-to, wrong-id, notice, corrupt and symlinked files do not", () => {
+  const PARENT = "parent-session", FORK = "fork-session", CID = randomUUID();
+  const ask = { type: "message", id: "e1", message: { role: "toolResult", toolCallId: "call-1", toolName: "chief", isError: false, content: [],
+    details: { action: "ask", askId: "call-1", question: "q?", askedAt: 1, chief: "c", leaseGeneration: 0 } } };
+  const card = (over: Record<string, unknown> = {}) => ({ type: "custom_message", id: "e2", customType: "conductor-coordination", content: "re", display: true,
+    details: { v: 1, coordinationId: CID, kind: "chief_reply", from: "c", to: PARENT, createdAt: 5, askId: "call-1", leaseGeneration: 0, ...over } });
+  const header = (id: string) => ({ type: "session", version: 3, id, timestamp: new Date(0).toISOString(), cwd: "/" });
+  const branch = [ask, card()]; // the fork's in-memory branch: the card keeps the parent as its `to`
+  const judge = (lines: unknown[] | undefined, setup?: (file: string) => void) => {
+    const file = join(fixtures, `fork-${randomUUID()}.jsonl`);
+    if (lines) writeFileSync(file, lines.map(l => typeof l === "string" ? l : JSON.stringify(l)).join("\n") + "\n");
+    setup?.(file);
+    const asks = new LeadAsks();
+    asks.start({ getBranch: () => branch, sessionId: FORK, sessionFile: file });
+    return asks.pending()?.askId;
+  };
+  assert.equal(judge([header(FORK), ask, card()]), undefined, "the persisted copy in this session's own file answers");
+  for (const [label, lines, setup] of [
+    ["no file yet", undefined],
+    ["unpersisted copy", [header(FORK), ask]],
+    ["header names the parent", [header(PARENT), ask, card()]],
+    ["corrupt header", ["{not json", ask, card()]],
+    ["card addressed to the fork instead of its own to", [header(FORK), ask, card({ to: FORK })]],
+    ["another card id", [header(FORK), ask, card({ coordinationId: randomUUID() })]],
+    ["an uncertainty notice", [header(FORK), ask, card({ notice: "uncertain" })]],
+    ["a symlink to a valid file", undefined, (file: string) => { writeFileSync(`${file}.real`, [header(FORK), ask, card()].map(l => JSON.stringify(l)).join("\n") + "\n"); symlinkSync(`${file}.real`, file); }],
+  ] as const) assert.equal(judge(lines as unknown[] | undefined, setup as ((f: string) => void) | undefined), "call-1", label);
+  // The session id the file is judged against is the CURRENT one: the parent's own view of a parent file answers too.
+  const parentFile = join(fixtures, `parent-${randomUUID()}.jsonl`);
+  writeFileSync(parentFile, [header(PARENT), ask, card()].map(l => JSON.stringify(l)).join("\n") + "\n");
+  const asParent = new LeadAsks();
+  asParent.start({ getBranch: () => branch, sessionId: PARENT, sessionFile: parentFile });
+  assert.equal(asParent.pending(), undefined);
+});
+
+test("S4 receipt proof cache: a negative scan resumes where it stopped (append-only), a proof holds for that exact file, and a replaced file is judged afresh", () => {
+  const ID = "s-cache", CID = randomUUID(), file = join(fixtures, `cache-${randomUUID()}.jsonl`);
+  const ask = { type: "message", message: { role: "toolResult", toolCallId: "call-9", toolName: "chief", isError: false, content: [],
+    details: { action: "ask", askId: "call-9", question: "q?", askedAt: 1, chief: "c", leaseGeneration: 0 } } };
+  const card = { type: "custom_message", customType: "conductor-coordination", content: "re", display: true,
+    details: { v: 1, coordinationId: CID, kind: "chief_reply", from: "c", to: ID, createdAt: 5, askId: "call-9", leaseGeneration: 0 } };
+  const head = JSON.stringify({ type: "session", version: 3, id: ID, timestamp: new Date(0).toISOString(), cwd: "/" }) + "\n" + JSON.stringify(ask) + "\n";
+  writeFileSync(file, head);
+  const asks = new LeadAsks();
+  asks.start({ getBranch: () => [ask, card], sessionId: ID, sessionFile: file });
+  assert.equal(asks.pending()?.askId, "call-9", "not yet in the file");
+  for (let i = 0; i < 50; i++) appendFileSync(file, JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text: `filler ${i}` }] } }) + "\n");
+  assert.equal(asks.pending()?.askId, "call-9");
+  appendFileSync(file, JSON.stringify(card) + "\n");
+  assert.equal(asks.pending(), undefined, "the appended card is found from the cursor");
+  assert.equal(asks.pending(), undefined, "and stays proven for this file");
+  // Replaced (rename: a new inode) by a file without the card: no stale proof survives.
+  writeFileSync(`${file}.new`, head);
+  renameSync(`${file}.new`, file);
+  assert.equal(asks.pending()?.askId, "call-9", "a replaced file is scanned afresh");
+  rmSync(file);
+  assert.equal(asks.pending()?.askId, "call-9", "an absent file proves nothing");
+  // A new start (fork, resume) never inherits the previous session's proofs.
+  writeFileSync(file, head + JSON.stringify(card) + "\n");
+  assert.equal(asks.pending(), undefined);
+  asks.start({ getBranch: () => [ask, card], sessionId: "another-session", sessionFile: file });
+  assert.equal(asks.pending()?.askId, "call-9", "the header no longer names the current session");
 });

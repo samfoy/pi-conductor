@@ -238,4 +238,3 @@ test("S4 transcript: a lease, own-presence or target identity change while the f
   } finally { (fs as { readSync: typeof fs.readSync }).readSync = real; syncBuiltinESMExports(); }
   stop();
 });
-
