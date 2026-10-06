@@ -15,8 +15,6 @@ import { gitEnv } from "../worktree.ts";
 import { effortGit } from "./open.ts";
 import { effortDir } from "./store.ts";
 
-/** Only a leftover conflict marker fails `diff --check`; whitespace is the repository hooks' policy. */
-const MARKERS_ONLY = "core.whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,-indent-with-non-tab,-tab-in-indent,-cr-at-eol";
 const scrubbed = () => Object.fromEntries(Object.entries(gitEnv()).filter(([key]) => !key.startsWith("HERDR_")));
 const run = (cwd: string, args: string[]) => spawnSync("git", args, { cwd, env: scrubbed(), encoding: "utf8", timeout: 30000, maxBuffer: 16 * 1024 * 1024 });
 
@@ -122,7 +120,7 @@ export function observeMerger(merger: Pick<Run, "status" | "id" | "mergerFor" | 
     unmerged: exists ? out(["ls-files", "-u"]) ?? "unreadable" : "missing",
     unsafeIndex: exists ? (out(["ls-files", "-v", "-z"]) ?? "unreadable").split("\0").filter(e => e && !e.startsWith("H ")).join(", ") : "missing",
     dirty: exists ? out(["status", "--porcelain", "--ignored", "--untracked-files=all"]) ?? "unreadable" : "missing",
-    diffCheck: head ? run(cwd, ["-c", MARKERS_ONLY, "diff", "--check", wal.setupOid, head]).status : null,
+    diffCheck: head ? run(cwd, ["diff", "--check", wal.setupOid, head]).status : null,
     finalText, exitConfirmed,
   };
 }
@@ -170,6 +168,7 @@ export function acceptMergerOutcome(wal: MergerWal, repository: string, f: Merge
   if (f.unmerged) return no("candidate has unmerged index entries");
   if (f.unsafeIndex) return no(`candidate has hidden index flags: ${f.unsafeIndex}`);
   if (f.dirty) return no("candidate has uncommitted, untracked or ignored files");
-  if (f.diffCheck !== 0) return no("merger commit leaves conflict markers (diff --check)");
+  // Plain Git: leftover markers or whitespace errors, including ones inherited from the writer, reject.
+  if (f.diffCheck !== 0) return no("merger commit fails plain git diff --check against the setup commit (conflict markers or whitespace errors)");
   return { ok: true, outputOid: f.head };
 }

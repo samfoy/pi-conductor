@@ -65,6 +65,13 @@ registry.onChange(r => { if (r.mergerFor) merger = r; });
 if (phase === "after-proposal") {
   const holding = setInterval(() => { if (fs.existsSync(join(process.env.M6A_FIXTURE!, "hold-pid"))) { clearInterval(holding); barrier(); } }, 20);
 }
+// The merger asked its owner, exited and recorded itself blocked; the answer never arrives here.
+if (phase === "blocked") {
+  const asking = setInterval(() => {
+    if (merger?.status !== "blocked" || merger.processOpen || !fs.existsSync(merger.recordPath) || JSON.parse(fs.readFileSync(merger.recordPath, "utf8")).status !== "blocked") return;
+    clearInterval(asking); barrier();
+  }, 20);
+}
 const outcome = await registry.integrations.enqueue(run, () => registry.notify(run));
 run.mergeResult = outcome.mergeResult; run.landedCommit = outcome.landedCommit;
 await settleRun(run, outcome.terminal, 0, { registry, onComplete: r => fs.appendFileSync(delivery, `${r.id}\n`) });

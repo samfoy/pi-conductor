@@ -599,9 +599,13 @@ Merger text can only reject (`## Verdict: cannot-resolve`). Acceptance requires 
 of: a `completed` merger whose process exited; matching id, nonce, candidate path
 and repository; a detached HEAD that differs from and descends from the setup OID;
 no `MERGE_HEAD`, unmerged entries or hidden index flags; a clean tree including
-ignored and untracked files; and `diff --check` free of conflict markers (whitespace
-policy stays with the hooks). Failed, killed, timed-out, lost, uncommitted or dirty
-proposals are rejected and preserved untouched. An accepted proposal re-enters at the
+ignored and untracked files; and a plain `git diff --check <setup> <head>` that
+passes. That plain Git check rejects leftover conflict markers and whitespace errors,
+including whitespace inherited from the writer's own branch: such a proposal can pass
+benign repository hooks, but it settles `merge_conflict` with its work preserved.
+It is Git's check, not proof against every way to hide a marker (a committed
+`.gitattributes` change can suppress it). Failed, killed, timed-out, lost,
+uncommitted or dirty proposals are rejected and preserved untouched. An accepted proposal re-enters at the
 front of the same M2/M3 queue against the **current** tip: merge-tree, regeneration,
 an ordinary hooked one-parent squash commit with `Conductor-Merger: <id>` (checked
 once after the hook, like the effort and run trailers), verify of the exact
@@ -614,7 +618,8 @@ existing at-most-once delivery ledger. A blocked merger's `ask_owner` reaches th
 owner as the merger's own card; `ensemble_send` answers it only while the writer's
 claim is open, resuming in the same candidate. A running merger accepts only kill.
 Killing the writer cancels a queued, launching, running or blocked merger, waits for
-its exit and settles once with work preserved; killing the merger exhausts the
+its exit and settles once with work preserved, including a kill that arrives while
+the claim or candidate is still being set up (nothing launches after it); killing the merger exhausts the
 writer. Suspend/reload stop watching and signal nothing. Recovery re-parks a blocked
 merger (its answer still resumes it), runs acceptance for a terminal one, pauses for
 a human resume while a merger is live or unknown (no signals), treats a dead
@@ -626,7 +631,9 @@ names that merger. The merger's cost is persisted once on the writer and reporte
 <id> …`, the outcome and the cost; merger output is never treated as proof.
 
 Not covered: `ask` resolve (M6b), more attempts, real herdr merger panes, human TUI
-acceptance and rollout. This repository's own pre-commit hook needs a local
+acceptance and rollout; attribute-based marker evasion; `stepCost` under `ensemble_auto`
+(effort auto is still refused, so it is exercised only by status); and exit proof for a
+recovered herdr merger record, which has no PID and so counts as exited. See `docs/backlog.md`. This repository's own pre-commit hook needs a local
 `node_modules`, which candidates lack, so its own dogfood still pauses at the hook.
 
 Spawn with `effort:"feature"` and optional `touches:["src/**"]`. The first spawn

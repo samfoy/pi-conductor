@@ -1218,6 +1218,14 @@ From the critic-opus-h11-gwm4 review of the N2 delegate broker. None blocks N2; 
 - **OpenAI Responses-family call ids (`call_…|fc_…`) fail the plan's id regex**, and the error wrongly says "nested calls cannot delegate". Widening the id set needs its own path-safety review.
 - **Code-read only:** a herdr delegating persona as a chain successor throws inside `onChain` and `applyChainIfPresent` swallows it without a diagnostic; `ensemble_auto` plan validation does not check the herdr delegation refusal; `close()` captures leaves before its cancel loop, so for a queued leaf drained during the loop it awaits the placeholder's record write, not the spawned run's.
 
+## M6a review follow-ups (2026-10-06, non-blocking)
+
+From the critic-opus-h11-rpix review of the M6a automatic merger. None blocks M6a.
+
+- **Attribute or binary marker evasion.** A merger that commits a `.gitattributes` line (`base -diff`, `conflict-marker-size=32`) or makes a conflicted file binary passes the plain `git diff --check`, and the markers can reach the integration ref. The plan's own check has the same hole. `--attr-source=<setup>` closes the attribute case only; `git grep --text -E '^(<{7}|>{7})( |$)' <head> -- <conflicted paths>` closes both and could replace or join the check.
+- **`stepCost` is not yet exercised by `ensemble_auto`.** Effort auto is still refused, so the merger cost reaches only status. M8 must count it against `max_steps` and the budget.
+- **A recovered herdr merger with no PID counts as exited.** For a merger restored from its record (no live transport), the acceptance exit proof (`mergerExited`, `src/effort/driver.ts`) probes `run.pid`; a herdr merger record has none, so a terminal record is accepted without pane-child exit proof. Real-herdr mergers are not shipped or tested in M6a.
+
 ## N4 review follow-ups (2026-10-01, non-blocking)
 
 From the critic-opus-h11-6ptr review of N4 direct ownership. The stale-invocation blocker it found is fixed (the gate is fenced by invocation); these are pre-existing or accepted and each needs its own test-first slice.

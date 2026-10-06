@@ -5336,7 +5336,6 @@ function renderTail(lines) {
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { existsSync as existsSync9, mkdirSync as mkdirSync8, readFileSync as readFileSync12, realpathSync as realpathSync7, writeFileSync as writeFileSync4 } from "node:fs";
 import { join as join15 } from "node:path";
-var MARKERS_ONLY = "core.whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,-indent-with-non-tab,-tab-in-indent,-cr-at-eol";
 var scrubbed = () => Object.fromEntries(Object.entries(gitEnv()).filter(([key]) => !key.startsWith("HERDR_")));
 var run = (cwd, args) => spawnSync2("git", args, { cwd, env: scrubbed(), encoding: "utf8", timeout: 3e4, maxBuffer: 16 * 1024 * 1024 });
 var MERGER_PERSONA = "merger";
@@ -5433,7 +5432,7 @@ function observeMerger(merger, wal, finalText, exitConfirmed) {
     unmerged: exists ? out(["ls-files", "-u"]) ?? "unreadable" : "missing",
     unsafeIndex: exists ? (out(["ls-files", "-v", "-z"]) ?? "unreadable").split("\0").filter((e) => e && !e.startsWith("H ")).join(", ") : "missing",
     dirty: exists ? out(["status", "--porcelain", "--ignored", "--untracked-files=all"]) ?? "unreadable" : "missing",
-    diffCheck: head ? run(cwd, ["-c", MARKERS_ONLY, "diff", "--check", wal.setupOid, head]).status : null,
+    diffCheck: head ? run(cwd, ["diff", "--check", wal.setupOid, head]).status : null,
     finalText,
     exitConfirmed
   };
@@ -5486,7 +5485,7 @@ function acceptMergerOutcome(wal, repository, f) {
   if (f.unmerged) return no("candidate has unmerged index entries");
   if (f.unsafeIndex) return no(`candidate has hidden index flags: ${f.unsafeIndex}`);
   if (f.dirty) return no("candidate has uncommitted, untracked or ignored files");
-  if (f.diffCheck !== 0) return no("merger commit leaves conflict markers (diff --check)");
+  if (f.diffCheck !== 0) return no("merger commit fails plain git diff --check against the setup commit (conflict markers or whitespace errors)");
   return { ok: true, outputOid: f.head };
 }
 
@@ -6014,11 +6013,15 @@ ${trailers.join("\n")}
       files = writeMergerContext(root, record.name, run2, wal, extra.verifyLog);
       await this.persist(job);
     } catch (error) {
-      if (job.cancelled) return true;
+      if (job.cancelled) {
+        await this.cancelMerger(job);
+        return true;
+      }
       job.parked = false;
       this.pause(job, `merger setup refused: ${error.message}; claim spent, candidate ${wal.candidatePath} preserved`);
       return true;
     }
+    if (job.cancelled || job.suspended) return true;
     try {
       const mergerFor = { writerId: run2.id, runId, nonce: wal.nonce, effort: record.name, gitRoot: root, owner: job.owner };
       const launching = this.launch({ writer: run2, wal, mergerFor, task: mergerTask(run2, wal, entry.verifyIdentity.command), files });

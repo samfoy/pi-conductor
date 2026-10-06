@@ -434,11 +434,14 @@ export class EffortDriver {
       files = writeMergerContext(root, record.name, run, wal, extra.verifyLog);
       await this.persist(job);
     } catch (error) {
-      if (job.cancelled) return true;
+      // A kill at the claim's own notification found no parked entry to cancel; settle it here.
+      if (job.cancelled) { await this.cancelMerger(job); return true; }
       job.parked = false;
       this.pause(job, `merger setup refused: ${(error as Error).message}; claim spent, candidate ${wal.candidatePath} preserved`);
       return true;
     }
+    // A kill (already routed to cancelMerger) or suspend during setup launches nothing.
+    if (job.cancelled || job.suspended) return true;
     try {
       const mergerFor = { writerId: run.id, runId, nonce: wal.nonce, effort: record.name, gitRoot: root, owner: job.owner };
       const launching = this.launch({ writer: run, wal, mergerFor, task: mergerTask(run, wal, entry.verifyIdentity.command), files });

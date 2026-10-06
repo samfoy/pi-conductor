@@ -4,12 +4,14 @@
  * production launcher, SpawnQueue, spawnRun and pipeline, with real bash, real ask_owner and an
  * offline faux model. Private repositories and a private marker hook only. Missing 0.87.1 fails.
  */
+// First import: throws on an inherited herdr scope before any repository module evaluates.
+import "./helpers/no-live-scope.ts";
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { stop } from "esbuild";
-import { assertNoLiveScope, bundleNativeMerger } from "./helpers/native-merger-bundle.ts";
+import { bundleNativeMerger } from "./helpers/native-merger-bundle.ts";
 import { git, until } from "./helpers/effort-integration.ts";
 import { land, mergerFixture, trailerCount } from "./helpers/effort-merger.ts";
 import { sandboxPi, tmpDir } from "./helpers/tmp.ts";
@@ -20,7 +22,6 @@ import { SpawnQueue } from "../src/queue.ts";
 import { forceTerminate, sendToRun } from "../src/runs.ts";
 import { emptyUsage, isTerminal, type Run } from "../src/types.ts";
 
-assertNoLiveScope();
 sandboxPi();
 process.env.PI_OFFLINE = "1"; process.env.PI_SKIP_VERSION_CHECK = "1"; process.env.PI_TELEMETRY = "0";
 const root = tmpDir("m6a-native-");
@@ -59,6 +60,14 @@ echo "$top" > "$stamp" && git add -- "$stamp"`);
     if (existsSync(pidFile)) { const pid = Number(readFileSync(pidFile, "utf8")); if (alive(pid)) process.kill(pid, "SIGKILL"); }
   });
   const merger = () => f.registry.list().find(r => r.mergerFor?.writerId === a.id);
+  // Flake instrument (diagnostic only, never a pass condition): a merger that fails or times out
+  // reports its own error and stderr tail, e.g. the "No API key found" seen once under full-suite load.
+  const reported = new Set<string>();
+  f.registry.onChange(r => {
+    if (!r.mergerFor || reported.has(`${r.id}:${r.status}`) || !isTerminal(r.status) || r.status === "completed") return;
+    reported.add(`${r.id}:${r.status}`);
+    t.diagnostic(`merger ${r.id} ${r.status}: ${r.errorMessage ?? ""} | stderr tail: ${(r.transport?.stderr ?? "").slice(-600)}`);
+  });
   const markerLines = () => existsSync(markers) ? readFileSync(markers, "utf8").trim().split("\n") : [];
   return { ...f, a, landed, fixture, cards, queue, merger, markerLines, tighten, out: () => f.start(a) };
 }
@@ -134,7 +143,7 @@ test("M6a native: a proposal committed under a benign fixture hook is re-checked
 });
 
 for (const [scenario, reason, timeoutMs] of [
-  ["markers", /conflict markers/, undefined], ["no-commit", /no commit/, undefined], ["dirty", /untracked or ignored/, undefined],
+  ["markers", /fails plain git diff --check/, undefined], ["no-commit", /no commit/, undefined], ["dirty", /untracked or ignored/, undefined],
   ["failure", /merger failed/, undefined], ["timeout", /merger timeout/, 4000],
 ] as const) test(`M6a native: a ${scenario} merger is rejected with its candidate and the source preserved`, { timeout: 60000 }, async t => {
   const n = await native(t, scenario, { timeoutMs });
@@ -146,6 +155,19 @@ for (const [scenario, reason, timeoutMs] of [
   if (scenario === "dirty") assert.equal(readFileSync(join(m.cwd, "notes.md"), "utf8"), "junk\n", "the bad proposal is not cleaned to force validity");
   if (scenario === "timeout") { assert.equal(m.status, "timeout"); assert.ok(Date.now() - started < 30000, "a real short timeout"); }
   assert.equal(n.registry.list().filter(r => r.mergerFor).length, 1);
+});
+
+for (const [scenario, writer] of [["trailing-space", "writer\n"], ["blank-eof", "writer\n"], ["inherit", "writer  \n"]] as const) test(`M6a native: a ${scenario} whitespace proposal passes the benign hook but fails the plain diff check; work preserved`, { timeout: 60000 }, async t => {
+  const n = await native(t, scenario, { writer: { base: writer } });
+  const outcome = await n.out();
+  const m = await settledMerger(n);
+  assert.equal(m.status, "completed", m.errorMessage);
+  assert.equal(outcome.terminal, "merge_conflict"); assert.match(n.a.integration!.merger!.reason!, /fails plain git diff --check/);
+  assert.deepEqual(n.markerLines(), [m.cwd], "the ordinary benign hook allowed the merger's commit; no driver commit followed");
+  const proposal = git(m.cwd, "rev-parse", "HEAD");
+  assert.notEqual(proposal, n.landed); assert.equal(n.a.integration!.merger!.outputOid, undefined);
+  assert.equal(git(m.cwd, "status", "--porcelain", "--ignored", "--untracked-files=all"), "", "the proposal is preserved, not cleaned");
+  assert.equal(n.tip(), n.landed);
 });
 
 test("M6a native: ask_owner blocks the merger and keeps the writer resolving; ensemble_send's answer resumes it in the candidate and integrates", { timeout: 60000 }, async t => {

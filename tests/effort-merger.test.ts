@@ -205,7 +205,7 @@ test("M6a acceptance table: every authority fact is required, and merger text ca
     ["attached", { detached: false }, /not detached/], ["no head", { head: undefined }, /not detached/], ["no commit", { head: wal.setupOid }, /no commit/],
     ["ancestry", { descends: false }, /does not descend/], ["merge in progress", { mergeHead: true }, /merge is still in progress/],
     ["unmerged", { unmerged: "100644 x 1\tbase" }, /unmerged/], ["hidden index", { unsafeIndex: "h base" }, /hidden index flags/],
-    ["dirty", { dirty: "?? junk" }, /uncommitted, untracked or ignored/], ["markers", { diffCheck: 2 }, /conflict markers/], ["check unknown", { diffCheck: null }, /conflict markers/],
+    ["dirty", { dirty: "?? junk" }, /uncommitted, untracked or ignored/], ["diff check", { diffCheck: 2 }, /fails plain git diff --check/], ["check unknown", { diffCheck: null }, /fails plain git diff --check/],
   ];
   for (const [name, change, reason] of rows) {
     const verdict = acceptMergerOutcome(wal, "/r/.git", { ...good, ...change });
@@ -216,7 +216,9 @@ test("M6a acceptance table: every authority fact is required, and merger text ca
 });
 
 const negatives: [string, (cand: string, sourceHead: string) => void, RegExp, Partial<{ status: Run["status"]; text: string }>?][] = [
-  ["leftover markers", cand => { git(cand, "add", "--", "base"); git(cand, "commit", "--no-edit"); }, /conflict markers/],
+  ["leftover markers", cand => { git(cand, "add", "--", "base"); git(cand, "commit", "--no-edit"); }, /fails plain git diff --check/],
+  ["merger-introduced trailing spaces", cand => { resolveBoth(cand, "landed\nwriter  \n"); }, /fails plain git diff --check/],
+  ["merger-introduced blank line at EOF", cand => { resolveBoth(cand, "landed\nwriter\n\n"); }, /fails plain git diff --check/],
   ["no commit", cand => { writeFileSync(join(cand, "base"), "landed\nwriter\n"); git(cand, "add", "--", "base"); }, /no commit/],
   ["untracked junk", cand => { resolveBoth(cand); writeFileSync(join(cand, "notes.md"), "junk"); }, /uncommitted, untracked or ignored/],
   ["ignored junk", cand => { resolveBoth(cand); fs.mkdirSync(join(cand, ".worktrees")); writeFileSync(join(cand, ".worktrees", "cache"), "junk"); }, /uncommitted, untracked or ignored/],
@@ -245,6 +247,21 @@ for (const [name, act, reason, as] of negatives) test(`M6a real-Git rejection pr
   assert.equal(m.calls.length, 1); assert.equal(a.integration!.merger!.cost, 0.02);
 });
 
+test("M6a writer-inherited whitespace kept by an otherwise clean resolution fails the plain diff check: merge_conflict, work preserved", { timeout: 15000 }, async t => {
+  const f = mergerFixture(t);
+  const a = f.writer("builder-a", { base: "writer  \n" });
+  const landed = land(f.root, f.record.intRef, { base: "landed\n" });
+  const m = fakeMergers(f.registry);
+  const out = f.start(a);
+  const merger = await m.nth(0);
+  const proposal = resolveBoth(merger.cwd, "landed\nwriter  \n");
+  await settle(f.registry, merger, "Resolved, keeping the writer's line as written.");
+  const outcome = await out;
+  assert.equal(outcome.terminal, "merge_conflict"); assert.match(a.integration!.merger!.reason!, /fails plain git diff --check/);
+  assert.equal(f.tip(), landed); assert.equal(git(merger.cwd, "rev-parse", "HEAD"), proposal, "the proposal is preserved untouched");
+  assert.equal(git(merger.cwd, "status", "--porcelain", "--ignored", "--untracked-files=all"), "");
+});
+
 for (const phase of ["pending launch", "running", "blocked"] as const) test(`M6a killing the writer with a ${phase} merger cancels it, preserves work and settles once`, { timeout: 15000 }, async t => {
   const f = mergerFixture(t);
   const a = f.writer("builder-a", { base: "writer\n" });
@@ -269,6 +286,28 @@ for (const phase of ["pending launch", "running", "blocked"] as const) test(`M6a
   assert.equal(merger.status, "killed", "a late or live merger is controlled through its own run, never a recorded PID");
   assert.equal(a.integration!.state, "cancelled"); assert.match(a.integration!.merger!.reason!, /writer killed; merger cancelled/);
   assert.equal(f.tip(), landed); assert.ok(existsSync(merger.cwd), "candidate preserved");
+  await new Promise(r => setTimeout(r, 50)); assert.equal(settled, 1);
+});
+
+for (const at of ["claim", "context"] as const) test(`M6a a kill delivered synchronously at the merger ${at} notification settles the writer once; no merger launches`, { timeout: 15000 }, async t => {
+  const f = mergerFixture(t);
+  const a = f.writer("builder-a", { base: "writer\n" });
+  const landed = land(f.root, f.record.intRef, { base: "landed\n" });
+  const m = fakeMergers(f.registry);
+  let kills = 0, settled = 0;
+  f.registry.onChange(r => {
+    const wal = r === a && r.integration?.state === "resolving" ? r.integration.merger : undefined;
+    if (!wal || kills || (at === "claim") === !!wal.contextDir) return;
+    kills++; forceTerminate(a, "killed", f.registry);
+  });
+  const out = f.start(a).then(o => { settled++; return o; });
+  let timer: NodeJS.Timeout | undefined;
+  const outcome = await Promise.race([out, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("writer never settled after a kill at the merger claim")), 5000); })]).finally(() => clearTimeout(timer));
+  assert.equal(kills, 1); assert.equal(outcome.terminal, "killed"); assert.equal(settled, 1);
+  assert.equal(m.calls.length, 0, "no merger launches after the writer was killed");
+  assert.equal(a.integration!.state, "cancelled"); assert.match(a.integration!.merger!.reason!, /writer killed; merger never started/);
+  assert.equal(existsSync(a.integration!.merger!.candidatePath), at === "context", "a prepared candidate is preserved");
+  assert.equal(f.tip(), landed);
   await new Promise(r => setTimeout(r, 50)); assert.equal(settled, 1);
 });
 
