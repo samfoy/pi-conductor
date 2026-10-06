@@ -52,8 +52,8 @@ test("S5 live guard: a crash signal reaches only an owned fixture process by exa
 test("S5 live guard: refuses before any signal on a wrong socket, an unowned or reused PID, the server, or a process outside the private namespace", async () => {
   const cases: Array<[string, Parameters<typeof fake>[1], { pid: number; startTime: number }, RegExp]> = [
     ["server status names another socket", { status: { running: true, socket: "/home/user/.config/herdr/herdr.sock" } }, { pid: 5001, startTime: 90 }, /ownership refused: server status socket mismatch/],
-    ["a PID outside the owned inventory", {}, { pid: 6001, startTime: 90 }, /not an owned fixture process/],
-    ["an owned PID with another start time", {}, { pid: 5001, startTime: 91 }, /not an owned fixture process/],
+    ["a PID outside the owned inventory", { start: { 6001: 90 } }, { pid: 6001, startTime: 90 }, /not an owned fixture process/],
+    ["an owned PID with another start time", { start: { 5001: 91 } }, { pid: 5001, startTime: 91 }, /not an owned fixture process/],
     ["a PID reused since the inventory", { start: { 5001: 95 } }, { pid: 5001, startTime: 90 }, /start identity changed/],
     ["the fixture server itself", {}, { pid: 4242, startTime: 77 }, /refuses to signal the fixture server/],
     ["the test's own (host) namespace", { net: { 5001: "net:[host]" } }, { pid: 5001, startTime: 90 }, /outside the fixture's private network namespace/],

@@ -890,7 +890,11 @@ replayed". Nothing is ever resent automatically; ask the sender to resend. Nothi
 reports that the recipient read or acted on a message. This survives a process crash,
 not a power loss. Malformed records are kept as `.rejected.json` with a warning and
 never reach the model; a record whose sender is still publishing it (its publication temp
-still exists, so the file briefly has two links) waits for the next pass instead. Uncertain and rejected records are deleted after 7 days.
+still exists, so the file briefly has two links) waits for the next pass instead. If the sender
+crashes between linking the record and unlinking the temp, it remains pending with no notice
+or doctor line. Delivery resumes only when a recipient session start finds that temp at least
+10 minutes old and removes it. A younger temp defers delivery until a later session start;
+ordinary drain passes alone do not recover it. Uncertain and rejected records are deleted after 7 days.
 `/conductor off` stops new dispatches but cannot recall a message Pi already
 accepted; its receipt is checked when the lead is ON again. Automated evidence
 only: native Pi 0.87.1 and 1.0.3 with a faux model. Human TUI acceptance is unverified.
@@ -1053,7 +1057,7 @@ Human TUI acceptance is unverified.
 ## Supervision acceptance and scope (S5; not rolled out)
 
 S1–S4 above are independently accepted development work. S5 adds cross-process and isolated
-real-herdr acceptance, and one fix it found. None of it is rolled out, and human TUI acceptance
+real-herdr acceptance, and two fixes it found. None of it is rolled out, and human TUI acceptance
 is unverified: automated runs are not a visual sign-off.
 
 **Scope.** Supervision is active only while conductor mode is ON in an eligible herdr lead,
@@ -1078,7 +1082,11 @@ failed deferred run, a TUI Esc that clears the queue). Such a card keeps its `.s
 and its ask keeps the reply reservation, until a session start that replaces Pi's session;
 `/reload`, OFF/ON, age and unrelated turns do not release it, and `/conductor doctor` shows the
 count. A crash between `.sending` and the receipt becomes uncertain at the next start and is
-not replayed.
+not replayed. A separate pre-dispatch publication crash can leave a queued record with its
+temporary hard link: it stays pending without a notice or doctor line until a recipient session
+start finds the temp at least 10 minutes old. Starting sooner leaves it for another session
+start; repeated drain passes do not release it. Once publication is recovered, normal
+at-most-once dispatch applies.
 
 **Accepted risks.** R8: another extension that registers `chief`, `peer` or `staff` in a herdr
 lead (pi-herdsman does) collides with these names, and Pi will not start; herdsman is not in this
