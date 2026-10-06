@@ -9040,7 +9040,7 @@ import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
 
 // src/commands.ts
-import { existsSync as existsSync19, readdirSync as readdirSync11, readFileSync as readFileSync16, statSync as statSync6 } from "node:fs";
+import { existsSync as existsSync19, readdirSync as readdirSync12, readFileSync as readFileSync16, statSync as statSync6 } from "node:fs";
 import { join as join29, dirname as dirname20 } from "node:path";
 
 // src/status-glyph.ts
@@ -10507,7 +10507,7 @@ import { Type as Type2 } from "@sinclair/typebox";
 import { lstatSync as lstatSync7 } from "node:fs";
 
 // src/supervision/delivery.ts
-import { closeSync as closeSync8, existsSync as existsSync18, lstatSync as lstatSync6, readSync as readSync6, watch as watch2 } from "node:fs";
+import { closeSync as closeSync8, existsSync as existsSync18, lstatSync as lstatSync6, readdirSync as readdirSync11, readSync as readSync6, watch as watch2 } from "node:fs";
 
 // src/supervision/inbox.ts
 import { createHash as createHash7, randomUUID as randomUUID9 } from "node:crypto";
@@ -11585,8 +11585,13 @@ var CoordinationDelivery = class {
       try {
         record = readQueued(dir, base, self.sessionId);
       } catch {
-        this.reject(run, dir, base, "json");
-        continue;
+        if (publishing(dir, base)) continue;
+        try {
+          record = readQueued(dir, base, self.sessionId);
+        } catch {
+          this.reject(run, dir, base, "json");
+          continue;
+        }
       }
       const current = this.owned();
       if (!current || current.generation !== self.generation || run.closed || this.run !== run) return;
@@ -11702,6 +11707,7 @@ var CoordinationDelivery = class {
     }
   }
 };
+var publishing = (dir, base) => readdirSync11(dir).some((n) => n.startsWith(`${base}.json-`) && n.endsWith(".claim"));
 function fileSize(file) {
   try {
     return lstatSync6(file).size;
@@ -12561,7 +12567,7 @@ function runHistory(_opts, ctx, arg) {
     {
       listRunIds: () => {
         try {
-          return readdirSync11(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+          return readdirSync12(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
         } catch {
           return [];
         }
@@ -15879,7 +15885,7 @@ function mapFromRegistry2(r) {
 }
 
 // src/delegation-broker.ts
-import { existsSync as existsSync23, readFileSync as readFileSync20, readdirSync as readdirSync12 } from "node:fs";
+import { existsSync as existsSync23, readFileSync as readFileSync20, readdirSync as readdirSync13 } from "node:fs";
 import { dirname as dirname23, join as join31 } from "node:path";
 var LEAF_OUTCOME_UNCERTAIN = "leaf outcome uncertain after lead restart; not replayed";
 var HERDR_RELOAD_CANCELLED = "lead /reload stopped a leaf it could not hand over (queued, launching or subprocess); delegate again";
@@ -16210,7 +16216,7 @@ function durableLeaves(lineage) {
   const root = runsRoot();
   let names;
   try {
-    names = readdirSync12(root);
+    names = readdirSync13(root);
   } catch {
     return [];
   }

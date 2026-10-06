@@ -256,6 +256,24 @@ test("S2 order and caps: createdAt then id; a pass dispatches the 64 oldest; mal
   many.delivery.stop();
 });
 
+test("S2 publication window: a record its sender has linked but whose publication temp still exists waits, then delivers once; any other second link is still quarantined (above)", () => {
+  reset();
+  const h = harness();
+  const r = h.send({ createdAt: 40 });
+  const dir = inboxDir(h.sessionId), base = `${String(r.createdAt).padStart(13, "0")}-${r.id}`;
+  // What another process sees between publishJson's linkSync(temp, path) and its unlinkSync(temp): two links.
+  const temp = join(dir, `${base}.json-${randomUUID()}.claim`);
+  linkSync(join(dir, `${base}.json`), temp);
+  h.start();
+  assert.deepEqual([h.cards().length, h.notes.filter(n => /rejected/.test(n)).length], [0, 0], "still being published: neither sent nor rejected");
+  assert.deepEqual(suffixes(h.sessionId).filter(s => !s.endsWith(".claim")), [".json", ".slot"]);
+  rmSync(temp); // the sender's unlink
+  h.delivery.drain();
+  assert.deepEqual(h.cards().map(s => s.message.details.coordinationId), [r.id], "delivered once the publication completes");
+  assert.equal(h.notes.filter(n => /rejected/.test(n)).length, 0);
+  h.delivery.stop();
+});
+
 test("S2 claims: two overlapping drainers never both dispatch; .sending wins over a leftover queued record and is never redispatched", () => {
   reset();
   const h = harness();

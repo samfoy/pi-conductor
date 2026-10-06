@@ -14,7 +14,7 @@
  * labelled "former chief". A `chief_reply` must also answer this branch's
  * outstanding ask; otherwise it is quarantined, never shown to the model.
  */
-import { closeSync, existsSync, lstatSync, readSync, watch } from "node:fs";
+import { closeSync, existsSync, lstatSync, readdirSync, readSync, watch } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isRecord } from "../herdr/cli.ts";
 import { readProcessStartTime } from "../reconcile-startup.ts";
@@ -281,7 +281,11 @@ export class CoordinationDelivery {
     const dispatched: SendingRecord[] = [];
     for (const base of queued.slice(0, INBOX_QUEUE_MAX)) {
       let record: CoordinationRecord;
-      try { record = readQueued(dir, base, self.sessionId); } catch { this.reject(run, dir, base, "json"); continue; }
+      try { record = readQueued(dir, base, self.sessionId); } catch {
+        // A sender links the record before unlinking its publication temp (two links meanwhile): wait for it, never quarantine it.
+        if (publishing(dir, base)) continue;
+        try { record = readQueued(dir, base, self.sessionId); } catch { this.reject(run, dir, base, "json"); continue; }
+      }
       // Revalidated before each effect: an OFF, reload or session switch since the pass began stops here.
       const current = this.owned();
       if (!current || current.generation !== self.generation || run.closed || this.run !== run) return;
@@ -379,6 +383,9 @@ export class CoordinationDelivery {
     } catch { run.watcher = { close() {} }; }
   }
 }
+
+/** `publishJson`'s temp for this queued record still exists; checked after a failed read, then the record is read once more. */
+const publishing = (dir: string, base: string) => readdirSync(dir).some(n => n.startsWith(`${base}.json-`) && n.endsWith(".claim"));
 
 function fileSize(file: string): number {
   try { return lstatSync(file).size; } catch (e) { if (errno(e) === "ENOENT") return 0; throw e; }
