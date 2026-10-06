@@ -3,6 +3,7 @@ import { createHerdrCli } from "./herdr/cli.ts";
 import { readoptHerdrRun } from "./run-pipeline.ts";
 import { buildOrphanRun } from "./reconcile-startup.ts";
 import { recoverEffort } from "./effort/reconcile.ts";
+import { createMergerLauncher } from "./effort/merger.ts";
 import { listEfforts } from "./effort/store.ts";
 import { effortRepository } from "./effort/open.ts";
 /**
@@ -814,6 +815,8 @@ export default function (pi: ExtensionAPI): void {
     pi.on("session_tree", () => { syncAsk(); });
   }
 
+  // M6a: this lead's driver may launch its effort mergers; children and test registries never do.
+  if (process.env.CONDUCTOR_SUBAGENT !== "1") registry.integrations.configureMerger(createMergerLauncher({ queue, notify: run => opts.pushCompletionNotification(run), events: conductorEvents }));
   registerTools(pi, opts);
   registerCommands(pi, opts);
   // Registered at factory time, not lazily: pi resolves a message's

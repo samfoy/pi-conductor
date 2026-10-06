@@ -18,6 +18,7 @@ import {
   prepareSpawnRuntime,
   prepareSpawnEvidence,
   prepareSpawnEffort,
+  prepareSpawnMerger,
   writeRecord,
   type SpawnOptions,
 } from "./runs.ts";
@@ -103,6 +104,7 @@ export class SpawnQueue {
   ): SpawnOrQueueResult {
     opts = prepareSpawnRuntime(leafSpawnOptions(opts));
     opts = prepareSpawnEvidence(opts, opts.registry ?? this.registry);
+    prepareSpawnMerger(opts, opts.registry ?? this.registry, opts.mergerFor?.runId);
     const effort = prepareSpawnEffort(opts);
     if (opts.touches) opts = { ...opts, touches: [...opts.touches] };
     const { registry: callerRegistry, ...spawn } = opts;
@@ -116,7 +118,7 @@ export class SpawnQueue {
     }
 
     // Queue. Auto-downgrade foreground → background.
-    const id = allocateRunId(opts.persona.name, mapFromRegistry(registry));
+    const id = opts.mergerFor?.runId ?? allocateRunId(opts.persona.name, mapFromRegistry(registry));
     // Pre-create the run dir + a queued placeholder Run so /conductor status
     // and the panel can show the queued sub-agent immediately.
     if (effort) addEffortMember(effort, id);
@@ -135,6 +137,7 @@ export class SpawnQueue {
       ...(opts.delegation ? { depth: 2 as const, delegateAllow: [], parentRunId: opts.delegation.parentRunId, delegateToolCallId: opts.delegation.delegateToolCallId } : {}),
       waitReason,
       ...(effort ? { parentPid: effort.owner.pid, parentStartTime: effort.owner.startTime, parentSessionId: effort.owner.sessionId } : {}),
+      ...(opts.mergerFor ? { mergerFor: opts.mergerFor, parentPid: process.pid, parentSessionId: opts.parentSessionId } : {}),
       effort: effort ? { owner: effort.owner, name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches ? [...opts.touches] : undefined } : undefined,
       startTime: Date.now(),
       lastEventAt: Date.now(),
@@ -233,10 +236,10 @@ export class SpawnQueue {
         this.spawn({ ...next.spawn, mode: next.effectiveMode, registry: this.registry, preAllocatedId: next.id });
       } catch (e) {
         // A leaf left queued outside the queue would keep its parent awaiting after the call is answered.
-        if (!placeholder.effort && !next.spawn.delegation) throw e;
+        if (!placeholder.effort && !next.spawn.delegation && !next.spawn.mergerFor) throw e;
         if (this.pending[i]?.id === next.id) this.pending.splice(i, 1);
         const current = this.registry.get(next.id)!;
-        void failEffortLaunch(current, this.registry, `${placeholder.effort ? "effort" : "delegated leaf"} launch refused: ${(e as Error).message}`, next.spawn.onComplete).done;
+        void failEffortLaunch(current, this.registry, `${placeholder.effort ? "effort" : next.spawn.mergerFor ? "merger" : "delegated leaf"} launch refused: ${(e as Error).message}`, next.spawn.onComplete).done;
       }
     }
   }

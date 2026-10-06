@@ -129,7 +129,7 @@ export async function executeReclaim(
       continue;
     }
 
-    if (record.effort) {
+    if (record.effort || record.mergerFor) {
       failed.push({ agentId, action: actionKind, error: "unresolved effort ownership; legacy GC refused" });
       continue;
     }
@@ -145,7 +145,7 @@ export async function executeReclaim(
     const assertCurrent = () => {
       if (active()) throw new Error("active during reclaim");
       const latest = JSON.parse(readFileSync(recordPath, "utf8")) as RunRecord;
-      if (!isTerminal(latest.status) || latest.effort) throw new Error("status/effort changed during reclaim");
+      if (!isTerminal(latest.status) || latest.effort || latest.mergerFor) throw new Error("status/effort changed during reclaim");
       if (record.runtime === "herdr" || latest.runtime === "herdr") {
         const live = options.currentRun?.(agentId);
         if (record.runtime !== "herdr" || latest.runtime !== "herdr" || latest.id !== agentId ||

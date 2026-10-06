@@ -71,6 +71,7 @@ export interface InventoryEntry {
    */
   holdsWorktree?: boolean;
   effort?: RunRecord["effort"];
+  mergerFor?: RunRecord["mergerFor"];
   runtime?: RunRecord["runtime"];
   herdr?: RunRecord["herdr"];
   herdrChildAbsent?: boolean;
@@ -207,6 +208,7 @@ async function buildEntry(
     malformed: false,
     holdsWorktree: holdsKeptWorktree(record),
     effort: record.effort,
+    mergerFor: record.mergerFor,
     runtime: record.runtime,
     herdr: record.herdr && { ...record.herdr },
     herdrChildAbsent: record.runtime === "herdr" ? herdrChildAbsent({ ...record, recordPath: join(runDir, "record.json") }) : undefined,

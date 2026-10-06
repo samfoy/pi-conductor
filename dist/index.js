@@ -108,12 +108,14 @@ function processIdentityState(owner, deps = {}) {
 
 // src/effort/policy.ts
 import { matchesGlob } from "node:path";
-var EFFORT_NOTICE = "M5: disjoint effort writers run in independent worktrees within global/effort limits; integration remains serial after optional generated artifact regeneration, baseline/candidate verification and repository hooks. Legacy work remains UNINTEGRATED. Crash recovery uses owner fencing and reachable Git proof; uncertain work pauses for human effort resume/requeue. Delivery-uncertain callbacks are never replayed automatically. Merger, landing, readers, auto plans, chains and retries remain unavailable.";
-function effortSummary(run) {
-  if (!run.effort) return "";
-  const state = run.landedCommit ? `integrated ${run.landedCommit.slice(0, 12)}` : run.mergeResult?.nothingToCommit ? "tree-equal no-op" : run.status === "integrating" ? `integrating (${run.integration?.state ?? "paused"})` : "UNINTEGRATED";
-  const violations = run.integration?.touchViolations ?? run.effort.touchViolations;
-  return `${run.effort.name}: ${state}${run.mergeResult?.verifyDisabled ? " (effort verify disabled; repository hooks still required)" : ""}${run.integration?.reason ? `: ${run.integration.reason}` : ""}${violations?.length ? `; touches violations: ${JSON.stringify(violations)}` : ""}`;
+var EFFORT_NOTICE = 'M6a: disjoint effort writers run in independent worktrees within global/effort limits; integration remains serial after optional generated artifact regeneration, baseline/candidate verification and repository hooks. Under efforts.merger "auto", a textual conflict or twice-red verify parks that writer while one driver-owned merger proposes a hooked commit in a detached candidate; the proposal is re-gated by the same queue against the current tip, once per writer. "ask"/"off" keep merge_conflict (no resolve action yet). Legacy work remains UNINTEGRATED. Crash recovery uses owner fencing and reachable Git proof; uncertain work pauses for human effort resume/requeue. Delivery-uncertain callbacks are never replayed automatically. Landing, readers, auto plans, chains and retries remain unavailable.';
+function effortSummary(run2) {
+  if (!run2.effort) return "";
+  const state = run2.landedCommit ? `integrated ${run2.landedCommit.slice(0, 12)}` : run2.mergeResult?.nothingToCommit ? "tree-equal no-op" : run2.status === "integrating" ? `integrating (${run2.integration?.state ?? "paused"})` : "UNINTEGRATED";
+  const violations = run2.integration?.touchViolations ?? run2.effort.touchViolations;
+  const m = run2.integration?.merger;
+  const merger = m ? `; merger ${m.runId} ${m.outcome === "accepted" ? `proposal ${m.outputOid?.slice(0, 12)} accepted for re-gating` : m.outcome === "rejected" ? `exhausted: ${m.reason}` : "resolving"}${m.cost !== void 0 ? ` ($${m.cost.toFixed(4)})` : ""}` : "";
+  return `${run2.effort.name}: ${state}${run2.mergeResult?.verifyDisabled ? " (effort verify disabled; repository hooks still required)" : ""}${run2.integration?.reason ? `: ${run2.integration.reason}` : ""}${merger}${violations?.length ? `; touches violations: ${JSON.stringify(violations)}` : ""}`;
 }
 function validateEffortName(name2) {
   if (typeof name2 !== "string" || !/^[a-z][a-z0-9-]{0,39}$/.test(name2)) {
@@ -302,11 +304,11 @@ function listEfforts(gitRoot2) {
   }
   return result;
 }
-function assertRunEffortOwner(run) {
-  if (!run.effort) return;
-  const record = readEffort(run.effort.gitRoot, run.effort.name);
+function assertRunEffortOwner(run2) {
+  if (!run2.effort) return;
+  const record = readEffort(run2.effort.gitRoot, run2.effort.name);
   if (!record) throw new Error("effort record missing");
-  const owner = run.effort.owner ?? { sessionId: run.parentSessionId, pid: run.parentPid, startTime: run.parentStartTime };
+  const owner = run2.effort.owner ?? { sessionId: run2.parentSessionId, pid: run2.parentPid, startTime: run2.parentStartTime };
   assertEffortOwner(record, owner);
 }
 
@@ -588,6 +590,7 @@ function toRunRecord(r) {
     worktreeBranch: r.worktreeBranch,
     effort: r.effort,
     integration: r.integration,
+    mergerFor: r.mergerFor,
     landedCommit: r.landedCommit,
     worktreeBaseBranch: r.worktreeBaseBranch,
     mergeStrategy: r.mergeStrategy,
@@ -601,11 +604,11 @@ function toRunRecord(r) {
     graceTurns: r.graceTurns
   };
 }
-function isDelegatedLeaf(run) {
-  return run.depth === 2;
+function isDelegatedLeaf(run2) {
+  return run2.depth === 2;
 }
-function childExitUnconfirmed(run) {
-  return run.abandonedChildren?.some((c) => c.exit === "unconfirmed") === true;
+function childExitUnconfirmed(run2) {
+  return run2.abandonedChildren?.some((c) => c.exit === "unconfirmed") === true;
 }
 var TERMINAL_STATUSES = [
   "completed",
@@ -809,23 +812,23 @@ function parseAgentList(value, field = "agents") {
   }
   return names;
 }
-function runScopeError(run) {
-  if (run.depth === void 0 && run.delegateAllow === void 0) return void 0;
-  if (run.depth !== 1 && run.depth !== 2) {
-    return `run depth ${JSON.stringify(run.depth) ?? "missing"} is not 1 or 2; refusing to launch with a guessed tool scope`;
+function runScopeError(run2) {
+  if (run2.depth === void 0 && run2.delegateAllow === void 0) return void 0;
+  if (run2.depth !== 1 && run2.depth !== 2) {
+    return `run depth ${JSON.stringify(run2.depth) ?? "missing"} is not 1 or 2; refusing to launch with a guessed tool scope`;
   }
   try {
-    if (parseAgentList(run.delegateAllow, "delegateAllow").length > 0 && run.depth === 2) return "run scope is malformed: a depth-2 run cannot delegate";
+    if (parseAgentList(run2.delegateAllow, "delegateAllow").length > 0 && run2.depth === 2) return "run scope is malformed: a depth-2 run cannot delegate";
   } catch (e) {
     return `run scope is malformed: ${e.message}`;
   }
   return void 0;
 }
-function childToolScope(run) {
-  const error = runScopeError(run);
+function childToolScope(run2) {
+  const error = runScopeError(run2);
   if (error) throw new Error(error);
-  if (run.depth === void 0) return LEGACY_CHILD_SCOPE;
-  return { depth: run.depth, delegateAllow: [...run.delegateAllow] };
+  if (run2.depth === void 0) return LEGACY_CHILD_SCOPE;
+  return { depth: run2.depth, delegateAllow: [...run2.delegateAllow] };
 }
 var LEAF_MUTATION_TOOLS = ["edit", "write", "insert_before", "insert_after"];
 function effectiveExcludeTools(excludeTools, scope = LEGACY_CHILD_SCOPE) {
@@ -1031,10 +1034,10 @@ function agentsRosterError(p, roster, overrides) {
 
 // src/subprocess-runtime.ts
 var SubprocessRuntime = class {
-  launch(run, args, cwd, sink, initialPrompt) {
-    assertSupportedRuntime(run.runtime);
+  launch(run2, args, cwd, sink, initialPrompt) {
+    assertSupportedRuntime(run2.runtime);
     const invocation = getPiInvocation(args);
-    const tmp = run.effort ? join3(dirname3(run.recordPath), "tmp") : void 0;
+    const tmp = run2.effort ? join3(dirname3(run2.recordPath), "tmp") : void 0;
     if (tmp) mkdirSync2(tmp, { recursive: true });
     const rpc = args[1] === "rpc";
     const proc = spawn(invocation.command, invocation.args, {
@@ -1042,10 +1045,11 @@ var SubprocessRuntime = class {
       shell: false,
       stdio: [rpc ? "pipe" : "ignore", "pipe", "pipe"],
       // Worktrees may not contain the spawning project's untracked config.
-      env: buildSubagentEnv(process.env, {
-        CONDUCTOR_CONFIG_CWD: run.cwd,
-        CONDUCTOR_RUN_ID: run.id,
-        ...childScopeEnv(dirname3(run.recordPath), childToolScope(run), run.deadlineAt),
+      // M6a: a merger's git must see only its candidate cwd, never a lead's inherited repository scope.
+      env: buildSubagentEnv(run2.mergerFor ? Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_"))) : process.env, {
+        CONDUCTOR_CONFIG_CWD: run2.cwd,
+        CONDUCTOR_RUN_ID: run2.id,
+        ...childScopeEnv(dirname3(run2.recordPath), childToolScope(run2), run2.deadlineAt),
         ...tmp ? { TMPDIR: tmp } : {}
       })
     });
@@ -1061,9 +1065,9 @@ var SubprocessRuntime = class {
     if (rpc && proc.stdin) {
       const queue = new RpcStdinQueue(proc.stdin);
       proc.stdin.on("error", (e) => queue.destroy(e.message));
-      run.rpcStdinQueue = queue;
+      run2.rpcStdinQueue = queue;
       if (typeof initialPrompt === "string" && initialPrompt.length > 0) {
-        void queue.enqueue({ id: `init-${run.id}`, type: "prompt", message: initialPrompt }).catch((error) => sink.initialDeliveryFailed(error));
+        void queue.enqueue({ id: `init-${run2.id}`, type: "prompt", message: initialPrompt }).catch((error) => sink.initialDeliveryFailed(error));
       }
     }
     proc.unref();
@@ -1073,46 +1077,46 @@ var SubprocessRuntime = class {
       proc.kill(signal);
     } };
   }
-  capabilities(run) {
-    if (unsupportedRuntimeReason(run.runtime)) return { pause: false, liveSend: false };
-    const exited = run.proc?.exitCode != null || run.proc?.signalCode != null;
+  capabilities(run2) {
+    if (unsupportedRuntimeReason(run2.runtime)) return { pause: false, liveSend: false };
+    const exited = run2.proc?.exitCode != null || run2.proc?.signalCode != null;
     return {
-      pause: !!run.proc?.pid && !exited,
-      liveSend: run.streamingMode === "rpc" && run.steerable !== false && !!run.rpcStdinQueue?.writable && !exited
+      pause: !!run2.proc?.pid && !exited,
+      liveSend: run2.streamingMode === "rpc" && run2.steerable !== false && !!run2.rpcStdinQueue?.writable && !exited
     };
   }
-  deliver(run, type, message4) {
-    const reason = unsupportedRuntimeReason(run.runtime);
-    return reason ? { kind: "epipe", reason } : enqueueRpcSendWithAck(run, type === "grace" ? "follow_up" : type, message4);
+  deliver(run2, type, message4) {
+    const reason = unsupportedRuntimeReason(run2.runtime);
+    return reason ? { kind: "epipe", reason } : enqueueRpcSendWithAck(run2, type === "grace" ? "follow_up" : type, message4);
   }
-  stopProcess(run) {
-    assertSupportedRuntime(run.runtime);
-    run.proc?.kill("SIGTERM");
+  stopProcess(run2) {
+    assertSupportedRuntime(run2.runtime);
+    run2.proc?.kill("SIGTERM");
   }
-  signal(run, signal, signaler = process.kill) {
-    assertSupportedRuntime(run.runtime);
-    signaler(run.proc.pid, signal);
+  signal(run2, signal, signaler = process.kill) {
+    assertSupportedRuntime(run2.runtime);
+    signaler(run2.proc.pid, signal);
   }
-  terminate(run, killGroup) {
-    assertSupportedRuntime(run.runtime);
-    if (run.proc) {
+  terminate(run2, killGroup) {
+    assertSupportedRuntime(run2.runtime);
+    if (run2.proc) {
       try {
-        run.proc.kill("SIGTERM");
+        run2.proc.kill("SIGTERM");
       } catch {
       }
       setTimeout(() => {
         try {
-          run.proc?.kill("SIGKILL");
+          run2.proc?.kill("SIGKILL");
         } catch {
         }
       }, 2e3).unref();
     }
-    terminateHook(run, killGroup);
+    terminateHook(run2, killGroup);
   }
 };
-function terminateHook(run, killGroup) {
-  if (run.hookProc?.pid !== void 0) {
-    const hookPid = run.hookProc.pid;
+function terminateHook(run2, killGroup) {
+  if (run2.hookProc?.pid !== void 0) {
+    const hookPid = run2.hookProc.pid;
     try {
       killGroup(hookPid, "SIGTERM");
     } catch {
@@ -1123,12 +1127,12 @@ function terminateHook(run, killGroup) {
       } catch {
       }
     }, 2e3).unref();
-    run.hookProc = void 0;
+    run2.hookProc = void 0;
   }
 }
 var subprocessRuntime = new SubprocessRuntime();
-function capabilitiesFor(run) {
-  return run.runtime !== "herdr" && unsupportedRuntimeReason(run.runtime) ? { pause: false, liveSend: false } : runtimeFor(run).capabilities(run);
+function capabilitiesFor(run2) {
+  return run2.runtime !== "herdr" && unsupportedRuntimeReason(run2.runtime) ? { pause: false, liveSend: false } : runtimeFor(run2).capabilities(run2);
 }
 function buildSubagentEnv(baseEnv = process.env, owned = {}) {
   const env = { ...baseEnv };
@@ -1173,28 +1177,28 @@ function createLineDecoder(onLine) {
 }
 var RPC_ACK_TIMEOUT_MS = 3e4;
 var rpcSendCounter = 0;
-function enqueueRpcSendWithAck(run, type, message4) {
-  const queue = run.rpcStdinQueue;
+function enqueueRpcSendWithAck(run2, type, message4) {
+  const queue = run2.rpcStdinQueue;
   if (!queue) {
     return {
       kind: "epipe",
-      reason: `sub-agent ${run.id} finished before steer was delivered (stdin queue gone).`
+      reason: `sub-agent ${run2.id} finished before steer was delivered (stdin queue gone).`
     };
   }
-  if (!run.pendingAcks) run.pendingAcks = /* @__PURE__ */ new Map();
+  if (!run2.pendingAcks) run2.pendingAcks = /* @__PURE__ */ new Map();
   rpcSendCounter += 1;
-  const id = `send-${run.id}-${rpcSendCounter}`;
+  const id = `send-${run2.id}-${rpcSendCounter}`;
   const ackPromise = new Promise(
     (resolve7, reject) => {
       const timer = setTimeout(() => {
-        run.pendingAcks?.delete(id);
+        run2.pendingAcks?.delete(id);
         reject(
           new Error(
             `ack timeout \u2014 sub-agent may have received the message; check via ensemble_status`
           )
         );
       }, RPC_ACK_TIMEOUT_MS);
-      run.pendingAcks.set(id, {
+      run2.pendingAcks.set(id, {
         resolve: (delivered) => resolve7({ delivered, deliveredAt: Date.now() }),
         reject,
         timer
@@ -1203,13 +1207,13 @@ function enqueueRpcSendWithAck(run, type, message4) {
   );
   let epipeFlag = null;
   void queue.enqueue({ id, type, message: message4 }).catch((err) => {
-    const entry = run.pendingAcks?.get(id);
+    const entry = run2.pendingAcks?.get(id);
     if (entry) {
       clearTimeout(entry.timer);
-      run.pendingAcks?.delete(id);
+      run2.pendingAcks?.delete(id);
       entry.reject(
         new Error(
-          `sub-agent ${run.id} finished before steer was delivered (${err.message}).`
+          `sub-agent ${run2.id} finished before steer was delivered (${err.message}).`
         )
       );
     }
@@ -1218,7 +1222,7 @@ function enqueueRpcSendWithAck(run, type, message4) {
   if (epipeFlag) {
     return {
       kind: "epipe",
-      reason: `sub-agent ${run.id} finished before steer was delivered.`
+      reason: `sub-agent ${run2.id} finished before steer was delivered.`
     };
   }
   return { kind: "queued", ack: ackPromise };
@@ -1268,7 +1272,7 @@ function createHerdrCli(opts) {
   const env = Object.fromEntries(Object.entries(opts.env).filter(([key]) => !key.startsWith("HERDR_")));
   env.HERDR_SOCKET_PATH = socketPath;
   const execute = opts.execute ?? execFile;
-  async function run(args, json, limits = {}) {
+  async function run2(args, json, limits = {}) {
     const timeoutMs = limits.timeoutMs ?? 5e3;
     const maxBuffer = limits.maxBuffer ?? 65536;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 65e3 || !Number.isSafeInteger(maxBuffer) || maxBuffer <= 0 || maxBuffer > 1048576) throw new HerdrCliError("configuration");
@@ -1322,11 +1326,11 @@ function createHerdrCli(opts) {
   }
   return {
     socketPath,
-    text: (args, limits) => run(args, false, limits),
+    text: (args, limits) => run2(args, false, limits),
     async json(args, limits) {
       const expected = jsonCommands[args.slice(0, 2).join(" ")];
       if (!expected || args.includes("--help")) throw new HerdrCliError("protocol");
-      const value = envelope(await run(args, true, limits));
+      const value = envelope(await run2(args, true, limits));
       if (!value || "error" in value && "result" in value) throw new HerdrCliError("protocol");
       if (isRecord(value.error) && typeof value.error.code === "string" && typeof value.error.message === "string") {
         throw new HerdrCliError("remote", void 0, remoteCodes.has(value.error.code) ? value.error.code : void 0);
@@ -1367,17 +1371,17 @@ function describeDelivery(ack) {
   if (ack.delivered) return "input accepted by the child bridge; this does not prove the request executed.";
   return ack.definite ? `input rejected: ${ack.reason}` : `delivery unconfirmed: ${ack.reason}; do not resend blindly.`;
 }
-function isObservableHere(run) {
-  return run.runtime === "herdr" ? run.transport?.kind === "herdr" && run.transport.observable === true : run.proc !== void 0;
+function isObservableHere(run2) {
+  return run2.runtime === "herdr" ? run2.transport?.kind === "herdr" && run2.transport.observable === true : run2.proc !== void 0;
 }
-function runtimeFor(run, env) {
-  if (run.runtime === "herdr" && run.transport?.kind === "herdr" && run.transport.runtime) return run.transport.runtime;
-  if (run.runtime === "herdr") return new HerdrRuntime(env ? {
+function runtimeFor(run2, env) {
+  if (run2.runtime === "herdr" && run2.transport?.kind === "herdr" && run2.transport.runtime) return run2.transport.runtime;
+  if (run2.runtime === "herdr") return new HerdrRuntime(env ? {
     cli: createHerdrCli({ env: { ...env }, socketPath: env.HERDR_SOCKET_PATH }),
     workspaceId: env.HERDR_WORKSPACE_ID,
     env: { ...env }
   } : void 0);
-  assertSupportedRuntime(run.runtime);
+  assertSupportedRuntime(run2.runtime);
   return subprocessRuntime;
 }
 
@@ -1389,6 +1393,7 @@ function classifyRecord(record, isAlive, _now, selfPid = process.pid, isParentAl
     if (isRequestedTermination(record.status)) return "skip-terminal";
     if (herdrProbe === "other-socket" || herdrProbe === "unknown") return "skip-foreign";
     if (record.status === "integrating" || record.effort && record.integration) return "restore-integrating";
+    if (record.mergerFor && record.status !== "blocked") return "preserve-merger";
     return "readopt-herdr";
   }
   if (unsupportedRuntimeReason(record.runtime)) return "skip-unsupported-runtime";
@@ -1405,6 +1410,7 @@ function classifyRecord(record, isAlive, _now, selfPid = process.pid, isParentAl
   if (status === "integrating") return "restore-integrating";
   if (status === "blocked") return "restore-blocked";
   if (record.effort) return "restore-effort";
+  if (record.mergerFor) return "preserve-merger";
   if (status === "queued") {
     return "reclassify-failed-queued";
   }
@@ -1538,17 +1544,17 @@ async function reconcileOrphansAtStartup(deps) {
           break;
         case "restore-effort":
           if (!dryRun) {
-            const run = buildOrphanRun(record, record.status);
-            run.integrationSuspended = true;
-            deps.registry.register(run);
+            const run2 = buildOrphanRun(record, record.status);
+            run2.integrationSuspended = true;
+            deps.registry.register(run2);
           }
           break;
         case "restore-integrating":
           if (!dryRun) {
-            const run = buildOrphanRun(record, "integrating");
-            run.integrationSuspended = true;
-            if (run.integration) run.integration = { ...run.integration, state: "paused", reason: "interrupted integration preserved pending fenced effort recovery" };
-            deps.registry.register(run);
+            const run2 = buildOrphanRun(record, "integrating");
+            run2.integrationSuspended = true;
+            if (run2.integration) run2.integration = { ...run2.integration, state: "paused", reason: "interrupted integration preserved pending fenced effort recovery" };
+            deps.registry.register(run2);
           }
           break;
         case "restore-blocked":
@@ -1556,6 +1562,8 @@ async function reconcileOrphansAtStartup(deps) {
           await checkSessionResumability(record, result);
           break;
         case "skip-terminal":
+          break;
+        case "preserve-merger":
           break;
         case "skip-foreign":
           result.skippedForeign.push(record.id);
@@ -1662,12 +1670,12 @@ async function reconcileOrphansAtStartup(deps) {
   for (const record of attachedLeaves) {
     try {
       const why2 = await leafOrphanReason(record, deps);
-      const run = deps.registry.get(record.id), transport = run?.transport;
-      if (!why2 || !run || transport?.kind !== "herdr") continue;
+      const run2 = deps.registry.get(record.id), transport = run2?.transport;
+      if (!why2 || !run2 || transport?.kind !== "herdr") continue;
       void transport.ready.then(() => {
-        if (deps.registry.get(record.id) !== run || run.transport !== transport || isTerminal(run.status)) return;
-        run.errorMessage = `orphaned: parent ${record.parentRunId ?? "(none)"} ${why2}; stopped through its proven pane child`;
-        deps.stopOrphanLeaf?.(run);
+        if (deps.registry.get(record.id) !== run2 || run2.transport !== transport || isTerminal(run2.status)) return;
+        run2.errorMessage = `orphaned: parent ${record.parentRunId ?? "(none)"} ${why2}; stopped through its proven pane child`;
+        deps.stopOrphanLeaf?.(run2);
       }, () => {
       });
     } catch (e) {
@@ -1750,6 +1758,7 @@ function buildOrphanRun(record, status) {
     worktreeBranch: record.worktreeBranch,
     effort: record.effort,
     integration: record.integration,
+    mergerFor: record.mergerFor,
     landedCommit: record.landedCommit,
     worktreeBaseBranch: record.worktreeBaseBranch,
     mergeStrategy: record.mergeStrategy,
@@ -2005,37 +2014,37 @@ function claimHerdrOwner(dir, identity, options = {}) {
   };
   return { identity: owner, assert, release: () => publishJson(`${path2}.released`, owner, assert) };
 }
-function assertHerdrOwner(run) {
-  if (run.runtime !== "herdr") return;
-  if (run.herdrOwnership) {
-    run.herdrOwnership.assert();
+function assertHerdrOwner(run2) {
+  if (run2.runtime !== "herdr") return;
+  if (run2.herdrOwnership) {
+    run2.herdrOwnership.assert();
     return;
   }
-  if (run.effort && run.integration) return;
-  if (run.herdr?.ownerGeneration !== void 0 || readHerdrOwner(dirname4(run.recordPath))) throw new Error("herdr stream not owned by this runtime");
+  if (run2.effort && run2.integration) return;
+  if (run2.herdr?.ownerGeneration !== void 0 || readHerdrOwner(dirname4(run2.recordPath))) throw new Error("herdr stream not owned by this runtime");
 }
-function ownsHerdrRun(run) {
+function ownsHerdrRun(run2) {
   try {
-    assertHerdrOwner(run);
+    assertHerdrOwner(run2);
     return true;
   } catch {
     return false;
   }
 }
-function herdrEffectFence(run) {
-  const ownership = run.herdrOwnership, binding = run.herdr;
+function herdrEffectFence(run2) {
+  const ownership = run2.herdrOwnership, binding = run2.herdr;
   return () => {
-    if (run.runtime !== "herdr") return;
+    if (run2.runtime !== "herdr") return;
     ownership?.assert();
-    if (run.herdrOwnership !== ownership || run.herdr !== binding) throw new Error("herdr invocation fenced");
-    assertHerdrOwner(run);
+    if (run2.herdrOwnership !== ownership || run2.herdr !== binding) throw new Error("herdr invocation fenced");
+    assertHerdrOwner(run2);
   };
 }
 
 // src/herdr/runtime.ts
 import { createHash as createHash4, randomUUID as randomUUID5 } from "node:crypto";
-import { closeSync as closeSync5, constants as constants4, fstatSync as fstatSync4, openSync as openSync5, readSync as readSync4, statSync as statSync4, writeFileSync as writeFileSync5, mkdirSync as mkdirSync10 } from "node:fs";
-import { dirname as dirname16, isAbsolute as isAbsolute5, join as join18 } from "node:path";
+import { closeSync as closeSync5, constants as constants4, fstatSync as fstatSync4, openSync as openSync5, readSync as readSync4, statSync as statSync4, writeFileSync as writeFileSync6, mkdirSync as mkdirSync11 } from "node:fs";
+import { dirname as dirname16, isAbsolute as isAbsolute5, join as join19 } from "node:path";
 import { setTimeout as delay2 } from "node:timers/promises";
 import { getAgentDir, hasTrustRequiringProjectResources, ProjectTrustStore, SessionManager as SessionManager2, SettingsManager } from "@earendil-works/pi-coding-agent";
 
@@ -2467,8 +2476,8 @@ function savedSessionRetired(sessionPath) {
     return false;
   }
 }
-function contextRetirementNotice(run) {
-  if (!run.contextRetired || !loadConfig(run.cwd).contextRetirement) return void 0;
+function contextRetirementNotice(run2) {
+  if (!run2.contextRetired || !loadConfig(run2.cwd).contextRetirement) return void 0;
   return "Session retired due to context pressure. Use a fresh child with the handoff for follow-up; retirement does not mean the task is complete.";
 }
 
@@ -2600,9 +2609,9 @@ function sourceRun(id, registry) {
   }
   return r;
 }
-function resultRef(run) {
+function resultRef(run2) {
   try {
-    return RUN_ID.test(run.id) && isTerminal(run.status) && !run.herdrExitUnconfirmed && !run.herdrResultUnavailable && !childExitUnconfirmed(run) && usableResult(run.finalPath) ? `run:${run.id}` : void 0;
+    return RUN_ID.test(run2.id) && isTerminal(run2.status) && !run2.herdrExitUnconfirmed && !run2.herdrResultUnavailable && !childExitUnconfirmed(run2) && usableResult(run2.finalPath) ? `run:${run2.id}` : void 0;
   } catch {
     return void 0;
   }
@@ -2617,18 +2626,18 @@ function appendFileEvidence(task, files, options) {
   const entries = files.map((input) => {
     if (typeof input !== "string" || !input.trim() || input.includes("\0")) throw new Error("files entries must be non-empty local paths or run:<agent_id> references");
     try {
-      const run = input.startsWith("run:") ? sourceRun(input.slice(4), options.registry) : void 0;
-      if (run && (run.herdrExitUnconfirmed || run.herdrResultUnavailable || childExitUnconfirmed(run) || !usableResult(run.finalPath))) throw new Error(`no usable final result: ${input}`);
-      const path2 = realpathSync4(run ? run.finalPath : resolveLocalPath(input, options.cwd));
+      const run2 = input.startsWith("run:") ? sourceRun(input.slice(4), options.registry) : void 0;
+      if (run2 && (run2.herdrExitUnconfirmed || run2.herdrResultUnavailable || childExitUnconfirmed(run2) || !usableResult(run2.finalPath))) throw new Error(`no usable final result: ${input}`);
+      const path2 = realpathSync4(run2 ? run2.finalPath : resolveLocalPath(input, options.cwd));
       const size = inspect(path2, (_fd, size2) => size2);
       if (seen.has(path2)) return void 0;
       seen.add(path2);
-      const attrs = `name="${escapeAttr(run ? input : path2)}" bytes="${size}"`;
-      const ref = `<file ${attrs}${run ? ` path="${escapeAttr(path2)}"` : ""} />
+      const attrs = `name="${escapeAttr(run2 ? input : path2)}" bytes="${size}"`;
+      const ref = `<file ${attrs}${run2 ? ` path="${escapeAttr(path2)}"` : ""} />
 `;
       budget -= Buffer.byteLength(ref);
       if (budget < 0) throw new Error("rendered evidence references exceed total budget; attach fewer files");
-      const provenance = run ? `Agent result source: ${JSON.stringify({ agent_id: run.id, persona: run.persona, cwd: run.cwd, session_path: run.sessionPath })}
+      const provenance = run2 ? `Agent result source: ${JSON.stringify({ agent_id: run2.id, persona: run2.persona, cwd: run2.cwd, session_path: run2.sessionPath })}
 
 ` : "";
       return { path: path2, size, attrs, ref, provenance };
@@ -3093,12 +3102,13 @@ function checkedCas(root, ref, candidate, expected, fence) {
 function shellQuote2(value) {
   return "'" + value.replaceAll("'", `'"'"'`) + "'";
 }
-function integratedCandidate(record, run) {
-  const e = run.integration;
+function integratedCandidate(record, run2) {
+  const e = run2.integration;
   if (!e?.candidateOid || !e.expectedTip || !e.candidateTree || e.verifiedOid !== e.candidateOid && e.state !== "verified" && e.state !== "accepted" || e.verifyIdentity.command !== record.policy.verify || e.verifyIdentity.timeoutSeconds !== record.policy.verifyTimeoutSeconds || e.verifyIdentity.retries !== record.policy.verifyRetries || e.verifyIdentity.command && (!e.verify?.passed || e.verify.command !== e.verifyIdentity.command)) return;
   const root = record.gitRoot;
   const body = effortGit(root, "show", "-s", "--format=%B", e.candidateOid).split("\n");
-  if ([`Conductor-Effort: ${record.name}`, `Conductor-Run: ${run.id}`].some((trailer) => body.filter((line) => line === trailer).length !== 1)) return;
+  const m = e.merger?.outcome === "accepted" && e.branchHead === e.merger.outputOid ? e.merger.runId : void 0;
+  if ([`Conductor-Effort: ${record.name}`, `Conductor-Run: ${run2.id}`, ...m ? [`Conductor-Merger: ${m}`] : []].some((trailer) => body.filter((line) => line === trailer).length !== 1)) return;
   if (effortGit(root, "show", "-s", "--format=%P", e.candidateOid) !== e.expectedTip || effortGit(root, "rev-parse", `${e.candidateOid}^{tree}`) !== e.candidateTree) return;
   const result = spawnSync("git", ["merge-base", "--is-ancestor", e.candidateOid, record.intRef], { cwd: root, env: gitEnv(), timeout: 3e4 });
   if (result.status === 0) return e.candidateOid;
@@ -3152,8 +3162,8 @@ async function regenerateCandidate(cwd, expectedHead, generated, evidencePath, c
 }
 
 // src/effort/admit.ts
-var consumesSlot = (run) => !isSettled(run.status) && run.status !== "queued" && run.status !== "integrating";
-var holdsSlot = (run) => consumesSlot(run) || run.processOpen === true;
+var consumesSlot = (run2) => !isSettled(run2.status) && run2.status !== "queued" && run2.status !== "integrating";
+var holdsSlot = (run2) => consumesSlot(run2) || run2.processOpen === true;
 var declared = (touches) => touches?.length ? touches : ["**"];
 var prefix = (glob) => {
   const parts = glob.split("/");
@@ -3169,9 +3179,9 @@ function covered(glob, generated) {
   if (!/[*?\[\]{}()!+@\\]/.test(glob)) return isGeneratedPath(glob, generated);
   return generated.paths.some((g) => g === glob || g.endsWith("/**") && !/[*?\[\]{}()!+@\\]/.test(g.slice(0, -3)) && glob.startsWith(g.slice(0, -2)));
 }
-function holdsFootprint(run) {
-  if (!run.effort || run.mergeResult?.success) return false;
-  return run.status === "queued" || consumesSlot(run) || run.status === "blocked" || run.status === "integrating" || !!run.effort.spawnBase || !!run.worktreeBranch;
+function holdsFootprint(run2) {
+  if (!run2.effort || run2.mergeResult?.success) return false;
+  return run2.status === "queued" || consumesSlot(run2) || run2.status === "blocked" || run2.status === "integrating" || !!run2.effort.spawnBase || !!run2.worktreeBranch;
 }
 function admitEffortWriter(candidate, members, limits, record, efforts = [], waitingBehind = /* @__PURE__ */ new Set()) {
   const others = members.filter((r) => r.id !== candidate.id);
@@ -3186,19 +3196,19 @@ function admitEffortWriter(candidate, members, limits, record, efforts = [], wai
   if (efforts.some((e) => e.members.some((id) => id !== candidate.id && !members.some((r) => r.id === id)))) return "waits for unobserved same-repository effort assignments; recovery required";
   if (active.filter((r) => r.effort?.gitRoot === record.gitRoot && r.effort.name === record.name).length >= record.policy.maxParallel) return `waits for effort maxParallel (${record.policy.maxParallel})`;
   const touches = [...declared(candidate.effort.touches), ...candidate.effort.changedPaths ?? [], ...candidate.effort.footprintUnknown ? ["**"] : []];
-  for (const run of others) {
-    if (waitingBehind.has(run.id) && run.status === "queued") continue;
-    if (!holdsFootprint(run) || run.effort.gitRoot !== record.gitRoot) continue;
-    const footprint = [...declared(run.effort.touches), ...run.integration?.changedPaths ?? run.effort.changedPaths ?? []];
-    if (run.effort.footprintUnknown || isSettled(run.status) && run.status !== "blocked") footprint.push("**");
-    const generated = run.effort.name === record.name && !touches.includes("**") && !footprint.includes("**") ? record.policy.generated : void 0;
-    if (touches.some((a) => !covered(a, generated) && footprint.some((b) => !covered(b, generated) && footprintsOverlap(a, b)))) return `waits on ${run.id} (touches overlap)`;
+  for (const run2 of others) {
+    if (waitingBehind.has(run2.id) && run2.status === "queued") continue;
+    if (!holdsFootprint(run2) || run2.effort.gitRoot !== record.gitRoot) continue;
+    const footprint = [...declared(run2.effort.touches), ...run2.integration?.changedPaths ?? run2.effort.changedPaths ?? []];
+    if (run2.effort.footprintUnknown || isSettled(run2.status) && run2.status !== "blocked") footprint.push("**");
+    const generated = run2.effort.name === record.name && !touches.includes("**") && !footprint.includes("**") ? record.policy.generated : void 0;
+    if (touches.some((a) => !covered(a, generated) && footprint.some((b) => !covered(b, generated) && footprintsOverlap(a, b)))) return `waits on ${run2.id} (touches overlap)`;
   }
 }
-function measureEffortFootprint(run, branchHead, policy) {
-  if (!run.effort?.spawnBase) throw new Error("missing effort spawn base; footprint unknown");
-  const changedPaths2 = changedPaths(run.effort.gitRoot, run.effort.spawnBase, branchHead);
-  const touchViolations = changedPaths2.filter((path2) => !isGeneratedPath(path2, policy.generated) && !declared(run.effort.touches).some((glob) => matchesGlob2(path2, glob)));
+function measureEffortFootprint(run2, branchHead, policy) {
+  if (!run2.effort?.spawnBase) throw new Error("missing effort spawn base; footprint unknown");
+  const changedPaths2 = changedPaths(run2.effort.gitRoot, run2.effort.spawnBase, branchHead);
+  const touchViolations = changedPaths2.filter((path2) => !isGeneratedPath(path2, policy.generated) && !declared(run2.effort.touches).some((glob) => matchesGlob2(path2, glob)));
   return { changedPaths: changedPaths2, touchViolations };
 }
 
@@ -3255,63 +3265,63 @@ var UPDATED = { kind: "updated" };
 function qualifyModel(model, provider) {
   return !provider || model.startsWith(`${provider}/`) ? model : `${provider}/${model}`;
 }
-function applyEvent(run, event) {
+function applyEvent(run2, event) {
   if (!event || typeof event !== "object") return NONE;
   const e = event;
   if (typeof e.type !== "string") return NONE;
   if (e.type === "conductor_child" && e.event === "ui_prompt") {
-    if (run.runtime !== "herdr" || !run.herdr || e._c?.n !== run.herdr.launchNonce || typeof e.kind !== "string") return NONE;
-    const nonce = run.herdr.launchNonce;
+    if (run2.runtime !== "herdr" || !run2.herdr || e._c?.n !== run2.herdr.launchNonce || typeof e.kind !== "string") return NONE;
+    const nonce = run2.herdr.launchNonce;
     const key = JSON.stringify([e.kind, typeof e.title === "string" ? e.title : null]);
-    const prompts = run.herdrPrompts?.nonce === nonce ? run.herdrPrompts : void 0;
+    const prompts = run2.herdrPrompts?.nonce === nonce ? run2.herdrPrompts : void 0;
     if (e.state === "start") {
-      run.herdrPrompts = { nonce, active: [...prompts?.active ?? [], key], notified: prompts?.notified };
-      run.stalledSince = void 0;
+      run2.herdrPrompts = { nonce, active: [...prompts?.active ?? [], key], notified: prompts?.notified };
+      run2.stalledSince = void 0;
       return UPDATED;
     }
     const index = prompts?.active.lastIndexOf(key) ?? -1;
     if (e.state !== "end" || !prompts || index < 0) return NONE;
     const active = prompts.active.filter((_, i) => i !== index);
-    run.herdrPrompts = active.length ? { ...prompts, active } : void 0;
-    if (!active.length) run.lastEventAt = Date.now();
+    run2.herdrPrompts = active.length ? { ...prompts, active } : void 0;
+    if (!active.length) run2.lastEventAt = Date.now();
     return UPDATED;
   }
-  if (run.streamingMode === "rpc" && bumpOnRpcLine(run, Date.now(), e.type)) {
-    run.lastEventAt = Date.now();
+  if (run2.streamingMode === "rpc" && bumpOnRpcLine(run2, Date.now(), e.type)) {
+    run2.lastEventAt = Date.now();
   }
   if (e.type === "response") {
     if (e.command === "compact") {
       return { kind: "compacted" };
     }
-    routeRpcResponse(run, e);
+    routeRpcResponse(run2, e);
     return UPDATED;
   }
   if (e.type === "extension_ui_request") {
-    return handleExtensionUiRequest(run, e);
+    return handleExtensionUiRequest(run2, e);
   }
   if (e.type === "tool_execution_start" && e.toolName === "ask_owner") {
-    const assistant = [...run.messages].reverse().find((m) => m.role === "assistant");
+    const assistant = [...run2.messages].reverse().find((m) => m.role === "assistant");
     const calls = assistant?.role === "assistant" ? assistant.content.filter((p) => p.type === "toolCall") : [];
-    if (!run.pendingAsk && calls.length === 1 && calls[0].name === "ask_owner" && calls[0].id === e.toolCallId && typeof e.args?.question === "string" && e.args.question.trim()) {
-      run.askExecution = { askId: e.toolCallId, question: e.args.question.trim() };
-      run.askContinuation = false;
+    if (!run2.pendingAsk && calls.length === 1 && calls[0].name === "ask_owner" && calls[0].id === e.toolCallId && typeof e.args?.question === "string" && e.args.question.trim()) {
+      run2.askExecution = { askId: e.toolCallId, question: e.args.question.trim() };
+      run2.askContinuation = false;
     }
     return NONE;
   }
   if (e.type === "tool_execution_end" && e.toolName === "ask_owner") {
-    const execution = run.askExecution;
-    run.askExecution = void 0;
-    if (e.isError !== false) run.askContinuation = void 0;
+    const execution = run2.askExecution;
+    run2.askExecution = void 0;
+    if (e.isError !== false) run2.askContinuation = void 0;
     const details2 = e.result?.details;
-    if (execution && e.isError === false && execution.askId === e.toolCallId && details2?.askId === e.toolCallId && details2.question === execution.question && typeof details2.evidence === "string" && !run.pendingAsk) {
-      run.pendingAsk = { ...execution, evidence: details2.evidence };
+    if (execution && e.isError === false && execution.askId === e.toolCallId && details2?.askId === e.toolCallId && details2.question === execution.question && typeof details2.evidence === "string" && !run2.pendingAsk) {
+      run2.pendingAsk = { ...execution, evidence: details2.evidence };
       return UPDATED;
     }
     return NONE;
   }
   if (e.type === "agent_settled") {
-    run.herdrPrompts = void 0;
-    const failed = run.stopReason === "error" || run.stopReason === "aborted";
+    run2.herdrPrompts = void 0;
+    const failed = run2.stopReason === "error" || run2.stopReason === "aborted";
     return { kind: "finalize", status: failed ? "failed" : "completed", exitCode: failed ? 1 : 0 };
   }
   if (e.type === "message_end") {
@@ -3320,37 +3330,37 @@ function applyEvent(run, event) {
       return { kind: "compacted" };
     }
     const msg = e.message;
-    if (!run.rejectAnswerDelivery && (run.pendingAsk || run.askExecution)) {
-      if (msg.role === "user") run.askContinuation = true;
-      if (msg.role === "assistant" && run.askContinuation) {
-        run.pendingAsk = void 0;
-        run.askExecution = void 0;
-        run.askContinuation = void 0;
+    if (!run2.rejectAnswerDelivery && (run2.pendingAsk || run2.askExecution)) {
+      if (msg.role === "user") run2.askContinuation = true;
+      if (msg.role === "assistant" && run2.askContinuation) {
+        run2.pendingAsk = void 0;
+        run2.askExecution = void 0;
+        run2.askContinuation = void 0;
       }
     }
-    run.messages.push(msg);
-    run.lastEventAt = Date.now();
+    run2.messages.push(msg);
+    run2.lastEventAt = Date.now();
     if (msg.role === "assistant") {
-      run.usage.turns += 1;
+      run2.usage.turns += 1;
       const u = msg.usage;
       if (u) {
-        run.usage.input += u.input || 0;
-        run.usage.output += u.output || 0;
-        run.usage.cacheRead += u.cacheRead || 0;
-        run.usage.cacheWrite += u.cacheWrite || 0;
-        run.usage.cost += u.cost?.total || 0;
+        run2.usage.input += u.input || 0;
+        run2.usage.output += u.output || 0;
+        run2.usage.cacheRead += u.cacheRead || 0;
+        run2.usage.cacheWrite += u.cacheWrite || 0;
+        run2.usage.cost += u.cost?.total || 0;
       }
       const m = msg.model;
-      if (m && !run.model) run.model = qualifyModel(m, msg.provider);
+      if (m && !run2.model) run2.model = qualifyModel(m, msg.provider);
       const sr = msg.stopReason;
-      if (sr) run.stopReason = sr;
+      if (sr) run2.stopReason = sr;
       const em = msg.errorMessage;
-      if (em && !run.errorMessage) run.errorMessage = em;
+      if (em && !run2.errorMessage) run2.errorMessage = em;
       const content = msg.content;
       if (Array.isArray(content)) {
         for (const part of content) {
           if (part?.type === "toolCall") {
-            run.lastToolCall = formatToolCallShort(part.name, part.arguments);
+            run2.lastToolCall = formatToolCallShort(part.name, part.arguments);
           }
         }
       }
@@ -3359,12 +3369,12 @@ function applyEvent(run, event) {
   }
   if (e.type === "tool_result_end") {
     if (!e.message) return NONE;
-    run.messages.push(e.message);
-    run.lastEventAt = Date.now();
+    run2.messages.push(e.message);
+    run2.lastEventAt = Date.now();
     return UPDATED;
   }
   if (e.type === "tool_execution_update") {
-    run.lastEventAt = Date.now();
+    run2.lastEventAt = Date.now();
     return UPDATED;
   }
   return NONE;
@@ -3372,24 +3382,24 @@ function applyEvent(run, event) {
 function bumpOnRpcLine(_run, _now, evtType) {
   return evtType === "response";
 }
-function routeRpcResponse(run, evt) {
+function routeRpcResponse(run2, evt) {
   const id = evt.id;
-  if (typeof id !== "string" || !run.pendingAcks) return UPDATED;
-  const entry = run.pendingAcks.get(id);
+  if (typeof id !== "string" || !run2.pendingAcks) return UPDATED;
+  const entry = run2.pendingAcks.get(id);
   if (!entry) return UPDATED;
   clearTimeout(entry.timer);
-  run.pendingAcks.delete(id);
+  run2.pendingAcks.delete(id);
   entry.resolve(evt.success === true);
   return UPDATED;
 }
-function handleExtensionUiRequest(run, evt) {
+function handleExtensionUiRequest(run2, evt) {
   const id = evt.id;
   const method = evt.method ?? "unknown";
   console.warn(
-    `sub-agent ${run.id} emitted ${method} request under steerable=true; auto-cancelled`
+    `sub-agent ${run2.id} emitted ${method} request under steerable=true; auto-cancelled`
   );
-  if (!run.rpcStdinQueue || typeof id !== "string") return UPDATED;
-  void run.rpcStdinQueue.enqueue({ type: "extension_ui_response", id, cancelled: true }).catch(() => {
+  if (!run2.rpcStdinQueue || typeof id !== "string") return UPDATED;
+  void run2.rpcStdinQueue.enqueue({ type: "extension_ui_response", id, cancelled: true }).catch(() => {
   });
   return UPDATED;
 }
@@ -3636,14 +3646,14 @@ function loadOutcomes(path2 = memoryPath()) {
   }
   return out;
 }
-function recordRunOutcome(run, now = Date.now(), path2 = memoryPath()) {
+function recordRunOutcome(run2, now = Date.now(), path2 = memoryPath()) {
   appendOutcome(
     {
-      persona: run.persona,
-      taskShape: normalizeTaskShape(run.task),
-      status: run.status,
-      failureClass: run.failureClass,
-      durationMs: (run.finishedAt ?? now) - run.startTime,
+      persona: run2.persona,
+      taskShape: normalizeTaskShape(run2.task),
+      status: run2.status,
+      failureClass: run2.failureClass,
+      durationMs: (run2.finishedAt ?? now) - run2.startTime,
       ts: now
     },
     path2
@@ -3815,15 +3825,15 @@ function toolSummary(name2, args = {}) {
   }
   return boundStallText(`${boundStallText(name2, 128)} ${summarizeToolArgs(name2, bounded)}`, 512);
 }
-function recentStallEvidence(run) {
+function recentStallEvidence(run2) {
   try {
     const blocks = [];
     let used = Buffer.byteLength("<recent-activity>\n\n</recent-activity>" + OLDER);
     let partsLeft = 64;
-    const floor = Math.max(0, run.messages.length - 32);
+    const floor = Math.max(0, run2.messages.length - 32);
     let omitted = floor > 0;
-    outer: for (let i = run.messages.length - 1; i >= floor; i--) {
-      const msg = run.messages[i];
+    outer: for (let i = run2.messages.length - 1; i >= floor; i--) {
+      const msg = run2.messages[i];
       if (msg.role !== "assistant" && msg.role !== "toolResult") continue;
       if (!Array.isArray(msg.content)) continue;
       const add = (text5) => {
@@ -3881,10 +3891,10 @@ ${boundStallText(part.text, ITEM_BYTES - 11)}` : part.type === "toolCall" ? `too
 }
 
 // src/notifications.ts
-function perSendNumbers(run) {
-  const startedAt = run.thisInvocationStartedAt ?? run.startTime;
-  const finishedAt = run.finishedAt ?? Date.now();
-  const baseline = run.thisInvocationUsageBaseline ?? {
+function perSendNumbers(run2) {
+  const startedAt = run2.thisInvocationStartedAt ?? run2.startTime;
+  const finishedAt = run2.finishedAt ?? Date.now();
+  const baseline = run2.thisInvocationUsageBaseline ?? {
     turns: 0,
     input: 0,
     output: 0,
@@ -3892,33 +3902,33 @@ function perSendNumbers(run) {
   };
   return {
     durationMs: Math.max(0, finishedAt - startedAt),
-    turns: Math.max(0, run.usage.turns - baseline.turns),
-    input: Math.max(0, run.usage.input - baseline.input),
-    output: Math.max(0, run.usage.output - baseline.output),
-    cost: Math.max(0, run.usage.cost - baseline.cost)
+    turns: Math.max(0, run2.usage.turns - baseline.turns),
+    input: Math.max(0, run2.usage.input - baseline.input),
+    output: Math.max(0, run2.usage.output - baseline.output),
+    cost: Math.max(0, run2.usage.cost - baseline.cost)
   };
 }
-function formatCompletionNotification(run, actions = availableActions(run), runs = []) {
-  if (run.status === "blocked") {
-    const ask = run.pendingAsk;
-    const tag = run.errorMessage ? "sub-agent-answer-failed" : "sub-agent-asked";
-    const error = run.errorMessage ? `
-  <error>${escapeXml(run.errorMessage)}</error>` : "";
+function formatCompletionNotification(run2, actions = availableActions(run2), runs = []) {
+  if (run2.status === "blocked") {
+    const ask = run2.pendingAsk;
+    const tag = run2.errorMessage ? "sub-agent-answer-failed" : "sub-agent-asked";
+    const error = run2.errorMessage ? `
+  <error>${escapeXml(run2.errorMessage)}</error>` : "";
     return `<${tag}>${error}
-  <agent-id>${escapeXml(run.id)}</agent-id>
+  <agent-id>${escapeXml(run2.id)}</agent-id>
   <status>blocked</status>
   <ask-id>${escapeXml(ask?.askId ?? "")}</ask-id>
   <question>${escapeXml(ask?.question ?? "Question unavailable; inspect transcript")}</question>
 ${ask?.evidence ?? ""}
   <available-actions>${actions.join(", ")}</available-actions>
   <guidance>Answer via ensemble_send on this agent id. Assignment unresolved; do independent work while deciding.</guidance>
-  <transcript>${escapeXml(run.transcriptPath)}</transcript>
+  <transcript>${escapeXml(run2.transcriptPath)}</transcript>
 </${tag}>`;
   }
-  const finalText = getCompletionText(run);
-  const perSend = perSendNumbers(run);
-  const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
-  const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
+  const finalText = getCompletionText(run2);
+  const perSend = perSendNumbers(run2);
+  const perSendStart = run2.thisInvocationStartedAt ?? run2.startTime;
+  const perSendEnd = run2.finishedAt ?? perSendStart + perSend.durationMs;
   const elapsed = elapsedStr(perSendStart, perSendEnd);
   const usageStr = formatUsage({
     turns: perSend.turns,
@@ -3926,21 +3936,21 @@ ${ask?.evidence ?? ""}
     output: perSend.output,
     cost: perSend.cost
   });
-  const resumed = sendsSinceSpawn(run) >= 1;
+  const resumed = sendsSinceSpawn(run2) >= 1;
   const lines = [];
   lines.push("```xml");
   lines.push("<sub-agent-completed>");
-  const ref = resultRef(run);
+  const ref = resultRef(run2);
   if (ref) lines.push(`  <result-ref>${ref}</result-ref>`);
-  lines.push(`  <agent-id>${run.id}</agent-id>`);
-  lines.push(`  <persona>${run.persona}</persona>`);
-  lines.push(`  <status>${run.status}</status>`);
+  lines.push(`  <agent-id>${run2.id}</agent-id>`);
+  lines.push(`  <persona>${run2.persona}</persona>`);
+  lines.push(`  <status>${run2.status}</status>`);
   lines.push(`  <available-actions>${actions.join(",")}</available-actions>`);
   lines.push(`  <duration>${elapsed}</duration>`);
   lines.push(
     `  <usage><turns>${perSend.turns}</turns><input>${perSend.input}</input><output>${perSend.output}</output><cost>${perSend.cost.toFixed(4)}</cost></usage>`
   );
-  const children = childrenOf(run, runs, perSendStart);
+  const children = childrenOf(run2, runs, perSendStart);
   if (children.length) {
     lines.push("  <children>");
     for (const c of children) {
@@ -3950,40 +3960,40 @@ ${ask?.evidence ?? ""}
     lines.push("  </children>");
     lines.push(`  <subtree-cost>${children.reduce((sum, c) => sum + c.usage.cost, perSend.cost).toFixed(4)}</subtree-cost>`);
   }
-  if (run.abandonedChildren?.length) {
+  if (run2.abandonedChildren?.length) {
     lines.push("  <abandoned-children>");
-    for (const c of run.abandonedChildren) lines.push(`    <child id="${escapeXmlAttr(c.id)}" persona="${escapeXmlAttr(c.persona)}" status="${c.status}" exit="${c.exit}"/>`);
+    for (const c of run2.abandonedChildren) lines.push(`    <child id="${escapeXmlAttr(c.id)}" persona="${escapeXmlAttr(c.persona)}" status="${c.status}" exit="${c.exit}"/>`);
     lines.push("  </abandoned-children>");
   }
   if (resumed) {
-    const lifetimeElapsed = elapsedStr(run.startTime, run.finishedAt);
+    const lifetimeElapsed = elapsedStr(run2.startTime, run2.finishedAt);
     lines.push("  <lifetime>");
     lines.push(`    <duration>${lifetimeElapsed}</duration>`);
     lines.push(
-      `    <usage><turns>${run.usage.turns}</turns><input>${run.usage.input}</input><output>${run.usage.output}</output><cost>${run.usage.cost.toFixed(4)}</cost></usage>`
+      `    <usage><turns>${run2.usage.turns}</turns><input>${run2.usage.input}</input><output>${run2.usage.output}</output><cost>${run2.usage.cost.toFixed(4)}</cost></usage>`
     );
-    lines.push(`    <cost>${run.usage.cost.toFixed(4)}</cost>`);
-    if (childrenOf(run, runs).length) lines.push(`    <subtree-cost>${subtreeCost(run, runs).toFixed(4)}</subtree-cost>`);
-    lines.push(`    <resumes>${run.resumeCount ?? 0}</resumes>`);
-    if (run.steerCount) lines.push(`    <steers>${run.steerCount}</steers>`);
+    lines.push(`    <cost>${run2.usage.cost.toFixed(4)}</cost>`);
+    if (childrenOf(run2, runs).length) lines.push(`    <subtree-cost>${subtreeCost(run2, runs).toFixed(4)}</subtree-cost>`);
+    lines.push(`    <resumes>${run2.resumeCount ?? 0}</resumes>`);
+    if (run2.steerCount) lines.push(`    <steers>${run2.steerCount}</steers>`);
     lines.push("  </lifetime>");
   }
-  const retirement = contextRetirementNotice(run);
+  const retirement = contextRetirementNotice(run2);
   if (retirement) lines.push(`  <context-retired>${escapeXml(retirement)}</context-retired>`);
-  if (run.errorMessage) {
-    lines.push(`  <error>${escapeXml(run.errorMessage)}</error>`);
+  if (run2.errorMessage) {
+    lines.push(`  <error>${escapeXml(run2.errorMessage)}</error>`);
   }
-  if (run.integration) lines.push(`  <integration>${escapeXml(JSON.stringify({ effort: run.effort?.name, landedCommit: run.landedCommit, ...run.integration, reason: run.mergeResult?.reason ?? run.integration.reason }))}</integration>`);
-  if (run.worktreeKept) {
+  if (run2.integration) lines.push(`  <integration>${escapeXml(JSON.stringify({ effort: run2.effort?.name, landedCommit: run2.landedCommit, ...run2.integration, reason: run2.mergeResult?.reason ?? run2.integration.reason }))}</integration>`);
+  if (run2.worktreeKept) {
     const attrs = [
-      run.worktreePath && ` path="${escapeXmlAttr(run.worktreePath)}"`,
-      run.worktreeBranch && ` branch="${escapeXmlAttr(run.worktreeBranch)}"`
+      run2.worktreePath && ` path="${escapeXmlAttr(run2.worktreePath)}"`,
+      run2.worktreeBranch && ` branch="${escapeXmlAttr(run2.worktreeBranch)}"`
     ].filter(Boolean).join("");
-    lines.push(`  <worktree-kept${attrs}>${escapeXml(run.worktreeKept)}</worktree-kept>`);
+    lines.push(`  <worktree-kept${attrs}>${escapeXml(run2.worktreeKept)}</worktree-kept>`);
   }
-  if (run.hookResult) {
-    const h = run.hookResult;
-    const hookElapsed = elapsedStr(run.finishedAt - h.durationMs, run.finishedAt);
+  if (run2.hookResult) {
+    const h = run2.hookResult;
+    const hookElapsed = elapsedStr(run2.finishedAt - h.durationMs, run2.finishedAt);
     lines.push("  <hook>");
     lines.push(`    <command>${escapeXml(h.command)}</command>`);
     lines.push(`    <exit-code>${h.exitCode ?? "signal"}</exit-code>`);
@@ -3996,11 +4006,11 @@ ${ask?.evidence ?? ""}
     }
     lines.push("  </hook>");
   }
-  if (run.herdr?.versionWarning) lines.push(`  <warning reason="pi-version">${escapeXml(run.herdr.versionWarning)}</warning>`);
-  if (run.herdr?.placementWarning) lines.push(`  <warning reason="placement">${escapeXml(run.herdr.placementWarning)}</warning>`);
-  if (run.nonSubstantiveFinal) {
+  if (run2.herdr?.versionWarning) lines.push(`  <warning reason="pi-version">${escapeXml(run2.herdr.versionWarning)}</warning>`);
+  if (run2.herdr?.placementWarning) lines.push(`  <warning reason="placement">${escapeXml(run2.herdr.placementWarning)}</warning>`);
+  if (run2.nonSubstantiveFinal) {
     lines.push(
-      `  <warning reason="${run.nonSubstantiveFinal.reason}">${escapeXml(run.nonSubstantiveFinal.message)}</warning>`
+      `  <warning reason="${run2.nonSubstantiveFinal.reason}">${escapeXml(run2.nonSubstantiveFinal.message)}</warning>`
     );
   }
   if (finalText) {
@@ -4008,11 +4018,11 @@ ${ask?.evidence ?? ""}
     lines.push(escapeXml(finalText));
     lines.push("  </result>");
   }
-  lines.push(`  <transcript>${run.transcriptPath}</transcript>`);
+  lines.push(`  <transcript>${run2.transcriptPath}</transcript>`);
   lines.push("</sub-agent-completed>");
   lines.push("```");
   lines.push("");
-  const header = headerLine(run, elapsed, usageStr, resumed);
+  const header = headerLine(run2, elapsed, usageStr, resumed);
   return [header, "", ...lines].join("\n");
 }
 function statusVerb(status) {
@@ -4034,14 +4044,14 @@ function statusVerb(status) {
       return "failed";
   }
 }
-function headerLine(run, elapsed, usageStr, resumed) {
-  const glyph = run.status === "blocked" ? "?" : run.status === "completed" ? "\u2713" : run.status === "killed" ? "\u25A0" : run.status === "timeout" ? "\u23F1" : run.status === "hook_failed" ? "\u2297" : run.status === "aborted" ? "\u23F9" : "\u2717";
-  const verb = statusVerb(run.status) + (run.effort ? ` \u2014 ${effortSummary(run)}` : "");
+function headerLine(run2, elapsed, usageStr, resumed) {
+  const glyph = run2.status === "blocked" ? "?" : run2.status === "completed" ? "\u2713" : run2.status === "killed" ? "\u25A0" : run2.status === "timeout" ? "\u23F1" : run2.status === "hook_failed" ? "\u2297" : run2.status === "aborted" ? "\u23F9" : "\u2717";
+  const verb = statusVerb(run2.status) + (run2.effort ? ` \u2014 ${effortSummary(run2)}` : "");
   const usagePart = usageStr ? `, ${usageStr}` : "";
-  let line = `## ${glyph} \`${run.persona}\` ${verb} (${elapsed}${usagePart}) \u2014 id \`${run.id}\``;
+  let line = `## ${glyph} \`${run2.persona}\` ${verb} (${elapsed}${usagePart}) \u2014 id \`${run2.id}\``;
   if (resumed) {
-    const lifetimeElapsed = elapsedStr(run.startTime, run.finishedAt);
-    const lifetimeCost = run.usage.cost ? `$${run.usage.cost.toFixed(3)}` : "";
+    const lifetimeElapsed = elapsedStr(run2.startTime, run2.finishedAt);
+    const lifetimeCost = run2.usage.cost ? `$${run2.usage.cost.toFixed(3)}` : "";
     const suffix = lifetimeCost ? ` \xB7 lifetime ${lifetimeElapsed} ${lifetimeCost}` : ` \xB7 lifetime ${lifetimeElapsed}`;
     line += suffix;
   }
@@ -4053,81 +4063,81 @@ function escapeXml(s) {
 function escapeXmlAttr(s) {
   return escapeXml(s).replace(/"/g, "&quot;");
 }
-function formatStallNotification(run, args, actions = availableActions(run)) {
-  const elapsed = elapsedStr(run.startTime);
+function formatStallNotification(run2, args, actions = availableActions(run2)) {
+  const elapsed = elapsedStr(run2.startTime);
   const lines = [];
   lines.push("```xml");
   lines.push("<sub-agent-stalled>");
-  lines.push(`  <agent-id>${run.id}</agent-id>`);
-  lines.push(`  <persona>${run.persona}</persona>`);
-  lines.push(`  <status>${run.status}</status>`);
+  lines.push(`  <agent-id>${run2.id}</agent-id>`);
+  lines.push(`  <persona>${run2.persona}</persona>`);
+  lines.push(`  <status>${run2.status}</status>`);
   lines.push(`  <available-actions>${actions.join(",")}</available-actions>`);
   lines.push(`  <duration>${elapsed}</duration>`);
   lines.push(
     `  <stall><severity>${args.severity}</severity><silent-seconds>${args.silentSeconds}</silent-seconds><threshold-seconds>${args.thresholdSeconds}</threshold-seconds></stall>`
   );
-  if (run.lastToolCall) {
-    lines.push(`  <last-tool>${escapeStallEvidence(boundStallText(run.lastToolCall, 512))}</last-tool>`);
+  if (run2.lastToolCall) {
+    lines.push(`  <last-tool>${escapeStallEvidence(boundStallText(run2.lastToolCall, 512))}</last-tool>`);
   }
   lines.push(args.evidenceReference ? `  <evidence-reference>${escapeStallEvidence(args.evidenceReference)}</evidence-reference>` : `<recent-activity>
-${escapeStallEvidence(args.evidence ?? recentStallEvidence(run))}
+${escapeStallEvidence(args.evidence ?? recentStallEvidence(run2))}
 </recent-activity>`);
   lines.push(`  <guidance>${escapeXml(STALL_GUIDANCE)}</guidance>`);
-  lines.push(`  <transcript>${run.transcriptPath}</transcript>`);
+  lines.push(`  <transcript>${run2.transcriptPath}</transcript>`);
   lines.push("</sub-agent-stalled>");
   lines.push("```");
   lines.push("");
   const glyph = args.severity === "hard" ? "\u26A0" : "\xB7";
   const verb = args.severity === "hard" ? "hard-stalled" : "soft-stalled";
-  const lastTool = run.lastToolCall ? `, last: ${escapeStallEvidence(boundStallText(run.lastToolCall, 512))}` : "";
-  const header = `## ${glyph} \`${run.persona}\` ${verb} \u2014 silent ${args.silentSeconds}s${lastTool} \u2014 id \`${run.id}\``;
+  const lastTool = run2.lastToolCall ? `, last: ${escapeStallEvidence(boundStallText(run2.lastToolCall, 512))}` : "";
+  const header = `## ${glyph} \`${run2.persona}\` ${verb} \u2014 silent ${args.silentSeconds}s${lastTool} \u2014 id \`${run2.id}\``;
   return [header, "", ...lines].join("\n");
 }
-function buildCompletionSendMessageOptions(run) {
-  if (run.mode === "background") {
+function buildCompletionSendMessageOptions(run2) {
+  if (run2.mode === "background") {
     return { triggerTurn: true };
   }
   return { triggerTurn: true, deliverAs: "followUp" };
 }
-function buildCompletionMessage(run, canFocus = false, sessionId, registry) {
-  const actions = availableActions(run, canFocus, sessionId, registry);
-  const perSend = perSendNumbers(run);
-  const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
-  const perSendEnd = run.finishedAt ?? perSendStart + perSend.durationMs;
+function buildCompletionMessage(run2, canFocus = false, sessionId, registry) {
+  const actions = availableActions(run2, canFocus, sessionId, registry);
+  const perSend = perSendNumbers(run2);
+  const perSendStart = run2.thisInvocationStartedAt ?? run2.startTime;
+  const perSendEnd = run2.finishedAt ?? perSendStart + perSend.durationMs;
   const stats = [elapsedStr(perSendStart, perSendEnd)];
-  if (run.effort) stats.push(effortSummary(run));
+  if (run2.effort) stats.push(effortSummary(run2));
   const usageStr = formatUsage(perSend);
   if (usageStr) stats.push(usageStr);
-  stats.push(run.id);
-  if (sendsSinceSpawn(run) >= 1) {
-    const cost = run.usage.cost ? ` $${run.usage.cost.toFixed(3)}` : "";
+  stats.push(run2.id);
+  if (sendsSinceSpawn(run2) >= 1) {
+    const cost = run2.usage.cost ? ` $${run2.usage.cost.toFixed(3)}` : "";
     const plural = (n, noun) => `${n} ${noun}${n === 1 ? "" : "s"}`;
     const sends = [
-      run.resumeCount && plural(run.resumeCount, "resume"),
-      run.steerCount && plural(run.steerCount, "steer")
+      run2.resumeCount && plural(run2.resumeCount, "resume"),
+      run2.steerCount && plural(run2.steerCount, "steer")
     ].filter(Boolean).join(", ");
-    stats.push(`lifetime ${elapsedStr(run.startTime, run.finishedAt)}${cost} (${sends})`);
+    stats.push(`lifetime ${elapsedStr(run2.startTime, run2.finishedAt)}${cost} (${sends})`);
   }
   const notes = [];
-  const ref = resultRef(run);
+  const ref = resultRef(run2);
   if (ref) notes.push({ slot: "muted", text: `result-ref: ${ref} \u2014 pass files: ['${ref}'] for the full evidence.` });
-  const retirement = contextRetirementNotice(run);
+  const retirement = contextRetirementNotice(run2);
   if (retirement) {
     stats.push("session retired; use a fresh child with the handoff");
     notes.push({ slot: "warning", text: retirement });
   }
-  if (run.integration) notes.push({ slot: "muted", text: `Integration: ${effortSummary(run)}; ${run.mergeResult?.reason ?? run.integration.state}; verify ${run.integration.verify?.durationMs ?? 0}ms; log ${run.integration.verify?.logPath ?? run.integration.commitHook?.logPath ?? "not run"}` });
-  if (run.errorMessage) notes.push({ slot: "error", text: run.errorMessage });
-  if (run.worktreeKept) notes.push({ slot: "warning", text: run.worktreeKept });
-  if (run.herdr?.versionWarning) notes.push({ slot: "warning", text: run.herdr.versionWarning });
-  if (run.nonSubstantiveFinal) {
+  if (run2.integration) notes.push({ slot: "muted", text: `Integration: ${effortSummary(run2)}; ${run2.mergeResult?.reason ?? run2.integration.state}; verify ${run2.integration.verify?.durationMs ?? 0}ms; log ${run2.integration.verify?.logPath ?? run2.integration.commitHook?.logPath ?? "not run"}` });
+  if (run2.errorMessage) notes.push({ slot: "error", text: run2.errorMessage });
+  if (run2.worktreeKept) notes.push({ slot: "warning", text: run2.worktreeKept });
+  if (run2.herdr?.versionWarning) notes.push({ slot: "warning", text: run2.herdr.versionWarning });
+  if (run2.nonSubstantiveFinal) {
     notes.push({
       slot: "warning",
-      text: `${run.nonSubstantiveFinal.reason}: ${run.nonSubstantiveFinal.message}`
+      text: `${run2.nonSubstantiveFinal.reason}: ${run2.nonSubstantiveFinal.message}`
     });
   }
-  if (run.hookResult && run.status !== "blocked") {
-    const h = run.hookResult;
+  if (run2.hookResult && run2.status !== "blocked") {
+    const h = run2.hookResult;
     const exit = h.exitCode ?? "signal";
     notes.push({
       slot: h.passed ? "muted" : "error",
@@ -4136,66 +4146,66 @@ function buildCompletionMessage(run, canFocus = false, sessionId, registry) {
   }
   return {
     customType: "ensemble-notification",
-    content: formatCompletionNotification(run, actions, registry?.list()),
+    content: formatCompletionNotification(run2, actions, registry?.list()),
     display: true,
     details: {
-      kind: run.status === "blocked" ? run.errorMessage ? "answer_failed" : "asked" : "completed",
+      kind: run2.status === "blocked" ? run2.errorMessage ? "answer_failed" : "asked" : "completed",
       available_actions: actions,
-      id: run.id,
-      persona: run.persona,
-      status: run.status,
+      id: run2.id,
+      persona: run2.persona,
+      status: run2.status,
       stats,
-      body: run.status === "blocked" ? `Question ${run.pendingAsk?.askId}: ${run.pendingAsk?.question}
-${run.pendingAsk?.evidence ?? ""}
-Answer via ensemble_send; the original assignment remains unresolved.` : getCompletionText(run),
-      transcriptPath: run.transcriptPath,
+      body: run2.status === "blocked" ? `Question ${run2.pendingAsk?.askId}: ${run2.pendingAsk?.question}
+${run2.pendingAsk?.evidence ?? ""}
+Answer via ensemble_send; the original assignment remains unresolved.` : getCompletionText(run2),
+      transcriptPath: run2.transcriptPath,
       notes
     }
   };
 }
-function pushCompletionCard(run, host, canFocus = false, sessionId, registry) {
-  if (isDelegatedLeaf(run)) return false;
-  host.sendMessage(buildCompletionMessage(run, canFocus, sessionId, registry), buildCompletionSendMessageOptions(run));
+function pushCompletionCard(run2, host, canFocus = false, sessionId, registry) {
+  if (isDelegatedLeaf(run2)) return false;
+  host.sendMessage(buildCompletionMessage(run2, canFocus, sessionId, registry), buildCompletionSendMessageOptions(run2));
   return true;
 }
-function buildDialogMessage(run) {
+function buildDialogMessage(run2) {
   const body = "Waiting for a human UI response in the managed herdr pane. This is not a stall. Inspect the pane; conductor does not auto-answer dialogs.";
   return {
     customType: "ensemble-notification",
     display: true,
-    content: `<sub-agent-dialog><agent-id>${escapeXml(run.id)}</agent-id>${body}</sub-agent-dialog>`,
+    content: `<sub-agent-dialog><agent-id>${escapeXml(run2.id)}</agent-id>${body}</sub-agent-dialog>`,
     details: {
       kind: "dialog",
-      id: run.id,
-      persona: run.persona,
-      status: run.status,
-      stats: [run.id],
+      id: run2.id,
+      persona: run2.persona,
+      status: run2.status,
+      stats: [run2.id],
       body,
-      transcriptPath: run.transcriptPath,
+      transcriptPath: run2.transcriptPath,
       notes: []
     }
   };
 }
-function buildStallMessage(run, args, canFocus = false, sessionId) {
-  const actions = args.availableActions ?? availableActions(run, canFocus, sessionId);
-  const evidence = args.evidenceReference ? void 0 : args.evidence ?? recentStallEvidence(run);
+function buildStallMessage(run2, args, canFocus = false, sessionId) {
+  const actions = args.availableActions ?? availableActions(run2, canFocus, sessionId);
+  const evidence = args.evidenceReference ? void 0 : args.evidence ?? recentStallEvidence(run2);
   return {
     customType: "ensemble-notification",
-    content: formatStallNotification(run, { ...args, evidence }, actions),
+    content: formatStallNotification(run2, { ...args, evidence }, actions),
     display: true,
     details: {
       kind: "stalled",
       available_actions: actions,
-      id: run.id,
-      persona: run.persona,
-      status: run.status,
+      id: run2.id,
+      persona: run2.persona,
+      status: run2.status,
       severity: args.severity,
       evidence: evidence ?? args.evidenceReference,
       guidance: STALL_GUIDANCE,
-      stats: [`silent ${args.silentSeconds}s`, `threshold ${args.thresholdSeconds}s`, run.id],
+      stats: [`silent ${args.silentSeconds}s`, `threshold ${args.thresholdSeconds}s`, run2.id],
       body: "",
-      transcriptPath: run.transcriptPath,
-      notes: run.lastToolCall ? [{ slot: "muted", text: `last tool: ${boundStallText(run.lastToolCall, 512)}` }] : []
+      transcriptPath: run2.transcriptPath,
+      notes: run2.lastToolCall ? [{ slot: "muted", text: `last tool: ${boundStallText(run2.lastToolCall, 512)}` }] : []
     }
   };
 }
@@ -4264,6 +4274,9 @@ function childrenOf(parent, runs, since = parent.startTime) {
 }
 function subtreeCost(root, runs) {
   return childrenOf(root, runs).reduce((sum, leaf) => sum + leaf.usage.cost, root.usage.cost);
+}
+function stepCost(root, runs) {
+  return subtreeCost(root, runs) + (root.integration?.merger?.cost ?? 0);
 }
 var CHILD_EXIT_BOUND_MS = 2500;
 function observedExit(leaf) {
@@ -4402,51 +4415,51 @@ function sessionHeaderCwd(text5) {
 }
 
 // src/run-pipeline.ts
-function createRunPipeline(run, piArgs, opts) {
-  if (opts.reattach && run.integration) throw new Error("durable integration belongs to M5 recovery, not stream attachment");
-  if (run.runtime === "herdr" && !opts.registry.herdrAdmissionOpen) throw new Error("herdr runtime shutting down; launch/attach refused");
-  const runtime = opts.runtime ?? runtimeFor(run);
-  const launchedAt = opts.reattach ? run.startTime : Date.now();
-  if (run.runtime === "herdr") run.herdrResultUnavailable = true;
+function createRunPipeline(run2, piArgs, opts) {
+  if (opts.reattach && run2.integration) throw new Error("durable integration belongs to M5 recovery, not stream attachment");
+  if (run2.runtime === "herdr" && !opts.registry.herdrAdmissionOpen) throw new Error("herdr runtime shutting down; launch/attach refused");
+  const runtime = opts.runtime ?? runtimeFor(run2);
+  const launchedAt = opts.reattach ? run2.startTime : Date.now();
+  if (run2.runtime === "herdr") run2.herdrResultUnavailable = true;
   if (opts.reattach) {
-    run.messages = [];
-    run.usage = { ...run.herdrUsageBaseline?.launchNonce === run.herdr?.launchNonce ? run.herdrUsageBaseline.usage : emptyUsage() };
-    run.herdrEffortAuthorized = !run.effort;
+    run2.messages = [];
+    run2.usage = { ...run2.herdrUsageBaseline?.launchNonce === run2.herdr?.launchNonce ? run2.herdrUsageBaseline.usage : emptyUsage() };
+    run2.herdrEffortAuthorized = !run2.effort;
   }
-  const messageOffset = run.messages.length;
+  const messageOffset = run2.messages.length;
   let suspended = false;
   let pipeline;
   let finalizing;
-  const current = () => run.runtime !== "herdr" || !suspended && (!pipeline || run.herdrPipeline === pipeline) && opts.registry.get(run.id) === run && ownsHerdrRun(run);
+  const current = () => run2.runtime !== "herdr" || !suspended && (!pipeline || run2.herdrPipeline === pipeline) && opts.registry.get(run2.id) === run2 && ownsHerdrRun(run2);
   const check = () => {
     if (!current()) throw new Error("herdr pipeline fenced");
   };
   const rpc = piArgs[1] === "rpc";
-  run.onComplete = opts.onComplete;
-  const recoveredAnswer = !!opts.answer && !!run.reconciledAtStartup && !!run.effort && run.effort.gate !== void 0;
-  if (!opts.reattach && run.effort && (!run.reconciledAtStartup || run.effort.gate !== void 0)) run.effort.gate = opts.resolvedHook ?? null;
+  run2.onComplete = opts.onComplete;
+  const recoveredAnswer = !!opts.answer && !!run2.reconciledAtStartup && !!run2.effort && run2.effort.gate !== void 0;
+  if (!opts.reattach && run2.effort && (!run2.reconciledAtStartup || run2.effort.gate !== void 0)) run2.effort.gate = opts.resolvedHook ?? null;
   let awaitingAnswer = opts.answer !== void 0;
   let answerRecord = Promise.resolve();
   const restoreAnswer = async (reason) => {
     await answerRecord;
     check();
-    if (isTerminal(run.status)) return run;
-    run.rejectAnswerDelivery = void 0;
-    run.pendingAsk = opts.answer.ask;
-    run.cwd = opts.answer.cwd;
-    run.status = "blocked";
-    run.finishedAt = Date.now();
-    run.proc = void 0;
-    run.pid = void 0;
-    run.failureClass = void 0;
-    run.errorMessage = `Owner answer delivery failed before acceptance: ${reason}. Question ${run.pendingAsk.askId} remains outstanding; retry ensemble_send.`;
-    await writeRecord(run);
-    opts.registry.notify(run);
+    if (isTerminal(run2.status)) return run2;
+    run2.rejectAnswerDelivery = void 0;
+    run2.pendingAsk = opts.answer.ask;
+    run2.cwd = opts.answer.cwd;
+    run2.status = "blocked";
+    run2.finishedAt = Date.now();
+    run2.proc = void 0;
+    run2.pid = void 0;
+    run2.failureClass = void 0;
+    run2.errorMessage = `Owner answer delivery failed before acceptance: ${reason}. Question ${run2.pendingAsk.askId} remains outstanding; retry ensemble_send.`;
+    await writeRecord(run2);
+    opts.registry.notify(run2);
     try {
-      opts.onComplete?.(run);
+      opts.onComplete?.(run2);
     } catch {
     }
-    return run;
+    return run2;
   };
   let transport;
   let finalized = false;
@@ -4456,9 +4469,9 @@ function createRunPipeline(run, piArgs, opts) {
   });
   const finalize2 = (terminal, exitCode) => {
     if (!current() || finalized) return;
-    if (opts.reattach && run.effort && !run.herdrEffortAuthorized) {
-      run.herdrResumeSettlement = () => {
-        run.herdrResumeSettlement = void 0;
+    if (opts.reattach && run2.effort && !run2.herdrEffortAuthorized) {
+      run2.herdrResumeSettlement = () => {
+        run2.herdrResumeSettlement = void 0;
         finalize2(terminal, exitCode);
       };
       return;
@@ -4466,48 +4479,48 @@ function createRunPipeline(run, piArgs, opts) {
     finalizing = finalizeEffects(terminal, exitCode).catch((error) => {
       if (!current()) return;
       if (replaced()) {
-        donePromiseResolve(run);
+        donePromiseResolve(run2);
         return;
       }
-      run.errorMessage = `herdr settlement preserved: ${error.message}`;
-      opts.registry.notify(run);
+      run2.errorMessage = `herdr settlement preserved: ${error.message}`;
+      opts.registry.notify(run2);
     });
   };
   const finalizeEffects = async (terminal, exitCode) => {
     if (finalized) return;
     finalized = true;
-    run.rpcStdinQueue?.destroy("settled");
-    for (const ack of run.pendingAcks?.values() ?? []) {
+    run2.rpcStdinQueue?.destroy("settled");
+    for (const ack of run2.pendingAcks?.values() ?? []) {
       clearTimeout(ack.timer);
       ack.reject(new Error("sub-agent settled before acknowledgement"));
     }
-    run.pendingAcks?.clear();
-    if (run.timeoutTimer) {
-      clearTimeout(run.timeoutTimer);
-      run.timeoutTimer = void 0;
+    run2.pendingAcks?.clear();
+    if (run2.timeoutTimer) {
+      clearTimeout(run2.timeoutTimer);
+      run2.timeoutTimer = void 0;
     }
     if (transport.kind === "herdr") {
       const exited = await transport.waitForExit();
       check();
       if (!exited) {
-        run.herdrExitUnconfirmed = true;
-        run.errorMessage = "herdr: child exit unconfirmed; pane/worktree preserved";
-        if (awaitingAnswer && !isTerminal(run.status)) {
-          await restoreAnswer(run.errorMessage);
-          donePromiseResolve(run);
+        run2.herdrExitUnconfirmed = true;
+        run2.errorMessage = "herdr: child exit unconfirmed; pane/worktree preserved";
+        if (awaitingAnswer && !isTerminal(run2.status)) {
+          await restoreAnswer(run2.errorMessage);
+          donePromiseResolve(run2);
           return;
         }
         await settle("failed", 1);
         return;
       }
-      run.herdrExitUnconfirmed = void 0;
+      run2.herdrExitUnconfirmed = void 0;
     }
     const rest = transport.drain();
     if (rest.trim()) processLine(rest);
-    if (transport.kind === "herdr") run.herdrResultUnavailable = !getFinalText(run.messages.slice(messageOffset)) || void 0;
+    if (transport.kind === "herdr") run2.herdrResultUnavailable = !getFinalText(run2.messages.slice(messageOffset)) || void 0;
     if (opts.answer) await answerRecord;
     check();
-    if (!replaced()) await settleOwnedChildren(run, opts.registry, launchedAt, opts.reattach === true);
+    if (!replaced()) await settleOwnedChildren(run2, opts.registry, launchedAt, opts.reattach === true);
     check();
     if (replaced()) {
       try {
@@ -4515,19 +4528,19 @@ function createRunPipeline(run, piArgs, opts) {
       } catch {
       }
       escalate();
-      donePromiseResolve(run);
+      donePromiseResolve(run2);
       return;
     }
-    if (childExitUnconfirmed(run) && !isTerminal(run.status) && !awaitingAnswer) {
-      const ask = run.pendingAsk, ids = run.abandonedChildren.filter((c) => c.exit === "unconfirmed").map((c) => c.id).join(", ");
-      run.pendingAsk = void 0;
+    if (childExitUnconfirmed(run2) && !isTerminal(run2.status) && !awaitingAnswer) {
+      const ask = run2.pendingAsk, ids = run2.abandonedChildren.filter((c) => c.exit === "unconfirmed").map((c) => c.id).join(", ");
+      run2.pendingAsk = void 0;
       terminal = "failed";
-      run.errorMessage = [run.errorMessage, `delegated child ${ids} exit unconfirmed after cancellation; hook, merge, integration and final result withheld; worktree preserved` + (ask ? `; owner question ${ask.askId} withdrawn: ${ask.question}` : "")].filter(Boolean).join("\n");
+      run2.errorMessage = [run2.errorMessage, `delegated child ${ids} exit unconfirmed after cancellation; hook, merge, integration and final result withheld; worktree preserved` + (ask ? `; owner question ${ask.askId} withdrawn: ${ask.question}` : "")].filter(Boolean).join("\n");
     }
-    discoverSessionPathIfMissing(run, opts.sessionDir);
-    discoverContextRetirement(run, opts.sessionDir);
-    if ((awaitingAnswer || run.pendingAsk) && !isTerminal(run.status)) {
-      if (awaitingAnswer || terminal === "completed" && run.sessionPath && !contextRetirementNotice(run)) {
+    discoverSessionPathIfMissing(run2, opts.sessionDir);
+    discoverContextRetirement(run2, opts.sessionDir);
+    if ((awaitingAnswer || run2.pendingAsk) && !isTerminal(run2.status)) {
+      if (awaitingAnswer || terminal === "completed" && run2.sessionPath && !contextRetirementNotice(run2)) {
         try {
           transport.stop();
         } catch {
@@ -4541,48 +4554,48 @@ function createRunPipeline(run, piArgs, opts) {
         await transport.closed;
         check();
         clearTimeout(killFallback);
-        if (isTerminal(run.status)) {
-          donePromiseResolve(run);
+        if (isTerminal(run2.status)) {
+          donePromiseResolve(run2);
           return;
         }
         if (awaitingAnswer) {
-          await restoreAnswer(run.errorMessage || transport.stderr.trim() || `subprocess exited with code ${exitCode} before accepting the answer`);
-          donePromiseResolve(run);
+          await restoreAnswer(run2.errorMessage || transport.stderr.trim() || `subprocess exited with code ${exitCode} before accepting the answer`);
+          donePromiseResolve(run2);
           return;
         }
-        if (run.effort) {
+        if (run2.effort) {
           try {
-            const policy = readEffort(run.effort.gitRoot, run.effort.name).policy;
-            const measured = measureEffortFootprint(run, effortGit(run.worktreePath, "rev-parse", "HEAD"), policy);
-            Object.assign(run.effort, measured, { footprintUnknown: !!effortGit(run.worktreePath, "status", "--porcelain", "--untracked-files=all") });
+            const policy = readEffort(run2.effort.gitRoot, run2.effort.name).policy;
+            const measured = measureEffortFootprint(run2, effortGit(run2.worktreePath, "rev-parse", "HEAD"), policy);
+            Object.assign(run2.effort, measured, { footprintUnknown: !!effortGit(run2.worktreePath, "status", "--porcelain", "--untracked-files=all") });
           } catch {
-            run.effort.footprintUnknown = true;
+            run2.effort.footprintUnknown = true;
           }
         }
-        run.status = "blocked";
-        run.finishedAt = Date.now();
-        run.exitCode = exitCode;
-        run.proc = void 0;
-        run.pid = void 0;
-        run.failureClass = void 0;
-        await writeRecord(run);
+        run2.status = "blocked";
+        run2.finishedAt = Date.now();
+        run2.exitCode = exitCode;
+        run2.proc = void 0;
+        run2.pid = void 0;
+        run2.failureClass = void 0;
+        await writeRecord(run2);
         check();
-        opts.registry.notify(run);
-        if (run.runtime === "herdr" && !run.effort) await dispatchHerdrSettlement(run, () => opts.onComplete?.(run));
+        opts.registry.notify(run2);
+        if (run2.runtime === "herdr" && !run2.effort) await dispatchHerdrSettlement(run2, () => opts.onComplete?.(run2));
         else if (!opts.reattach) {
           try {
-            opts.onComplete?.(run);
+            opts.onComplete?.(run2);
           } catch {
           }
         }
-        donePromiseResolve(run);
+        donePromiseResolve(run2);
         return;
       }
-      run.pendingAsk = void 0;
+      run2.pendingAsk = void 0;
       terminal = "failed";
-      run.errorMessage = "Owner question cannot be resumed: session missing, retired, or subprocess failed. Use a fresh child with the transcript.";
+      run2.errorMessage = "Owner question cannot be resumed: session missing, retired, or subprocess failed. Use a fresh child with the transcript.";
     }
-    if (run.effort && transport.kind === "subprocess") {
+    if (run2.effort && transport.kind === "subprocess") {
       try {
         transport.stop();
       } catch {
@@ -4597,17 +4610,17 @@ function createRunPipeline(run, piArgs, opts) {
       clearTimeout(escalation);
       await answerRecord;
     }
-    const resolvedHook = opts.resolvedHook ?? (opts.reattach ? run.effort?.gate ?? void 0 : void 0);
-    if (terminal === "completed" && exitCode === 0 && resolvedHook && !isTerminal(run.status)) {
+    const resolvedHook = opts.resolvedHook ?? (opts.reattach ? run2.effort?.gate ?? void 0 : void 0);
+    if (terminal === "completed" && exitCode === 0 && resolvedHook && !isTerminal(run2.status)) {
       try {
         terminal = await applyHookToTerminal(
-          run,
+          run2,
           resolvedHook,
           terminal,
           { events: opts.events }
         );
       } catch (e) {
-        run.hookResult = {
+        run2.hookResult = {
           passed: false,
           command: resolvedHook.command,
           exitCode: null,
@@ -4622,52 +4635,52 @@ function createRunPipeline(run, piArgs, opts) {
       }
     }
     check();
-    if (run.effort && terminal === "completed" && !isTerminal(run.status)) {
-      run.proc = void 0;
-      run.pid = void 0;
+    if (run2.effort && terminal === "completed" && !isTerminal(run2.status)) {
+      run2.proc = void 0;
+      run2.pid = void 0;
       try {
-        const record = readEffort(run.effort.gitRoot, run.effort.name);
+        const record = readEffort(run2.effort.gitRoot, run2.effort.name);
         if (!record) throw new Error("effort record missing; integration refused");
-        assertRunEffortOwner(run);
-        if (opts.reattach && run.effort.gate === void 0) throw new Error("original hook is unknown; integration refused");
+        assertRunEffortOwner(run2);
+        if (opts.reattach && run2.effort.gate === void 0) throw new Error("original hook is unknown; integration refused");
         const policy = resolveEffortPolicy(record.policy);
-        if (!run.worktreePath || !run.worktreeBranch) throw new Error("effort assignment workspace missing");
-        if (effortGit(run.worktreePath, "status", "--porcelain", "--untracked-files=all")) throw new Error("writer has uncommitted work; integration refused and workspace preserved");
-        const branchHead = effortGit(run.effort.gitRoot, "rev-parse", "--verify", `refs/heads/${run.worktreeBranch}^{commit}`);
-        const measured = measureEffortFootprint(run, branchHead, policy);
-        run.status = "integrating";
-        run.integration = {
+        if (!run2.worktreePath || !run2.worktreeBranch) throw new Error("effort assignment workspace missing");
+        if (effortGit(run2.worktreePath, "status", "--porcelain", "--untracked-files=all")) throw new Error("writer has uncommitted work; integration refused and workspace preserved");
+        const branchHead = effortGit(run2.effort.gitRoot, "rev-parse", "--verify", `refs/heads/${run2.worktreeBranch}^{commit}`);
+        const measured = measureEffortFootprint(run2, branchHead, policy);
+        run2.status = "integrating";
+        run2.integration = {
           ...measured,
-          resultText: getFinalText(run.messages),
+          resultText: getFinalText(run2.messages),
           state: "queued",
           enqueuedAt: Date.now(),
           branchHead,
           attempts: 0,
           verifyIdentity: { command: policy.verify, timeoutSeconds: policy.verifyTimeoutSeconds, retries: policy.verifyRetries }
         };
-        if (run.integrationSuspended) {
-          run.integration.state = "paused";
-          run.integration.reason = "owner runtime shut down; work preserved for fenced recovery";
-          await writeRecord(run, () => assertRunEffortOwner(run));
-          opts.registry.notify(run);
+        if (run2.integrationSuspended) {
+          run2.integration.state = "paused";
+          run2.integration.reason = "owner runtime shut down; work preserved for fenced recovery";
+          await writeRecord(run2, () => assertRunEffortOwner(run2));
+          opts.registry.notify(run2);
           return;
         }
-        const outcome = await opts.registry.integrations.enqueue(run, () => opts.registry.notify(run), recoveredAnswer || opts.reattach);
+        const outcome = await opts.registry.integrations.enqueue(run2, () => opts.registry.notify(run2), recoveredAnswer || opts.reattach);
         check();
         terminal = outcome.terminal;
-        run.mergeResult = outcome.mergeResult;
-        run.landedCommit = outcome.landedCommit;
-        if (!outcome.mergeResult.success) run.errorMessage = `effort integration failed: ${outcome.mergeResult.reason ?? "error"}. ${outcome.mergeResult.errorMessage ?? "Work and evidence preserved."}`;
+        run2.mergeResult = outcome.mergeResult;
+        run2.landedCommit = outcome.landedCommit;
+        if (!outcome.mergeResult.success) run2.errorMessage = `effort integration failed: ${outcome.mergeResult.reason ?? "error"}. ${outcome.mergeResult.errorMessage ?? "Work and evidence preserved."}`;
       } catch (e) {
         terminal = "merge_conflict";
-        run.errorMessage = `effort integration refused: ${e.message}`;
-        run.mergeResult = { success: false, reason: "error", errorMessage: run.errorMessage };
+        run2.errorMessage = `effort integration refused: ${e.message}`;
+        run2.mergeResult = { success: false, reason: "error", errorMessage: run2.errorMessage };
       }
     }
     check();
     await settle(terminal, exitCode);
   };
-  const replaced = () => run.transport !== transport;
+  const replaced = () => run2.transport !== transport;
   const escalate = () => {
     if (transport.kind !== "subprocess") return;
     const launched = transport;
@@ -4685,13 +4698,13 @@ function createRunPipeline(run, piArgs, opts) {
     if (!current() || settled) return;
     settled = true;
     try {
-      await settleRun(run, terminal, exitCode, opts, transport, donePromiseResolve);
+      await settleRun(run2, terminal, exitCode, opts, transport, donePromiseResolve);
     } catch (error) {
-      if (!run.integration) throw error;
-      run.status = "integrating";
-      run.integration.state = "paused";
-      run.integration.reason = `terminal persistence uncertain: ${error.message}`;
-      opts.registry.notify(run);
+      if (!run2.integration) throw error;
+      run2.status = "integrating";
+      run2.integration.state = "paused";
+      run2.integration.reason = `terminal persistence uncertain: ${error.message}`;
+      opts.registry.notify(run2);
     } finally {
       escalate();
     }
@@ -4700,7 +4713,7 @@ function createRunPipeline(run, piArgs, opts) {
     if (!current()) return;
     const trimmed = line.trim();
     if (!trimmed) return;
-    if (run.runtime !== "herdr") void appendFile(run.transcriptPath, line + "\n").catch(() => {
+    if (run2.runtime !== "herdr") void appendFile(run2.transcriptPath, line + "\n").catch(() => {
     });
     let event;
     try {
@@ -4708,34 +4721,34 @@ function createRunPipeline(run, piArgs, opts) {
     } catch {
       return;
     }
-    opts.onEvent?.(run, event);
-    if (run.runtime !== "herdr" && !finalized && awaitingAnswer && (!rpc && event.type === "agent_start" || rpc && event.type === "response" && event.command === "prompt" && event.id === `init-${run.id}` && event.success === true)) {
+    opts.onEvent?.(run2, event);
+    if (run2.runtime !== "herdr" && !finalized && awaitingAnswer && (!rpc && event.type === "agent_start" || rpc && event.type === "response" && event.command === "prompt" && event.id === `init-${run2.id}` && event.success === true)) {
       awaitingAnswer = false;
-      run.rejectAnswerDelivery = void 0;
-      run.pendingAsk = void 0;
-      answerRecord = answerRecord.then(() => writeRecord(run));
+      run2.rejectAnswerDelivery = void 0;
+      run2.pendingAsk = void 0;
+      answerRecord = answerRecord.then(() => writeRecord(run2));
     }
-    if (event.type === "response" && event.command === "prompt" && event.id === `init-${run.id}` && event.success === false) {
-      run.errorMessage = `initial prompt rejected: ${event.error ?? "unknown error"}`;
+    if (event.type === "response" && event.command === "prompt" && event.id === `init-${run2.id}` && event.success === false) {
+      run2.errorMessage = `initial prompt rejected: ${event.error ?? "unknown error"}`;
       void finalize2("failed", 1);
       return;
     }
-    const effect = applyEvent(run, event);
+    const effect = applyEvent(run2, event);
     if (effect.kind === "finalize") {
       void finalize2(effect.status, effect.exitCode);
       return;
     }
     if (effect.kind === "compacted") {
-      if (!opts.reattach) applyCompactionLine(run, opts.events);
-      opts.registry.notify(run);
+      if (!opts.reattach) applyCompactionLine(run2, opts.events);
+      opts.registry.notify(run2);
       return;
     }
     if (effect.kind === "updated") {
-      opts.registry.notify(run);
-      if (opts.onUpdate) opts.onUpdate(run);
+      opts.registry.notify(run2);
+      if (opts.onUpdate) opts.onUpdate(run2);
     }
     if (!opts.reattach) checkTurnLimit(
-      run,
+      run2,
       opts.registry,
       (r, reason) => forceTerminate(r, reason, opts.registry, opts.onComplete)
     );
@@ -4752,7 +4765,7 @@ function createRunPipeline(run, piArgs, opts) {
       line: (line) => receive(() => processLine(line)),
       gone: (reason) => receive(() => {
         if (finalized) return;
-        run.errorMessage = reason;
+        run2.errorMessage = reason;
         void finalize2("failed", 1);
       }),
       close: (code) => receive(() => {
@@ -4761,100 +4774,100 @@ function createRunPipeline(run, piArgs, opts) {
         else void finalize2("failed", code ?? 0);
       }),
       error: () => receive(() => {
-        run.errorMessage = "failed to spawn pi process";
+        run2.errorMessage = "failed to spawn pi process";
         void finalize2("failed", 1);
       }),
       initialDeliveryFailed: (error) => receive(() => {
         if (finalized) return;
-        run.errorMessage = `initial prompt delivery failed: ${error.message}`;
+        run2.errorMessage = `initial prompt delivery failed: ${error.message}`;
         void finalize2("failed", 1);
       })
     };
-    if (!opts.reattach) run.deadlineAt = Date.now() + opts.timeoutMs;
+    if (!opts.reattach) run2.deadlineAt = Date.now() + opts.timeoutMs;
     if (opts.reattach) {
       if (!runtime.attach) throw new Error("runtime attachment unavailable");
-      transport = runtime.attach(run, sink);
-    } else transport = runtime.launch(run, piArgs, opts.cwd, sink, opts.initialPrompt, opts.core);
+      transport = runtime.attach(run2, sink);
+    } else transport = runtime.launch(run2, piArgs, opts.cwd, sink, opts.initialPrompt, opts.core);
   } catch (e) {
     if (opts.reattach) throw e;
     if (awaitingAnswer) return restoreAnswer(`spawn failed: ${e.message}`);
-    run.status = "failed";
-    run.errorMessage = `spawn failed: ${e.message}`;
-    run.finishedAt = Date.now();
-    run.failureClass = classifyFailure({
+    run2.status = "failed";
+    run2.errorMessage = `spawn failed: ${e.message}`;
+    run2.finishedAt = Date.now();
+    run2.failureClass = classifyFailure({
       terminal: "failed",
-      errorMessage: run.errorMessage
+      errorMessage: run2.errorMessage
     });
-    opts.registry.notify(run);
-    void writeRecord(run);
-    void writeFinal(run);
-    if (opts.onComplete) opts.onComplete(run);
-    return Promise.resolve(run);
+    opts.registry.notify(run2);
+    void writeRecord(run2);
+    void writeFinal(run2);
+    if (opts.onComplete) opts.onComplete(run2);
+    return Promise.resolve(run2);
   }
-  run.transport = transport;
+  run2.transport = transport;
   if (transport.kind === "subprocess") {
-    answerRecord = attachSpawnedProc(run, transport.proc);
-    stampSpawnStreamingMode(run, opts.steerable === true);
-    run.streamingMode = rpc ? "rpc" : "print";
+    answerRecord = attachSpawnedProc(run2, transport.proc);
+    stampSpawnStreamingMode(run2, opts.steerable === true);
+    run2.streamingMode = rpc ? "rpc" : "print";
     const launched = transport;
-    run.processOpen = true;
+    run2.processOpen = true;
     void launched.closed.then(() => {
-      if (run.transport !== launched) return;
-      run.processOpen = void 0;
-      opts.registry.notify(run);
+      if (run2.transport !== launched) return;
+      run2.processOpen = void 0;
+      opts.registry.notify(run2);
     });
   } else {
-    run.proc = void 0;
-    run.pid = void 0;
-    run.streamingMode = void 0;
+    run2.proc = void 0;
+    run2.pid = void 0;
+    run2.streamingMode = void 0;
     const launch = transport;
-    if (isDelegatedLeaf(run)) {
-      run.processOpen = true;
+    if (isDelegatedLeaf(run2)) {
+      run2.processOpen = true;
       const exited = () => {
-        if (run.transport !== launch || !launch.childExited) return;
-        run.processOpen = void 0;
-        opts.registry.notify(run);
+        if (run2.transport !== launch || !launch.childExited) return;
+        run2.processOpen = void 0;
+        opts.registry.notify(run2);
       };
       void launch.closed.then(exited);
       void launch.ready.then(void 0, exited);
     }
     const launchFailed = async (error) => {
-      if (!current() || finalized || run.transport !== launch) return;
+      if (!current() || finalized || run2.transport !== launch) return;
       finalized = true;
-      if (run.timeoutTimer) clearTimeout(run.timeoutTimer);
-      run.timeoutTimer = void 0;
-      run.rejectAnswerDelivery = void 0;
+      if (run2.timeoutTimer) clearTimeout(run2.timeoutTimer);
+      run2.timeoutTimer = void 0;
+      run2.rejectAnswerDelivery = void 0;
       if (opts.reattach) {
-        run.errorMessage = error.message;
-        run.herdrResultUnavailable = true;
+        run2.errorMessage = error.message;
+        run2.herdrResultUnavailable = true;
         if (error.cause === "herdr-gone-before-start") {
           const complete = () => settle("failed", 1);
-          if (run.effort && !run.herdrEffortAuthorized) run.herdrResumeSettlement = () => {
+          if (run2.effort && !run2.herdrEffortAuthorized) run2.herdrResumeSettlement = () => {
             void complete();
           };
           else await complete();
         } else {
-          run.herdrExitUnconfirmed = true;
-          opts.registry.notify(run);
+          run2.herdrExitUnconfirmed = true;
+          opts.registry.notify(run2);
         }
-        donePromiseResolve(run);
+        donePromiseResolve(run2);
         return;
       }
-      if (isTerminal(run.status)) {
-        if (launch.stderr) run.errorMessage = [run.errorMessage, launch.stderr].filter(Boolean).join("\n");
-        await writeRecord(run);
+      if (isTerminal(run2.status)) {
+        if (launch.stderr) run2.errorMessage = [run2.errorMessage, launch.stderr].filter(Boolean).join("\n");
+        await writeRecord(run2);
       } else if (awaitingAnswer && !launch.initialAccepted) {
-        run.herdrExitUnconfirmed = !launch.childExited || void 0;
+        run2.herdrExitUnconfirmed = !launch.childExited || void 0;
         await restoreAnswer(error.message);
       } else {
         if (launch.initialAccepted) {
           awaitingAnswer = false;
-          run.pendingAsk = void 0;
+          run2.pendingAsk = void 0;
         }
-        run.herdrExitUnconfirmed = !launch.childExited || void 0;
-        await failEffortLaunch(run, opts.registry, error.message, opts.onComplete).done;
+        run2.herdrExitUnconfirmed = !launch.childExited || void 0;
+        await failEffortLaunch(run2, opts.registry, error.message, opts.onComplete).done;
       }
-      donePromiseResolve(run);
+      donePromiseResolve(run2);
     };
     void launch.ready.then(async () => {
       if (!current()) return;
@@ -4863,193 +4876,193 @@ function createRunPipeline(run, piArgs, opts) {
         await launchFailed(new Error("herdr: launch cancelled"));
         return;
       }
-      if (finalized || isTerminal(run.status) || run.transport !== launch) return;
-      run.herdrResultUnavailable = void 0;
+      if (finalized || isTerminal(run2.status) || run2.transport !== launch) return;
+      run2.herdrResultUnavailable = void 0;
       if (awaitingAnswer) {
         awaitingAnswer = false;
-        run.pendingAsk = void 0;
-        run.rejectAnswerDelivery = void 0;
-        answerRecord = answerRecord.then(() => writeRecord(run));
+        run2.pendingAsk = void 0;
+        run2.rejectAnswerDelivery = void 0;
+        answerRecord = answerRecord.then(() => writeRecord(run2));
         await answerRecord;
         if (!current()) return;
       }
       launch.observe();
     }, launchFailed);
-    if (awaitingAnswer) run.rejectAnswerDelivery = (reason) => {
+    if (awaitingAnswer) run2.rejectAnswerDelivery = (reason) => {
       void launch.cancel().then(() => launchFailed(new Error(reason)));
     };
   }
   if (transport.kind === "herdr") {
     const ownedTransport = transport;
-    run.herdrPipeline = pipeline = {
+    run2.herdrPipeline = pipeline = {
       suspend() {
         opts.registry.herdrAdmissionOpen = false;
         suspended = true;
-        clearTimeout(run.timeoutTimer);
-        run.timeoutTimer = void 0;
+        clearTimeout(run2.timeoutTimer);
+        run2.timeoutTimer = void 0;
       },
       async quiesce() {
         await ownedTransport.detach?.();
-        await Promise.allSettled([run.integration ? run.integrationSettlement : finalizing, answerRecord, run.recordWrite, run.herdrDelivery].filter((p) => !!p));
+        await Promise.allSettled([run2.integration ? run2.integrationSettlement : finalizing, answerRecord, run2.recordWrite, run2.herdrDelivery].filter((p) => !!p));
       }
     };
   }
-  run.deadlineAt = Date.now() + opts.timeoutMs;
-  run.timeoutTimer = setTimeout(() => {
-    if (current() && (run.status === "running" || run.status === "paused")) {
-      forceTerminate(run, "timeout", opts.registry, opts.onComplete);
+  run2.deadlineAt = Date.now() + opts.timeoutMs;
+  run2.timeoutTimer = setTimeout(() => {
+    if (current() && (run2.status === "running" || run2.status === "paused")) {
+      forceTerminate(run2, "timeout", opts.registry, opts.onComplete);
     }
   }, opts.timeoutMs);
   launching = false;
   for (const callback of early) callback();
-  if (transport.kind === "subprocess" && awaitingAnswer) run.rejectAnswerDelivery = (reason) => {
-    run.errorMessage = reason;
+  if (transport.kind === "subprocess" && awaitingAnswer) run2.rejectAnswerDelivery = (reason) => {
+    run2.errorMessage = reason;
     void finalize2("failed", 1);
   };
   return done;
 }
 function readoptHerdrRun(record, deps) {
-  const run = buildOrphanRun(record, "running");
-  run.parentPid = process.pid;
-  run.parentSessionId = deps.sessionId;
+  const run2 = buildOrphanRun(record, "running");
+  run2.parentPid = process.pid;
+  run2.parentSessionId = deps.sessionId;
   let cwd;
   try {
     cwd = record.herdr ? sessionHeaderCwd(readFileSync11(record.herdr.sessionFile, "utf8")) : void 0;
   } catch {
   }
-  const done = createRunPipeline(run, [], {
+  const done = createRunPipeline(run2, [], {
     registry: deps.registry,
     runtime: deps.runtime,
     reattach: true,
-    cwd: run.cwd,
-    timeoutMs: resolveTimeoutMs(void 0, void 0, loadConfig(run.cwd)),
+    cwd: run2.cwd,
+    timeoutMs: resolveTimeoutMs(void 0, void 0, loadConfig(run2.cwd)),
     steerable: false,
-    onEvent: delegationObserver(run, deps.registry, cwd ?? run.cwd),
+    onEvent: delegationObserver(run2, deps.registry, cwd ?? run2.cwd),
     onComplete: deps.onComplete,
     events: deps.events
   });
-  deps.registry.register(run);
-  return { run, done };
+  deps.registry.register(run2);
+  return { run: run2, done };
 }
 function settleRun(...args) {
-  const run = args[0];
-  if (!run.effort || !run.integration) return settleRunEffects(...args);
-  if (run.integrationSettlement) return run.integrationSettlement;
+  const run2 = args[0];
+  if (!run2.effort || !run2.integration) return settleRunEffects(...args);
+  if (run2.integrationSettlement) return run2.integrationSettlement;
   const settling = Promise.resolve().then(() => settleRunEffects(...args));
-  run.integrationSettlement = settling;
+  run2.integrationSettlement = settling;
   const clear = () => {
-    if (run.integrationSettlement === settling) run.integrationSettlement = void 0;
+    if (run2.integrationSettlement === settling) run2.integrationSettlement = void 0;
   };
   void settling.then(clear, clear);
   return settling;
 }
-async function settleRunEffects(run, terminal, exitCode, opts, transport = { stderr: "", stop() {
+async function settleRunEffects(run2, terminal, exitCode, opts, transport = { stderr: "", stop() {
 } }, donePromiseResolve = () => {
 }) {
-  if (!ownsHerdrRun(run)) return;
-  const fence = herdrEffectFence(run);
-  if (!applyCloseHandlerTerminal(run, terminal, exitCode)) {
-    discoverSessionPathIfMissing(run, opts.sessionDir);
-    if (run.runtime === "herdr" && !run.herdrExitUnconfirmed) await writeFinal(run);
-    await writeRecord(run);
+  if (!ownsHerdrRun(run2)) return;
+  const fence = herdrEffectFence(run2);
+  if (!applyCloseHandlerTerminal(run2, terminal, exitCode)) {
+    discoverSessionPathIfMissing(run2, opts.sessionDir);
+    if (run2.runtime === "herdr" && !run2.herdrExitUnconfirmed) await writeFinal(run2);
+    await writeRecord(run2);
     fence();
-    run.proc = void 0;
+    run2.proc = void 0;
     try {
       transport.stop();
     } catch {
     }
     const dispatch2 = () => {
       fence();
-      emitFinalizeEvent(run, opts.events);
-      if (!run.reconciledAtStartup) applyRetryIfNeeded(run, opts.onRetry);
+      emitFinalizeEvent(run2, opts.events);
+      if (!run2.reconciledAtStartup) applyRetryIfNeeded(run2, opts.onRetry);
       fence();
-      recordRunOutcome(run);
+      recordRunOutcome(run2);
     };
-    if (run.runtime === "herdr" && !run.effort) await dispatchHerdrSettlement(run, dispatch2);
+    if (run2.runtime === "herdr" && !run2.effort) await dispatchHerdrSettlement(run2, dispatch2);
     else dispatch2();
-    donePromiseResolve(run);
+    donePromiseResolve(run2);
     return;
   }
-  if (terminal === "failed" && !run.errorMessage) {
-    run.errorMessage = transport.stderr.trim() || `pi subprocess exited with code ${exitCode}`;
+  if (terminal === "failed" && !run2.errorMessage) {
+    run2.errorMessage = transport.stderr.trim() || `pi subprocess exited with code ${exitCode}`;
   }
-  if (!run.reconciledAtStartup) applySubstanceCheck(run, terminal);
-  discoverSessionPathIfMissing(run, opts.sessionDir);
-  run.proc = void 0;
-  if (!run.effort) terminal = await settleWorktree(run, terminal);
-  else run.worktreeKept = `${effortSummary(run)}. Branch ${run.worktreeBranch} and worktree ${run.worktreePath} preserved.`;
+  if (!run2.reconciledAtStartup) applySubstanceCheck(run2, terminal);
+  discoverSessionPathIfMissing(run2, opts.sessionDir);
+  run2.proc = void 0;
+  if (!run2.effort) terminal = await settleWorktree(run2, terminal);
+  else run2.worktreeKept = `${effortSummary(run2)}. Branch ${run2.worktreeBranch} and worktree ${run2.worktreePath} preserved.`;
   fence();
-  if (terminal === "merge_conflict") run.status = terminal;
+  if (terminal === "merge_conflict") run2.status = terminal;
   if (terminal !== "completed") {
-    const tail = terminal === "hook_failed" ? run.hookResult?.tailText ?? transport.stderr : transport.stderr;
-    run.failureClass = classifyFailure({
+    const tail = terminal === "hook_failed" ? run2.hookResult?.tailText ?? transport.stderr : transport.stderr;
+    run2.failureClass = classifyFailure({
       terminal,
       exitCode,
       stderrTail: tail,
-      errorMessage: run.errorMessage
+      errorMessage: run2.errorMessage
     });
   }
-  if (run.mergeResult?.reason === "verify_timeout") run.failureClass = "timeout";
-  opts.registry.notify(run);
+  if (run2.mergeResult?.reason === "verify_timeout") run2.failureClass = "timeout";
+  opts.registry.notify(run2);
   try {
     transport.stop();
   } catch {
   }
   const dispatch = () => {
     fence();
-    if (run.effort && run.reconciledAtStartup && !run.integration) return;
+    if (run2.effort && run2.reconciledAtStartup && !run2.integration) return;
     try {
-      opts.onComplete?.(run);
+      opts.onComplete?.(run2);
     } catch {
     }
-    if (!run.reconciledAtStartup) {
-      applyChainIfPresent(run, run.status, opts.onChain);
-      applyRetryIfNeeded(run, opts.onRetry);
+    if (!run2.reconciledAtStartup) {
+      applyChainIfPresent(run2, run2.status, opts.onChain);
+      applyRetryIfNeeded(run2, opts.onRetry);
     }
-    recordRunOutcome(run);
-    emitFinalizeEvent(run, opts.events);
+    recordRunOutcome(run2);
+    emitFinalizeEvent(run2, opts.events);
   };
-  if (run.effort && run.integration) {
-    const persist = () => writeRecord(run, () => assertRunEffortOwner(run));
+  if (run2.effort && run2.integration) {
+    const persist = () => writeRecord(run2, () => assertRunEffortOwner(run2));
     await persist();
-    await writeFinal(run, true);
+    await writeFinal(run2, true);
     fence();
-    if (!run.integration.delivery) {
-      run.integration.delivery = "intent";
+    if (!run2.integration.delivery) {
+      run2.integration.delivery = "intent";
       await persist();
-      assertRunEffortOwner(run);
+      assertRunEffortOwner(run2);
       dispatch();
-      run.integration.delivery = "attempted";
+      run2.integration.delivery = "attempted";
       await persist();
     }
-    donePromiseResolve(run);
-  } else if (run.runtime === "herdr" && run.herdr) {
-    await writeRecord(run, () => assertHerdrOwner(run));
-    await writeFinal(run, true);
+    donePromiseResolve(run2);
+  } else if (run2.runtime === "herdr" && run2.herdr) {
+    await writeRecord(run2, () => assertHerdrOwner(run2));
+    await writeFinal(run2, true);
     fence();
-    await dispatchHerdrSettlement(run, dispatch);
-    donePromiseResolve(run);
+    await dispatchHerdrSettlement(run2, dispatch);
+    donePromiseResolve(run2);
   } else {
-    await Promise.all([writeRecord(run), writeFinal(run)]).catch(() => {
+    await Promise.all([writeRecord(run2), writeFinal(run2)]).catch(() => {
     }).finally(() => {
       dispatch();
-      donePromiseResolve(run);
+      donePromiseResolve(run2);
     });
   }
 }
-function dispatchHerdrSettlement(run, dispatch) {
-  if (run.effort || !run.herdr) throw new Error("ordinary herdr settlement required");
-  const binding = run.herdr, fence = herdrEffectFence(run);
-  return run.herdrDelivery ??= Promise.resolve().then(async () => {
+function dispatchHerdrSettlement(run2, dispatch) {
+  if (run2.effort || !run2.herdr) throw new Error("ordinary herdr settlement required");
+  const binding = run2.herdr, fence = herdrEffectFence(run2);
+  return run2.herdrDelivery ??= Promise.resolve().then(async () => {
     fence();
-    const persist = () => writeRecord(run, () => {
+    const persist = () => writeRecord(run2, () => {
       fence();
-      if (run.herdr !== binding) throw new Error("herdr invocation replaced");
+      if (run2.herdr !== binding) throw new Error("herdr invocation replaced");
     });
     if (binding.settlement && binding.settlement.launchNonce !== binding.launchNonce) throw new Error("herdr settlement nonce mismatch; preserve for inspection");
     if (binding.settlement?.delivery === "intent") {
       binding.settlement.delivery = "uncertain";
-      run.errorMessage = [run.errorMessage, "delivery uncertain: notification/events/memory may be missing; automatic replay suppressed"].filter(Boolean).join("\n");
+      run2.errorMessage = [run2.errorMessage, "delivery uncertain: notification/events/memory may be missing; automatic replay suppressed"].filter(Boolean).join("\n");
       await persist();
     }
     if (binding.settlement) return;
@@ -5068,8 +5081,8 @@ function dispatchHerdrSettlement(run, dispatch) {
 
 // src/effort/driver.ts
 import { randomUUID as randomUUID4 } from "node:crypto";
-import { copyFileSync, mkdirSync as mkdirSync8, writeFileSync as writeFileSync4 } from "node:fs";
-import { dirname as dirname13, join as join15 } from "node:path";
+import { copyFileSync, existsSync as existsSync10, mkdirSync as mkdirSync9, readFileSync as readFileSync13, realpathSync as realpathSync8, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname13, join as join16 } from "node:path";
 
 // src/hook-runner.ts
 import {
@@ -5319,34 +5332,229 @@ function renderTail(lines) {
   return lines.join("\n");
 }
 
+// src/effort/merger.ts
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { existsSync as existsSync9, mkdirSync as mkdirSync8, readFileSync as readFileSync12, realpathSync as realpathSync7, writeFileSync as writeFileSync4 } from "node:fs";
+import { join as join15 } from "node:path";
+var MARKERS_ONLY = "core.whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab,-indent-with-non-tab,-tab-in-indent,-cr-at-eol";
+var scrubbed = () => Object.fromEntries(Object.entries(gitEnv()).filter(([key]) => !key.startsWith("HERDR_")));
+var run = (cwd, args) => spawnSync2("git", args, { cwd, env: scrubbed(), encoding: "utf8", timeout: 3e4, maxBuffer: 16 * 1024 * 1024 });
+var MERGER_PERSONA = "merger";
+function mergerPersonaError(persona) {
+  if (persona.name !== MERGER_PERSONA) return `persona ${persona.name} is not the merger`;
+  if (persona.readOnly) return "merger persona override sets read_only; refusing to launch";
+  if (persona.agents?.length) return "merger persona override sets agents; mergers never delegate";
+  if (persona.worktree) return "merger persona override sets worktree; the driver owns the candidate cwd";
+}
+function mergerClaimError(writer, id, cwd, mergerFor) {
+  let record;
+  try {
+    record = writer && existsSync9(writer.recordPath) ? JSON.parse(readFileSync12(writer.recordPath, "utf8")) : void 0;
+  } catch {
+    record = void 0;
+  }
+  const wal = record?.integration?.merger;
+  if (!record || record.id !== mergerFor.writerId || record.effort?.name !== mergerFor.effort || record.effort.gitRoot !== mergerFor.gitRoot) return "merger writer record missing or not in this effort";
+  if (!wal || wal.runId !== id || wal.nonce !== mergerFor.nonce || wal.candidatePath !== cwd) return "merger claim does not match this id, nonce and candidate";
+  if (record.status !== "integrating" || record.integration?.state !== "resolving" || wal.outcome) return "merger claim is no longer resolving";
+}
+function mergerSpawnError(opts, id, writer) {
+  if (!opts.mergerFor) return opts.persona.name === MERGER_PERSONA ? "the merger persona is driver-owned: only effort integration launches it" : void 0;
+  const personaError = mergerPersonaError(opts.persona);
+  if (personaError) return personaError;
+  if (opts.effort !== void 0 || opts.touches !== void 0 || opts.worktree || opts.mergeStrategy !== void 0 && opts.mergeStrategy !== "none" || opts.delegation || opts.onChain || opts.onRetry || (opts.retryMaxAttempts ?? 1) !== 1 || opts.steerable) return "incompatible merger spawn options (effort, worktree, merge, delegation, chain, retry or steering)";
+  if (id !== void 0 && id !== opts.mergerFor.runId) return "merger id differs from the claimed id";
+  return mergerClaimError(writer, opts.mergerFor.runId, opts.cwd, opts.mergerFor);
+}
+function prepareMergerWorkspace(root, wal) {
+  effortGit(root, "worktree", "add", "--detach", wal.candidatePath, wal.setupOid);
+  if (effortGit(wal.candidatePath, "rev-parse", "HEAD") !== wal.setupOid) throw new Error("merger candidate is not at its setup OID");
+  if (wal.kind !== "conflict") return;
+  const merge = run(wal.candidatePath, ["merge", "--no-ff", "--no-commit", wal.sourceHead]);
+  if (merge.error || merge.status !== 0 && merge.status !== 1) throw new Error(`merger setup merge failed: ${merge.error?.message ?? merge.stderr}`);
+  const unmerged = [...new Set(effortGit(wal.candidatePath, "ls-files", "-u", "-z").split("\0").filter(Boolean).map((entry) => entry.slice(entry.indexOf("	") + 1)))].sort();
+  const expected = [...new Set(wal.conflicts ?? [])].sort();
+  if (JSON.stringify(unmerged) !== JSON.stringify(expected)) throw new Error(`merger setup unmerged paths ${JSON.stringify(unmerged)} differ from merge-tree conflicts ${JSON.stringify(expected)}`);
+}
+function writeMergerContext(root, effort, writer, wal, verifyLog) {
+  const dir = join15(effortDir(root, effort), "merge", `${writer.id}-${wal.attempt}`);
+  mkdirSync8(dir, { recursive: true });
+  const base = effortGit(root, "merge-base", wal.expectedTip, wal.sourceHead);
+  const paths = wal.kind === "conflict" ? ["--", ...wal.conflicts ?? []] : [];
+  const files = {
+    "conflict.md": `# Merger context (${wal.kind})
+
+Writer: ${writer.id} (${writer.persona})
+Integration tip: ${wal.expectedTip}
+Writer head: ${wal.sourceHead}
+Setup: ${wal.setupOid}
+` + (wal.kind === "conflict" ? `
+Conflicted paths:
+${(wal.conflicts ?? []).map((p) => `- ${p}`).join("\n")}
+` : "\nThe effort verify command failed twice on the setup candidate.\n"),
+    "ours.diff": effortGit(root, "diff", base, wal.expectedTip, ...paths),
+    "theirs.diff": effortGit(root, "diff", base, wal.sourceHead, ...paths),
+    "slices.md": `# Writer task
+
+${writer.task}
+`,
+    "writer-report.md": writer.integration?.resultText || "(no saved writer report)"
+  };
+  if (verifyLog !== void 0) files["verify.log"] = verifyLog;
+  for (const [name2, text5] of Object.entries(files)) writeFileSync4(join15(dir, name2), text5 || "(empty)\n");
+  wal.contextDir = dir;
+  return Object.keys(files).map((name2) => join15(dir, name2));
+}
+function mergerTask(writer, wal, verify) {
+  const what = wal.kind === "conflict" ? `Resolve the textual conflict between the effort integration tip and writer ${writer.id}. The merge is in progress in your cwd.` : `Fix the effort verify failure on writer ${writer.id}'s candidate in your cwd.`;
+  return `${what}
+Effort verify command: ${verify ? `\`${verify}\`` : "(disabled; repository hooks still apply)"}
+Commit your resolution with an ordinary hooked \`git commit\` on the detached HEAD and leave the candidate clean, or end with \`## Verdict: cannot-resolve\`. The evidence files below are outside the candidate.`;
+}
+function observeMerger(merger, wal, finalText, exitConfirmed) {
+  const cwd = wal.candidatePath;
+  const out = (args) => {
+    const r = run(cwd, args);
+    return r.status === 0 ? r.stdout.trim() : void 0;
+  };
+  const exists = existsSync9(cwd);
+  const head = exists ? out(["rev-parse", "--verify", "HEAD^{commit}"]) : void 0;
+  const common = exists ? out(["rev-parse", "--path-format=absolute", "--git-common-dir"]) : void 0;
+  return {
+    status: merger.status,
+    runId: merger.id,
+    nonce: merger.mergerFor?.nonce,
+    cwd: merger.cwd,
+    repository: common && existsSync9(common) ? realpathSync7(common) : void 0,
+    head,
+    detached: exists && run(cwd, ["symbolic-ref", "-q", "HEAD"]).status === 1,
+    descends: !!head && run(cwd, ["merge-base", "--is-ancestor", wal.setupOid, head]).status === 0,
+    mergeHead: !exists || run(cwd, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]).status !== 1,
+    unmerged: exists ? out(["ls-files", "-u"]) ?? "unreadable" : "missing",
+    unsafeIndex: exists ? (out(["ls-files", "-v", "-z"]) ?? "unreadable").split("\0").filter((e) => e && !e.startsWith("H ")).join(", ") : "missing",
+    dirty: exists ? out(["status", "--porcelain", "--ignored", "--untracked-files=all"]) ?? "unreadable" : "missing",
+    diffCheck: head ? run(cwd, ["-c", MARKERS_ONLY, "diff", "--check", wal.setupOid, head]).status : null,
+    finalText,
+    exitConfirmed
+  };
+}
+function createMergerLauncher(deps) {
+  return async ({ wal, mergerFor, task, files }) => {
+    const root = mergerFor.gitRoot;
+    const cfg = loadConfig(root);
+    const persona = (await resolvePersonas({ cwd: root, personaOverrides: cfg.personaOverrides })).personas.get(MERGER_PERSONA);
+    if (!persona) throw new Error("merger persona unavailable (disabled or broken override)");
+    const refused = mergerPersonaError(persona);
+    if (refused) throw new Error(refused);
+    const ov = cfg.personaOverrides[MERGER_PERSONA] ?? {};
+    const result = deps.queue.enqueueOrSpawn({
+      persona,
+      task,
+      files,
+      mode: "background",
+      cwd: wal.candidatePath,
+      model: ov.model ?? persona.model,
+      thinking: ov.thinking ?? persona.thinking,
+      timeoutMs: deps.timeoutMs ?? resolveTimeoutMs(persona, ov, cfg),
+      parentSessionId: mergerFor.owner.sessionId,
+      worktree: false,
+      mergeStrategy: "none",
+      retryMaxAttempts: 1,
+      inheritContextOverride: "none",
+      steerable: false,
+      mergerFor,
+      // Only its owner question becomes a card; its terminal result belongs to the writer's one card.
+      onComplete: (r) => {
+        if (r.status === "blocked") deps.notify?.(r);
+      },
+      events: deps.events
+    });
+    return result.kind === "spawned" ? result.run : result.placeholderRun;
+  };
+}
+function acceptMergerOutcome(wal, repository, f) {
+  const no = (reason) => ({ ok: false, reason });
+  if (f.status !== "completed") return no(`merger ${f.status}`);
+  if (!f.exitConfirmed) return no("merger process exit unconfirmed");
+  if (f.runId !== wal.runId || f.nonce !== wal.nonce || f.cwd !== wal.candidatePath) return no("merger identity does not match the claim");
+  if (f.repository !== repository) return no("candidate is not in the effort repository");
+  if (/^## Verdict: cannot-resolve\s*$/m.test(f.finalText)) return no("merger reported cannot-resolve");
+  if (!f.head || !f.detached) return no("candidate HEAD is not detached");
+  if (f.head === wal.setupOid) return no("merger made no commit");
+  if (!f.descends) return no("merger commit does not descend from the setup OID");
+  if (f.mergeHead) return no("a merge is still in progress");
+  if (f.unmerged) return no("candidate has unmerged index entries");
+  if (f.unsafeIndex) return no(`candidate has hidden index flags: ${f.unsafeIndex}`);
+  if (f.dirty) return no("candidate has uncommitted, untracked or ignored files");
+  if (f.diffCheck !== 0) return no("merger commit leaves conflict markers (diff --check)");
+  return { ok: true, outputOid: f.head };
+}
+
 // src/effort/driver.ts
+var MERGER_EXIT_BOUND_MS = 1e4;
+async function mergerExited(m) {
+  const t = m.transport;
+  if (t?.kind === "herdr") return t.waitForExit();
+  if (t?.kind === "subprocess") {
+    if (!m.processOpen) return true;
+    let timer;
+    await Promise.race([t.closed, new Promise((resolve7) => {
+      timer = setTimeout(resolve7, MERGER_EXIT_BOUND_MS);
+    })]);
+    clearTimeout(timer);
+    return !m.processOpen;
+  }
+  if (!m.pid) return true;
+  try {
+    process.kill(m.pid, 0);
+    return false;
+  } catch (error) {
+    return error.code === "ESRCH";
+  }
+}
 var EffortDriver = class {
   queues = /* @__PURE__ */ new Map();
   flights = /* @__PURE__ */ new Map();
+  seen = /* @__PURE__ */ new Map();
+  launch;
+  // A private field, so a serialized registry (spawn option snapshots) never cycles through it.
+  #registry;
+  constructor(registry) {
+    this.#registry = registry;
+  }
+  /** Only a configured lead launches mergers; without one, `auto` keeps the M5 conflict outcome. */
+  configureMerger(launch) {
+    this.launch = launch;
+  }
   whenIdle(root) {
     return this.flights.get(root) ?? Promise.resolve();
   }
-  enqueue(run, notify, recovered = false) {
-    const owner = run.effort.owner ?? effortOwner(run.parentSessionId);
-    const record = readEffort(run.effort.gitRoot, run.effort.name);
+  enqueue(run2, notify, recovered = false) {
+    const owner = run2.effort.owner ?? effortOwner(run2.parentSessionId);
+    const record = readEffort(run2.effort.gitRoot, run2.effort.name);
     assertEffortOwner(record, owner);
-    if (run.status !== "integrating" || !run.integration || run.pendingAsk || run.reconciledAtStartup && !recovered) throw new Error("only observed hook-passed completions may enter integration");
-    run.integration.deliveryProtocol = 1;
-    const prior = this.queues.get(record.gitRoot)?.find((job2) => job2.run.id === run.id && !job2.finished && !job2.suspended);
+    if (run2.status !== "integrating" || !run2.integration || run2.pendingAsk || run2.reconciledAtStartup && !recovered) throw new Error("only observed hook-passed completions may enter integration");
+    run2.integration.deliveryProtocol = 1;
+    const prior = this.queues.get(record.gitRoot)?.find((job2) => job2.run.id === run2.id && !job2.finished && !job2.suspended);
     if (prior) return prior.result;
     let job;
     const result = new Promise((resolve7) => {
-      job = { run, owner, notify, resolve: resolve7, cancelled: false, suspended: !!run.integrationSuspended, finished: false };
-      run.integrationControl = {
+      job = { run: run2, owner, notify, resolve: resolve7, cancelled: false, suspended: !!run2.integrationSuspended, finished: false };
+      run2.integrationControl = {
         cancel: () => {
           if (job.cancelled || job.finished) return;
           this.fence(job);
           job.cancelled = true;
           void job.stop?.();
+          if (job.parked) {
+            void this.cancelMerger(job);
+            return;
+          }
           if (!job.flight) void this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
         },
         suspend: () => {
-          if (run.integrationSuspension) return run.integrationSuspension;
+          if (run2.integrationSuspension) return run2.integrationSuspension;
+          job.merger?.off?.();
           const suspending = Promise.resolve().then(async () => {
             await job.stop?.();
             try {
@@ -5355,22 +5563,29 @@ var EffortDriver = class {
               if (job.teardownError) throw job.teardownError;
             }
           });
-          run.integrationSuspension = suspending;
+          run2.integrationSuspension = suspending;
           void suspending.then(() => {
-            if (run.integrationSuspension === suspending) run.integrationSuspension = void 0;
+            if (run2.integrationSuspension === suspending) run2.integrationSuspension = void 0;
           }, () => {
           });
           job.suspended = true;
-          run.integrationControl = void 0;
+          run2.integrationControl = void 0;
           return suspending;
         }
       };
       job.ready = this.persist(job).then(() => {
         const current = this.fence(job);
-        writeEffort({ ...current, queue: [.../* @__PURE__ */ new Set([...current.queue ?? [], run.id])], updatedAt: Date.now() });
+        writeEffort({ ...current, queue: [.../* @__PURE__ */ new Set([...current.queue ?? [], run2.id])], updatedAt: Date.now() });
       });
       void job.ready.catch(() => {
       });
+      if (run2.integration.state === "resolving") {
+        job.parked = true;
+        void job.ready.then(() => this.readopt(job)).catch((error) => {
+          job.parked = false;
+          this.pause(job, `merger recovery unresolved: ${error.message}`);
+        });
+      }
       const root = record.gitRoot;
       const queue = this.queues.get(root) ?? [];
       queue.push(job);
@@ -5396,8 +5611,13 @@ var EffortDriver = class {
     });
     job.notify();
   }
-  async finish(job, outcome) {
+  finish(job, outcome) {
+    return job.finishing ??= this.finishOnce(job, outcome);
+  }
+  async finishOnce(job, outcome) {
     if (job.finished || job.suspended) return;
+    job.merger?.off?.();
+    job.parked = false;
     job.run.integration.state = outcome.terminal === "completed" ? "accepted" : "paused";
     if (!outcome.mergeResult.success) job.run.integration.reason = outcome.mergeResult.reason;
     if (outcome.terminal === "killed") {
@@ -5415,6 +5635,7 @@ var EffortDriver = class {
     job.finished = true;
     job.run.integrationControl = void 0;
     job.resolve(outcome);
+    this.wake(record.gitRoot);
   }
   pause(job, reason) {
     job.run.integration.state = "paused";
@@ -5434,17 +5655,36 @@ var EffortDriver = class {
     }
     job.notify();
   }
+  /** Front re-entries first, then FIFO; parked entries wait for their merger. */
+  next(root, seen) {
+    const eligible = (job) => !seen.has(job) && !job.finished && !job.suspended && !job.cancelled && !job.parked && !(job.deferred && this.mergerBusy(job));
+    const queue = this.queues.get(root) ?? [];
+    return queue.find((job) => job.front && eligible(job)) ?? queue.find(eligible);
+  }
+  mergerBusy(job) {
+    return (this.queues.get(job.run.effort.gitRoot) ?? []).some((other) => other !== job && other.parked && !other.finished && other.run.effort.name === job.run.effort.name);
+  }
+  /** Revisit re-entries and deferred entries in the current flight, or start one. */
+  wake(root) {
+    const seen = this.seen.get(root);
+    for (const job of this.queues.get(root) ?? []) if (job.front || job.deferred) seen?.delete(job);
+    if (!this.flights.has(root) && (this.queues.get(root) ?? []).some((job) => !job.finished && !job.suspended && (job.front || job.deferred))) {
+      this.flights.set(root, Promise.resolve().then(() => this.drain(root)));
+    }
+  }
   async drain(root) {
     const lockDir = effortDir(root, "integration-driver");
-    const lock = join15(lockDir, "driver.lock");
+    const lock = join16(lockDir, "driver.lock");
     let claim;
     let claimed = false;
+    const seen = /* @__PURE__ */ new Set();
+    this.seen.set(root, seen);
     try {
-      mkdirSync8(lockDir, { recursive: true });
+      mkdirSync9(lockDir, { recursive: true });
       claim = acquireClaim(lock, effortOwner(randomUUID4()));
       claimed = true;
-      for (const job of this.queues.get(root) ?? []) {
-        if (job.finished || job.suspended || job.cancelled) continue;
+      for (let job = this.next(root, seen); job; job = this.next(root, seen)) {
+        seen.add(job);
         try {
           await job.ready;
           job.claim = { path: lock, owner: claim };
@@ -5453,52 +5693,57 @@ var EffortDriver = class {
             this.pause(job, record.pausedReason ?? "effort paused");
             continue;
           }
+          job.front = false;
+          job.deferred = false;
+          const current = job;
           job.flight = (async () => {
             for (; ; ) {
               try {
-                await this.integrate(job);
+                await this.integrate(current);
                 return;
               } catch (error) {
                 if (!(error instanceof StaleTipError)) throw error;
-                job.run.integration.casFailures = (job.run.integration.casFailures ?? 0) + 1;
-                await this.persist(job);
-                if (job.run.integration.casFailures >= 3) throw new Error("integration ref moved outside the queue: three CAS failures; resume requires inspection");
+                current.run.integration.casFailures = (current.run.integration.casFailures ?? 0) + 1;
+                await this.persist(current);
+                if (current.run.integration.casFailures >= 3) throw new Error("integration ref moved outside the queue: three CAS failures; resume requires inspection");
               }
             }
           })();
           await job.flight;
-          if (job.cancelled) await this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
+          if (job.cancelled && !job.parked) await this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
         } catch (error) {
           if (job.teardownError) {
             claimed = false;
             this.pause(job, job.teardownError.message);
             break;
           }
-          if (job.cancelled) await this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
-          else this.pause(job, error.message);
+          if (job.cancelled) {
+            if (!job.parked) await this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
+          } else this.pause(job, error.message);
         } finally {
           job.flight = void 0;
           job.claim = void 0;
         }
       }
     } catch (error) {
-      for (const job of this.queues.get(root) ?? []) if (!job.finished) this.pause(job, `integration driver ownership unresolved: ${error.message}`);
+      for (const job of this.queues.get(root) ?? []) if (!job.finished && !job.parked) this.pause(job, `integration driver ownership unresolved: ${error.message}`);
     } finally {
       try {
         if (claimed && claim) releaseClaim(lock, claim);
       } catch {
       }
+      if (this.seen.get(root) === seen) this.seen.delete(root);
       this.flights.delete(root);
       this.queues.set(root, (this.queues.get(root) ?? []).filter((job) => !job.finished));
     }
   }
   async command(job, cwd, command, logPath) {
     this.fence(job);
-    const run = job.run;
-    const entry = run.integration;
+    const run2 = job.run;
+    const entry = run2.integration;
     entry.logPath = logPath;
-    const tmpDir = join15(dirname13(logPath), "tmp");
-    mkdirSync8(tmpDir, { recursive: true });
+    const tmpDir = join16(dirname13(logPath), "tmp");
+    mkdirSync9(tmpDir, { recursive: true });
     entry.commandPending = true;
     entry.process = void 0;
     await this.persist(job);
@@ -5512,9 +5757,9 @@ var EffortDriver = class {
           job.teardownError = new Error(`integration process-group teardown unconfirmed: ${error.message}`);
           entry.teardownError = job.teardownError.message;
           job.suspended = true;
-          run.integrationControl = void 0;
+          run2.integrationControl = void 0;
           this.pause(job, job.teardownError.message);
-          void writeRecord(run, () => assertEffortOwner(readEffort(run.effort.gitRoot, run.effort.name), job.owner)).catch(() => {
+          void writeRecord(run2, () => assertEffortOwner(readEffort(run2.effort.gitRoot, run2.effort.name), job.owner)).catch(() => {
           });
         });
       }
@@ -5527,7 +5772,7 @@ var EffortDriver = class {
       } catch {
         if (!job.cancelled) {
           job.suspended = true;
-          run.integrationControl = void 0;
+          run2.integrationControl = void 0;
         }
         void stop();
       }
@@ -5536,15 +5781,15 @@ var EffortDriver = class {
     try {
       result = await runHook({
         resolved: { command, source: "project", timeoutSeconds: entry.verifyIdentity.timeoutSeconds },
-        runId: run.id,
-        persona: run.persona,
-        runDir: dirname13(run.recordPath),
-        finalPath: run.finalPath,
-        transcriptPath: run.transcriptPath,
+        runId: run2.id,
+        persona: run2.persona,
+        runDir: dirname13(run2.recordPath),
+        finalPath: run2.finalPath,
+        transcriptPath: run2.transcriptPath,
         parentCwd: cwd,
         logPath,
         tmpDir,
-        extraEnv: effortEnv({ CONDUCTOR_EFFORT: run.effort.name, CONDUCTOR_CANDIDATE: entry.candidateOid, TMPDIR: tmpDir }),
+        extraEnv: effortEnv({ CONDUCTOR_EFFORT: run2.effort.name, CONDUCTOR_CANDIDATE: entry.candidateOid, TMPDIR: tmpDir }),
         onEnd: (result2) => {
           if (entry.state === "verifying") entry.verify = result2;
           if (entry.state === "generating") entry.generation = result2;
@@ -5560,7 +5805,7 @@ var EffortDriver = class {
           void this.persist(job).catch(() => {
             if (!job.cancelled) {
               job.suspended = true;
-              run.integrationControl = void 0;
+              run2.integrationControl = void 0;
             }
             void stop();
           });
@@ -5582,11 +5827,12 @@ var EffortDriver = class {
     return result;
   }
   async integrate(job) {
-    const run = job.run;
-    const entry = run.integration;
+    const run2 = job.run;
+    const entry = run2.integration;
     let record = this.fence(job);
     const root = record.gitRoot;
     const expected = effortTip(record);
+    entry.sourceHead ??= entry.branchHead;
     entry.expectedTip = expected;
     entry.state = "merging";
     entry.candidateOid = void 0;
@@ -5596,16 +5842,16 @@ var EffortDriver = class {
     entry.attempts = 0;
     entry.verify = void 0;
     await this.persist(job);
-    const dir = join15(effortDir(root, record.name), "verify", `${run.id}-${randomUUID4()}`);
-    mkdirSync8(dir, { recursive: true });
-    const candidate = join15(root, ".worktrees", "conductor-cand", record.name, `${run.id}-${randomUUID4()}`);
+    const dir = join16(effortDir(root, record.name), "verify", `${run2.id}-${randomUUID4()}`);
+    mkdirSync9(dir, { recursive: true });
+    const candidate = join16(root, ".worktrees", "conductor-cand", record.name, `${run2.id}-${randomUUID4()}`);
     entry.candidatePath = candidate;
     entry.candidates = [.../* @__PURE__ */ new Set([...entry.candidates ?? [], candidate])];
     await this.persist(job);
     this.fence(job);
     effortGit(root, "worktree", "add", "--detach", candidate, expected);
     if (record.gatedTip !== expected) {
-      const result = entry.verifyIdentity.command ? await this.command(job, candidate, entry.verifyIdentity.command, join15(dir, "baseline.log")) : void 0;
+      const result = entry.verifyIdentity.command ? await this.command(job, candidate, entry.verifyIdentity.command, join16(dir, "baseline.log")) : void 0;
       assertCandidate(candidate, expected);
       record = this.fence(job);
       writeEffort({ ...record, baseline: { oid: expected, result, disabled: !result }, ...result?.passed === false ? {} : { gatedTip: expected }, updatedAt: Date.now() });
@@ -5624,16 +5870,17 @@ var EffortDriver = class {
     if (generated) {
       entry.mergeTree = merged.tree;
       entry.conflicts = merged.kind === "conflict" ? [...merged.conflicts] : [];
-      entry.mergeEvidencePath = join15(dir, "merge-tree.z");
-      writeFileSync4(entry.mergeEvidencePath, merged.output);
+      entry.mergeEvidencePath = join16(dir, "merge-tree.z");
+      writeFileSync5(entry.mergeEvidencePath, merged.output);
       this.fence(job);
       assertCandidate(candidate, expected);
       effortGit(candidate, "read-tree", "--reset", "-u", merged.tree);
-      copyFileSync(effortGit(candidate, "rev-parse", "--git-path", "index"), join15(dir, "merge.index"));
+      copyFileSync(effortGit(candidate, "rev-parse", "--git-path", "index"), join16(dir, "merge.index"));
       await this.persist(job);
     }
     if (merged.kind === "conflict" && (!generated || !merged.conflicts.every((path2) => isGeneratedPath(path2, generated)))) {
-      await this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: "conflict", conflicts: merged.conflicts } });
+      if (await this.park(job, record, "conflict", { conflicts: merged.conflicts })) return;
+      await this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: "conflict", conflicts: merged.conflicts, ...this.exhausted(entry) } });
       return;
     }
     if (merged.kind === "clean" && merged.tree === effortGit(root, "rev-parse", `${expected}^{tree}`)) {
@@ -5658,8 +5905,8 @@ var EffortDriver = class {
       entry.preGenerationTree = effortGit(candidate, "write-tree");
       entry.state = "generating";
       await this.persist(job);
-      const result = await regenerateCandidate(candidate, expected, generated, join15(dir, "generation-before.json"), async () => {
-        entry.generation = await this.command(job, candidate, generated.command, join15(dir, "generate.log"));
+      const result = await regenerateCandidate(candidate, expected, generated, join16(dir, "generation-before.json"), async () => {
+        entry.generation = await this.command(job, candidate, generated.command, join16(dir, "generate.log"));
         return entry.generation;
       }, () => {
         this.fence(job);
@@ -5670,13 +5917,14 @@ var EffortDriver = class {
       }
       entry.state = "merging";
     }
-    const message4 = join15(dir, "commit-message");
-    writeFileSync4(message4, `${buildMergeCommitMessage(run.persona, run.id, run.task)}
+    const merger = entry.merger?.outcome === "accepted" && entry.branchHead === entry.merger.outputOid ? entry.merger.runId : void 0;
+    const trailers = [`Conductor-Effort: ${record.name}`, `Conductor-Run: ${run2.id}`, ...merger ? [`Conductor-Merger: ${merger}`] : []];
+    const message4 = join16(dir, "commit-message");
+    writeFileSync5(message4, `${buildMergeCommitMessage(run2.persona, run2.id, run2.task)}
 
-Conductor-Effort: ${record.name}
-Conductor-Run: ${run.id}
+${trailers.join("\n")}
 `);
-    entry.commitHook = await this.command(job, candidate, `git commit -F ${shellQuote2(message4)}`, join15(dir, "commit.log"));
+    entry.commitHook = await this.command(job, candidate, `git commit -F ${shellQuote2(message4)}`, join16(dir, "commit.log"));
     if (!entry.commitHook.passed) {
       this.pause(job, `candidate commit hooks failed: ${entry.commitHook.logPath}: ${entry.commitHook.tailText}`);
       return;
@@ -5686,13 +5934,13 @@ Conductor-Run: ${run.id}
     assertCandidate(candidate, entry.candidateOid);
     if (effortGit(candidate, "show", "-s", "--format=%P", "HEAD") !== expected) throw new Error("candidate must have exactly the expected tip as its sole parent");
     const body = effortGit(candidate, "show", "-s", "--format=%B", "HEAD");
-    for (const trailer of [`Conductor-Effort: ${record.name}`, `Conductor-Run: ${run.id}`]) if (body.split("\n").filter((line) => line === trailer).length !== 1) throw new Error("candidate hook changed required trailers");
+    for (const trailer of trailers) if (body.split("\n").filter((line) => line === trailer).length !== 1) throw new Error("candidate hook changed required trailers");
     entry.state = "verifying";
     await this.persist(job);
     if (entry.verifyIdentity.command) {
       for (; ; ) {
         entry.attempts++;
-        entry.verify = await this.command(job, candidate, entry.verifyIdentity.command, join15(dir, `verify-${entry.attempts}.log`));
+        entry.verify = await this.command(job, candidate, entry.verifyIdentity.command, join16(dir, `verify-${entry.attempts}.log`));
         assertCandidate(candidate, entry.candidateOid);
         const action = nextIntegration(entry.verify, entry.attempts, entry.verifyIdentity.retries);
         await this.persist(job);
@@ -5702,7 +5950,8 @@ Conductor-Run: ${run.id}
           this.pause(job, `verify cannot run: ${entry.verify.logPath}: ${entry.verify.tailText}`);
           return;
         }
-        await this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: action, verify: entry.verify } });
+        if (await this.park(job, record, action, { verifyLog: entry.verify.tailText })) return;
+        await this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: action, verify: entry.verify, ...this.exhausted(entry) } });
         return;
       }
     }
@@ -5716,16 +5965,183 @@ Conductor-Run: ${run.id}
     });
     entry.state = "accepted";
     record = this.fence(job);
-    writeEffort({ ...record, gatedTip: entry.candidateOid, queue: (record.queue ?? []).filter((id) => id !== run.id), updatedAt: Date.now() });
+    writeEffort({ ...record, gatedTip: entry.candidateOid, queue: (record.queue ?? []).filter((id) => id !== run2.id), updatedAt: Date.now() });
     await this.finish(job, { terminal: "completed", landedCommit: entry.candidateOid, mergeResult: { success: true, verify: entry.verify, flakyVerify: entry.attempts > 1, verifyDisabled: !entry.verifyIdentity.command } });
+  }
+  exhausted(entry) {
+    const m = entry.merger;
+    if (!m) return {};
+    return { errorMessage: m.outcome === "accepted" ? `merger ${m.runId} proposal ${m.outputOid?.slice(0, 12)} did not re-gate on the current tip; its one attempt is spent and no second merger runs. Candidate ${m.candidatePath} and source preserved.` : `merger ${m.runId} ${m.reason ?? "attempt spent"}; candidate ${m.candidatePath} and source preserved.` };
+  }
+  /**
+   * M6a: hand a conflict or twice-red verify to the effort's one merger. The claim is durable before
+   * persona resolution or spawn. Returns false when policy, a spent attempt or no launcher applies.
+   */
+  async park(job, record, kind, extra) {
+    const run2 = job.run, entry = run2.integration;
+    if (!this.launch || record.policy.merger !== "auto" || entry.merger) return false;
+    if (this.mergerBusy(job)) {
+      job.deferred = true;
+      entry.state = "queued";
+      entry.reason = "waiting for this effort's merger; recomputed against the tip when it frees";
+      await this.persist(job);
+      return true;
+    }
+    const root = record.gitRoot;
+    const runId = allocateRunId("merger", new Map(this.#registry.list().map((r) => [r.id, r])));
+    const wal = {
+      attempt: 1,
+      nonce: randomUUID4(),
+      runId,
+      kind,
+      setupOid: kind === "conflict" ? entry.expectedTip : entry.candidateOid,
+      sourceHead: entry.sourceHead,
+      expectedTip: entry.expectedTip,
+      claimedAt: Date.now(),
+      candidatePath: join16(root, ".worktrees", "conductor-cand", record.name, `${run2.id}-merger-1`),
+      ...extra.conflicts ? { conflicts: [...extra.conflicts] } : {}
+    };
+    entry.merger = wal;
+    entry.state = "resolving";
+    entry.reason = `merger ${runId} claimed`;
+    entry.candidates = [.../* @__PURE__ */ new Set([...entry.candidates ?? [], wal.candidatePath])];
+    await this.persist(job);
+    job.parked = true;
+    let files;
+    try {
+      this.fence(job);
+      prepareMergerWorkspace(root, wal);
+      files = writeMergerContext(root, record.name, run2, wal, extra.verifyLog);
+      await this.persist(job);
+    } catch (error) {
+      if (job.cancelled) return true;
+      job.parked = false;
+      this.pause(job, `merger setup refused: ${error.message}; claim spent, candidate ${wal.candidatePath} preserved`);
+      return true;
+    }
+    try {
+      const mergerFor = { writerId: run2.id, runId, nonce: wal.nonce, effort: record.name, gitRoot: root, owner: job.owner };
+      const launching = this.launch({ writer: run2, wal, mergerFor, task: mergerTask(run2, wal, entry.verifyIdentity.command), files });
+      job.merger = { launching };
+      const merger = await launching;
+      job.merger.run = merger;
+      if (job.cancelled || job.suspended) return true;
+      this.watch(job, merger);
+    } catch (error) {
+      if (job.cancelled) return true;
+      job.parked = false;
+      wal.outcome = "rejected";
+      wal.reason = `not started: ${error.message}`;
+      await this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: kind, conflicts: extra.conflicts, ...this.exhausted(entry) } });
+    }
+    return true;
+  }
+  /** Job-owned and fenced: removed on finish, suspend or cancel. */
+  watch(job, merger) {
+    const off = this.#registry.onChange((r) => {
+      if (r.id === merger.id && r === this.#registry.get(merger.id)) this.observe(job, r);
+    });
+    job.merger = { ...job.merger, run: merger, off: () => {
+      off();
+      if (job.merger) job.merger.off = void 0;
+    } };
+    this.observe(job, merger);
+  }
+  observe(job, m) {
+    if (job.finished || job.suspended || job.cancelled || !job.merger?.off) return;
+    if (isTerminal(m.status)) {
+      job.merger.off();
+      void this.settleMerger(job, m);
+      return;
+    }
+    if (job.merger.status === m.status) return;
+    job.merger.status = m.status;
+    const entry = job.run.integration;
+    entry.reason = m.status === "blocked" ? `merger ${m.id} blocked: ${JSON.stringify(m.pendingAsk?.question ?? "")}` : `merger ${m.id} ${m.status}`;
+    void this.persist(job).catch(() => {
+    });
+  }
+  settleMerger(job, m) {
+    return job.merger.settling ??= (async () => {
+      const run2 = job.run, entry = run2.integration, wal = entry.merger;
+      const root = run2.effort.gitRoot;
+      try {
+        const exited = await mergerExited(m);
+        await m.recordWrite;
+        if (job.finished || job.suspended || job.cancelled) return;
+        this.fence(job);
+        const finalText = getFinalText(m.messages) || (existsSync10(m.finalPath) ? readFileSync13(m.finalPath, "utf8") : "");
+        const verdict = acceptMergerOutcome(wal, realpathSync8(effortGit(root, "rev-parse", "--path-format=absolute", "--git-common-dir")), observeMerger(m, wal, finalText, exited));
+        wal.cost ??= subtreeCost(m, this.#registry.list());
+        job.parked = false;
+        if (verdict.ok) {
+          wal.outcome = "accepted";
+          wal.outputOid = verdict.outputOid;
+          entry.branchHead = verdict.outputOid;
+          entry.state = "queued";
+          entry.reason = `merger ${wal.runId} proposal ${verdict.outputOid.slice(0, 12)} re-entering against the current tip`;
+          await this.persist(job);
+          job.front = true;
+          this.wake(root);
+          return;
+        }
+        wal.outcome = "rejected";
+        wal.reason = verdict.reason;
+        await this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: wal.kind, conflicts: wal.conflicts, ...this.exhausted(entry) } });
+      } catch (error) {
+        job.parked = false;
+        if (!job.cancelled && !job.suspended) this.pause(job, `merger outcome unresolved: ${error.message}; candidate and source preserved`);
+        this.wake(root);
+      }
+    })();
+  }
+  /** Writer kill: cancel a queued, launching, live or blocked merger, wait for its exit, settle once. */
+  async cancelMerger(job) {
+    job.merger?.off?.();
+    const m = job.merger?.run ?? await job.merger?.launching?.catch(() => void 0);
+    if (m && !isTerminal(m.status)) forceTerminate(m, "killed", this.#registry);
+    const exited = m ? await mergerExited(m) : true;
+    const wal = job.run.integration.merger;
+    if (wal && !wal.outcome) {
+      wal.outcome = "rejected";
+      wal.reason = `writer killed; merger ${m ? `cancelled${exited ? "" : " (exit unconfirmed)"}` : "never started"}`;
+      if (m) wal.cost ??= subtreeCost(m, this.#registry.list());
+    }
+    job.parked = false;
+    await this.finish(job, { terminal: "killed", mergeResult: { success: false, reason: "killed" } });
+  }
+  /** Recovery: re-park a restored resolving entry on its canonical merger, or settle it from the WAL. */
+  async readopt(job) {
+    const entry = job.run.integration, wal = entry.merger;
+    if (!wal) throw new Error("resolving entry has no merger claim");
+    const m = this.#registry.get(wal.runId);
+    if (wal.outcome || !m || m.mergerFor?.nonce !== wal.nonce || m.mergerFor.writerId !== job.run.id || m.cwd !== wal.candidatePath) {
+      if (!wal.outcome) {
+        wal.outcome = "rejected";
+        wal.reason = m ? "merger record does not match the claim" : "launch uncertain: claim without a merger record; attempt spent";
+      }
+      job.parked = false;
+      await this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: wal.kind, conflicts: wal.conflicts, ...this.exhausted(entry) } });
+      return;
+    }
+    if (m.status === "blocked") {
+      m.mergerFor = { ...m.mergerFor, owner: job.owner };
+      m.parentPid = job.owner.pid;
+      m.parentSessionId = job.owner.sessionId;
+      m.parentStartTime = job.owner.startTime;
+      await writeRecord(m, () => {
+        this.fence(job);
+      });
+    }
+    this.watch(job, m);
   }
 };
 
 // src/runs.ts
-import { existsSync as existsSync10, mkdirSync as mkdirSync9, readFileSync as readFileSync13, readdirSync as readdirSync6, statSync as statSync3 } from "node:fs";
+import { existsSync as existsSync12, mkdirSync as mkdirSync10, readFileSync as readFileSync15, readdirSync as readdirSync6, statSync as statSync3 } from "node:fs";
 import { mkdir, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir as homedir7 } from "node:os";
-import { dirname as dirname15, join as join17, resolve as resolve5, sep as sep3 } from "node:path";
+import { dirname as dirname15, join as join18, resolve as resolve5, sep as sep3 } from "node:path";
 
 // src/gc/id-reuse.ts
 var recentlyDeletedIds = /* @__PURE__ */ new Set();
@@ -6077,9 +6493,9 @@ ${diag}
 }
 
 // src/workspace-doctrine.ts
-import { existsSync as existsSync9, readFileSync as readFileSync12, statSync as statSync2 } from "node:fs";
+import { existsSync as existsSync11, readFileSync as readFileSync14, statSync as statSync2 } from "node:fs";
 import { homedir as homedir6, tmpdir } from "node:os";
-import { dirname as dirname14, join as join16, relative as relative2, resolve as resolve4, sep as sep2 } from "node:path";
+import { dirname as dirname14, join as join17, relative as relative2, resolve as resolve4, sep as sep2 } from "node:path";
 var MAX_WALK_DEPTH = 6;
 var MAX_DOCTRINE_CHARS = 24e3;
 var DOCTRINE_HEADING = "## Workspace doctrine";
@@ -6098,7 +6514,7 @@ function walkDirs(start) {
 }
 function findAgentsMd(start) {
   for (const dir of walkDirs(start)) {
-    const candidate = join16(dir, "AGENTS.md");
+    const candidate = join17(dir, "AGENTS.md");
     try {
       if (statSync2(candidate).isFile()) return candidate;
     } catch {
@@ -6109,7 +6525,7 @@ function findAgentsMd(start) {
 function gitRoot(start) {
   let current = resolve4(start);
   while (true) {
-    if (existsSync9(join16(current, ".git"))) return current;
+    if (existsSync11(join17(current, ".git"))) return current;
     const parent = dirname14(current);
     if (parent === current) return void 0;
     current = parent;
@@ -6124,7 +6540,7 @@ function childNativeAgentsDirs(workdir) {
   const dirs = [root];
   let current = root;
   for (const part of rel.split(sep2).filter(Boolean)) {
-    current = join16(current, part);
+    current = join17(current, part);
     dirs.push(current);
   }
   return dirs;
@@ -6143,7 +6559,7 @@ function loadWorkspaceDoctrine(workdir) {
     const start = resolve4(workdir);
     const path2 = findAgentsMd(start);
     if (!path2 || childNativeAgentsDirs(start).includes(dirname14(path2))) return "";
-    let text5 = readFileSync12(path2, "utf8").trim();
+    let text5 = readFileSync14(path2, "utf8").trim();
     if (!text5) return "";
     if (text5.length > MAX_DOCTRINE_CHARS) text5 = truncateDoctrine(text5, path2);
     return `${DOCTRINE_HEADING}
@@ -6158,17 +6574,17 @@ ${text5}`;
 
 // src/runs.ts
 function runsRoot() {
-  return join17(homedir7(), ".pi", "agent", "conductor", "runs");
+  return join18(homedir7(), ".pi", "agent", "conductor", "runs");
 }
 function runDir(id) {
-  return join17(runsRoot(), id);
+  return join18(runsRoot(), id);
 }
 function collectInheritedSkillPaths(opts) {
   const home = opts.homeDir ?? homedir7();
-  const exists = opts.existsFn ?? existsSync10;
+  const exists = opts.existsFn ?? existsSync12;
   const candidates = [
-    join17(home, ".pi", "agent", "skills"),
-    join17(opts.cwd, ".pi", "skills")
+    join18(home, ".pi", "agent", "skills"),
+    join18(opts.cwd, ".pi", "skills")
   ];
   return candidates.filter((p) => exists(p));
 }
@@ -6187,7 +6603,7 @@ function findSessionFile(sessionDir) {
   let bestMtime = -Infinity;
   for (const name2 of entries) {
     if (!name2.endsWith(".jsonl")) continue;
-    const full = join17(sessionDir, name2);
+    const full = join18(sessionDir, name2);
     let st;
     try {
       st = statSync3(full);
@@ -6202,11 +6618,11 @@ function findSessionFile(sessionDir) {
   }
   return bestPath;
 }
-function discoverSessionPathIfMissing(run, sessionDir) {
+function discoverSessionPathIfMissing(run2, sessionDir) {
   if (!sessionDir) return;
-  if (run.sessionPath) return;
+  if (run2.sessionPath) return;
   const found = findSessionFile(sessionDir);
-  if (found) run.sessionPath = found;
+  if (found) run2.sessionPath = found;
 }
 var PRONOUNCEABLE_CHARS = "abcdefghijklmnpqrstuvwxyz0123456789";
 function shortHash() {
@@ -6219,7 +6635,7 @@ function shortHash() {
 function allocateRunId(persona, registry) {
   for (let i = 0; i < 32; i++) {
     const id = `${persona}-${shortHash()}`;
-    if (!registry.has(id) && !existsSync10(runDir(id))) {
+    if (!registry.has(id) && !existsSync12(runDir(id))) {
       noteAllocatedId(id);
       return id;
     }
@@ -6259,7 +6675,7 @@ var READ_ONLY_PERSONA_ENFORCER = [
 function assemblePersonaSystemPrompt(persona, cwd) {
   const blocks = persona.readOnly === true ? [READ_ONLY_PERSONA_ENFORCER, persona.systemPrompt] : [persona.systemPrompt];
   try {
-    const preamble = readFileSync13(join17(builtinPersonasDir(), "_preamble.md"), "utf8").trim();
+    const preamble = readFileSync15(join18(builtinPersonasDir(), "_preamble.md"), "utf8").trim();
     if (preamble) blocks.push(preamble);
   } catch {
   }
@@ -6272,7 +6688,7 @@ function assemblePersonaSystemPrompt(persona, cwd) {
 function resolveDefaultReads(reads, childCwd, requestedCwd) {
   return reads.map((f) => {
     const own = resolve5(childCwd, f);
-    return existsSync10(own) ? own : resolve5(requestedCwd, f);
+    return existsSync12(own) ? own : resolve5(requestedCwd, f);
   });
 }
 function buildSubAgentPrompt(persona, task, place, scope = LEGACY_CHILD_SCOPE) {
@@ -6329,22 +6745,22 @@ function buildPiCoreArgs(opts) {
   }
   return args;
 }
-function buildResumePiArgs(run, message4) {
-  if (!run.sessionPath) {
+function buildResumePiArgs(run2, message4) {
+  if (!run2.sessionPath) {
     throw new Error(
-      `buildResumePiArgs called on run ${run.id} without sessionPath; validateSendable should have rejected this earlier`
+      `buildResumePiArgs called on run ${run2.id} without sessionPath; validateSendable should have rejected this earlier`
     );
   }
   return buildPiArgs({
     kind: "resume",
-    sessionPath: run.sessionPath,
+    sessionPath: run2.sessionPath,
     prompt: message4,
-    model: run.model,
-    thinking: run.thinking,
-    systemPrompt: run.systemPrompt,
-    tools: run.tools,
-    excludeTools: run.excludeTools,
-    scope: childToolScope(run),
+    model: run2.model,
+    thinking: run2.thinking,
+    systemPrompt: run2.systemPrompt,
+    tools: run2.tools,
+    excludeTools: run2.excludeTools,
+    scope: childToolScope(run2),
     // v0.12 steering: spawn-resume on a terminal run is always
     // print-mode by design (§4.4 archived-run compat / Q10 lock).
     // RPC mode is NOT sticky across the original-subprocess boundary
@@ -6441,7 +6857,7 @@ function planSpawnPiArgs(opts) {
     seedMessages = [filteredHistorySentinel(), ...seedMessages];
   }
   if (seedMessages) {
-    const seededSessionPath = join17(sessionDir, "seeded.jsonl");
+    const seededSessionPath = join18(sessionDir, "seeded.jsonl");
     seedSessionFile(seededSessionPath, seedMessages, cwd);
     return {
       mode: "resume",
@@ -6489,7 +6905,7 @@ var RunRegistry = class {
   /** N2: this module instance's broker for subprocess delegators' `delegate` calls. */
   delegation;
   admissionLimits;
-  integrations = new EffortDriver();
+  integrations = new EffortDriver(this);
   runs = /* @__PURE__ */ new Map();
   listeners = /* @__PURE__ */ new Set();
   list() {
@@ -6501,9 +6917,9 @@ var RunRegistry = class {
   has(id) {
     return this.runs.has(id);
   }
-  register(run) {
-    this.runs.set(run.id, run);
-    this.notify(run);
+  register(run2) {
+    this.runs.set(run2.id, run2);
+    this.notify(run2);
   }
   countActive() {
     let n = 0;
@@ -6537,15 +6953,19 @@ var RunRegistry = class {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
   }
-  notify(run) {
+  notify(run2) {
     for (const fn of this.listeners) {
       try {
-        fn(run);
+        fn(run2);
       } catch {
       }
     }
   }
 };
+function prepareSpawnMerger(opts, registry, id) {
+  const refused = mergerSpawnError(opts, id, opts.mergerFor && registry.get(opts.mergerFor.writerId));
+  if (refused) throw new Error(refused);
+}
 function leafSpawnOptions(opts) {
   if (!opts.delegation) return opts;
   if (opts.persona && (opts.persona.readOnly !== true || isWriteCapable(opts.persona.name))) {
@@ -6566,33 +6986,34 @@ function leafSpawnOptions(opts) {
     retryAttempt: 0,
     inheritContextOverride: "none",
     parentMessages: void 0,
-    steerable: false
+    steerable: false,
+    mergerFor: void 0
   };
 }
-function recordSpawnedProc(run, proc) {
-  run.proc = proc;
-  run.pid = proc.pid;
+function recordSpawnedProc(run2, proc) {
+  run2.proc = proc;
+  run2.pid = proc.pid;
 }
-function snapshotInvocationMarkers(run, counter) {
-  run.thisInvocationStartedAt = Date.now();
-  run.thisInvocationUsageBaseline = {
-    turns: run.usage.turns,
-    input: run.usage.input,
-    output: run.usage.output,
-    cost: run.usage.cost
+function snapshotInvocationMarkers(run2, counter) {
+  run2.thisInvocationStartedAt = Date.now();
+  run2.thisInvocationUsageBaseline = {
+    turns: run2.usage.turns,
+    input: run2.usage.input,
+    output: run2.usage.output,
+    cost: run2.usage.cost
   };
-  run[counter] = (run[counter] ?? 0) + 1;
+  run2[counter] = (run2[counter] ?? 0) + 1;
 }
-function sendsSinceSpawn(run) {
-  return (run.resumeCount ?? 0) + (run.steerCount ?? 0);
+function sendsSinceSpawn(run2) {
+  return (run2.resumeCount ?? 0) + (run2.steerCount ?? 0);
 }
-function stampSpawnStreamingMode(run, steerable) {
-  run.steerable = steerable;
-  run.streamingMode = steerable ? "rpc" : "print";
+function stampSpawnStreamingMode(run2, steerable) {
+  run2.steerable = steerable;
+  run2.streamingMode = steerable ? "rpc" : "print";
 }
-async function attachSpawnedProc(run, proc) {
-  recordSpawnedProc(run, proc);
-  await writeRecord(run);
+async function attachSpawnedProc(run2, proc) {
+  recordSpawnedProc(run2, proc);
+  await writeRecord(run2);
 }
 function prepareSpawnEvidence(opts, registry) {
   if (opts.files === void 0) return opts;
@@ -6627,12 +7048,14 @@ function spawnRun(opts) {
   opts = prepareSpawnRuntime(opts);
   if (opts.runtime === "herdr" && !opts.registry.herdrAdmissionOpen) throw new Error("herdr runtime shutting down; launch refused");
   opts = prepareSpawnEvidence(opts, opts.registry);
+  prepareSpawnMerger(opts, opts.registry, opts.preAllocatedId ?? opts.mergerFor?.runId);
   const effort = prepareSpawnEffort(opts);
-  const id = opts.preAllocatedId ?? allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
+  const id = opts.preAllocatedId ?? opts.mergerFor?.runId ?? allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
+  if (opts.mergerFor && (existsSync12(join18(runDir(id), "record.json")) || opts.registry.has(id) && opts.registry.get(id).status !== "queued")) throw new Error(`merger ${id} already launched; refusing a second launch`);
   if (effort) addEffortMember(effort, id);
   const dir = runDir(id);
-  mkdirSync9(dir, { recursive: true });
-  const run = {
+  mkdirSync10(dir, { recursive: true });
+  const run2 = {
     id,
     runtime: opts.runtime,
     // A queued placeholder may still be writing this same record.
@@ -6649,9 +7072,9 @@ function spawnRun(opts) {
     messages: [],
     usage: emptyUsage(),
     cwd: opts.cwd,
-    recordPath: join17(dir, "record.json"),
-    transcriptPath: join17(dir, "transcript.jsonl"),
-    finalPath: join17(dir, "final.md"),
+    recordPath: join18(dir, "record.json"),
+    transcriptPath: join18(dir, "transcript.jsonl"),
+    finalPath: join18(dir, "final.md"),
     sessionPath: void 0,
     // Capture the persona body now so future ensemble_send calls can
     // re-pass it on resume. Pi doesn't persist system prompts to disk.
@@ -6668,6 +7091,7 @@ function spawnRun(opts) {
     parentRunId: opts.delegation?.parentRunId,
     delegateToolCallId: opts.delegation?.delegateToolCallId,
     herdrParent: opts.delegation ? opts.registry.get(opts.delegation.parentRunId) : void 0,
+    mergerFor: opts.mergerFor,
     // Item 15: per-invocation markers. Initial spawn IS the start of
     // the (sole, so far) invocation, so:
     //   - thisInvocationStartedAt mirrors startTime
@@ -6742,29 +7166,29 @@ function spawnRun(opts) {
       };
     })()
   };
-  opts.registry.register(run);
+  opts.registry.register(run2);
   try {
     if (!opts.preAllocatedId) {
       opts.events?.emitCreated({
-        id: run.id,
-        persona: run.persona,
-        description: run.task,
-        isBackground: run.mode === "background"
+        id: run2.id,
+        persona: run2.persona,
+        description: run2.task,
+        isBackground: run2.mode === "background"
       });
     }
     opts.events?.emitStarted({
-      id: run.id,
-      persona: run.persona,
-      description: run.task
+      id: run2.id,
+      persona: run2.persona,
+      description: run2.task
     });
     let effectiveCwd = opts.cwd;
     let worktreeFence;
     if (opts.worktree || effort) {
-      const spec = resolveWorktreeSpec(effort?.gitRoot ?? opts.cwd, run.id);
+      const spec = resolveWorktreeSpec(effort?.gitRoot ?? opts.cwd, run2.id);
       if (spec === null) {
         if (effort) throw new Error("effort repository disappeared; refusing shared cwd fallback");
         process.stderr.write(
-          `[conductor] worktree: true but ${opts.cwd} is not inside a git repo; falling back to shared cwd for run ${run.id}
+          `[conductor] worktree: true but ${opts.cwd} is not inside a git repo; falling back to shared cwd for run ${run2.id}
 `
         );
       } else {
@@ -6772,29 +7196,29 @@ function spawnRun(opts) {
           const baseBranch = effort?.baseBranch ?? currentBranch(spec.gitRoot);
           const from = effort ? effortTip(effort) : void 0;
           createWorktree(spec, { from });
-          if (run.effort) run.effort.spawnBase = from;
-          run.worktreePath = spec.worktreePath;
-          run.worktreeBranch = spec.branch;
-          if (baseBranch) run.worktreeBaseBranch = baseBranch;
+          if (run2.effort) run2.effort.spawnBase = from;
+          run2.worktreePath = spec.worktreePath;
+          run2.worktreeBranch = spec.branch;
+          if (baseBranch) run2.worktreeBaseBranch = baseBranch;
           effectiveCwd = worktreeCwd(effort ? { ...spec, gitRoot: effortRepository(opts.cwd).requestedRoot } : spec, opts.cwd);
-          if (run.effort) run.effort.cwd = effectiveCwd;
+          if (run2.effort) run2.effort.cwd = effectiveCwd;
           worktreeFence = { path: spec.worktreePath, branch: spec.branch, gitRoot: spec.gitRoot };
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          process.stderr.write(`[conductor] worktree creation failed for ${run.id}: ${msg}
+          process.stderr.write(`[conductor] worktree creation failed for ${run2.id}: ${msg}
 `);
           if (effort) throw err;
         }
       }
     }
-    void writeRecord(run);
+    void writeRecord(run2);
     const prompt = buildSubAgentPrompt(opts.persona, opts.task, {
       cwd: effectiveCwd,
       requestedCwd: opts.cwd,
       worktree: worktreeFence
     }, scope);
-    const sessionDir = join17(dir, "session");
-    mkdirSync9(sessionDir, { recursive: true });
+    const sessionDir = join18(dir, "session");
+    mkdirSync10(sessionDir, { recursive: true });
     const plan = planSpawnPiArgs({
       persona: opts.persona,
       parentMessages: opts.parentMessages,
@@ -6833,23 +7257,23 @@ function spawnRun(opts) {
       siblingRunCount: opts.registry.list().length - 1,
       scope
     });
-    if (plan.seededSessionPath) run.sessionPath = plan.seededSessionPath;
-    const done = createRunPipeline(run, plan.piArgs, {
+    if (plan.seededSessionPath) run2.sessionPath = plan.seededSessionPath;
+    const done = createRunPipeline(run2, plan.piArgs, {
       registry: opts.registry,
-      runtime: runtimeFor(run, opts.runtimeEnv ?? process.env),
+      runtime: runtimeFor(run2, opts.runtimeEnv ?? process.env),
       core: {
         ...plan.seededSessionPath ? { kind: "resume", sessionPath: plan.seededSessionPath } : { kind: "fresh", sessionDir },
-        systemPrompt: run.systemPrompt,
+        systemPrompt: run2.systemPrompt,
         model: opts.model,
         thinking: opts.thinking,
-        tools: run.tools,
-        excludeTools: run.excludeTools,
+        tools: run2.tools,
+        excludeTools: run2.excludeTools,
         skillPaths: opts.persona.inheritSkills ? collectInheritedSkillPaths({ cwd: opts.cwd }) : void 0
       },
       cwd: effectiveCwd,
       // v0.13: opts.cwd's counterpart in the worktree when one was created
       timeoutMs: opts.timeoutMs,
-      onEvent: delegationObserver(run, opts.registry, effectiveCwd),
+      onEvent: delegationObserver(run2, opts.registry, effectiveCwd),
       onUpdate: opts.onUpdate,
       onComplete: opts.onComplete,
       // Only let the subprocess discover a session file when we didn't pre-seed
@@ -6881,39 +7305,39 @@ function spawnRun(opts) {
       // v0.16-S3: thread the event bus adapter so finalize can emit lifecycle events.
       events: opts.events
     });
-    return { run, done };
+    return { run: run2, done };
   } catch (error) {
     if (!effort) throw error;
-    const current = opts.registry.get(run.id);
+    const current = opts.registry.get(run2.id);
     return failEffortLaunch(current, opts.registry, `effort isolation failed; no child started: ${error.message}. ${EFFORT_NOTICE}`, opts.onComplete);
   }
 }
-function delegationObserver(run, registry, cwd) {
-  if (runScopeError(run) || !isDelegating(childToolScope(run))) return void 0;
+function delegationObserver(run2, registry, cwd) {
+  if (runScopeError(run2) || !isDelegating(childToolScope(run2))) return void 0;
   return (r, event) => registry.delegation?.observe(r, event, cwd);
 }
-function failEffortLaunch(run, registry, errorMessage, onComplete) {
-  if (!applyCloseHandlerTerminal(run, "failed", void 0)) return { run, done: Promise.resolve(run) };
-  run.waitReason = void 0;
-  run.errorMessage = errorMessage;
-  run.failureClass = "environment";
-  const done = writeRecord(run).then(() => {
-    registry.notify(run);
+function failEffortLaunch(run2, registry, errorMessage, onComplete) {
+  if (!applyCloseHandlerTerminal(run2, "failed", void 0)) return { run: run2, done: Promise.resolve(run2) };
+  run2.waitReason = void 0;
+  run2.errorMessage = errorMessage;
+  run2.failureClass = "environment";
+  const done = writeRecord(run2).then(() => {
+    registry.notify(run2);
     try {
-      onComplete?.(run);
+      onComplete?.(run2);
     } catch {
     }
-    return run;
+    return run2;
   });
-  return { run, done };
+  return { run: run2, done };
 }
 function failBeforeSpawn(opts, errorMessage) {
   const runtime = prepareSpawnRuntime(opts).runtime;
   const id = allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
   const dir = runDir(id);
-  mkdirSync9(dir, { recursive: true });
+  mkdirSync10(dir, { recursive: true });
   const now = Date.now();
-  const run = {
+  const run2 = {
     id,
     runtime,
     persona: opts.persona.name,
@@ -6928,20 +7352,20 @@ function failBeforeSpawn(opts, errorMessage) {
     messages: [],
     usage: emptyUsage(),
     cwd: opts.cwd,
-    recordPath: join17(dir, "record.json"),
-    transcriptPath: join17(dir, "transcript.jsonl"),
-    finalPath: join17(dir, "final.md"),
+    recordPath: join18(dir, "record.json"),
+    transcriptPath: join18(dir, "transcript.jsonl"),
+    finalPath: join18(dir, "final.md"),
     parentPid: process.pid,
     parentStartTime: readProcessStartTime(process.pid),
     parentSessionId: opts.parentSessionId,
     errorMessage,
     failureClass: classifyFailure({ terminal: "failed", errorMessage })
   };
-  opts.registry.register(run);
-  void writeRecord(run);
-  void writeFinal(run);
-  opts.onComplete?.(run);
-  return run;
+  opts.registry.register(run2);
+  void writeRecord(run2);
+  void writeFinal(run2);
+  opts.onComplete?.(run2);
+  return run2;
 }
 function resolveCloseHook(cwd, personaName, perCall, personaFrontmatter) {
   const layered = loadConfigWithErrors(cwd);
@@ -6983,15 +7407,15 @@ function mapFromRegistry(r) {
   for (const x of r.list()) m.set(x.id, x);
   return m;
 }
-function sendCwd(run, conductorCwd) {
-  return run.cwd || conductorCwd;
+function sendCwd(run2, conductorCwd) {
+  return run2.cwd || conductorCwd;
 }
-function effortAnswerWaitReason(run, registry) {
-  if (!run.effort || run.status !== "blocked") return;
+function effortAnswerWaitReason(run2, registry) {
+  if (!run2.effort || run2.status !== "blocked") return;
   try {
-    const record = readEffort(run.effort.gitRoot, run.effort.name);
-    const limits = registry.admissionLimits ?? loadConfigWithErrors(run.cwd).config;
-    return admitEffortWriter(run, registry.list(), limits, record, listEfforts(run.effort.gitRoot), new Set(registry.list().filter((r) => r.status === "queued").map((r) => r.id)));
+    const record = readEffort(run2.effort.gitRoot, run2.effort.name);
+    const limits = registry.admissionLimits ?? loadConfigWithErrors(run2.cwd).config;
+    return admitEffortWriter(run2, registry.list(), limits, record, listEfforts(run2.effort.gitRoot), new Set(registry.list().filter((r) => r.status === "queued").map((r) => r.id)));
   } catch (e) {
     return `effort answer admission refused: ${e.message}`;
   }
@@ -7000,102 +7424,104 @@ var RUN_ACTIONS = ["send", "steer", "follow_up", "pause", "resume", "kill", "foc
 function supportsFocus(ctx) {
   return ctx?.mode === "tui";
 }
-function observeRunActions(run, canFocus = false, sessionId, registry) {
+function observeRunActions(run2, canFocus = false, sessionId, registry) {
   let effortOwnershipError;
-  if (run.effort) {
+  const owned = run2.effort ? { gitRoot: run2.effort.gitRoot, name: run2.effort.name, generation: run2.effort.owner?.generation } : run2.mergerFor && { gitRoot: run2.mergerFor.gitRoot, name: run2.mergerFor.effort, generation: run2.mergerFor.owner.generation };
+  if (owned) {
     try {
-      const effort = readEffort(run.effort.gitRoot, run.effort.name);
+      const effort = readEffort(owned.gitRoot, owned.name);
       if (!effort) throw new Error("effort record missing; ownership unresolved");
-      assertEffortOwner(effort, { ...effortOwner(sessionId), generation: run.effort.owner?.generation });
+      assertEffortOwner(effort, { ...effortOwner(sessionId), generation: owned.generation });
     } catch (e) {
-      effortOwnershipError = `cannot send to effort ${run.effort.name}: ${e.message}`;
+      effortOwnershipError = `cannot send to effort ${owned.name}: ${e.message}`;
     }
   }
-  const sessionPath = findRunSessionFile(run);
+  const sessionPath = findRunSessionFile(run2);
   let sessionMissing = false;
-  if (run.sessionPath) {
+  if (run2.sessionPath) {
     try {
-      sessionMissing = !statSync3(run.sessionPath).isFile();
+      sessionMissing = !statSync3(run2.sessionPath).isFile();
     } catch {
       sessionMissing = true;
     }
   }
   return {
     effortOwnershipError,
-    effortAdmissionError: registry ? effortAnswerWaitReason(run, registry) : void 0,
-    capabilities: capabilitiesFor(run),
+    effortAdmissionError: registry ? effortAnswerWaitReason(run2, registry) : void 0,
+    capabilities: capabilitiesFor(run2),
     canFocus,
-    owned: run.parentPid === void 0 || run.parentPid === process.pid,
+    owned: run2.parentPid === void 0 || run2.parentPid === process.pid,
     retirementNotice: contextRetirementNotice({
-      cwd: run.cwd,
-      contextRetired: run.contextRetired || savedSessionRetired(sessionPath)
+      cwd: run2.cwd,
+      contextRetired: run2.contextRetired || savedSessionRetired(sessionPath)
     }),
     sessionMissing
   };
 }
-function runActionError(run, action, observed) {
+function runActionError(run2, action, observed) {
   if (action === "focus") return observed.canFocus ? void 0 : "Focused stream requires terminal UI (TUI mode).";
-  const unsupported = unsupportedRuntimeReason(run.runtime);
-  if (unsupported && !(run.runtime === "herdr" && run.transport?.kind === "herdr")) return unsupported;
+  const unsupported = unsupportedRuntimeReason(run2.runtime);
+  if (unsupported && !(run2.runtime === "herdr" && run2.transport?.kind === "herdr")) return unsupported;
   if (action === "send") {
-    const scopeError = runScopeError(run);
+    const scopeError = runScopeError(run2);
     if (scopeError) return scopeError;
   }
-  if (action !== "kill" && isDelegatedLeaf(run)) return `sub-agent ${run.id} is owned by ${run.parentRunId ?? "its delegating parent"}; only kill. Its parent consumes the result.`;
-  if (run.runtime === "herdr") {
-    if (!ownsHerdrRun(run)) return "herdr owner generation fenced; action refused";
-    if (run.transport?.kind !== "herdr") return "herdr runtime unavailable here: stream is not attached";
+  if (action !== "kill" && isDelegatedLeaf(run2)) return `sub-agent ${run2.id} is owned by ${run2.parentRunId ?? "its delegating parent"}; only kill. Its parent consumes the result.`;
+  if (run2.mergerFor && action !== "kill" && !(action === "send" && run2.status === "blocked")) return `merger ${run2.id} belongs to ${run2.mergerFor.writerId}'s effort integration: only answer its blocked question (send) or kill it.`;
+  if (run2.runtime === "herdr") {
+    if (!ownsHerdrRun(run2)) return "herdr owner generation fenced; action refused";
+    if (run2.transport?.kind !== "herdr") return "herdr runtime unavailable here: stream is not attached";
     if (action === "pause" || action === "resume") return `${action} is subprocess-only; use send to relaunch a saved herdr session.`;
-    if (action === "send" && (run.herdrExitUnconfirmed || run.transport?.kind !== "herdr" || !run.transport.childExited)) return "herdr: previous child exit is unconfirmed; preserve the session and workspace";
-    if (!observed.owned) return `sub-agent ${run.id} is owned by another conductor (foreign run).`;
+    if (action === "send" && (run2.herdrExitUnconfirmed || run2.transport?.kind !== "herdr" || !run2.transport.childExited)) return "herdr: previous child exit is unconfirmed; preserve the session and workspace";
+    if (!observed.owned) return `sub-agent ${run2.id} is owned by another conductor (foreign run).`;
   }
   if (action === "send" || action === "steer" || action === "follow_up") {
     if (observed.effortOwnershipError) return observed.effortOwnershipError;
     if (action === "send" && observed.effortAdmissionError) return observed.effortAdmissionError;
-    if ((run.pendingAsk || run.askExecution) && run.status !== "blocked") return `sub-agent ${run.id} is settling an owner question; wait for sub-agent-asked before answering.`;
-    if (observed.retirementNotice) return `sub-agent ${run.id}: ${observed.retirementNotice}`;
+    if ((run2.pendingAsk || run2.askExecution) && run2.status !== "blocked") return `sub-agent ${run2.id} is settling an owner question; wait for sub-agent-asked before answering.`;
+    if (observed.retirementNotice) return `sub-agent ${run2.id}: ${observed.retirementNotice}`;
   }
   if (action !== "send" && !observed.owned) {
-    return `sub-agent ${run.id} is owned by another conductor (foreign run).`;
+    return `sub-agent ${run2.id} is owned by another conductor (foreign run).`;
   }
-  if (action === "kill" && run.status === "integrating" && !run.integrationControl) return "integration is preserved without a live driver; inspect effort status and use human effort resume/requeue";
-  if (action === "kill") return isTerminal(run.status) ? `sub-agent ${run.id} is already ${run.status}.` : void 0;
+  if (action === "kill" && run2.status === "integrating" && !run2.integrationControl) return "integration is preserved without a live driver; inspect effort status and use human effort resume/requeue";
+  if (action === "kill") return isTerminal(run2.status) ? `sub-agent ${run2.id} is already ${run2.status}.` : void 0;
   if (action === "pause" || action === "resume") {
     const required = action === "pause" ? "running" : "paused";
-    if (run.status !== required) return `cannot ${action} sub-agent ${run.id}: status is ${run.status} (must be '${required}').`;
-    return observed.capabilities.pause ? void 0 : `${action} failed for ${run.id}: process handle missing or signal rejected.`;
+    if (run2.status !== required) return `cannot ${action} sub-agent ${run2.id}: status is ${run2.status} (must be '${required}').`;
+    return observed.capabilities.pause ? void 0 : `${action} failed for ${run2.id}: process handle missing or signal rejected.`;
   }
-  const decision = resolveSendStrategy(run, action === "send" ? "resume" : action);
+  const decision = resolveSendStrategy(run2, action === "send" ? "resume" : action);
   if (decision.strategy.kind === "rejected") return decision.strategy.reason;
-  if (observed.sessionMissing) return `sub-agent ${run.id} session file is missing on disk: ${run.sessionPath}`;
+  if (observed.sessionMissing) return `sub-agent ${run2.id} session file is missing on disk: ${run2.sessionPath}`;
   if (action !== "send" && !observed.capabilities.liveSend) {
-    return run.runtime === "herdr" ? `sub-agent ${run.id}: herdr child is not owned, attached, ready and running.` : `sub-agent ${run.id} finished before steer was delivered (${run.rpcStdinQueue ? "stdin is not writable" : "stdin queue gone"}).`;
+    return run2.runtime === "herdr" ? `sub-agent ${run2.id}: herdr child is not owned, attached, ready and running.` : `sub-agent ${run2.id} finished before steer was delivered (${run2.rpcStdinQueue ? "stdin is not writable" : "stdin queue gone"}).`;
   }
   return void 0;
 }
-function computeAvailableActions(run, observed) {
-  return RUN_ACTIONS.filter((action) => runActionError(run, action, observed) === void 0);
+function computeAvailableActions(run2, observed) {
+  return RUN_ACTIONS.filter((action) => runActionError(run2, action, observed) === void 0);
 }
-function availableActions(run, canFocus = false, sessionId, registry) {
-  return computeAvailableActions(run, observeRunActions(run, canFocus, sessionId, registry));
+function availableActions(run2, canFocus = false, sessionId, registry) {
+  return computeAvailableActions(run2, observeRunActions(run2, canFocus, sessionId, registry));
 }
-function validateRunAction(run, action, canFocus = false, sessionId) {
-  return runActionError(run, action, observeRunActions(run, canFocus, sessionId));
+function validateRunAction(run2, action, canFocus = false, sessionId) {
+  return runActionError(run2, action, observeRunActions(run2, canFocus, sessionId));
 }
-function validateSendable(run, behavior = "auto", sessionId) {
-  if (run.runtime === "herdr") run.transport?.drain();
-  const action = behavior === "auto" ? run.status === "running" ? "follow_up" : "send" : behavior === "resume" ? "send" : behavior;
-  const reason = validateRunAction(run, action, false, sessionId);
+function validateSendable(run2, behavior = "auto", sessionId) {
+  if (run2.runtime === "herdr") run2.transport?.drain();
+  const action = behavior === "auto" ? run2.status === "running" ? "follow_up" : "send" : behavior === "resume" ? "send" : behavior;
+  const reason = validateRunAction(run2, action, false, sessionId);
   return reason === void 0 ? { ok: true } : { ok: false, reason };
 }
-function resolveSendStrategy(run, behavior = "auto") {
-  if (run.status === "running") {
-    const isRpc = run.runtime === "herdr" || run.streamingMode === "rpc" && run.steerable !== false;
+function resolveSendStrategy(run2, behavior = "auto") {
+  if (run2.status === "running") {
+    const isRpc = run2.runtime === "herdr" || run2.streamingMode === "rpc" && run2.steerable !== false;
     if (!isRpc) {
       return {
         strategy: {
           kind: "rejected",
-          reason: `sub-agent ${run.id} is not steerable; mark steerable: true at spawn to send messages while the subprocess is alive. (Currently running; wait for it to finish before sending again.)`
+          reason: `sub-agent ${run2.id} is not steerable; mark steerable: true at spawn to send messages while the subprocess is alive. (Currently running; wait for it to finish before sending again.)`
         }
       };
     }
@@ -7106,37 +7532,37 @@ function resolveSendStrategy(run, behavior = "auto") {
     return {
       strategy: {
         kind: "rejected",
-        reason: `sub-agent ${run.id} is currently running; resume is for terminal runs only. Use streaming_behavior=steer or follow_up to send to the live subprocess.`
+        reason: `sub-agent ${run2.id} is currently running; resume is for terminal runs only. Use streaming_behavior=steer or follow_up to send to the live subprocess.`
       }
     };
   }
-  if (run.status === "paused") {
+  if (run2.status === "paused") {
     return {
       strategy: {
         kind: "rejected",
-        reason: `sub-agent ${run.id} is paused; resume it first via /conductor resume ${run.id}.`
+        reason: `sub-agent ${run2.id} is paused; resume it first via /conductor resume ${run2.id}.`
       }
     };
   }
-  if (run.status === "queued") {
+  if (run2.status === "queued") {
     return {
       strategy: {
         kind: "rejected",
-        reason: `sub-agent ${run.id} is queued and has not started yet; wait for it to start before sending.`
+        reason: `sub-agent ${run2.id} is queued and has not started yet; wait for it to start before sending.`
       }
     };
   }
-  if (run.status === "blocked") {
-    if (!run.pendingAsk) return { strategy: { kind: "rejected", reason: `sub-agent ${run.id} has no valid pending owner question; inspect the transcript before abandoning this assignment.` } };
-    if (behavior === "steer" || behavior === "follow_up") return { strategy: { kind: "rejected", reason: `sub-agent ${run.id} is blocked on an owner question. Answer with auto or resume to continue its saved session.` } };
+  if (run2.status === "blocked") {
+    if (!run2.pendingAsk) return { strategy: { kind: "rejected", reason: `sub-agent ${run2.id} has no valid pending owner question; inspect the transcript before abandoning this assignment.` } };
+    if (behavior === "steer" || behavior === "follow_up") return { strategy: { kind: "rejected", reason: `sub-agent ${run2.id} is blocked on an owner question. Answer with auto or resume to continue its saved session.` } };
   }
-  if (run.status === "integrating") return { strategy: { kind: "rejected", reason: `sub-agent ${run.id} is integrating; no saved-session continuation is available.` } };
-  if (run.effort && isTerminal(run.status)) return { strategy: { kind: "rejected", reason: `${EFFORT_NOTICE} Start a fresh effort writer; only blocked assignments accept owner answers.` } };
+  if (run2.status === "integrating") return { strategy: { kind: "rejected", reason: `sub-agent ${run2.id} is integrating; no saved-session continuation is available.` } };
+  if (run2.effort && isTerminal(run2.status)) return { strategy: { kind: "rejected", reason: `${EFFORT_NOTICE} Start a fresh effort writer; only blocked assignments accept owner answers.` } };
   if (behavior === "steer") {
     return {
       strategy: {
         kind: "rejected",
-        reason: `sub-agent ${run.id} has already finished; cannot steer a terminal run. Send without streaming_behavior to spawn a fresh subprocess.`
+        reason: `sub-agent ${run2.id} has already finished; cannot steer a terminal run. Send without streaming_behavior to spawn a fresh subprocess.`
       }
     };
   }
@@ -7144,63 +7570,71 @@ function resolveSendStrategy(run, behavior = "auto") {
     return {
       strategy: {
         kind: "rejected",
-        reason: `sub-agent ${run.id} has already finished; cannot follow_up a terminal run. Send without streaming_behavior to spawn a fresh subprocess.`
+        reason: `sub-agent ${run2.id} has already finished; cannot follow_up a terminal run. Send without streaming_behavior to spawn a fresh subprocess.`
       }
     };
   }
-  if (!run.sessionPath) {
+  if (!run2.sessionPath) {
     return {
       strategy: {
         kind: "rejected",
-        reason: `sub-agent ${run.id} has no resumable session on disk (sessionPath unset).`
+        reason: `sub-agent ${run2.id} has no resumable session on disk (sessionPath unset).`
       }
     };
   }
   return { strategy: { kind: "spawn-resume" } };
 }
-function restoreResumeWorktree(run, readSession) {
+function restoreResumeWorktree(run2, readSession) {
   let path2;
   try {
     path2 = sessionHeaderCwd(readSession());
   } catch {
     return void 0;
   }
-  if (!path2 || existsSync10(path2)) return void 0;
-  const layout = `${sep3}${join17(".worktrees", "conductor-wt", run.id)}`;
+  if (!path2 || existsSync12(path2)) return void 0;
+  const layout = `${sep3}${join18(".worktrees", "conductor-wt", run2.id)}`;
   const at = `${path2}${sep3}`.lastIndexOf(`${layout}${sep3}`);
   if (at < 0) return void 0;
   const gitRoot2 = path2.slice(0, at);
   const root = path2.slice(0, at + layout.length);
-  if (existsSync10(root)) return void 0;
-  const spawnFresh = `spawn a fresh ${run.persona} instead`;
-  const kept = run.worktreeBranch && refExists(gitRoot2, `refs/heads/${run.worktreeBranch}`) ? run.worktreeBranch : void 0;
-  const base = run.worktreeBaseBranch ?? "master";
+  if (existsSync12(root)) return void 0;
+  const spawnFresh = `spawn a fresh ${run2.persona} instead`;
+  const kept = run2.worktreeBranch && refExists(gitRoot2, `refs/heads/${run2.worktreeBranch}`) ? run2.worktreeBranch : void 0;
+  const base = run2.worktreeBaseBranch ?? "master";
   if (!kept && !refExists(gitRoot2, base)) {
-    const gone = existsSync10(gitRoot2) ? `its base branch ${base}` : `its repo ${gitRoot2}`;
-    return `cannot resume ${run.id}: its worktree ${root} was removed, and ${gone} is gone; ${spawnFresh}.`;
+    const gone = existsSync12(gitRoot2) ? `its base branch ${base}` : `its repo ${gitRoot2}`;
+    return `cannot resume ${run2.id}: its worktree ${root} was removed, and ${gone} is gone; ${spawnFresh}.`;
   }
-  const branch = kept ?? `conductor-wt/${run.id}-r${(run.resumeCount ?? 0) + 1}`;
+  const branch = kept ?? `conductor-wt/${run2.id}-r${(run2.resumeCount ?? 0) + 1}`;
   try {
     restoreWorktree({ gitRoot: gitRoot2, worktreePath: root, branch }, kept ? void 0 : base);
   } catch (e) {
-    return `cannot resume ${run.id}: re-creating its worktree failed: ${e.message}; ${spawnFresh}.`;
+    return `cannot resume ${run2.id}: re-creating its worktree failed: ${e.message}; ${spawnFresh}.`;
   }
-  run.worktreePath = root;
-  run.worktreeBranch = branch;
+  run2.worktreePath = root;
+  run2.worktreeBranch = branch;
   return void 0;
 }
-function sendToRun(run, message4, opts) {
-  if (run.runtime === "herdr" && !opts.registry.herdrAdmissionOpen) return { kind: "rejected", reason: "herdr runtime shutting down; send refused" };
+function sendToRun(run2, message4, opts) {
+  if (run2.runtime === "herdr" && !opts.registry.herdrAdmissionOpen) return { kind: "rejected", reason: "herdr runtime shutting down; send refused" };
   let trimmed = message4.trim();
   if (!trimmed) {
     return {
       kind: "rejected",
-      reason: `cannot send an empty message to sub-agent ${run.id}.`
+      reason: `cannot send an empty message to sub-agent ${run2.id}.`
     };
   }
   const behavior = opts.streamingBehavior ?? "auto";
-  const check = validateSendable(run, behavior, opts.sessionId);
+  const check = validateSendable(run2, behavior, opts.sessionId);
   if (!check.ok) return { kind: "rejected", reason: check.reason };
+  if (run2.mergerFor) {
+    const claim = mergerClaimError(opts.registry.get(run2.mergerFor.writerId), run2.id, run2.cwd, run2.mergerFor);
+    if (claim) return { kind: "rejected", reason: `cannot answer merger ${run2.id}: ${claim}` };
+    const forward = opts.onComplete;
+    opts = { ...opts, onComplete: (r) => {
+      if (r.status === "blocked") forward?.(r);
+    } };
+  }
   if (opts.files !== void 0) {
     if (!opts.callerCwd) return { kind: "rejected", reason: "files require an explicit callerCwd" };
     try {
@@ -7209,88 +7643,88 @@ function sendToRun(run, message4, opts) {
       return { kind: "rejected", reason: e.message };
     }
   }
-  const decision = resolveSendStrategy(run, behavior);
+  const decision = resolveSendStrategy(run2, behavior);
   if (decision.strategy.kind === "rejected") {
     return { kind: "rejected", reason: decision.strategy.reason };
   }
   if (decision.strategy.kind === "rpc-steer" || decision.strategy.kind === "rpc-follow-up") {
     const cmdType = decision.strategy.kind === "rpc-steer" ? "steer" : "follow_up";
-    if (run.runtime === "herdr" && opts.maxTurns !== void 0) run.maxTurns = opts.maxTurns;
-    if (run.runtime === "herdr" && opts.graceTurns !== void 0) run.graceTurns = opts.graceTurns;
-    if (opts.killOnStall !== void 0) run.killOnStall = opts.killOnStall;
-    if (opts.softStallSeconds !== void 0) run.softStallSeconds = opts.softStallSeconds;
-    if (opts.onCompleteHook !== void 0) run.onCompleteHook = opts.onCompleteHook;
+    if (run2.runtime === "herdr" && opts.maxTurns !== void 0) run2.maxTurns = opts.maxTurns;
+    if (run2.runtime === "herdr" && opts.graceTurns !== void 0) run2.graceTurns = opts.graceTurns;
+    if (opts.killOnStall !== void 0) run2.killOnStall = opts.killOnStall;
+    if (opts.softStallSeconds !== void 0) run2.softStallSeconds = opts.softStallSeconds;
+    if (opts.onCompleteHook !== void 0) run2.onCompleteHook = opts.onCompleteHook;
     if (opts.onCompleteHookTimeoutSeconds !== void 0)
-      run.onCompleteHookTimeoutSeconds = opts.onCompleteHookTimeoutSeconds;
-    snapshotInvocationMarkers(run, "steerCount");
-    const result = runtimeFor(run).deliver(run, cmdType, trimmed, opts.sessionId);
+      run2.onCompleteHookTimeoutSeconds = opts.onCompleteHookTimeoutSeconds;
+    snapshotInvocationMarkers(run2, "steerCount");
+    const result = runtimeFor(run2).deliver(run2, cmdType, trimmed, opts.sessionId);
     if (result.kind === "epipe") {
       return { kind: "rejected", reason: result.reason };
     }
     const done2 = new Promise((resolve7) => {
       const unsub = opts.registry.onChange((r) => {
-        if (r.id === run.id && isSettled(r.status)) {
+        if (r.id === run2.id && isSettled(r.status)) {
           unsub();
           resolve7(r);
         }
       });
     });
-    opts.events?.emitSteered({ id: run.id, message: trimmed });
-    return { kind: "started", run, done: done2, ack: result.ack };
+    opts.events?.emitSteered({ id: run2.id, message: trimmed });
+    return { kind: "started", run: run2, done: done2, ack: result.ack };
   }
-  const sessionPath = run.sessionPath;
-  const answer = run.pendingAsk ? { ask: run.pendingAsk, cwd: run.cwd } : void 0;
-  if (run.effort && (!run.effort.cwd || !run.worktreeBranch || !refExists(run.effort.gitRoot, `refs/heads/${run.worktreeBranch}`))) {
+  const sessionPath = run2.sessionPath;
+  const answer = run2.pendingAsk ? { ask: run2.pendingAsk, cwd: run2.cwd } : void 0;
+  if (run2.effort && (!run2.effort.cwd || !run2.worktreeBranch || !refExists(run2.effort.gitRoot, `refs/heads/${run2.worktreeBranch}`))) {
     return { kind: "rejected", reason: "effort assignment branch/cwd is missing; preserve the outstanding question and inspect the effort before recovery" };
   }
-  if (run.effort) {
-    const reason = effortAnswerWaitReason(run, opts.registry);
+  if (run2.effort) {
+    const reason = effortAnswerWaitReason(run2, opts.registry);
     if (reason) return { kind: "rejected", reason };
   }
-  const worktreeBlocker = restoreResumeWorktree(run, () => readFileSync13(sessionPath, "utf8"));
+  const worktreeBlocker = restoreResumeWorktree(run2, () => readFileSync15(sessionPath, "utf8"));
   if (worktreeBlocker) return { kind: "rejected", reason: worktreeBlocker };
-  const pendingAsk = run.pendingAsk;
-  if (pendingAsk && run.runtime !== "herdr") trimmed = formatOwnerAnswer(pendingAsk, trimmed);
-  run.askExecution = void 0;
-  run.askContinuation = void 0;
-  run.failureClass = void 0;
-  run.nonSubstantiveFinal = void 0;
-  run.status = "running";
-  run.finishedAt = void 0;
-  run.exitCode = void 0;
-  run.errorMessage = void 0;
-  run.worktreeKept = void 0;
-  run.stopReason = void 0;
-  run.lastToolCall = void 0;
-  run.abandonedChildren = void 0;
-  run.delegationClosed = void 0;
-  run.lastEventAt = Date.now();
-  run.stalledSince = void 0;
-  snapshotInvocationMarkers(run, "resumeCount");
-  if (run.runtime === "herdr" && opts.maxTurns !== void 0) run.maxTurns = opts.maxTurns;
-  if (run.runtime === "herdr" && opts.graceTurns !== void 0) run.graceTurns = opts.graceTurns;
-  if (opts.killOnStall !== void 0) run.killOnStall = opts.killOnStall;
-  if (opts.softStallSeconds !== void 0) run.softStallSeconds = opts.softStallSeconds;
-  if (opts.onCompleteHook !== void 0) run.onCompleteHook = opts.onCompleteHook;
+  const pendingAsk = run2.pendingAsk;
+  if (pendingAsk && run2.runtime !== "herdr") trimmed = formatOwnerAnswer(pendingAsk, trimmed);
+  run2.askExecution = void 0;
+  run2.askContinuation = void 0;
+  run2.failureClass = void 0;
+  run2.nonSubstantiveFinal = void 0;
+  run2.status = "running";
+  run2.finishedAt = void 0;
+  run2.exitCode = void 0;
+  run2.errorMessage = void 0;
+  run2.worktreeKept = void 0;
+  run2.stopReason = void 0;
+  run2.lastToolCall = void 0;
+  run2.abandonedChildren = void 0;
+  run2.delegationClosed = void 0;
+  run2.lastEventAt = Date.now();
+  run2.stalledSince = void 0;
+  snapshotInvocationMarkers(run2, "resumeCount");
+  if (run2.runtime === "herdr" && opts.maxTurns !== void 0) run2.maxTurns = opts.maxTurns;
+  if (run2.runtime === "herdr" && opts.graceTurns !== void 0) run2.graceTurns = opts.graceTurns;
+  if (opts.killOnStall !== void 0) run2.killOnStall = opts.killOnStall;
+  if (opts.softStallSeconds !== void 0) run2.softStallSeconds = opts.softStallSeconds;
+  if (opts.onCompleteHook !== void 0) run2.onCompleteHook = opts.onCompleteHook;
   if (opts.onCompleteHookTimeoutSeconds !== void 0)
-    run.onCompleteHookTimeoutSeconds = opts.onCompleteHookTimeoutSeconds;
-  opts.registry.notify(run);
-  run.model = resumeModel(
-    run.model,
-    () => readFileSync13(sessionPath, "utf8"),
+    run2.onCompleteHookTimeoutSeconds = opts.onCompleteHookTimeoutSeconds;
+  opts.registry.notify(run2);
+  run2.model = resumeModel(
+    run2.model,
+    () => readFileSync15(sessionPath, "utf8"),
     opts.isRegisteredModel,
     opts.currentModelProvider
   );
-  const piArgs = buildResumePiArgs(run, trimmed);
-  const resumeCwd = run.runtime === "herdr" ? sessionHeaderCwd(readFileSync13(sessionPath, "utf8")) ?? run.cwd : run.effort?.cwd ?? run.cwd;
-  const done = createRunPipeline(run, piArgs, {
+  const piArgs = buildResumePiArgs(run2, trimmed);
+  const resumeCwd = run2.runtime === "herdr" ? sessionHeaderCwd(readFileSync15(sessionPath, "utf8")) ?? run2.cwd : run2.effort?.cwd ?? run2.cwd;
+  const done = createRunPipeline(run2, piArgs, {
     answer,
     registry: opts.registry,
-    runtime: runtimeFor(run),
-    core: { kind: "resume", sessionPath, systemPrompt: run.systemPrompt, model: run.model, thinking: run.thinking, tools: run.tools, excludeTools: run.excludeTools },
+    runtime: runtimeFor(run2),
+    core: { kind: "resume", sessionPath, systemPrompt: run2.systemPrompt, model: run2.model, thinking: run2.thinking, tools: run2.tools, excludeTools: run2.excludeTools },
     cwd: resumeCwd,
     // Pi resumes in the session header's cwd, which is the parent's effective cwd for its files.
-    onEvent: delegationObserver(run, opts.registry, sessionHeaderCwd(readFileSync13(sessionPath, "utf8")) ?? resumeCwd),
+    onEvent: delegationObserver(run2, opts.registry, sessionHeaderCwd(readFileSync15(sessionPath, "utf8")) ?? resumeCwd),
     timeoutMs: opts.timeoutMs,
     onUpdate: opts.onUpdate,
     onComplete: opts.onComplete,
@@ -7305,122 +7739,122 @@ function sendToRun(run, message4, opts) {
     // honored (§4.6: each terminal is a fresh gate). Per-call layer
     // (slice 3) reads from `Run.onCompleteHook` — stamped at spawn time
     // by `spawnRun` and replaceable by per-send overrides above.
-    resolvedHook: run.reconciledAtStartup && run.effort ? run.effort.gate ?? void 0 : resolveCloseHook(
-      run.cwd,
-      run.persona,
-      hookSpecFromOpts(run.onCompleteHook, run.onCompleteHookTimeoutSeconds),
+    resolvedHook: run2.reconciledAtStartup && run2.effort ? run2.effort.gate ?? void 0 : resolveCloseHook(
+      run2.cwd,
+      run2.persona,
+      hookSpecFromOpts(run2.onCompleteHook, run2.onCompleteHookTimeoutSeconds),
       opts.persona ? hookSpecFromPersona(opts.persona) : void 0
     ),
     // v0.16-S3: thread event bus so finalize on the resumed run can emit.
     events: opts.events
   });
-  return { kind: "started", run, done };
+  return { kind: "started", run: run2, done };
 }
-function emitFinalizeEvent(run, events) {
+function emitFinalizeEvent(run2, events) {
   if (!events) return;
-  const durationMs = (run.finishedAt ?? Date.now()) - run.startTime;
+  const durationMs = (run2.finishedAt ?? Date.now()) - run2.startTime;
   const base = {
-    id: run.id,
-    persona: run.persona,
+    id: run2.id,
+    persona: run2.persona,
     durationMs,
-    toolUses: run.usage.turns,
-    tokens: { input: run.usage.input, output: run.usage.output, cost: run.usage.cost }
+    toolUses: run2.usage.turns,
+    tokens: { input: run2.usage.input, output: run2.usage.output, cost: run2.usage.cost }
   };
-  if (run.status === "completed") {
+  if (run2.status === "completed") {
     events.emitCompleted(base);
   } else {
     events.emitFailed({
       ...base,
-      status: run.status,
-      errorMessage: run.errorMessage,
-      failureClass: run.failureClass
+      status: run2.status,
+      errorMessage: run2.errorMessage,
+      failureClass: run2.failureClass
     });
   }
 }
-function applyCloseHandlerTerminal(run, terminal, exitCode) {
-  if (isTerminal(run.status)) return false;
-  run.status = terminal;
-  run.exitCode = exitCode;
-  run.finishedAt = Date.now();
+function applyCloseHandlerTerminal(run2, terminal, exitCode) {
+  if (isTerminal(run2.status)) return false;
+  run2.status = terminal;
+  run2.exitCode = exitCode;
+  run2.finishedAt = Date.now();
   return true;
 }
-function applyCompactionLine(run, events) {
-  const tokensBefore = run.usage.input + run.usage.output;
-  run.compactionCount = (run.compactionCount ?? 0) + 1;
+function applyCompactionLine(run2, events) {
+  const tokensBefore = run2.usage.input + run2.usage.output;
+  run2.compactionCount = (run2.compactionCount ?? 0) + 1;
   events?.emitCompacted({
-    id: run.id,
-    persona: run.persona,
-    compactionCount: run.compactionCount,
+    id: run2.id,
+    persona: run2.persona,
+    compactionCount: run2.compactionCount,
     description: "",
     tokensBefore
   });
-  return run.compactionCount;
+  return run2.compactionCount;
 }
-function applySubstanceCheck(run, terminal) {
+function applySubstanceCheck(run2, terminal) {
   if (terminal !== "completed") return;
-  if (run.nonSubstantiveFinal) return;
-  const check = isNonSubstantiveFinalMessage(run.messages);
+  if (run2.nonSubstantiveFinal) return;
+  const check = isNonSubstantiveFinalMessage(run2.messages);
   if (check.warn && check.reason && check.message) {
-    run.nonSubstantiveFinal = { reason: check.reason, message: check.message };
+    run2.nonSubstantiveFinal = { reason: check.reason, message: check.message };
   }
 }
-async function applyMergeToTerminal(run, gitRoot2, terminal) {
-  if (run.effort) return terminal;
-  if (terminal !== "completed" || !run.worktreePath || !run.worktreeBranch || !run.mergeStrategy || run.mergeStrategy === "none") {
+async function applyMergeToTerminal(run2, gitRoot2, terminal) {
+  if (run2.effort) return terminal;
+  if (terminal !== "completed" || !run2.worktreePath || !run2.worktreeBranch || !run2.mergeStrategy || run2.mergeStrategy === "none") {
     return terminal;
   }
-  if (run.reconciledAtStartup) {
-    run.errorMessage = `auto-merge skipped: startup reconcile re-adopted this run, so its on_complete_hook gate could not be rebuilt; worktree preserved at ${run.worktreePath}; review ${run.worktreeBranch}, then /conductor worktree merge ${run.id}`;
+  if (run2.reconciledAtStartup) {
+    run2.errorMessage = `auto-merge skipped: startup reconcile re-adopted this run, so its on_complete_hook gate could not be rebuilt; worktree preserved at ${run2.worktreePath}; review ${run2.worktreeBranch}, then /conductor worktree merge ${run2.id}`;
     return "merge_conflict";
   }
-  const baseBranch = run.worktreeBaseBranch ?? "master";
+  const baseBranch = run2.worktreeBaseBranch ?? "master";
   const commitMessage = buildMergeCommitMessage(
-    run.persona,
-    run.id,
-    run.task
+    run2.persona,
+    run2.id,
+    run2.task
   );
   const result = await mergeWorktree(
-    { gitRoot: gitRoot2, worktreePath: run.worktreePath, branch: run.worktreeBranch },
-    { strategy: run.mergeStrategy, baseBranch, commitMessage }
+    { gitRoot: gitRoot2, worktreePath: run2.worktreePath, branch: run2.worktreeBranch },
+    { strategy: run2.mergeStrategy, baseBranch, commitMessage }
   );
-  run.mergeResult = result;
+  run2.mergeResult = result;
   if (result.success) return terminal;
-  run.errorMessage = result.conflicts ? `merge conflict in: ${result.conflicts.join(", ")}` : result.errorMessage ?? "merge failed";
-  run.worktreeKept = `worktree kept for the merge conflict: ${run.worktreePath} (branch ${run.worktreeBranch}); resolve manually: cd ${gitRoot2} && git merge ${run.worktreeBranch}, or fix it in the worktree and run /conductor worktree merge ${run.id}`;
+  run2.errorMessage = result.conflicts ? `merge conflict in: ${result.conflicts.join(", ")}` : result.errorMessage ?? "merge failed";
+  run2.worktreeKept = `worktree kept for the merge conflict: ${run2.worktreePath} (branch ${run2.worktreeBranch}); resolve manually: cd ${gitRoot2} && git merge ${run2.worktreeBranch}, or fix it in the worktree and run /conductor worktree merge ${run2.id}`;
   return "merge_conflict";
 }
-async function herdrChildGone(run) {
-  if (run.runtime !== "herdr") return true;
-  if (run.transport?.kind === "herdr" ? run.transport.childExited : herdrChildAbsent(run)) return true;
-  run.worktreeKept = "worktree kept: herdr child exit unconfirmed";
+async function herdrChildGone(run2) {
+  if (run2.runtime !== "herdr") return true;
+  if (run2.transport?.kind === "herdr" ? run2.transport.childExited : herdrChildAbsent(run2)) return true;
+  run2.worktreeKept = "worktree kept: herdr child exit unconfirmed";
   return false;
 }
-async function settleWorktree(run, terminal) {
-  assertHerdrOwner(run);
-  if (!await herdrChildGone(run)) return terminal;
-  assertHerdrOwner(run);
-  if (run.effort) {
-    run.worktreeKept = `${effortSummary(run)}. Worktree ${run.worktreePath ?? "unavailable"}; branch ${run.worktreeBranch ?? "unavailable"} preserved.`;
+async function settleWorktree(run2, terminal) {
+  assertHerdrOwner(run2);
+  if (!await herdrChildGone(run2)) return terminal;
+  assertHerdrOwner(run2);
+  if (run2.effort) {
+    run2.worktreeKept = `${effortSummary(run2)}. Worktree ${run2.worktreePath ?? "unavailable"}; branch ${run2.worktreeBranch ?? "unavailable"} preserved.`;
     return terminal;
   }
-  if (!run.worktreePath || !run.worktreeBranch) return terminal;
-  if (childExitUnconfirmed(run)) {
-    run.worktreeKept = `delegated child exit unconfirmed: worktree ${run.worktreePath} and branch ${run.worktreeBranch} preserved, nothing merged.`;
+  if (!run2.worktreePath || !run2.worktreeBranch) return terminal;
+  if (childExitUnconfirmed(run2)) {
+    run2.worktreeKept = `delegated child exit unconfirmed: worktree ${run2.worktreePath} and branch ${run2.worktreeBranch} preserved, nothing merged.`;
     return terminal;
   }
-  const gitRoot2 = dirname15(dirname15(dirname15(run.worktreePath)));
-  const noMergeBack = !run.mergeStrategy || run.mergeStrategy === "none";
-  if (!noMergeBack) terminal = await applyMergeToTerminal(run, gitRoot2, terminal);
-  if (terminal === "merge_conflict" || run.reconciledAtStartup) return terminal;
-  if (terminal !== "completed" && (run.resumeCount ?? 0) > 0) {
-    run.worktreeKept = keptWorktreeHint(run.worktreePath, run.worktreeBranch);
+  const gitRoot2 = dirname15(dirname15(dirname15(run2.worktreePath)));
+  const noMergeBack = !run2.mergeStrategy || run2.mergeStrategy === "none";
+  if (!noMergeBack) terminal = await applyMergeToTerminal(run2, gitRoot2, terminal);
+  if (terminal === "merge_conflict" || run2.reconciledAtStartup) return terminal;
+  if (terminal !== "completed" && (run2.resumeCount ?? 0) > 0) {
+    run2.worktreeKept = keptWorktreeHint(run2.worktreePath, run2.worktreeBranch);
     return terminal;
   }
-  const branch = run.worktreeBranch;
-  const keepBranch = noMergeBack || terminal !== "completed" && branchHasUnmergedCommits(gitRoot2, run.worktreeBaseBranch ?? "master", branch);
-  await releaseWorktree(run, { keepBranch });
-  if (terminal !== "completed" && keepBranch && !run.worktreePath) {
-    run.worktreeKept = keptBranchHint(gitRoot2, branch);
+  const branch = run2.worktreeBranch;
+  const keepBranch = noMergeBack || terminal !== "completed" && branchHasUnmergedCommits(gitRoot2, run2.worktreeBaseBranch ?? "master", branch);
+  await releaseWorktree(run2, { keepBranch });
+  if (terminal !== "completed" && keepBranch && !run2.worktreePath) {
+    run2.worktreeKept = keptBranchHint(gitRoot2, branch);
   }
   return terminal;
 }
@@ -7431,8 +7865,8 @@ function keptWorktreeHint(worktreePath, branch) {
   const gitRoot2 = dirname15(dirname15(dirname15(worktreePath)));
   return `worktree kept with any partial work: ${worktreePath} (branch ${branch}); keep it with cd ${gitRoot2} && git merge ${branch}, or discard it (with every other kept worktree) via /conductor worktree clean`;
 }
-function worktreeCleanupGuard(run, currentRun) {
-  if (run.runtime !== "herdr") return () => run.runtime === void 0 || run.runtime === "subprocess";
+function worktreeCleanupGuard(run2, currentRun) {
+  if (run2.runtime !== "herdr") return () => run2.runtime === void 0 || run2.runtime === "subprocess";
   const keys = [
     "id",
     "runtime",
@@ -7447,111 +7881,111 @@ function worktreeCleanupGuard(run, currentRun) {
     "parentPid",
     "parentSessionId"
   ];
-  const expected = Object.fromEntries(keys.map((key) => [key, run[key]]));
-  const binding = run.herdr && { ...run.herdr };
-  const recordPath = run.recordPath;
-  const valid = ["id", "recordPath", "cwd", "worktreePath", "worktreeBranch"].every((key) => typeof expected[key] === "string" && expected[key].length > 0 && !expected[key].includes("\0")) && ["worktreeBaseBranch", "sessionPath"].every((key) => expected[key] === void 0 || typeof expected[key] === "string" && expected[key].length > 0 && !expected[key].includes("\0")) && (expected.mergeStrategy === void 0 || typeof expected.mergeStrategy === "string" && ["none", "squash", "merge"].includes(expected.mergeStrategy)) && isTerminal(run.status) && binding?.runId === run.id && Number.isSafeInteger(binding.childPid) && Number(binding.childPid) > 1 && (binding.childStartTime === void 0 || Number.isSafeInteger(binding.childStartTime) && binding.childStartTime > 0) && typeof binding.createdTab === "boolean" && ["runId", "launchNonce", "sessionId", "sessionFile", "socketPath", "workspaceId", "tabId", "paneId", "terminalId"].every((key) => {
+  const expected = Object.fromEntries(keys.map((key) => [key, run2[key]]));
+  const binding = run2.herdr && { ...run2.herdr };
+  const recordPath = run2.recordPath;
+  const valid = ["id", "recordPath", "cwd", "worktreePath", "worktreeBranch"].every((key) => typeof expected[key] === "string" && expected[key].length > 0 && !expected[key].includes("\0")) && ["worktreeBaseBranch", "sessionPath"].every((key) => expected[key] === void 0 || typeof expected[key] === "string" && expected[key].length > 0 && !expected[key].includes("\0")) && (expected.mergeStrategy === void 0 || typeof expected.mergeStrategy === "string" && ["none", "squash", "merge"].includes(expected.mergeStrategy)) && isTerminal(run2.status) && binding?.runId === run2.id && Number.isSafeInteger(binding.childPid) && Number(binding.childPid) > 1 && (binding.childStartTime === void 0 || Number.isSafeInteger(binding.childStartTime) && binding.childStartTime > 0) && typeof binding.createdTab === "boolean" && ["runId", "launchNonce", "sessionId", "sessionFile", "socketPath", "workspaceId", "tabId", "paneId", "terminalId"].every((key) => {
     const value = binding[key];
     return typeof value === "string" && value.length > 0 && !value.includes("\0");
   });
   const matches = (value, allowRemoved = false) => valid && isRecord(value) && value.effort === void 0 && keys.every((key) => value[key] === expected[key] || allowRemoved && (key === "worktreePath" || key === "worktreeBranch") && value[key] === void 0) && isRecord(value.herdr) && value.herdr.createdTab === binding?.createdTab && sameHerdrBinding(binding, value.herdr);
   return (worktreeRemoved = false) => {
     try {
-      return ownsHerdrRun(run) && matches(run, worktreeRemoved) && matches(currentRun(), worktreeRemoved) && matches(read(recordPath));
+      return ownsHerdrRun(run2) && matches(run2, worktreeRemoved) && matches(currentRun(), worktreeRemoved) && matches(read(recordPath));
     } catch {
       return false;
     }
   };
 }
-async function releaseRunPane(run, isCurrent = () => true) {
-  if (!ownsHerdrRun(run) || !isCurrent()) return false;
-  if (run.runtime !== "herdr") return true;
-  const binding = run.herdr, status = run.status;
-  return run.transport?.kind === "herdr" ? run.transport.releasePane(void 0, isCurrent) : releaseRecordedPane(run, () => isCurrent() && run.herdr === binding && run.status === status ? run.herdr : void 0);
+async function releaseRunPane(run2, isCurrent = () => true) {
+  if (!ownsHerdrRun(run2) || !isCurrent()) return false;
+  if (run2.runtime !== "herdr") return true;
+  const binding = run2.herdr, status = run2.status;
+  return run2.transport?.kind === "herdr" ? run2.transport.releasePane(void 0, isCurrent) : releaseRecordedPane(run2, () => isCurrent() && run2.herdr === binding && run2.status === status ? run2.herdr : void 0);
 }
-async function releaseWorktree(run, opts) {
+async function releaseWorktree(run2, opts) {
   if (opts.isCurrent && !opts.isCurrent()) {
-    run.worktreeKept = "worktree kept: current ownership unconfirmed";
+    run2.worktreeKept = "worktree kept: current ownership unconfirmed";
     return false;
   }
-  if (run.effort) return false;
-  if (!run.worktreePath || !run.worktreeBranch) return false;
+  if (run2.effort) return false;
+  if (!run2.worktreePath || !run2.worktreeBranch) return false;
   const wtSpec = {
     // Reconstruct gitRoot: <gitRoot>/.worktrees/conductor-wt/<run-id> → 3 levels up
-    gitRoot: dirname15(dirname15(dirname15(run.worktreePath))),
-    worktreePath: run.worktreePath,
-    branch: run.worktreeBranch
+    gitRoot: dirname15(dirname15(dirname15(run2.worktreePath))),
+    worktreePath: run2.worktreePath,
+    branch: run2.worktreeBranch
   };
   if (worktreeHasUncommittedChanges(wtSpec.worktreePath)) {
-    run.worktreeKept = `worktree kept: uncommitted changes in ${wtSpec.worktreePath}; commit them to ${wtSpec.branch} or discard them, then git worktree remove ${wtSpec.worktreePath}`;
+    run2.worktreeKept = `worktree kept: uncommitted changes in ${wtSpec.worktreePath}; commit them to ${wtSpec.branch} or discard them, then git worktree remove ${wtSpec.worktreePath}`;
     return false;
   }
-  const binding = run.herdr, status = run.status;
-  if (run.runtime === "herdr" && (!await releaseRunPane(run, opts.isCurrent) || run.herdr !== binding || run.status !== status || run.worktreePath !== wtSpec.worktreePath || run.worktreeBranch !== wtSpec.branch)) {
-    run.worktreeKept = `worktree kept: pane ${run.herdr?.paneId ?? "unknown"} not proven ours and empty`;
+  const binding = run2.herdr, status = run2.status;
+  if (run2.runtime === "herdr" && (!await releaseRunPane(run2, opts.isCurrent) || run2.herdr !== binding || run2.status !== status || run2.worktreePath !== wtSpec.worktreePath || run2.worktreeBranch !== wtSpec.branch)) {
+    run2.worktreeKept = `worktree kept: pane ${run2.herdr?.paneId ?? "unknown"} not proven ours and empty`;
     return false;
   }
   if (opts.isCurrent && !opts.isCurrent()) {
-    run.worktreeKept = "worktree kept: current ownership unconfirmed";
+    run2.worktreeKept = "worktree kept: current ownership unconfirmed";
     return false;
   }
-  if (!ownsHerdrRun(run)) return false;
+  if (!ownsHerdrRun(run2)) return false;
   if (removeWorktree(wtSpec, opts)) {
-    run.worktreePath = void 0;
-    if (!opts.keepBranch) run.worktreeBranch = void 0;
+    run2.worktreePath = void 0;
+    if (!opts.keepBranch) run2.worktreeBranch = void 0;
     return true;
   } else {
-    process.stderr.write(`[conductor] worktree removal failed for ${run.id}; GC will clean up
+    process.stderr.write(`[conductor] worktree removal failed for ${run2.id}; GC will clean up
 `);
     return false;
   }
 }
-function applyChainIfPresent(run, terminal, onChain) {
-  if (run.effort || terminal !== "completed") return;
+function applyChainIfPresent(run2, terminal, onChain) {
+  if (run2.effort || terminal !== "completed") return;
   if (!onChain) return;
   try {
-    onChain(run);
+    onChain(run2);
   } catch {
   }
 }
-function applyRetryIfNeeded(run, onRetry) {
-  if (run.effort || !onRetry) return false;
-  if (run.status === "completed") return false;
-  if (!run.retryPolicy || !run.failureClass) return false;
-  const attempt = run.retryAttempt ?? 0;
-  if (!shouldRetry(run.failureClass, attempt, run.retryPolicy)) return false;
+function applyRetryIfNeeded(run2, onRetry) {
+  if (run2.effort || !onRetry) return false;
+  if (run2.status === "completed") return false;
+  if (!run2.retryPolicy || !run2.failureClass) return false;
+  const attempt = run2.retryAttempt ?? 0;
+  if (!shouldRetry(run2.failureClass, attempt, run2.retryPolicy)) return false;
   try {
-    onRetry(run);
+    onRetry(run2);
   } catch {
   }
   return true;
 }
-async function applyHookToTerminal(run, resolvedHook, terminal, deps = {}) {
-  const fence = herdrEffectFence(run);
+async function applyHookToTerminal(run2, resolvedHook, terminal, deps = {}) {
+  const fence = herdrEffectFence(run2);
   fence();
   try {
-    if (run.effort) await writeFile2(join17(dirname15(run.recordPath), "gate-final.md"), getFinalText(run.messages) || "(no output)");
-    else await writeFinal(run);
+    if (run2.effort) await writeFile2(join18(dirname15(run2.recordPath), "gate-final.md"), getFinalText(run2.messages) || "(no output)");
+    else await writeFinal(run2);
   } catch {
   }
   fence();
   const runHookImpl = deps.runHookImpl ?? runHook;
-  run.hookExecuting = true;
+  run2.hookExecuting = true;
   try {
     const hookResult = await runHookImpl({
       resolved: resolvedHook,
-      runId: run.id,
-      persona: run.persona,
-      runDir: dirname15(run.finalPath),
-      finalPath: run.effort ? join17(dirname15(run.recordPath), "gate-final.md") : run.finalPath,
-      transcriptPath: run.transcriptPath,
-      parentCwd: run.cwd,
-      cwd: run.effort?.cwd,
-      extraEnv: run.effort ? effortEnv() : void 0,
-      tmpDir: run.effort ? join17(dirname15(run.recordPath), "tmp") : void 0,
-      worktreePath: run.worktreePath,
+      runId: run2.id,
+      persona: run2.persona,
+      runDir: dirname15(run2.finalPath),
+      finalPath: run2.effort ? join18(dirname15(run2.recordPath), "gate-final.md") : run2.finalPath,
+      transcriptPath: run2.transcriptPath,
+      parentCwd: run2.cwd,
+      cwd: run2.effort?.cwd,
+      extraEnv: run2.effort ? effortEnv() : void 0,
+      tmpDir: run2.effort ? join18(dirname15(run2.recordPath), "tmp") : void 0,
+      worktreePath: run2.worktreePath,
       onProc: (proc) => {
-        run.hookProc = proc;
+        run2.hookProc = proc;
       },
       onStart: () => {
         try {
@@ -7560,8 +7994,8 @@ async function applyHookToTerminal(run, resolvedHook, terminal, deps = {}) {
           return;
         }
         deps.events?.emitHookStarted({
-          id: run.id,
-          persona: run.persona,
+          id: run2.id,
+          persona: run2.persona,
           command: resolvedHook.command
         });
       },
@@ -7573,16 +8007,16 @@ async function applyHookToTerminal(run, resolvedHook, terminal, deps = {}) {
         }
         if (result.passed) {
           deps.events?.emitHookCompleted({
-            id: run.id,
-            persona: run.persona,
+            id: run2.id,
+            persona: run2.persona,
             command: resolvedHook.command,
             exitCode: result.exitCode ?? 0,
             durationMs: result.durationMs
           });
         } else {
           deps.events?.emitHookFailed({
-            id: run.id,
-            persona: run.persona,
+            id: run2.id,
+            persona: run2.persona,
             command: resolvedHook.command,
             exitCode: result.exitCode,
             durationMs: result.durationMs,
@@ -7592,210 +8026,210 @@ async function applyHookToTerminal(run, resolvedHook, terminal, deps = {}) {
       }
     });
     fence();
-    if (isTerminal(run.status)) {
-      return run.status;
+    if (isTerminal(run2.status)) {
+      return run2.status;
     }
-    run.hookResult = hookResult;
+    run2.hookResult = hookResult;
     if (!hookResult.passed) {
       return "hook_failed";
     }
     return terminal;
   } finally {
-    run.hookExecuting = false;
-    run.hookProc = void 0;
+    run2.hookExecuting = false;
+    run2.hookProc = void 0;
   }
 }
 var GRACE_MESSAGE = "You have reached your turn limit. Wrap up immediately \u2014 provide your final answer now.";
-var defaultGraceEnqueue = (run, message4) => {
-  runtimeFor(run).deliver(run, run.runtime === "herdr" ? "grace" : "follow_up", message4, run.parentSessionId);
+var defaultGraceEnqueue = (run2, message4) => {
+  runtimeFor(run2).deliver(run2, run2.runtime === "herdr" ? "grace" : "follow_up", message4, run2.parentSessionId);
 };
-function checkTurnLimit(run, registry, terminateFn, enqueueGraceMsg = defaultGraceEnqueue) {
-  if (!run.maxTurns || isTerminal(run.status)) return;
-  if (run.runtime === "herdr" && (run.pendingAsk || run.askExecution)) return;
-  const { turns } = run.usage;
-  const graceTurns = run.graceTurns ?? 5;
-  if (run.gracePeriodActive && run.gracePeriodStartTurn !== void 0 && turns >= run.gracePeriodStartTurn + graceTurns) {
-    terminateFn(run, "aborted");
+function checkTurnLimit(run2, registry, terminateFn, enqueueGraceMsg = defaultGraceEnqueue) {
+  if (!run2.maxTurns || isTerminal(run2.status)) return;
+  if (run2.runtime === "herdr" && (run2.pendingAsk || run2.askExecution)) return;
+  const { turns } = run2.usage;
+  const graceTurns = run2.graceTurns ?? 5;
+  if (run2.gracePeriodActive && run2.gracePeriodStartTurn !== void 0 && turns >= run2.gracePeriodStartTurn + graceTurns) {
+    terminateFn(run2, "aborted");
     return;
   }
-  if (!run.gracePeriodActive && turns >= run.maxTurns) {
-    if (run.runtime === "herdr" ? capabilitiesFor(run).liveSend : run.streamingMode === "rpc") {
-      run.gracePeriodActive = true;
-      run.gracePeriodStartTurn = turns;
-      enqueueGraceMsg(run, GRACE_MESSAGE);
+  if (!run2.gracePeriodActive && turns >= run2.maxTurns) {
+    if (run2.runtime === "herdr" ? capabilitiesFor(run2).liveSend : run2.streamingMode === "rpc") {
+      run2.gracePeriodActive = true;
+      run2.gracePeriodStartTurn = turns;
+      enqueueGraceMsg(run2, GRACE_MESSAGE);
     } else {
-      run.errorMessage = "turn limit reached (non-steerable: no grace period)";
-      terminateFn(run, "aborted");
+      run2.errorMessage = "turn limit reached (non-steerable: no grace period)";
+      terminateFn(run2, "aborted");
     }
     return;
   }
 }
-function forceTerminate(run, reason, registry, onComplete, killGroup = defaultKillGroup) {
-  if (!ownsHerdrRun(run) || isTerminal(run.status)) return;
-  const blocker = validateRunAction(run, "kill");
+function forceTerminate(run2, reason, registry, onComplete, killGroup = defaultKillGroup) {
+  if (!ownsHerdrRun(run2) || isTerminal(run2.status)) return;
+  const blocker = validateRunAction(run2, "kill");
   if (blocker) {
-    console.warn(`forceTerminate: refusing to mutate foreign run id=${run.id}: ${blocker}`);
+    console.warn(`forceTerminate: refusing to mutate foreign run id=${run2.id}: ${blocker}`);
     return;
   }
-  if (run.status === "integrating") {
-    run.integrationControl?.cancel();
+  if (run2.status === "integrating") {
+    run2.integrationControl?.cancel();
     return;
   }
-  if (run.rejectAnswerDelivery && (reason === "timeout" || reason === "stalled")) {
-    run.rejectAnswerDelivery(reason);
+  if (run2.rejectAnswerDelivery && (reason === "timeout" || reason === "stalled")) {
+    run2.rejectAnswerDelivery(reason);
     return;
   }
-  run.rejectAnswerDelivery = void 0;
-  terminateChildren(run, registry);
-  if (run.timeoutTimer) {
-    clearTimeout(run.timeoutTimer);
-    run.timeoutTimer = void 0;
+  run2.rejectAnswerDelivery = void 0;
+  terminateChildren(run2, registry);
+  if (run2.timeoutTimer) {
+    clearTimeout(run2.timeoutTimer);
+    run2.timeoutTimer = void 0;
   }
-  if (run.streamingMode === "rpc") {
-    if (run.pendingAcks) {
+  if (run2.streamingMode === "rpc") {
+    if (run2.pendingAcks) {
       const err = new Error(`RpcStdinQueue destroyed: force-terminate`);
-      for (const entry of run.pendingAcks.values()) {
+      for (const entry of run2.pendingAcks.values()) {
         clearTimeout(entry.timer);
         try {
           entry.reject(err);
         } catch {
         }
       }
-      run.pendingAcks.clear();
+      run2.pendingAcks.clear();
     }
-    if (run.rpcStdinQueue) {
+    if (run2.rpcStdinQueue) {
       try {
-        run.rpcStdinQueue.destroy("force-terminate");
+        run2.rpcStdinQueue.destroy("force-terminate");
       } catch {
       }
     }
   }
-  if (run.runtime === "herdr" && !(run.transport?.kind === "herdr" && run.transport.childExited)) run.herdrExitUnconfirmed = true;
-  void runtimeFor(run).terminate(run, killGroup);
-  run.pendingAsk = void 0;
-  run.askExecution = void 0;
-  discoverContextRetirement(run);
-  run.status = reason === "timeout" ? "timeout" : reason === "stalled" ? "killed" : reason === "aborted" ? "aborted" : (
+  if (run2.runtime === "herdr" && !(run2.transport?.kind === "herdr" && run2.transport.childExited)) run2.herdrExitUnconfirmed = true;
+  void runtimeFor(run2).terminate(run2, killGroup);
+  run2.pendingAsk = void 0;
+  run2.askExecution = void 0;
+  discoverContextRetirement(run2);
+  run2.status = reason === "timeout" ? "timeout" : reason === "stalled" ? "killed" : reason === "aborted" ? "aborted" : (
     // v0.17: turn-limit termination
     "killed"
   );
-  if (reason === "stalled" && !run.errorMessage) {
-    run.errorMessage = "watchdog: hard-stalled (no events past hard threshold)";
+  if (reason === "stalled" && !run2.errorMessage) {
+    run2.errorMessage = "watchdog: hard-stalled (no events past hard threshold)";
   }
-  run.finishedAt = Date.now();
-  run.failureClass = classifyFailure({
-    terminal: run.status,
+  run2.finishedAt = Date.now();
+  run2.failureClass = classifyFailure({
+    terminal: run2.status,
     terminationReason: reason,
-    errorMessage: run.errorMessage
+    errorMessage: run2.errorMessage
   });
-  if (run.worktreePath && run.worktreeBranch) {
-    run.worktreeKept = run.effort ? `${EFFORT_NOTICE} Worktree ${run.worktreePath}; branch ${run.worktreeBranch} preserved.` : keptWorktreeHint(run.worktreePath, run.worktreeBranch);
+  if (run2.worktreePath && run2.worktreeBranch) {
+    run2.worktreeKept = run2.effort ? `${EFFORT_NOTICE} Worktree ${run2.worktreePath}; branch ${run2.worktreeBranch} preserved.` : keptWorktreeHint(run2.worktreePath, run2.worktreeBranch);
   }
-  registry.notify(run);
-  void writeRecord(run);
-  void writeFinal(run);
-  if (run.runtime === "herdr" && !run.effort && run.herdr) {
-    if (onComplete) void dispatchHerdrSettlement(run, () => onComplete(run)).catch(() => {
+  registry.notify(run2);
+  void writeRecord(run2);
+  void writeFinal(run2);
+  if (run2.runtime === "herdr" && !run2.effort && run2.herdr) {
+    if (onComplete) void dispatchHerdrSettlement(run2, () => onComplete(run2)).catch(() => {
     });
   } else if (onComplete) {
     try {
-      onComplete(run);
+      onComplete(run2);
     } catch {
     }
   }
 }
-function pauseRun(run, registry, signaler) {
-  if (validateRunAction(run, "pause")) return false;
+function pauseRun(run2, registry, signaler) {
+  if (validateRunAction(run2, "pause")) return false;
   try {
-    subprocessRuntime.signal(run, "SIGSTOP", signaler);
+    subprocessRuntime.signal(run2, "SIGSTOP", signaler);
   } catch {
     return false;
   }
-  run.status = "paused";
-  run.pausedAt = Date.now();
-  registry.notify(run);
-  void writeRecord(run);
+  run2.status = "paused";
+  run2.pausedAt = Date.now();
+  registry.notify(run2);
+  void writeRecord(run2);
   return true;
 }
-function resumeRun(run, registry, signaler) {
-  if (validateRunAction(run, "resume")) return false;
+function resumeRun(run2, registry, signaler) {
+  if (validateRunAction(run2, "resume")) return false;
   try {
-    subprocessRuntime.signal(run, "SIGCONT", signaler);
+    subprocessRuntime.signal(run2, "SIGCONT", signaler);
   } catch {
     return false;
   }
-  run.status = "running";
-  run.pausedAt = void 0;
-  registry.notify(run);
-  void writeRecord(run);
+  run2.status = "running";
+  run2.pausedAt = void 0;
+  registry.notify(run2);
+  void writeRecord(run2);
   return true;
 }
-async function reconcileRecord(run, status, errorMessage, finishedAt) {
-  discoverContextRetirement(run);
-  run.status = status;
-  run.finishedAt = finishedAt;
-  run.errorMessage = errorMessage;
-  await writeRecord(run);
+async function reconcileRecord(run2, status, errorMessage, finishedAt) {
+  discoverContextRetirement(run2);
+  run2.status = status;
+  run2.finishedAt = finishedAt;
+  run2.errorMessage = errorMessage;
+  await writeRecord(run2);
 }
-function findRunSessionFile(run, sessionDir = join17(dirname15(run.recordPath), "session")) {
-  return run.sessionPath ?? findSessionFile(sessionDir);
+function findRunSessionFile(run2, sessionDir = join18(dirname15(run2.recordPath), "session")) {
+  return run2.sessionPath ?? findSessionFile(sessionDir);
 }
-function discoverContextRetirement(run, sessionDir) {
-  const sessionPath = findRunSessionFile(run, sessionDir);
+function discoverContextRetirement(run2, sessionDir) {
+  const sessionPath = findRunSessionFile(run2, sessionDir);
   if (savedSessionRetired(sessionPath)) {
-    run.sessionPath = sessionPath;
-    run.contextRetired = true;
+    run2.sessionPath = sessionPath;
+    run2.contextRetired = true;
   }
 }
-function writeRecord(run, durableFence) {
-  const ownership = run.herdrOwnership;
+function writeRecord(run2, durableFence) {
+  const ownership = run2.herdrOwnership;
   const fence = () => {
     ownership?.assert();
-    assertHerdrOwner(run);
+    assertHerdrOwner(run2);
     durableFence?.();
   };
-  const snapshot2 = structuredClone(toRunRecord(run));
-  const writing = (run.recordWrite ?? Promise.resolve()).catch(() => {
+  const snapshot2 = structuredClone(toRunRecord(run2));
+  const writing = (run2.recordWrite ?? Promise.resolve()).catch(() => {
   }).then(async () => {
-    await mkdir(dirname15(run.recordPath), { recursive: true });
-    if (durableFence || snapshot2.effort || snapshot2.runtime === "herdr") writeDurableJson(run.recordPath, snapshot2, () => {
+    await mkdir(dirname15(run2.recordPath), { recursive: true });
+    if (durableFence || snapshot2.effort || snapshot2.runtime === "herdr") writeDurableJson(run2.recordPath, snapshot2, () => {
       assertRunEffortOwner(snapshot2);
       fence();
     });
-    else await writeFile2(run.recordPath, JSON.stringify(snapshot2, null, 2));
+    else await writeFile2(run2.recordPath, JSON.stringify(snapshot2, null, 2));
   });
-  run.recordWrite = writing.catch(() => {
+  run2.recordWrite = writing.catch(() => {
   });
-  return durableFence ? writing : run.recordWrite;
+  return durableFence ? writing : run2.recordWrite;
 }
-async function writeFinal(run, durable = false) {
-  const ownership = run.herdrOwnership, binding = run.herdr;
-  const text5 = getFinalText(run.messages) || run.integration?.resultText || "(no output)";
+async function writeFinal(run2, durable = false) {
+  const ownership = run2.herdrOwnership, binding = run2.herdr;
+  const text5 = getFinalText(run2.messages) || run2.integration?.resultText || "(no output)";
   const fence = () => {
     ownership?.assert();
-    assertHerdrOwner(run);
-    if (run.herdr !== binding) throw new Error("herdr invocation changed before final write");
+    assertHerdrOwner(run2);
+    if (run2.herdr !== binding) throw new Error("herdr invocation changed before final write");
   };
-  if (run.herdrExitUnconfirmed || run.herdrResultUnavailable || childExitUnconfirmed(run)) return;
-  if (durable || run.runtime === "herdr") {
-    if (!ownsHerdrRun(run)) return;
-    await mkdir(dirname15(run.finalPath), { recursive: true });
-    writeDurableFile(run.finalPath, text5, () => {
-      assertRunEffortOwner(run);
+  if (run2.herdrExitUnconfirmed || run2.herdrResultUnavailable || childExitUnconfirmed(run2)) return;
+  if (durable || run2.runtime === "herdr") {
+    if (!ownsHerdrRun(run2)) return;
+    await mkdir(dirname15(run2.finalPath), { recursive: true });
+    writeDurableFile(run2.finalPath, text5, () => {
+      assertRunEffortOwner(run2);
       fence();
     });
     return;
   }
   try {
-    await mkdir(dirname15(run.finalPath), { recursive: true });
-    await writeFile2(run.finalPath, getFinalText(run.messages) || "(no output)");
+    await mkdir(dirname15(run2.finalPath), { recursive: true });
+    await writeFile2(run2.finalPath, getFinalText(run2.messages) || "(no output)");
   } catch {
   }
 }
-function getCompletionText(run) {
-  if (run.herdrResultUnavailable) return "herdr: no usable final output from this invocation. Any existing final.md is historical; inspect the transcript and diagnostics.";
-  if (childExitUnconfirmed(run)) return "delegated child exit unconfirmed; no final result published. Any existing final.md is historical; inspect the transcript and abandoned-children.";
-  return run.herdrExitUnconfirmed ? "herdr: child exit unconfirmed; no final result published. Any existing final.md belongs to a previous invocation. Inspect the retained transcript and diagnostics." : getFinalText(run.messages);
+function getCompletionText(run2) {
+  if (run2.herdrResultUnavailable) return "herdr: no usable final output from this invocation. Any existing final.md is historical; inspect the transcript and diagnostics.";
+  if (childExitUnconfirmed(run2)) return "delegated child exit unconfirmed; no final result published. Any existing final.md is historical; inspect the transcript and abandoned-children.";
+  return run2.herdrExitUnconfirmed ? "herdr: child exit unconfirmed; no final result published. Any existing final.md belongs to a previous invocation. Inspect the retained transcript and diagnostics." : getFinalText(run2.messages);
 }
 function getFinalText(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -7975,13 +8409,13 @@ function piVersionWarning(lead, child) {
   if (lead === "unknown" || child === "unknown") return `Pi version unverified: lead ${lead}, child ${child}`;
   return lead === child ? void 0 : `Pi version mismatch: lead ${lead}, child ${child}`;
 }
-function herdrChildAbsent(run) {
-  const b = run.herdr;
-  if (!b || b.runId !== run.id || typeof b.sessionFile !== "string" || typeof b.socketPath !== "string" || !isAbsolute5(b.socketPath) || !/^[A-Za-z0-9_-]+$/.test(b.launchNonce) || dirname16(b.sessionFile) !== join18(dirname16(run.recordPath), "session")) return false;
+function herdrChildAbsent(run2) {
+  const b = run2.herdr;
+  if (!b || b.runId !== run2.id || typeof b.sessionFile !== "string" || typeof b.socketPath !== "string" || !isAbsolute5(b.socketPath) || !/^[A-Za-z0-9_-]+$/.test(b.launchNonce) || dirname16(b.sessionFile) !== join19(dirname16(run2.recordPath), "session")) return false;
   try {
-    const owner = readHerdrOwner(dirname16(run.recordPath));
-    if (owner && (owner.generation !== b.ownerGeneration || owner.launchNonce !== b.launchNonce || owner.runId !== run.id || owner.socketPath !== b.socketPath)) return false;
-    const hello = read(join18(dirname16(run.recordPath), "launch", `${b.launchNonce}.json`));
+    const owner = readHerdrOwner(dirname16(run2.recordPath));
+    if (owner && (owner.generation !== b.ownerGeneration || owner.launchNonce !== b.launchNonce || owner.runId !== run2.id || owner.socketPath !== b.socketPath)) return false;
+    const hello = read(join19(dirname16(run2.recordPath), "launch", `${b.launchNonce}.json`));
     const proof = proveChildProcess({
       binding: b,
       current: b,
@@ -8004,12 +8438,12 @@ function herdrChildAbsent(run) {
     return false;
   }
 }
-async function releaseRecordedPane(run, current, env = process.env, signal) {
-  const binding = run.herdr && { ...run.herdr };
-  if (!binding || !sameHerdrBinding(binding, current()) || !herdrChildAbsent(run) || signal?.aborted) return false;
+async function releaseRecordedPane(run2, current, env = process.env, signal) {
+  const binding = run2.herdr && { ...run2.herdr };
+  if (!binding || !sameHerdrBinding(binding, current()) || !herdrChildAbsent(run2) || signal?.aborted) return false;
   try {
     const cli = createHerdrCli({ env, socketPath: binding.socketPath });
-    const result = await closeEmptyPane(cli, binding, () => !signal?.aborted && sameHerdrBinding(binding, current()) && herdrChildAbsent(run) ? binding : void 0, { timeoutMs: 2e3, signal });
+    const result = await closeEmptyPane(cli, binding, () => !signal?.aborted && sameHerdrBinding(binding, current()) && herdrChildAbsent(run2) ? binding : void 0, { timeoutMs: 2e3, signal });
     return result.ok;
   } catch {
     return false;
@@ -8020,34 +8454,34 @@ var HerdrRuntime = class {
     this.options = options;
   }
   options;
-  capabilities(run) {
-    return { pause: false, liveSend: run.transport?.kind === "herdr" && run.transport.liveSend?.() === true };
+  capabilities(run2) {
+    return { pause: false, liveSend: run2.transport?.kind === "herdr" && run2.transport.liveSend?.() === true };
   }
-  deliver(run, type, text5, sessionId) {
-    return run.transport?.kind === "herdr" && run.transport.deliver ? run.transport.deliver(type, text5, sessionId) : { kind: "epipe", reason: "herdr child is not attached and ready" };
+  deliver(run2, type, text5, sessionId) {
+    return run2.transport?.kind === "herdr" && run2.transport.deliver ? run2.transport.deliver(type, text5, sessionId) : { kind: "epipe", reason: "herdr child is not attached and ready" };
   }
   signal() {
     throw failure("pause is subprocess-only");
   }
-  stopProcess(run) {
-    return run.transport?.kind === "herdr" ? run.transport.stop() : void 0;
+  stopProcess(run2) {
+    return run2.transport?.kind === "herdr" ? run2.transport.stop() : void 0;
   }
-  terminate(run, killGroup) {
-    terminateHook(run, killGroup);
-    return this.stopProcess(run);
+  terminate(run2, killGroup) {
+    terminateHook(run2, killGroup);
+    return this.stopProcess(run2);
   }
-  launch(run, _args, cwd, sink, initialPrompt, core) {
-    return this.connect(run, cwd, sink, false, initialPrompt, core);
+  launch(run2, _args, cwd, sink, initialPrompt, core) {
+    return this.connect(run2, cwd, sink, false, initialPrompt, core);
   }
-  attach(run, sink) {
-    return this.connect(run, run.cwd, sink, true);
+  attach(run2, sink) {
+    return this.connect(run2, run2.cwd, sink, true);
   }
-  async inspect(run) {
-    if (!this.options || !run.herdr || run.herdr.socketPath !== this.options.cli.socketPath) throw failure("other-socket");
+  async inspect(run2) {
+    if (!this.options || !run2.herdr || run2.herdr.socketPath !== this.options.cli.socketPath) throw failure("other-socket");
     const { cli } = this.options, probe = this.options.probe ?? probeProcess;
-    const binding = { ...run.herdr }, nonce = binding.launchNonce, dir = dirname16(run.recordPath);
-    if (binding.runId !== run.id || !/^[A-Za-z0-9_-]+$/.test(nonce) || dirname16(binding.sessionFile) !== join18(dir, "session")) throw failure("reattach binding mismatch");
-    const claim = read(join18(dir, "launch", `${nonce}.json`));
+    const binding = { ...run2.herdr }, nonce = binding.launchNonce, dir = dirname16(run2.recordPath);
+    if (binding.runId !== run2.id || !/^[A-Za-z0-9_-]+$/.test(nonce) || dirname16(binding.sessionFile) !== join19(dir, "session")) throw failure("reattach binding mismatch");
+    const claim = read(join19(dir, "launch", `${nonce}.json`));
     if (!isRecord(claim)) throw failure("reattach missing child hello");
     const hello = claim;
     binding.childPid ??= hello.pid;
@@ -8073,7 +8507,7 @@ var HerdrRuntime = class {
       const request = requests[0].request;
       if (!readInboxAck(dir, request)?.accepted) throw failure("reattach initial input acceptance unknown");
       let launchOffset = -1, cursor = 0, boundary = false, nativeStart = false, settled = false;
-      const fd = openSync5(run.transcriptPath, constants4.O_RDONLY | constants4.O_NOFOLLOW | constants4.O_NONBLOCK);
+      const fd = openSync5(run2.transcriptPath, constants4.O_RDONLY | constants4.O_NOFOLLOW | constants4.O_NONBLOCK);
       try {
         const stat6 = fstatSync4(fd);
         if (!stat6.isFile() || stat6.nlink !== 1) throw failure("invalid recovery transcript");
@@ -8116,16 +8550,16 @@ var HerdrRuntime = class {
       throw error;
     }
   }
-  async probeRecord(run) {
-    if (!this.options || run.herdr?.socketPath !== this.options.cli.socketPath) return "other-socket";
+  async probeRecord(run2) {
+    if (!this.options || run2.herdr?.socketPath !== this.options.cli.socketPath) return "other-socket";
     try {
-      const result = await this.inspect(run);
+      const result = await this.inspect(run2);
       return result.settled ? "settled" : result.state;
     } catch (error) {
       return error instanceof Error && error.cause === "herdr-gone-before-start" ? "gone" : "unknown";
     }
   }
-  connect(run, cwd, sink, reattach, initialPrompt, core) {
+  connect(run2, cwd, sink, reattach, initialPrompt, core) {
     if (!this.options) throw failure("launch requires an explicitly injected CLI");
     const options = this.options;
     const { cli, env, workspaceId } = options;
@@ -8135,36 +8569,36 @@ var HerdrRuntime = class {
     const signal = options.signal ?? process.kill;
     const abort = new AbortController();
     let cleanupSignal;
-    const nonce = reattach ? run.herdr.launchNonce : randomUUID5(), dir = dirname16(run.recordPath);
-    if (!reattach) run.herdrUsageBaseline = { launchNonce: nonce, usage: { ...run.usage } };
+    const nonce = reattach ? run2.herdr.launchNonce : randomUUID5(), dir = dirname16(run2.recordPath);
+    if (!reattach) run2.herdrUsageBaseline = { launchNonce: nonce, usage: { ...run2.usage } };
     let detached = false;
     let ownership;
     const claimOwnership = () => {
-      if (run.herdrOwnership) run.herdrOwnership.release();
+      if (run2.herdrOwnership) run2.herdrOwnership.release();
       ownership = claimHerdrOwner(dir, {
         epoch: herdrModuleEpoch,
-        sessionId: run.parentSessionId ?? herdrModuleEpoch,
+        sessionId: run2.parentSessionId ?? herdrModuleEpoch,
         pid: process.pid,
         startTime: readProcessStartTime(process.pid),
         socketPath: cli.socketPath,
-        runId: run.id,
+        runId: run2.id,
         launchNonce: nonce,
         at: Date.now()
       });
-      run.herdrOwnership = ownership;
+      run2.herdrOwnership = ownership;
     };
     if (reattach) claimOwnership();
-    const owned = () => !detached && !!ownership && run.herdrOwnership === ownership && ownsHerdrRun(run);
-    const previous = run.herdr;
-    const parentRun = !reattach && !previous && run.depth === 2 ? run.herdrParent : void 0;
+    const owned = () => !detached && !!ownership && run2.herdrOwnership === ownership && ownsHerdrRun(run2);
+    const previous = run2.herdr;
+    const parentRun = !reattach && !previous && run2.depth === 2 ? run2.herdrParent : void 0;
     const priorLeaf = parentRun?.runtime === "herdr" ? parentRun.herdrLeafPlacement : void 0;
     let placed = () => {
     };
     if (parentRun?.runtime === "herdr") parentRun.herdrLeafPlacement = new Promise((resolve7) => {
       placed = resolve7;
     });
-    run.herdrPrompts = void 0;
-    const alias = herdrAgentName(run.id, nonce);
+    run2.herdrPrompts = void 0;
+    const alias = herdrAgentName(run2.id, nonce);
     let binding, hello, provenPane;
     let fresh = false, accepted = false, initialAccepted = false, startAttempted = false, stderr = "", stopWork;
     let tail, monitor;
@@ -8177,11 +8611,11 @@ var HerdrRuntime = class {
     const diagnostic = (message4) => {
       stderr = boundStallText(`${stderr}${stderr ? "\n" : ""}${message4}`, 4096);
     };
-    const current = () => owned() && run.herdr === binding ? run.herdr : void 0;
+    const current = () => owned() && run2.herdr === binding ? run2.herdr : void 0;
     const check = () => {
       if (!owned()) throw failure("owner fenced");
       if (abort.signal.aborted) throw failure("launch cancelled");
-      if (binding && run.herdr !== binding) throw failure("launch binding replaced; preserving resources");
+      if (binding && run2.herdr !== binding) throw failure("launch binding replaced; preserving resources");
     };
     const proof = (pane) => !owned() || cleanupSignal?.aborted ? { ok: false, state: "unknown", reason: "current invocation changed or cleanup cancelled" } : proveChildProcess({
       binding: binding && { ...binding, childPid: binding.childPid ?? hello?.pid, childStartTime: binding.childStartTime ?? hello?.pidStartTime },
@@ -8198,7 +8632,7 @@ var HerdrRuntime = class {
       tail?.close();
       monitor?.close();
       observing = false;
-      if (run.herdr === binding) run.herdrPrompts = void 0;
+      if (run2.herdr === binding) run2.herdrPrompts = void 0;
     };
     const gone = () => {
       if (!owned()) return;
@@ -8212,7 +8646,7 @@ var HerdrRuntime = class {
     };
     const readHello = () => {
       try {
-        return read(join18(dir, "launch", `${nonce}.json`));
+        return read(join19(dir, "launch", `${nonce}.json`));
       } catch (e) {
         if (e.code === "ENOENT") return;
         throw failure("invalid launch hello");
@@ -8269,7 +8703,7 @@ var HerdrRuntime = class {
       }
     })();
     const readStallEvidence = async () => {
-      if (!owned() || !binding?.agentName || run.herdr !== binding || cleanupSignal?.aborted) return "Live pane diagnostic unavailable.";
+      if (!owned() || !binding?.agentName || run2.herdr !== binding || cleanupSignal?.aborted) return "Live pane diagnostic unavailable.";
       try {
         const text5 = await cli.text(
           ["agent", "read", binding.agentName, "--source", "recent-unwrapped", "--lines", "40"],
@@ -8285,35 +8719,35 @@ var HerdrRuntime = class {
       if (!ownership) claimOwnership();
       check();
       if (reattach) {
-        const evidence = await this.inspect(run);
+        const evidence = await this.inspect(run2);
         check();
         binding = { ...evidence.binding, ownerGeneration: ownership.identity.generation };
-        run.herdr = binding;
+        run2.herdr = binding;
         hello = evidence.hello;
         provenPane = evidence.provenPane;
         const { launchOffset: launchOffset2, request: request2 } = evidence;
         accepted = initialAccepted = true;
         observation = { launchOffset: launchOffset2, requestId: request2.requestId };
-        if (request2.kind === "reply") run.pendingAsk = void 0;
+        if (request2.kind === "reply") run2.pendingAsk = void 0;
         if (evidence.state === "gone") {
           childExited = true;
           resolveClosed();
         }
         return { binding, request: request2, launchOffset: launchOffset2 };
       }
-      if (run.runtime !== "herdr" || !core || !initialPrompt?.trim()) throw failure("missing typed launch specification");
-      const scope = childToolScope(run);
-      if (run.pendingAsk && (core.kind !== "resume" || core.sessionPath !== run.sessionPath)) throw failure("answer requires the original session");
-      if (core.kind === "resume" && run.sessionPath && core.sessionPath !== run.sessionPath) throw failure("resume session mismatch");
-      const sessionDir = join18(dir, "session");
-      const sessionFile = core.kind === "resume" ? core.sessionPath : join18(sessionDir, `${nonce}.jsonl`);
+      if (run2.runtime !== "herdr" || !core || !initialPrompt?.trim()) throw failure("missing typed launch specification");
+      const scope = childToolScope(run2);
+      if (run2.pendingAsk && (core.kind !== "resume" || core.sessionPath !== run2.sessionPath)) throw failure("answer requires the original session");
+      if (core.kind === "resume" && run2.sessionPath && core.sessionPath !== run2.sessionPath) throw failure("resume session mismatch");
+      const sessionDir = join19(dir, "session");
+      const sessionFile = core.kind === "resume" ? core.sessionPath : join19(sessionDir, `${nonce}.jsonl`);
       if (dirname16(sessionFile) !== sessionDir) throw failure("session outside run directory");
       if (core.kind === "fresh") seedSessionFile(sessionFile, [], cwd);
       const session = SessionManager2.open(sessionFile, sessionDir);
       if (session.getCwd() !== cwd) throw failure("session cwd mismatch");
-      const invocation = { runId: run.id, launchNonce: nonce, sessionId: session.getSessionId(), sessionFile };
-      const promptPath = join18(dir, `system-prompt-${nonce}.md`);
-      writeFileSync5(promptPath, core.systemPrompt ?? "", { flag: "wx", mode: 384 });
+      const invocation = { runId: run2.id, launchNonce: nonce, sessionId: session.getSessionId(), sessionFile };
+      const promptPath = join19(dir, `system-prompt-${nonce}.md`);
+      writeFileSync6(promptPath, core.systemPrompt ?? "", { flag: "wx", mode: 384 });
       const args = [
         ...buildPiCoreArgs({ ...core, scope, kind: "resume", sessionPath: sessionFile, systemPrompt: promptPath }),
         ...(options.trustArgs ?? projectTrustArgs)(cwd, env.PI_CODING_AGENT_DIR),
@@ -8324,24 +8758,24 @@ var HerdrRuntime = class {
         try {
           const observed = await cli.json(["pane", "get", previous.paneId], { timeoutMs: 2e3, signal: abort.signal });
           check();
-          if (run.herdr === previous && provePaneOurs({ binding: previous, current: previous, socketPath: cli.socketPath, pane: observed.pane, requireNoAgent: true }).ok) {
+          if (run2.herdr === previous && provePaneOurs({ binding: previous, current: previous, socketPath: cli.socketPath, pane: observed.pane, requireNoAgent: true }).ok) {
             binding = { ...previous, ...invocation, createdTab: false, childPid: void 0, childStartTime: void 0 };
           }
         } catch {
           check();
         }
       }
-      if (run.herdr !== previous) throw failure("launch binding replaced; preserving resources");
-      if (run.effort) mkdirSync10(join18(dir, "tmp"), { recursive: true });
+      if (run2.herdr !== previous) throw failure("launch binding replaced; preserving resources");
+      if (run2.effort) mkdirSync11(join19(dir, "tmp"), { recursive: true });
       if (!binding) {
-        const paneEnv = buildHerdrEnv(env, { runId: run.id, runDir: dir, configCwd: run.cwd, scope, ...run.effort ? { tmpDir: join18(dir, "tmp") } : {} });
+        const paneEnv = buildHerdrEnv(env, { runId: run2.id, runDir: dir, configCwd: run2.cwd, scope, ...run2.effort ? { tmpDir: join19(dir, "tmp") } : {} });
         let placement;
-        if (run.depth === 2) {
+        if (run2.depth === 2) {
           const prior = await priorLeaf;
           check();
           const parentBinding = parentRun?.herdr;
           placement = await leafPlacement(cli, {
-            parentId: run.parentRunId ?? "(none)",
+            parentId: run2.parentRunId ?? "(none)",
             parentRuntime: parentRun?.runtime ?? "missing",
             parent: parentBinding,
             previous: prior,
@@ -8363,30 +8797,30 @@ var HerdrRuntime = class {
         }
         fresh = true;
       }
-      if (run.herdr !== previous) throw failure("launch binding replaced; preserving resources");
+      if (run2.herdr !== previous) throw failure("launch binding replaced; preserving resources");
       binding.ownerGeneration = ownership.identity.generation;
       binding.agentName = alias;
       delete binding.versionWarning;
       delete binding.settlement;
-      run.herdrDelivery = void 0;
-      run.herdr = binding;
-      run.sessionPath = sessionFile;
+      run2.herdrDelivery = void 0;
+      run2.herdr = binding;
+      run2.sessionPath = sessionFile;
       check();
-      await writeRecord(run, check);
+      await writeRecord(run2, check);
       check();
       const request = {
         v: 1,
         launchNonce: nonce,
         requestId: randomUUID5(),
         sequence: 1,
-        kind: run.pendingAsk ? "reply" : "initial",
+        kind: run2.pendingAsk ? "reply" : "initial",
         text: initialPrompt,
-        ...run.pendingAsk ? { askId: run.pendingAsk.askId } : {}
+        ...run2.pendingAsk ? { askId: run2.pendingAsk.askId } : {}
       };
       prepareInboxRequest(dir, request);
       let launchOffset = 0;
       try {
-        launchOffset = statSync4(run.transcriptPath).size;
+        launchOffset = statSync4(run2.transcriptPath).size;
       } catch (e) {
         if (e.code !== "ENOENT") throw e;
       }
@@ -8440,7 +8874,7 @@ var HerdrRuntime = class {
         binding.versionWarning = versionWarning;
         diagnostic(versionWarning);
       }
-      await writeRecord(run, check);
+      await writeRecord(run2, check);
       check();
       if (!identity.ok) throw failure(`child ${identity.state} before its task was published; prepared request preserved, not replayed`);
       publishPreparedInboxRequest(dir, request);
@@ -8462,7 +8896,7 @@ var HerdrRuntime = class {
       const scan = () => {
         let fd;
         try {
-          fd = openSync5(run.transcriptPath, constants4.O_RDONLY | constants4.O_NOFOLLOW | constants4.O_NONBLOCK);
+          fd = openSync5(run2.transcriptPath, constants4.O_RDONLY | constants4.O_NOFOLLOW | constants4.O_NONBLOCK);
         } catch (e) {
           if (e.code === "ENOENT") return;
           throw e;
@@ -8532,7 +8966,7 @@ var HerdrRuntime = class {
     };
     const waitForExit = async () => {
       monitor?.close();
-      if (!owned() || !accepted || run.herdr !== binding) return false;
+      if (!owned() || !accepted || run2.herdr !== binding) return false;
       const end = now() + 1e4;
       while (!childExited && now() < end) {
         tail?.drain();
@@ -8554,7 +8988,7 @@ var HerdrRuntime = class {
       observing = true;
       let started = false;
       tail = new HerdrTail({
-        path: run.transcriptPath,
+        path: run2.transcriptPath,
         offset: observation.launchOffset,
         nonce,
         line: (line) => {
@@ -8574,7 +9008,7 @@ var HerdrRuntime = class {
       });
       monitor = new HerdrMonitor({
         now,
-        active: () => owned() && run.herdr === binding && !nativeSettled && !isTerminal(run.status) && run.status !== "integrating" && run.status !== "blocked",
+        active: () => owned() && run2.herdr === binding && !nativeSettled && !isTerminal(run2.status) && run2.status !== "integrating" && run2.status !== "blocked",
         probe: () => {
           const state = proof(provenPane);
           return state.ok ? "alive" : state.state;
@@ -8582,7 +9016,7 @@ var HerdrRuntime = class {
         scan: async () => {
           try {
             const pane = await getPane();
-            if (!owned() || run.herdr !== binding || nativeSettled || isTerminal(run.status) || run.status === "integrating" || run.status === "blocked") return;
+            if (!owned() || run2.herdr !== binding || nativeSettled || isTerminal(run2.status) || run2.status === "integrating" || run2.status === "blocked") return;
             const state = proof(pane);
             if (state.ok) provenPane = pane;
             else diagnostic(`pane observation: ${state.reason}; evidence retained`);
@@ -8599,7 +9033,7 @@ var HerdrRuntime = class {
     };
     let sequence = reattach ? Math.max(1, ...readInbox(dir, nonce).map((entry) => entry.request.sequence)) : 1;
     let deliveryTail = Promise.resolve();
-    const liveSend = () => owned() && run.runtime === "herdr" && run.herdr === binding && binding?.launchNonce === nonce && accepted && observing && !abort.signal.aborted && !nativeSettled && !childExited && run.status === "running" && (run.parentPid === void 0 || run.parentPid === process.pid) && !run.pendingAsk && !run.askExecution && proof(provenPane).ok;
+    const liveSend = () => owned() && run2.runtime === "herdr" && run2.herdr === binding && binding?.launchNonce === nonce && accepted && observing && !abort.signal.aborted && !nativeSettled && !childExited && run2.status === "running" && (run2.parentPid === void 0 || run2.parentPid === process.pid) && !run2.pendingAsk && !run2.askExecution && proof(provenPane).ok;
     const deliver = (type, text5, sessionId) => {
       tail?.drain();
       if (!liveSend()) return { kind: "epipe", reason: "herdr child is not owned, attached, ready and running" };
@@ -8612,13 +9046,13 @@ var HerdrRuntime = class {
         } catch {
           return rejected2("pane observation unavailable; no input written", true);
         }
-        const policy = validateSendable(run, type === "grace" ? "steer" : type, sessionId);
+        const policy = validateSendable(run2, type === "grace" ? "steer" : type, sessionId);
         if (!liveSend() || !proof(pane).ok || !policy.ok) return rejected2(policy.ok ? "child identity or readiness changed; no input written" : policy.reason, true);
         try {
           writeInboxRequest(dir, request);
           const deadline = now() + HERDR_LAUNCH_BUDGET.ack;
           for (; ; ) {
-            if (!owned() || run.herdr !== binding || binding?.launchNonce !== nonce) return rejected2("invocation changed; do not resend blindly", false);
+            if (!owned() || run2.herdr !== binding || binding?.launchNonce !== nonce) return rejected2("invocation changed; do not resend blindly", false);
             tail?.drain();
             const response = readInboxAck(dir, request);
             if (response) return response.accepted ? { delivered: true, deliveredAt: response.at } : rejected2(response.code, true);
@@ -8637,15 +9071,15 @@ var HerdrRuntime = class {
     let paneReleased = false;
     const releasePane = async (signal2, isCurrent = () => true) => {
       cleanupSignal = signal2;
-      if (!owned() || !isCurrent() || !childExited || !binding || run.herdr !== binding || signal2?.aborted) return false;
+      if (!owned() || !isCurrent() || !childExited || !binding || run2.herdr !== binding || signal2?.aborted) return false;
       if (paneReleased) return true;
       const state = proof(provenPane);
       if (state.ok || state.state !== "gone") {
         diagnostic("pane/worktree preserved: child exit unconfirmed");
         return false;
       }
-      const status = run.status;
-      const result = await closeEmptyPane(cli, binding, () => isCurrent() && run.status === status ? current() : void 0, { timeoutMs: 2e3, signal: signal2 });
+      const status = run2.status;
+      const result = await closeEmptyPane(cli, binding, () => isCurrent() && run2.status === status ? current() : void 0, { timeoutMs: 2e3, signal: signal2 });
       if (!result.ok) diagnostic(`worktree kept: ${result.reason}`);
       paneReleased = result.ok;
       return result.ok;
@@ -8676,16 +9110,16 @@ var HerdrRuntime = class {
       waitForExit,
       releasePane,
       get paneReleased() {
-        return paneReleased && run.herdr === binding;
+        return paneReleased && run2.herdr === binding;
       },
       get observable() {
-        return owned() && observing && run.herdr === binding && !childExited && !abort.signal.aborted && (run.parentPid === void 0 || run.parentPid === process.pid);
+        return owned() && observing && run2.herdr === binding && !childExited && !abort.signal.aborted && (run2.parentPid === void 0 || run2.parentPid === process.pid);
       },
       get initialAccepted() {
-        return initialAccepted && run.herdr === binding;
+        return initialAccepted && run2.herdr === binding;
       },
       get childExited() {
-        return childExited && (!binding || run.herdr === binding);
+        return childExited && (!binding || run2.herdr === binding);
       },
       get cancelled() {
         return abort.signal.aborted;
@@ -8705,50 +9139,58 @@ var HerdrRuntime = class {
 
 // src/effort/reconcile.ts
 import { randomUUID as randomUUID6 } from "node:crypto";
-import { existsSync as existsSync11, mkdirSync as mkdirSync11, readFileSync as readFileSync14, readdirSync as readdirSync7, realpathSync as realpathSync7 } from "node:fs";
-import { dirname as dirname17, join as join19, relative as relative3 } from "node:path";
-function validateSource(run) {
-  if (!run.effort || !run.worktreeBranch) throw new Error("preserved source branch missing");
-  const oid = effortGit(run.effort.gitRoot, "rev-parse", "--verify", `refs/heads/${run.worktreeBranch}^{commit}`);
-  if (run.worktreePath && existsSync11(run.worktreePath)) {
-    assertCandidateIndexFlags(run.worktreePath);
-    if (effortGit(run.worktreePath, "rev-parse", "HEAD") !== oid || effortGit(run.worktreePath, "status", "--porcelain", "--untracked-files=all")) throw new Error("source changed or dirty; preserve and inspect before requeue");
+import { existsSync as existsSync13, mkdirSync as mkdirSync12, readFileSync as readFileSync16, readdirSync as readdirSync7, realpathSync as realpathSync9 } from "node:fs";
+import { dirname as dirname17, join as join20, relative as relative3 } from "node:path";
+function validateSource(run2) {
+  if (!run2.effort || !run2.worktreeBranch) throw new Error("preserved source branch missing");
+  const oid = effortGit(run2.effort.gitRoot, "rev-parse", "--verify", `refs/heads/${run2.worktreeBranch}^{commit}`);
+  if (run2.worktreePath && existsSync13(run2.worktreePath)) {
+    assertCandidateIndexFlags(run2.worktreePath);
+    if (effortGit(run2.worktreePath, "rev-parse", "HEAD") !== oid || effortGit(run2.worktreePath, "status", "--porcelain", "--untracked-files=all")) throw new Error("source changed or dirty; preserve and inspect before requeue");
   }
   return oid;
 }
 function records(record) {
-  if (!existsSync11(runsRoot())) return [];
+  if (!existsSync13(runsRoot())) return [];
   return readdirSync7(runsRoot()).sort().flatMap((id) => {
-    const path2 = join19(runsRoot(), id, "record.json");
-    if (!existsSync11(path2)) return [];
-    const r = JSON.parse(readFileSync14(path2, "utf8"));
+    const path2 = join20(runsRoot(), id, "record.json");
+    if (!existsSync13(path2)) return [];
+    const r = JSON.parse(readFileSync16(path2, "utf8"));
     if (r.effort?.gitRoot !== record.gitRoot || r.effort.name !== record.name) return [];
-    if (r.id !== id || r.recordPath !== path2 || r.finalPath !== join19(runsRoot(), id, "final.md") || r.transcriptPath !== join19(runsRoot(), id, "transcript.jsonl")) throw new Error(`noncanonical effort run record: ${id}`);
+    if (r.id !== id || r.recordPath !== path2 || r.finalPath !== join20(runsRoot(), id, "final.md") || r.transcriptPath !== join20(runsRoot(), id, "transcript.jsonl")) throw new Error(`noncanonical effort run record: ${id}`);
     return [r];
   });
 }
-function provenNoop(record, run) {
-  if (!run.integration?.noopTip) return false;
+function provenNoop(record, run2) {
+  if (!run2.integration?.noopTip) return false;
   const tip = effortTip(record);
   if (record.gatedTip !== tip) return false;
-  const merged = mergeTree(record.gitRoot, tip, run.integration.branchHead);
+  const merged = mergeTree(record.gitRoot, tip, run2.integration.branchHead);
   return merged.kind === "clean" && merged.tree === effortGit(record.gitRoot, "rev-parse", `${tip}^{tree}`);
 }
-async function cleanupCandidates(record, run) {
-  const e = run.integration;
-  if (!e || e.commandPending || e.process || !run.mergeResult?.success) return;
-  const others = records(record).filter((r) => r.id !== run.id && (r.status === "integrating" || r.status === "running" || r.status === "paused"));
-  const prefix2 = join19(record.gitRoot, ".worktrees", "conductor-cand", record.name) + "/";
+function landedByMerger(record, run2, oid) {
+  const m = run2.integration?.merger;
+  if (m?.outcome !== "accepted" || oid !== m.outputOid || !run2.landedCommit) return false;
+  effortGit(record.gitRoot, "merge-base", "--is-ancestor", run2.landedCommit, record.intRef);
+  return effortGit(record.gitRoot, "show", "-s", "--format=%B", run2.landedCommit).split("\n").filter((line) => line === `Conductor-Merger: ${m.runId}`).length === 1;
+}
+async function cleanupCandidates(record, run2) {
+  const e = run2.integration;
+  if (!e || e.commandPending || e.process || !run2.mergeResult?.success) return;
+  const others = records(record).filter((r) => r.id !== run2.id && (r.status === "integrating" || r.status === "running" || r.status === "paused"));
+  const prefix2 = join20(record.gitRoot, ".worktrees", "conductor-cand", record.name) + "/";
   const removed = /* @__PURE__ */ new Set();
   for (const path2 of e.candidates ?? []) {
-    if (!path2.startsWith(prefix2) || !existsSync11(path2) || others.some((r) => r.integration?.candidatePath === path2 || r.integration?.candidates?.includes(path2) || r.worktreePath === path2)) continue;
+    if (!path2.startsWith(prefix2) || !existsSync13(path2) || others.some((r) => r.integration?.candidatePath === path2 || r.integration?.candidates?.includes(path2) || r.worktreePath === path2)) continue;
     try {
-      if (realpathSync7(path2) !== path2) continue;
+      if (realpathSync9(path2) !== path2) continue;
       const oid = effortGit(path2, "rev-parse", "HEAD");
       assertCandidate(path2, oid);
       if (effortGit(path2, "status", "--porcelain", "--ignored", "--untracked-files=all")) continue;
-      effortGit(record.gitRoot, "merge-base", "--is-ancestor", oid, record.intRef);
-      assertRunEffortOwner(run);
+      if (path2 === e.merger?.candidatePath) {
+        if (!landedByMerger(record, run2, oid)) continue;
+      } else effortGit(record.gitRoot, "merge-base", "--is-ancestor", oid, record.intRef);
+      assertRunEffortOwner(run2);
       effortGit(record.gitRoot, "worktree", "remove", path2);
       removed.add(path2);
     } catch {
@@ -8757,34 +9199,34 @@ async function cleanupCandidates(record, run) {
   if (removed.size) {
     e.candidates = (e.candidates ?? []).filter((path2) => !removed.has(path2));
     if (e.candidatePath && removed.has(e.candidatePath)) e.candidatePath = void 0;
-    await writeRecord(run, () => assertRunEffortOwner(run));
+    await writeRecord(run2, () => assertRunEffortOwner(run2));
   }
 }
-function uncertainDelivery(run) {
-  run.integration.delivery = "uncertain";
-  run.integration.reason = "delivery uncertain after crash or legacy dispatch; automatic callbacks suppressed (notification/events/memory may be missing)";
+function uncertainDelivery(run2) {
+  run2.integration.delivery = "uncertain";
+  run2.integration.reason = "delivery uncertain after crash or legacy dispatch; automatic callbacks suppressed (notification/events/memory may be missing)";
 }
 async function recoverEffort(original, opts) {
   if (process.env.CONDUCTOR_SUBAGENT === "1") return { runs: [], done: Promise.resolve() };
-  for (const run of [...records(original), ...opts.registry.list().filter((r) => r.effort?.gitRoot === original.gitRoot && r.effort.name === original.name)]) assertSupportedRuntime(run.runtime);
+  for (const run2 of [...records(original), ...opts.registry.list().filter((r) => r.effort?.gitRoot === original.gitRoot && r.effort.name === original.name)]) assertSupportedRuntime(run2.runtime);
   if (!readEffort(original.gitRoot, original.name)) throw new Error("effort record missing; ownership recovery refused");
   let record = adoptEffort(original, effortOwner(opts.sessionId));
   const active = opts.registry.list().filter((r) => r.effort?.gitRoot === original.gitRoot && r.effort.name === original.name && r.integrationControl);
   if (active.length) {
     if (!opts.resume) return { runs: active, done: Promise.resolve() };
     if (original.status !== "paused") throw new Error("resume requires a paused effort, not an active integration");
-    for (const run of active) {
-      assertRunEffortOwner(run);
-      await run.integrationControl.suspend();
+    for (const run2 of active) {
+      assertRunEffortOwner(run2);
+      await run2.integrationControl.suspend();
     }
     await opts.registry.integrations.whenIdle(original.gitRoot);
   }
-  const lock = join19(effortDir(original.gitRoot, "integration-driver"), "driver.lock");
+  const lock = join20(effortDir(original.gitRoot, "integration-driver"), "driver.lock");
   const claim = acquireClaim(lock, effortOwner(randomUUID6()));
   const runnable = [], restored = [];
   try {
     const saved = records(record);
-    for (const run of saved) assertSupportedRuntime(run.runtime);
+    for (const run2 of saved) assertSupportedRuntime(run2.runtime);
     const order = [.../* @__PURE__ */ new Set([...record.queue ?? [], ...saved.filter((r) => r.status === "integrating").sort((a, b) => (a.integration?.enqueuedAt ?? a.startTime) - (b.integration?.enqueuedAt ?? b.startTime) || a.id.localeCompare(b.id)).map((r) => r.id)])];
     const missing = [.../* @__PURE__ */ new Set([...record.members, ...order])].filter((id) => !saved.some((r) => r.id === id));
     record = {
@@ -8819,182 +9261,216 @@ async function recoverEffort(original, opts) {
         continue;
       }
       if (savedRun.runtime === "herdr" && !savedRun.integration) continue;
-      const run = buildOrphanRun(savedRun, savedRun.status);
-      run.recordWrite = previous?.recordWrite;
-      run.effort = { ...run.effort, owner: record.owner };
-      run.parentSessionId = record.owner.sessionId;
-      run.parentPid = record.owner.pid;
-      run.parentStartTime = record.owner.startTime;
-      run.integrationSuspended = false;
-      if (run.integration?.delivery === "intent") uncertainDelivery(run);
-      opts.registry.register(run);
-      restored.push(run);
+      const run2 = buildOrphanRun(savedRun, savedRun.status);
+      run2.recordWrite = previous?.recordWrite;
+      run2.effort = { ...run2.effort, owner: record.owner };
+      run2.parentSessionId = record.owner.sessionId;
+      run2.parentPid = record.owner.pid;
+      run2.parentStartTime = record.owner.startTime;
+      run2.integrationSuspended = false;
+      if (run2.integration?.delivery === "intent") uncertainDelivery(run2);
+      opts.registry.register(run2);
+      restored.push(run2);
       try {
-        const candidate = run.integration && integratedCandidate(record, run);
-        if (candidate || provenNoop({ ...record, gatedTip: original.gatedTip }, run)) {
-          if (run.integration.deliveryProtocol !== 1) uncertainDelivery(run);
-          if (run.integration?.process) await stopOwnedProcessGroup(run.integration.process);
-          run.status = "integrating";
-          run.landedCommit = candidate || void 0;
-          run.integration.state = "accepted";
-          run.mergeResult = { success: true, verify: run.integration.verify, verifyDisabled: !record.policy.verify, ...candidate ? {} : { nothingToCommit: true } };
-          if (run.integration) {
-            run.integration.process = void 0;
-            run.integration.commandPending = false;
+        const candidate = run2.integration && integratedCandidate(record, run2);
+        if (candidate || provenNoop({ ...record, gatedTip: original.gatedTip }, run2)) {
+          if (run2.integration.deliveryProtocol !== 1) uncertainDelivery(run2);
+          if (run2.integration?.process) await stopOwnedProcessGroup(run2.integration.process);
+          run2.status = "integrating";
+          run2.landedCommit = candidate || void 0;
+          run2.integration.state = "accepted";
+          run2.mergeResult = { success: true, verify: run2.integration.verify, verifyDisabled: !record.policy.verify, ...candidate ? {} : { nothingToCommit: true } };
+          if (run2.integration) {
+            run2.integration.process = void 0;
+            run2.integration.commandPending = false;
           }
-          await settleRun(run, "completed", run.exitCode, opts);
-          await cleanupCandidates(record, run);
+          await settleRun(run2, "completed", run2.exitCode, opts);
+          await cleanupCandidates(record, run2);
           record = readEffort(record.gitRoot, record.name);
-          record = { ...record, queue: (record.queue ?? []).filter((id) => id !== run.id) };
+          record = { ...record, queue: (record.queue ?? []).filter((id) => id !== run2.id) };
           writeEffort(record);
           continue;
         }
-        if (run.status === "blocked") {
-          await writeRecord(run, () => assertRunEffortOwner(run));
+        if (run2.status === "blocked") {
+          await writeRecord(run2, () => assertRunEffortOwner(run2));
           continue;
         }
-        if (run.status !== "integrating") {
-          if (run.status === "running" || run.status === "paused" || run.status === "queued") {
-            let liveOrUnknown = !!run.pid;
-            if (run.pid) {
+        if (run2.status !== "integrating") {
+          if (run2.status === "running" || run2.status === "paused" || run2.status === "queued") {
+            let liveOrUnknown = !!run2.pid;
+            if (run2.pid) {
               try {
-                process.kill(run.pid, 0);
+                process.kill(run2.pid, 0);
               } catch (error) {
                 if (error.code === "ESRCH") liveOrUnknown = false;
               }
             }
             if (liveOrUnknown) {
-              run.status = "paused";
-              run.errorMessage = "lost writer process identity unresolved; no automatic gate or requeue";
+              run2.status = "paused";
+              run2.errorMessage = "lost writer process identity unresolved; no automatic gate or requeue";
             } else {
-              run.status = "killed";
-              run.errorMessage = "lost writer; explicit human requeue requires source and original hook validation";
+              run2.status = "killed";
+              run2.errorMessage = "lost writer; explicit human requeue requires source and original hook validation";
             }
           }
-          if (run.status === "completed") {
-            run.status = "merge_conflict";
-            run.mergeResult = { success: false, reason: "error" };
-            run.errorMessage = "completed JSON has no reachable correlated integration proof; work preserved";
+          if (run2.status === "completed") {
+            run2.status = "merge_conflict";
+            run2.mergeResult = { success: false, reason: "error" };
+            run2.errorMessage = "completed JSON has no reachable correlated integration proof; work preserved";
           }
-          if (run.effort) run.effort.footprintUnknown = !run.mergeResult?.success;
-          await writeRecord(run, () => assertRunEffortOwner(run));
-          if (order.includes(run.id)) throw new Error("queue/WAL disagreement: no durable hook-passed integrating record");
+          if (run2.effort) run2.effort.footprintUnknown = !run2.mergeResult?.success;
+          await writeRecord(run2, () => assertRunEffortOwner(run2));
+          if (order.includes(run2.id)) throw new Error("queue/WAL disagreement: no durable hook-passed integrating record");
           continue;
         }
-        const e = run.integration;
+        const e = run2.integration;
         if (!e || !e.branchHead || !Number.isFinite(e.enqueuedAt) || e.verifyIdentity.command !== record.policy.verify || e.verifyIdentity.timeoutSeconds !== record.policy.verifyTimeoutSeconds || e.verifyIdentity.retries !== record.policy.verifyRetries) throw new Error("integration WAL or frozen verification policy missing/mismatched");
-        if (!["queued", "merging", "generating", "verifying", "verified", "paused", "cancelled"].includes(e.state)) throw new Error(`unsupported recovery state ${e.state}; preserve for human inspection`);
+        if (!["queued", "merging", "generating", "verifying", "verified", "resolving", "paused", "cancelled"].includes(e.state)) throw new Error(`unsupported recovery state ${e.state}; preserve for human inspection`);
         if (e.commandPending && !e.process) throw new Error("interrupted command launch has unknown process identity; preserve work");
         if (e.process) await stopOwnedProcessGroup(e.process);
         e.process = void 0;
         e.commandPending = false;
         e.teardownError = void 0;
-        if (validateSource(run) !== e.branchHead) throw new Error("source branch head changed; original OID and work retained");
+        if (validateSource(run2) !== (e.sourceHead ?? e.branchHead)) throw new Error("source branch head changed; original OID and work retained");
         if (record.status === "paused" || e.state === "paused" && !opts.resume || e.state === "cancelled") throw new Error(record.pausedReason ?? e.reason ?? "paused entry requires explicit human resume");
-        e.state = "queued";
-        e.reason = void 0;
-        if (opts.resume) e.casFailures = 0;
-        await writeRecord(run, () => assertRunEffortOwner(run));
-        runnable.push(run);
-      } catch (error) {
-        if (run.integration) {
-          run.integration.state = "paused";
-          run.integration.reason = error.message;
+        if (e.state === "resolving") await restoreMerger(run2, opts);
+        else {
+          e.state = "queued";
+          e.reason = void 0;
         }
-        run.integrationSuspended = true;
-        record = { ...readEffort(record.gitRoot, record.name), status: "paused", pausedReason: error.message, pausedRun: run.id };
+        if (opts.resume) e.casFailures = 0;
+        await writeRecord(run2, () => assertRunEffortOwner(run2));
+        runnable.push(run2);
+      } catch (error) {
+        if (run2.integration) {
+          if (run2.integration.state !== "resolving" || !run2.integration.merger) run2.integration.state = "paused";
+          run2.integration.reason = error.message;
+        }
+        run2.integrationSuspended = true;
+        record = { ...readEffort(record.gitRoot, record.name), status: "paused", pausedReason: error.message, pausedRun: run2.id };
         writeEffort(record);
-        await writeRecord(run, () => assertRunEffortOwner(run));
+        await writeRecord(run2, () => assertRunEffortOwner(run2));
       }
-      opts.registry.notify(run);
+      opts.registry.notify(run2);
     }
   } finally {
     releaseClaim(lock, claim);
   }
-  const done = Promise.all(runnable.map(async (run) => {
-    const outcome = await opts.registry.integrations.enqueue(run, () => opts.registry.notify(run), true);
-    run.mergeResult = outcome.mergeResult;
-    run.landedCommit = outcome.landedCommit;
-    await settleRun(run, outcome.terminal, run.exitCode, opts);
-    await cleanupCandidates(readEffort(run.effort.gitRoot, run.effort.name), run);
+  const done = Promise.all(runnable.map(async (run2) => {
+    const outcome = await opts.registry.integrations.enqueue(run2, () => opts.registry.notify(run2), true);
+    run2.mergeResult = outcome.mergeResult;
+    run2.landedCommit = outcome.landedCommit;
+    await settleRun(run2, outcome.terminal, run2.exitCode, opts);
+    await cleanupCandidates(readEffort(run2.effort.gitRoot, run2.effort.name), run2);
   })).then(() => {
   });
   void done.catch(() => {
   });
   return { runs: restored, done };
 }
-async function requeueEffortRun(run, opts, replacement, expectedOid) {
-  assertSupportedRuntime(run.runtime);
-  if (!run.effort || run.status === "blocked" || run.status === "running" || run.status === "paused" || run.status === "integrating" && (!run.integrationSuspended || run.integrationControl || run.integration?.state !== "paused")) throw new Error("requeue requires a stopped preserved writer, never a blocked ask or live assignment");
-  let record = adoptEffort(readEffort(run.effort.gitRoot, run.effort.name), effortOwner(opts.sessionId));
-  const lock = join19(effortDir(record.gitRoot, "integration-driver"), "driver.lock");
+async function restoreMerger(writer, opts) {
+  const wal = writer.integration.merger;
+  if (!wal) throw new Error("resolving entry has no merger claim; preserve for inspection");
+  if (wal.outcome) return;
+  let merger = opts.registry.get(wal.runId);
+  const path2 = join20(runsRoot(), wal.runId, "record.json");
+  if (!merger && existsSync13(path2)) {
+    const saved = JSON.parse(readFileSync16(path2, "utf8"));
+    if (saved.id !== wal.runId || saved.recordPath !== path2 || saved.mergerFor?.writerId !== writer.id || saved.mergerFor.nonce !== wal.nonce) throw new Error(`noncanonical merger record ${wal.runId}; preserve for inspection`);
+    merger = buildOrphanRun(saved, saved.status);
+  }
+  if (!merger) return;
+  if (!isTerminal(merger.status) && merger.status !== "blocked") {
+    let live = merger.status !== "queued";
+    if (merger.pid) {
+      try {
+        process.kill(merger.pid, 0);
+      } catch (error) {
+        if (error.code === "ESRCH") live = false;
+      }
+    }
+    if (live) throw new Error(`merger ${merger.id} live or unknown after restart; no signal sent. Resume the effort once it settles`);
+    merger.status = "killed";
+    merger.finishedAt = Date.now();
+    merger.errorMessage = "lost merger: its process is gone without a terminal record; not authority";
+    await writeRecord(merger);
+  }
+  if (!opts.registry.get(merger.id)) opts.registry.register(merger);
+}
+async function requeueEffortRun(run2, opts, replacement, expectedOid) {
+  assertSupportedRuntime(run2.runtime);
+  if (!run2.effort || run2.status === "blocked" || run2.status === "running" || run2.status === "paused" || run2.status === "integrating" && (!run2.integrationSuspended || run2.integrationControl || run2.integration?.state !== "paused")) throw new Error("requeue requires a stopped preserved writer, never a blocked ask or live assignment");
+  let record = adoptEffort(readEffort(run2.effort.gitRoot, run2.effort.name), effortOwner(opts.sessionId));
+  const lock = join20(effortDir(record.gitRoot, "integration-driver"), "driver.lock");
   const claim = acquireClaim(lock, effortOwner(randomUUID6()));
   try {
-    if (record.status === "paused" && record.pausedRun !== run.id) throw new Error(`effort paused: ${record.pausedReason}; use human effort resume first`);
-    if (integratedCandidate(record, run) || provenNoop(record, run)) throw new Error("work is already integrated; never requeue to recreate delivery (manual repost may duplicate a notification)");
-    const gate = replacement === void 0 ? run.effort.gate : { command: replacement, source: "per-call", timeoutSeconds: run.effort.gate?.timeoutSeconds ?? 300 };
+    if (record.status === "paused" && record.pausedRun !== run2.id) throw new Error(`effort paused: ${record.pausedReason}; use human effort resume first`);
+    if (integratedCandidate(record, run2) || provenNoop(record, run2)) throw new Error("work is already integrated; never requeue to recreate delivery (manual repost may duplicate a notification)");
+    const gate = replacement === void 0 ? run2.effort.gate : { command: replacement, source: "per-call", timeoutSeconds: run2.effort.gate?.timeoutSeconds ?? 300 };
     if (gate === void 0) throw new Error("original hook is unknown/unreconstructable; provide an explicit human replacement with --hook <command>");
-    const head = validateSource(run);
-    if (head !== (run.integration?.branchHead ?? head) && expectedOid !== head) throw new Error(`source branch head changed; inspect and confirm exact OID with --oid=${head}`);
+    const head = validateSource(run2);
+    if (head !== (run2.integration?.sourceHead ?? run2.integration?.branchHead ?? head) && expectedOid !== head) throw new Error(`source branch head changed; inspect and confirm exact OID with --oid=${head}`);
     if (expectedOid && expectedOid !== head) throw new Error("source OID no longer matches human confirmation");
-    if (run.integration?.commandPending && !run.integration.process) throw new Error("previous gate launch identity unknown; preserve and inspect");
-    if (run.integration?.process) await stopOwnedProcessGroup(run.integration.process);
-    run.effort = { ...run.effort, owner: record.owner, gate };
-    run.parentPid = record.owner.pid;
-    run.parentSessionId = record.owner.sessionId;
-    run.parentStartTime = record.owner.startTime;
-    const path2 = join19(record.gitRoot, ".worktrees", "conductor-cand", record.name, `${run.id}-regate-${randomUUID6()}`);
-    const prior = run.integration;
-    run.integration = {
+    if (run2.integration?.commandPending && !run2.integration.process) throw new Error("previous gate launch identity unknown; preserve and inspect");
+    if (run2.integration?.process) await stopOwnedProcessGroup(run2.integration.process);
+    run2.effort = { ...run2.effort, owner: record.owner, gate };
+    run2.parentPid = record.owner.pid;
+    run2.parentSessionId = record.owner.sessionId;
+    run2.parentStartTime = record.owner.startTime;
+    const path2 = join20(record.gitRoot, ".worktrees", "conductor-cand", record.name, `${run2.id}-regate-${randomUUID6()}`);
+    const prior = run2.integration;
+    run2.integration = {
       state: "paused",
       branchHead: head,
+      sourceHead: head,
       enqueuedAt: Date.now(),
       attempts: 0,
+      ...prior?.merger ? { merger: prior.merger } : {},
       verifyIdentity: { command: record.policy.verify, timeoutSeconds: record.policy.verifyTimeoutSeconds, retries: record.policy.verifyRetries },
-      resultText: prior?.resultText || getFinalText(run.messages) || (existsSync11(run.finalPath) ? readFileSync14(run.finalPath, "utf8") : "(no saved result)"),
+      resultText: prior?.resultText || getFinalText(run2.messages) || (existsSync13(run2.finalPath) ? readFileSync16(run2.finalPath, "utf8") : "(no saved result)"),
       candidates: [...prior?.candidates ?? [], path2],
       candidatePath: path2,
       commandPending: !!gate
     };
-    await writeRecord(run, () => assertRunEffortOwner(run));
+    await writeRecord(run2, () => assertRunEffortOwner(run2));
     effortGit(record.gitRoot, "worktree", "add", "--detach", path2, head);
     if (gate) {
-      const subdir = run.worktreePath && run.effort.cwd ? relative3(run.worktreePath, run.effort.cwd) : "";
+      const subdir = run2.worktreePath && run2.effort.cwd ? relative3(run2.worktreePath, run2.effort.cwd) : "";
       if (subdir.startsWith("..")) throw new Error("original hook cwd cannot be reconstructed safely");
-      const cwd = join19(path2, subdir);
-      const dir = join19(effortDir(record.gitRoot, record.name), "verify", `${run.id}-regate-${randomUUID6()}`);
-      mkdirSync11(dir, { recursive: true });
+      const cwd = join20(path2, subdir);
+      const dir = join20(effortDir(record.gitRoot, record.name), "verify", `${run2.id}-regate-${randomUUID6()}`);
+      mkdirSync12(dir, { recursive: true });
       let recording = Promise.resolve();
       let teardown;
       const stop = () => {
-        if (!run.integration.process) return Promise.resolve();
-        teardown ??= stopOwnedProcessGroup(run.integration.process);
+        if (!run2.integration.process) return Promise.resolve();
+        teardown ??= stopOwnedProcessGroup(run2.integration.process);
         void teardown.catch(() => {
         });
         return teardown;
       };
-      const finalPath = join19(dirname17(run.recordPath), "gate-final.md");
-      writeDurableFile(finalPath, run.integration.resultText, () => assertRunEffortOwner(run));
+      const finalPath = join20(dirname17(run2.recordPath), "gate-final.md");
+      writeDurableFile(finalPath, run2.integration.resultText, () => assertRunEffortOwner(run2));
       const result = await runHook({
         resolved: gate,
-        runId: run.id,
-        persona: run.persona,
-        runDir: dirname17(run.recordPath),
+        runId: run2.id,
+        persona: run2.persona,
+        runDir: dirname17(run2.recordPath),
         finalPath,
-        transcriptPath: run.transcriptPath,
-        parentCwd: run.cwd,
+        transcriptPath: run2.transcriptPath,
+        parentCwd: run2.cwd,
         cwd,
         worktreePath: path2,
-        logPath: join19(dir, "gate.log"),
-        tmpDir: join19(dir, "tmp"),
+        logPath: join20(dir, "gate.log"),
+        tmpDir: join20(dir, "tmp"),
         extraEnv: effortEnv(),
         deps: { killGroup: () => {
           void stop();
         } },
         onProc: (proc) => {
           if (proc.pid) {
-            run.integration.process = { pid: proc.pid, startTime: readProcessStartTime(proc.pid) };
-            recording = writeRecord(run, () => assertRunEffortOwner(run));
+            run2.integration.process = { pid: proc.pid, startTime: readProcessStartTime(proc.pid) };
+            recording = writeRecord(run2, () => assertRunEffortOwner(run2));
             void recording.catch(() => {
               void stop();
             });
@@ -9003,32 +9479,32 @@ async function requeueEffortRun(run, opts, replacement, expectedOid) {
       });
       await stop();
       await recording;
-      run.hookResult = result;
-      run.integration.commandPending = false;
-      run.integration.process = void 0;
-      await writeRecord(run, () => assertRunEffortOwner(run));
+      run2.hookResult = result;
+      run2.integration.commandPending = false;
+      run2.integration.process = void 0;
+      await writeRecord(run2, () => assertRunEffortOwner(run2));
       if (!result.passed) throw new Error(`original hook rejected requeue: ${result.logPath}`);
     }
-    assertRunEffortOwner(run);
+    assertRunEffortOwner(run2);
     assertCandidate(path2, head);
-    if (validateSource(run) !== head) throw new Error("source changed while its gate ran; preserve both checkouts");
-    run.integration.commandPending = false;
-    Object.assign(run.integration, measureEffortFootprint(run, head, record.policy), { state: "queued" });
-    run.status = "integrating";
-    run.integrationSuspended = false;
-    run.mergeResult = void 0;
-    run.errorMessage = void 0;
-    await writeRecord(run, () => assertRunEffortOwner(run));
+    if (validateSource(run2) !== head) throw new Error("source changed while its gate ran; preserve both checkouts");
+    run2.integration.commandPending = false;
+    Object.assign(run2.integration, measureEffortFootprint(run2, head, record.policy), { state: "queued" });
+    run2.status = "integrating";
+    run2.integrationSuspended = false;
+    run2.mergeResult = void 0;
+    run2.errorMessage = void 0;
+    await writeRecord(run2, () => assertRunEffortOwner(run2));
     record = readEffort(record.gitRoot, record.name);
-    writeEffort({ ...record, status: "open", pausedReason: void 0, pausedRun: void 0, gatedTip: void 0, members: [.../* @__PURE__ */ new Set([...record.members, run.id])], queue: [.../* @__PURE__ */ new Set([...record.queue ?? [], run.id])] });
+    writeEffort({ ...record, status: "open", pausedReason: void 0, pausedRun: void 0, gatedTip: void 0, members: [.../* @__PURE__ */ new Set([...record.members, run2.id])], queue: [.../* @__PURE__ */ new Set([...record.queue ?? [], run2.id])] });
   } finally {
     releaseClaim(lock, claim);
   }
-  const done = opts.registry.integrations.enqueue(run, () => opts.registry.notify(run), true).then(async (outcome) => {
-    run.mergeResult = outcome.mergeResult;
-    run.landedCommit = outcome.landedCommit;
-    await settleRun(run, outcome.terminal, run.exitCode, opts);
-    await cleanupCandidates(readEffort(run.effort.gitRoot, run.effort.name), run);
+  const done = opts.registry.integrations.enqueue(run2, () => opts.registry.notify(run2), true).then(async (outcome) => {
+    run2.mergeResult = outcome.mergeResult;
+    run2.landedCommit = outcome.landedCommit;
+    await settleRun(run2, outcome.terminal, run2.exitCode, opts);
+    await cleanupCandidates(readEffort(run2.effort.gitRoot, run2.effort.name), run2);
   });
   void done.catch(() => {
   });
@@ -9040,8 +9516,8 @@ import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
 
 // src/commands.ts
-import { existsSync as existsSync19, readdirSync as readdirSync12, readFileSync as readFileSync16, statSync as statSync6 } from "node:fs";
-import { join as join29, dirname as dirname20 } from "node:path";
+import { existsSync as existsSync21, readdirSync as readdirSync12, readFileSync as readFileSync18, statSync as statSync6 } from "node:fs";
+import { join as join30, dirname as dirname20 } from "node:path";
 
 // src/status-glyph.ts
 var STATUS_GLYPH = {
@@ -9062,19 +9538,19 @@ var STATUS_GLYPH = {
 };
 
 // src/doctor.ts
-import { existsSync as existsSync14, accessSync, constants as constants5 } from "node:fs";
+import { existsSync as existsSync16, accessSync, constants as constants5 } from "node:fs";
 import { homedir as homedir8 } from "node:os";
-import { delimiter, join as join22 } from "node:path";
+import { delimiter, join as join23 } from "node:path";
 
 // src/gc/last-gc.ts
-import { existsSync as existsSync12, statSync as statSync5, utimesSync, writeFileSync as writeFileSync6 } from "node:fs";
-import { dirname as dirname18, join as join20 } from "node:path";
+import { existsSync as existsSync14, statSync as statSync5, utimesSync, writeFileSync as writeFileSync7 } from "node:fs";
+import { dirname as dirname18, join as join21 } from "node:path";
 function lastGcMarkerPath(runsRoot2) {
-  return join20(dirname18(runsRoot2), ".last-gc");
+  return join21(dirname18(runsRoot2), ".last-gc");
 }
 function readLastGcMtime(runsRoot2) {
   const path2 = lastGcMarkerPath(runsRoot2);
-  if (!existsSync12(path2)) return null;
+  if (!existsSync14(path2)) return null;
   try {
     return statSync5(path2).mtimeMs;
   } catch {
@@ -9084,7 +9560,7 @@ function readLastGcMtime(runsRoot2) {
 function writeLastGcMtime(runsRoot2, now) {
   const path2 = lastGcMarkerPath(runsRoot2);
   try {
-    if (!existsSync12(path2)) writeFileSync6(path2, "");
+    if (!existsSync14(path2)) writeFileSync7(path2, "");
     const t = new Date(now);
     utimesSync(path2, t, t);
   } catch {
@@ -9093,8 +9569,8 @@ function writeLastGcMtime(runsRoot2, now) {
 
 // src/gc/inventory.ts
 import { readdir as readdir3, readFile as readFile3, stat as stat3 } from "node:fs/promises";
-import { existsSync as existsSync13 } from "node:fs";
-import { join as join21 } from "node:path";
+import { existsSync as existsSync15 } from "node:fs";
+import { join as join22 } from "node:path";
 async function safeStat(path2) {
   try {
     const s = await stat3(path2);
@@ -9105,7 +9581,7 @@ async function safeStat(path2) {
 }
 async function readRecord(runDir2) {
   try {
-    const text5 = await readFile3(join21(runDir2, "record.json"), "utf-8");
+    const text5 = await readFile3(join22(runDir2, "record.json"), "utf-8");
     const parsed = JSON.parse(text5);
     if (typeof parsed.id !== "string" || typeof parsed.persona !== "string") {
       return null;
@@ -9116,8 +9592,8 @@ async function readRecord(runDir2) {
   }
 }
 async function detectSessionPath(runDir2) {
-  const sessionDir = join21(runDir2, "session");
-  if (!existsSync13(sessionDir)) return false;
+  const sessionDir = join22(runDir2, "session");
+  if (!existsSync15(sessionDir)) return false;
   try {
     const entries = await readdir3(sessionDir);
     return entries.some((e) => e.endsWith(".jsonl"));
@@ -9126,7 +9602,7 @@ async function detectSessionPath(runDir2) {
   }
 }
 async function walkInventory(runsRoot2, registry) {
-  if (!existsSync13(runsRoot2)) return [];
+  if (!existsSync15(runsRoot2)) return [];
   let entries;
   try {
     entries = await readdir3(runsRoot2);
@@ -9135,7 +9611,7 @@ async function walkInventory(runsRoot2, registry) {
   }
   const out = [];
   for (const id of entries) {
-    const runDir2 = join21(runsRoot2, id);
+    const runDir2 = join22(runsRoot2, id);
     let isDir = false;
     try {
       isDir = (await stat3(runDir2)).isDirectory();
@@ -9149,11 +9625,11 @@ async function walkInventory(runsRoot2, registry) {
 }
 async function buildEntry(id, runDir2, registry) {
   const record = await readRecord(runDir2);
-  const transcriptStat = await safeStat(join21(runDir2, "transcript.jsonl"));
-  const recordStat = await safeStat(join21(runDir2, "record.json"));
-  const finalStat = await safeStat(join21(runDir2, "final.md"));
-  const archivedStat = await safeStat(join21(runDir2, ".archived"));
-  const pinned = existsSync13(join21(runDir2, ".pinned"));
+  const transcriptStat = await safeStat(join22(runDir2, "transcript.jsonl"));
+  const recordStat = await safeStat(join22(runDir2, "record.json"));
+  const finalStat = await safeStat(join22(runDir2, "final.md"));
+  const archivedStat = await safeStat(join22(runDir2, ".archived"));
+  const pinned = existsSync15(join22(runDir2, ".pinned"));
   const sessionPathPresent = await detectSessionPath(runDir2);
   const inMemory = registry.get(id);
   const transcriptSizeBytes = transcriptStat?.size ?? 0;
@@ -9201,9 +9677,10 @@ async function buildEntry(id, runDir2, registry) {
     malformed: false,
     holdsWorktree: holdsKeptWorktree(record),
     effort: record.effort,
+    mergerFor: record.mergerFor,
     runtime: record.runtime,
     herdr: record.herdr && { ...record.herdr },
-    herdrChildAbsent: record.runtime === "herdr" ? herdrChildAbsent({ ...record, recordPath: join21(runDir2, "record.json") }) : void 0
+    herdrChildAbsent: record.runtime === "herdr" ? herdrChildAbsent({ ...record, recordPath: join22(runDir2, "record.json") }) : void 0
   };
 }
 
@@ -9299,6 +9776,7 @@ function decideForEntry(entry, config, now, orphanThresholdMs) {
     if (!isTerminal(entry.status)) return { kind: "keep", id: entry.id, reason: "herdr status unresolved" };
   } else if (unsupportedRuntimeReason(entry.runtime) || unsupportedRuntimeReason(entry.inMemory?.runtime)) return { kind: "keep", id: entry.id, reason: "unsupported runtime; evidence preserved" };
   if (entry.effort || entry.inMemory?.effort) return { kind: "keep", id: entry.id, reason: "unresolved effort ownership" };
+  if (entry.mergerFor || entry.inMemory?.mergerFor) return { kind: "keep", id: entry.id, reason: "effort merger evidence; effort recovery owns it" };
   if (entry.inMemory) {
     const mem = entry.inMemory;
     const proc = mem.proc;
@@ -9465,13 +9943,13 @@ async function buildDoctorReport(opts) {
   lines.push("## Config files");
   const userPath = userConfigPath();
   const projectPath = projectConfigPath(opts.cwd);
-  lines.push(`  user:    ${existsSync14(userPath) ? "\u2713" : "\xB7"} ${userPath}`);
-  lines.push(`  project: ${existsSync14(projectPath) ? "\u2713" : "\xB7"} ${projectPath}`);
+  lines.push(`  user:    ${existsSync16(userPath) ? "\u2713" : "\xB7"} ${userPath}`);
+  lines.push(`  project: ${existsSync16(projectPath) ? "\u2713" : "\xB7"} ${projectPath}`);
   const home = opts.homeDir ?? homedir8();
-  const legacyDir = join22(home, ".pi", "agent", "extensions", "conductor");
-  const legacyJs = join22(legacyDir, "index.js");
-  const legacyTs = join22(legacyDir, "index.ts");
-  const legacyEntry = existsSync14(legacyJs) ? legacyJs : existsSync14(legacyTs) ? legacyTs : null;
+  const legacyDir = join23(home, ".pi", "agent", "extensions", "conductor");
+  const legacyJs = join23(legacyDir, "index.js");
+  const legacyTs = join23(legacyDir, "index.ts");
+  const legacyEntry = existsSync16(legacyJs) ? legacyJs : existsSync16(legacyTs) ? legacyTs : null;
   if (legacyEntry !== null) {
     lines.push("");
     lines.push("## Legacy install path detected");
@@ -9522,7 +10000,7 @@ async function buildDoctorReport(opts) {
     );
   }
   {
-    const root = opts.runsRoot ?? join22(opts.homeDir ?? homedir8(), ".pi", "agent", "conductor", "runs");
+    const root = opts.runsRoot ?? join23(opts.homeDir ?? homedir8(), ".pi", "agent", "conductor", "runs");
     const lastMs = readLastGcMtime(root);
     const lastStr = lastMs === null ? "never" : new Date(lastMs).toISOString().replace("T", " ").slice(0, 19) + " UTC";
     lines.push(`  gc last run:           ${lastStr} (${lastGcMarkerPath(root)})`);
@@ -9540,10 +10018,10 @@ async function buildDoctorReport(opts) {
   lines.push("## Supervision");
   lines.push(...supervisionLines(opts.supervision));
   {
-    const runsRoot2 = opts.runsRoot ?? join22(opts.homeDir ?? homedir8(), ".pi", "agent", "conductor", "runs");
+    const runsRoot2 = opts.runsRoot ?? join23(opts.homeDir ?? homedir8(), ".pi", "agent", "conductor", "runs");
     lines.push("");
     lines.push(`## Run records (under ${runsRoot2})`);
-    if (!existsSync14(runsRoot2)) {
+    if (!existsSync16(runsRoot2)) {
       lines.push("  (no run records)");
     } else {
       let inventory;
@@ -9728,7 +10206,7 @@ function isBinaryOnPath(command) {
   if ([":", "cd", "export", "unset", "set", "test", "[", "command", "eval", "exec", "exit", "read"].includes(bin)) return true;
   return (process.env.PATH ?? "").split(delimiter).some((dir) => {
     try {
-      accessSync(join22(dir, bin), constants5.X_OK);
+      accessSync(join23(dir, bin), constants5.X_OK);
       return true;
     } catch {
       return false;
@@ -9804,12 +10282,12 @@ function collapseWhitespace(s) {
 }
 
 // src/gc/pinning.ts
-import { existsSync as existsSync15 } from "node:fs";
+import { existsSync as existsSync17 } from "node:fs";
 import { stat as stat4, unlink, writeFile as writeFile3 } from "node:fs/promises";
-import { join as join23 } from "node:path";
+import { join as join24 } from "node:path";
 var SIDECAR = ".pinned";
 async function pinRun(runsRoot2, agentId) {
-  const dir = join23(runsRoot2, agentId);
+  const dir = join24(runsRoot2, agentId);
   let st;
   try {
     st = await stat4(dir);
@@ -9819,10 +10297,10 @@ async function pinRun(runsRoot2, agentId) {
   if (!st.isDirectory()) {
     throw new Error(`not a directory: ${dir}`);
   }
-  await writeFile3(join23(dir, SIDECAR), "");
+  await writeFile3(join24(dir, SIDECAR), "");
 }
 async function unpinRun(runsRoot2, agentId) {
-  const path2 = join23(runsRoot2, agentId, SIDECAR);
+  const path2 = join24(runsRoot2, agentId, SIDECAR);
   try {
     await unlink(path2);
   } catch (e) {
@@ -9832,19 +10310,19 @@ async function unpinRun(runsRoot2, agentId) {
   }
 }
 function isPinned(runsRoot2, agentId) {
-  return existsSync15(join23(runsRoot2, agentId, SIDECAR));
+  return existsSync17(join24(runsRoot2, agentId, SIDECAR));
 }
 
 // src/gc/reconcile.ts
 import { readFile as readFile4, writeFile as writeFile4 } from "node:fs/promises";
-import { join as join24 } from "node:path";
+import { join as join25 } from "node:path";
 async function reconcileOrphans(actions, runsRoot2, now) {
   const reconciled = [];
   const failed = [];
   for (const action of actions) {
     if (action.kind !== "reconcile-orphan") continue;
     const agentId = action.id;
-    const recordPath = join24(runsRoot2, agentId, "record.json");
+    const recordPath = join25(runsRoot2, agentId, "record.json");
     let raw;
     try {
       raw = await readFile4(recordPath, "utf-8");
@@ -9884,8 +10362,8 @@ async function reconcileOrphans(actions, runsRoot2, now) {
 
 // src/gc/executor.ts
 import { readFile as readFile5, rm, stat as stat5, unlink as unlink2, utimes, writeFile as writeFile5, readdir as readdir4 } from "node:fs/promises";
-import { join as join25 } from "node:path";
-import { readFileSync as readFileSync15 } from "node:fs";
+import { join as join26 } from "node:path";
+import { readFileSync as readFileSync17 } from "node:fs";
 async function executeReclaim(actions, runsRoot2, registryActive, now, options = {}) {
   const archived = [];
   const deleted = [];
@@ -9893,7 +10371,7 @@ async function executeReclaim(actions, runsRoot2, registryActive, now, options =
   for (const action of actions) {
     if (action.kind !== "cold-archive" && action.kind !== "delete") continue;
     const agentId = action.id;
-    const runDir2 = join25(runsRoot2, agentId);
+    const runDir2 = join26(runsRoot2, agentId);
     const actionKind = action.kind;
     const active = () => (typeof registryActive === "function" ? registryActive() : registryActive).has(agentId);
     if (active()) {
@@ -9904,7 +10382,7 @@ async function executeReclaim(actions, runsRoot2, registryActive, now, options =
       });
       continue;
     }
-    const recordPath = join25(runDir2, "record.json");
+    const recordPath = join26(runDir2, "record.json");
     let record;
     try {
       const raw = await readFile5(recordPath, "utf-8");
@@ -9930,7 +10408,7 @@ async function executeReclaim(actions, runsRoot2, registryActive, now, options =
       });
       continue;
     }
-    if (record.effort) {
+    if (record.effort || record.mergerFor) {
       failed.push({ agentId, action: actionKind, error: "unresolved effort ownership; legacy GC refused" });
       continue;
     }
@@ -9944,8 +10422,8 @@ async function executeReclaim(actions, runsRoot2, registryActive, now, options =
     }
     const assertCurrent = () => {
       if (active()) throw new Error("active during reclaim");
-      const latest = JSON.parse(readFileSync15(recordPath, "utf8"));
-      if (!isTerminal(latest.status) || latest.effort) throw new Error("status/effort changed during reclaim");
+      const latest = JSON.parse(readFileSync17(recordPath, "utf8"));
+      if (!isTerminal(latest.status) || latest.effort || latest.mergerFor) throw new Error("status/effort changed during reclaim");
       if (record.runtime === "herdr" || latest.runtime === "herdr") {
         const live = options.currentRun?.(agentId);
         if (record.runtime !== "herdr" || latest.runtime !== "herdr" || latest.id !== agentId || latest.status !== record.status || action.herdrStatus !== void 0 && latest.status !== action.herdrStatus || !sameHerdrBinding(action.herdr, latest.herdr) || !sameHerdrBinding(record.herdr, latest.herdr) || !herdrChildAbsent({ ...latest, recordPath }) || latest.worktreePath !== record.worktreePath || latest.worktreeBranch !== record.worktreeBranch || live && (live.status !== latest.status || live.effort || !sameHerdrBinding(latest.herdr, live.herdr)))
@@ -9997,7 +10475,7 @@ async function executeReclaim(actions, runsRoot2, registryActive, now, options =
   return { archived, deleted, failed };
 }
 async function coldArchive(runDir2, now, assertCurrent) {
-  const transcriptPath = join25(runDir2, "transcript.jsonl");
+  const transcriptPath = join26(runDir2, "transcript.jsonl");
   let bytes = 0;
   try {
     const s = await stat5(transcriptPath);
@@ -10014,7 +10492,7 @@ async function coldArchive(runDir2, now, assertCurrent) {
       bytes = 0;
     }
   }
-  const sidecarPath = join25(runDir2, ".archived");
+  const sidecarPath = join26(runDir2, ".archived");
   assertCurrent();
   await writeFile5(sidecarPath, "");
   const nowSec = now / 1e3;
@@ -10047,7 +10525,7 @@ async function walkSize(path2) {
   let total = 0;
   const entries = await readdir4(path2, { withFileTypes: true });
   for (const entry of entries) {
-    const child = join25(path2, entry.name);
+    const child = join26(path2, entry.name);
     if (entry.isDirectory()) {
       total += await walkSize(child);
     } else if (entry.isFile()) {
@@ -10167,25 +10645,25 @@ async function maybeAutoRunGc(opts) {
 }
 
 // src/watchdog.ts
-function evaluateRun(run, state, config, now, awaiting = false) {
+function evaluateRun(run2, state, config, now, awaiting = false) {
   const current = state ?? { kind: "fresh" };
-  if (run.status !== "running" || waitingForDialog(run)) {
+  if (run2.status !== "running" || waitingForDialog(run2)) {
     return { transition: { kind: "none" }, nextState: current };
   }
-  if (run.pausedAt !== void 0) {
+  if (run2.pausedAt !== void 0) {
     return { transition: { kind: "none" }, nextState: current };
   }
-  if (run.hookExecuting === true || awaiting) {
+  if (run2.hookExecuting === true || awaiting) {
     return { transition: { kind: "none" }, nextState: current };
   }
-  if (!isObservableHere(run)) {
+  if (!isObservableHere(run2)) {
     return { transition: { kind: "none" }, nextState: current };
   }
-  const ageMs = now - run.startTime;
+  const ageMs = now - run2.startTime;
   if (ageMs < config.graceSeconds * 1e3) {
     return { transition: { kind: "none" }, nextState: current };
   }
-  const silentMs = now - run.lastEventAt;
+  const silentMs = now - run2.lastEventAt;
   const silentSeconds = Math.floor(silentMs / 1e3);
   const softMs = config.softThresholdSeconds * 1e3;
   const hardMs = config.hardThresholdSeconds * 1e3;
@@ -10223,12 +10701,12 @@ function evaluateRun(run, state, config, now, awaiting = false) {
   }
   return { transition: { kind: "none" }, nextState: current };
 }
-function waitingForDialog(run) {
-  return run.runtime === "herdr" && run.herdrPrompts?.nonce === run.herdr?.launchNonce && !!run.herdrPrompts?.active.length;
+function waitingForDialog(run2) {
+  return run2.runtime === "herdr" && run2.herdrPrompts?.nonce === run2.herdr?.launchNonce && !!run2.herdrPrompts?.active.length;
 }
 var DEFAULT_TICK_INTERVAL_MS = 3e4;
-function effectiveConfig(run, defaults) {
-  const overrideSoft = run.softStallSeconds;
+function effectiveConfig(run2, defaults) {
+  const overrideSoft = run2.softStallSeconds;
   if (overrideSoft === void 0) return defaults;
   const ratio = defaults.softThresholdSeconds > 0 ? defaults.hardThresholdSeconds / defaults.softThresholdSeconds : 5;
   const scaledHard = Math.max(
@@ -10241,23 +10719,23 @@ function effectiveConfig(run, defaults) {
     graceSeconds: defaults.graceSeconds
   };
 }
-function resolveKillOnStall(run, defaultKillOnStall) {
-  return run.killOnStall ?? defaultKillOnStall;
+function resolveKillOnStall(run2, defaultKillOnStall) {
+  return run2.killOnStall ?? defaultKillOnStall;
 }
-function resolveKillOnStallForPersona(run, defaultKillOnStall, isWriteCapablePersona) {
-  if (run.killOnStall !== void 0) return run.killOnStall;
+function resolveKillOnStallForPersona(run2, defaultKillOnStall, isWriteCapablePersona) {
+  if (run2.killOnStall !== void 0) return run2.killOnStall;
   if (defaultKillOnStall !== false) return defaultKillOnStall;
   return isWriteCapablePersona;
 }
-function classifyStall(run, nowMs, defaults, awaiting = false) {
-  if (run.status !== "running" || waitingForDialog(run)) return null;
-  if (run.pausedAt !== void 0) return null;
-  if (run.hookExecuting === true || awaiting) return null;
-  if (!isObservableHere(run)) return null;
-  const eff = effectiveConfig(run, defaults);
-  const silentMs = Math.max(0, nowMs - run.lastEventAt);
+function classifyStall(run2, nowMs, defaults, awaiting = false) {
+  if (run2.status !== "running" || waitingForDialog(run2)) return null;
+  if (run2.pausedAt !== void 0) return null;
+  if (run2.hookExecuting === true || awaiting) return null;
+  if (!isObservableHere(run2)) return null;
+  const eff = effectiveConfig(run2, defaults);
+  const silentMs = Math.max(0, nowMs - run2.lastEventAt);
   const silentSeconds = Math.floor(silentMs / 1e3);
-  const ageMs = nowMs - run.startTime;
+  const ageMs = nowMs - run2.startTime;
   if (ageMs < eff.graceSeconds * 1e3) return null;
   let severity = "fresh";
   if (silentSeconds >= eff.hardThresholdSeconds) severity = "hard";
@@ -10333,39 +10811,39 @@ var Watchdog = class {
     if (process.env.CONDUCTOR_SUBAGENT === "1") return;
     const now = this.deps.now();
     const runs = this.deps.registry.list();
-    const ids = new Set(runs.map((run) => run.id));
-    const awaiting = (run) => awaitingChildren(run, runs) > 0;
+    const ids = new Set(runs.map((run2) => run2.id));
+    const awaiting = (run2) => awaitingChildren(run2, runs) > 0;
     for (const id of this.states.keys()) if (!ids.has(id)) this.states.delete(id);
-    for (const run of runs) {
-      if (run.status === "running" && isObservableHere(run) && waitingForDialog(run) && !run.herdrPrompts.notified) {
-        run.herdrPrompts.notified = true;
-        this.deps.dialog?.(run);
+    for (const run2 of runs) {
+      if (run2.status === "running" && isObservableHere(run2) && waitingForDialog(run2) && !run2.herdrPrompts.notified) {
+        run2.herdrPrompts.notified = true;
+        this.deps.dialog?.(run2);
       }
       if (this.deps.isEnabled && !this.deps.isEnabled()) continue;
-      if (classifyStall(run, now, this.deps.config, awaiting(run)) === null) {
-        this.states.delete(run.id);
-        run.stalledSince = void 0;
+      if (classifyStall(run2, now, this.deps.config, awaiting(run2)) === null) {
+        this.states.delete(run2.id);
+        run2.stalledSince = void 0;
         continue;
       }
-      const invocationStartedAt = run.thisInvocationStartedAt ?? run.startTime;
-      const resumeCount = run.resumeCount ?? 0;
-      const herdrNonce = run.herdr?.launchNonce;
-      let episode = this.states.get(run.id);
-      if (episode && (episode.lastEventAt !== run.lastEventAt || episode.herdrNonce !== herdrNonce || episode.invocationStartedAt !== invocationStartedAt || episode.resumeCount !== resumeCount)) {
+      const invocationStartedAt = run2.thisInvocationStartedAt ?? run2.startTime;
+      const resumeCount = run2.resumeCount ?? 0;
+      const herdrNonce = run2.herdr?.launchNonce;
+      let episode = this.states.get(run2.id);
+      if (episode && (episode.lastEventAt !== run2.lastEventAt || episode.herdrNonce !== herdrNonce || episode.invocationStartedAt !== invocationStartedAt || episode.resumeCount !== resumeCount)) {
         if (episode.state.kind !== "fresh") {
-          this.dispatch(run, { kind: "recovered", previousKind: episode.state.kind }, this.deps.config);
+          this.dispatch(run2, { kind: "recovered", previousKind: episode.state.kind }, this.deps.config);
         }
         episode = void 0;
       }
       if (episode?.pending) continue;
       const prev = episode?.state;
-      const effective = effectiveConfig(run, this.deps.config);
-      let { transition, nextState } = evaluateRun(run, prev, effective, now, awaiting(run));
+      const effective = effectiveConfig(run2, this.deps.config);
+      let { transition, nextState } = evaluateRun(run2, prev, effective, now, awaiting(run2));
       const reminder = transition.kind === "none" && nextState.kind === "soft" && episode !== void 0 && now >= episode.nextReminderAt;
       if (reminder) {
         transition = {
           kind: "soft",
-          silentSeconds: Math.floor((now - run.lastEventAt) / 1e3),
+          silentSeconds: Math.floor((now - run2.lastEventAt) / 1e3),
           thresholdSeconds: effective.softThresholdSeconds
         };
       }
@@ -10376,40 +10854,40 @@ var Watchdog = class {
       if (attention) {
         if (episode?.noticeAt === void 0) {
           try {
-            actions = this.deps.observeActions?.(run);
+            actions = this.deps.observeActions?.(run2);
           } catch {
             actions = [];
           }
-          notice = { evidence: recentStallEvidence(run) };
+          notice = { evidence: recentStallEvidence(run2) };
         } else {
-          notice = { evidenceReference: `Same stall episode; use the evidence and action snapshot in the first notice at ${new Date(episode.noticeAt).toISOString()} (invocation ${invocationStartedAt}, resume ${resumeCount}, last event ${run.lastEventAt}).` };
+          notice = { evidenceReference: `Same stall episode; use the evidence and action snapshot in the first notice at ${new Date(episode.noticeAt).toISOString()} (invocation ${invocationStartedAt}, resume ${resumeCount}, last event ${run2.lastEventAt}).` };
         }
         notice.availableActions = actions;
       }
-      this.states.set(run.id, {
+      this.states.set(run2.id, {
         state: nextState,
         herdrNonce,
         noticeAt: episode?.noticeAt ?? (attention ? now : void 0),
         actions,
-        lastEventAt: run.lastEventAt,
+        lastEventAt: run2.lastEventAt,
         invocationStartedAt,
         resumeCount,
         nextReminderAt: transition.kind === "soft" ? now + interval : episode?.nextReminderAt ?? Infinity,
         reminderIntervalMs: transition.kind === "soft" ? interval : episode?.reminderIntervalMs ?? interval
       });
-      const read2 = run.transport?.kind === "herdr" ? run.transport.readStallEvidence : void 0;
+      const read2 = run2.transport?.kind === "herdr" ? run2.transport.readStallEvidence : void 0;
       if (attention && episode?.noticeAt === void 0 && read2) {
-        const saved = this.states.get(run.id);
+        const saved = this.states.get(run2.id);
         saved.pending = true;
         void read2().catch(() => "Live pane diagnostic unavailable.").then((evidence) => {
           saved.pending = false;
-          if (this.disposed || this.states.get(run.id) !== saved || run.lastEventAt !== saved.lastEventAt || run.herdr?.launchNonce !== saved.herdrNonce || classifyStall(run, this.deps.now(), this.deps.config, awaitingChildren(run, this.deps.registry.list()) > 0) === null) return;
-          this.dispatch(run, transition, effective, { ...notice, evidence: boundStallText(`${notice.evidence}
+          if (this.disposed || this.states.get(run2.id) !== saved || run2.lastEventAt !== saved.lastEventAt || run2.herdr?.launchNonce !== saved.herdrNonce || classifyStall(run2, this.deps.now(), this.deps.config, awaitingChildren(run2, this.deps.registry.list()) > 0) === null) return;
+          this.dispatch(run2, transition, effective, { ...notice, evidence: boundStallText(`${notice.evidence}
 
 Live pane (untrusted):
 ${evidence}`, 16 * 1024 - 64) });
         });
-      } else this.dispatch(run, transition, effective, notice);
+      } else this.dispatch(run2, transition, effective, notice);
     }
   }
   /**
@@ -10419,18 +10897,18 @@ ${evidence}`, 16 * 1024 - 64) });
    * recheck**: re-read `now() - run.lastEventAt` and abort the kill if
    * the run recovered between the detector verdict and the dispatch.
    */
-  dispatch(run, transition, effective, notice = {}) {
+  dispatch(run2, transition, effective, notice = {}) {
     switch (transition.kind) {
       case "none":
         return;
       case "soft": {
-        run.stalledSince ??= this.deps.now();
+        run2.stalledSince ??= this.deps.now();
         this.deps.log.warn(
-          `watchdog: soft-stall on ${run.id} (silent ${transition.silentSeconds}s)`,
+          `watchdog: soft-stall on ${run2.id} (silent ${transition.silentSeconds}s)`,
           {
             ...notice,
-            agentId: run.id,
-            persona: run.persona,
+            agentId: run2.id,
+            persona: run2.persona,
             thresholdSeconds: transition.thresholdSeconds,
             silentSeconds: transition.silentSeconds,
             severity: "soft"
@@ -10439,15 +10917,15 @@ ${evidence}`, 16 * 1024 - 64) });
         return;
       }
       case "hard": {
-        run.stalledSince = this.deps.now();
-        const killOnStall = this.deps.isKillOnStall(run);
+        run2.stalledSince = this.deps.now();
+        const killOnStall = this.deps.isKillOnStall(run2);
         if (!killOnStall) {
           this.deps.log.warn(
-            `watchdog: hard-stall on ${run.id} (silent ${transition.silentSeconds}s) \u2014 kill_on_stall=false; leaving alive`,
+            `watchdog: hard-stall on ${run2.id} (silent ${transition.silentSeconds}s) \u2014 kill_on_stall=false; leaving alive`,
             {
               ...notice,
-              agentId: run.id,
-              persona: run.persona,
+              agentId: run2.id,
+              persona: run2.persona,
               thresholdSeconds: transition.thresholdSeconds,
               silentSeconds: transition.silentSeconds,
               severity: "hard"
@@ -10456,41 +10934,41 @@ ${evidence}`, 16 * 1024 - 64) });
           return;
         }
         const nowAfter = this.deps.now();
-        const stillStaleMs = nowAfter - run.lastEventAt;
-        if (stillStaleMs < effective.hardThresholdSeconds * 1e3 || classifyStall(run, nowAfter, effective, awaitingChildren(run, this.deps.registry.list()) > 0) === null) {
-          run.stalledSince = void 0;
-          this.states.delete(run.id);
+        const stillStaleMs = nowAfter - run2.lastEventAt;
+        if (stillStaleMs < effective.hardThresholdSeconds * 1e3 || classifyStall(run2, nowAfter, effective, awaitingChildren(run2, this.deps.registry.list()) > 0) === null) {
+          run2.stalledSince = void 0;
+          this.states.delete(run2.id);
           this.deps.log.info(
-            `watchdog: kill aborted for ${run.id} \u2014 recovered before kill (A2)`,
+            `watchdog: kill aborted for ${run2.id} \u2014 recovered before kill (A2)`,
             {
-              agentId: run.id,
-              persona: run.persona,
+              agentId: run2.id,
+              persona: run2.persona,
               recoveredFrom: "hard"
             }
           );
           return;
         }
         this.deps.log.warn(
-          `watchdog: hard-stall on ${run.id} (silent ${transition.silentSeconds}s) \u2014 killing (kill_on_stall=true)`,
+          `watchdog: hard-stall on ${run2.id} (silent ${transition.silentSeconds}s) \u2014 killing (kill_on_stall=true)`,
           {
             ...notice,
-            agentId: run.id,
-            persona: run.persona,
+            agentId: run2.id,
+            persona: run2.persona,
             thresholdSeconds: transition.thresholdSeconds,
             silentSeconds: transition.silentSeconds,
             severity: "hard"
           }
         );
-        this.deps.kill(run, "stalled");
+        this.deps.kill(run2, "stalled");
         return;
       }
       case "recovered": {
-        run.stalledSince = void 0;
+        run2.stalledSince = void 0;
         this.deps.log.info(
-          `watchdog: ${run.id} recovered from ${transition.previousKind}-stall`,
+          `watchdog: ${run2.id} recovered from ${transition.previousKind}-stall`,
           {
-            agentId: run.id,
-            persona: run.persona,
+            agentId: run2.id,
+            persona: run2.persona,
             previousKind: transition.previousKind
           }
         );
@@ -10507,33 +10985,33 @@ import { Type as Type2 } from "@sinclair/typebox";
 import { lstatSync as lstatSync7 } from "node:fs";
 
 // src/supervision/delivery.ts
-import { closeSync as closeSync8, existsSync as existsSync18, lstatSync as lstatSync6, readdirSync as readdirSync11, readSync as readSync6, watch as watch2 } from "node:fs";
+import { closeSync as closeSync8, existsSync as existsSync20, lstatSync as lstatSync6, readdirSync as readdirSync11, readSync as readSync6, watch as watch2 } from "node:fs";
 
 // src/supervision/inbox.ts
 import { createHash as createHash7, randomUUID as randomUUID9 } from "node:crypto";
-import { closeSync as closeSync6, existsSync as existsSync17, linkSync as linkSync3, lstatSync as lstatSync4, openSync as openSync6, readdirSync as readdirSync10, unlinkSync as unlinkSync3 } from "node:fs";
-import { isAbsolute as isAbsolute7, join as join28 } from "node:path";
+import { closeSync as closeSync6, existsSync as existsSync19, linkSync as linkSync3, lstatSync as lstatSync4, openSync as openSync6, readdirSync as readdirSync10, unlinkSync as unlinkSync3 } from "node:fs";
+import { isAbsolute as isAbsolute7, join as join29 } from "node:path";
 
 // src/supervision/lease.ts
 import { createHash as createHash6, randomUUID as randomUUID8 } from "node:crypto";
-import { existsSync as existsSync16, readdirSync as readdirSync9 } from "node:fs";
-import { join as join27 } from "node:path";
+import { existsSync as existsSync18, readdirSync as readdirSync9 } from "node:fs";
+import { join as join28 } from "node:path";
 
 // src/supervision/store.ts
 import { createHash as createHash5, randomUUID as randomUUID7 } from "node:crypto";
-import { linkSync as linkSync2, lstatSync as lstatSync3, mkdirSync as mkdirSync12, readdirSync as readdirSync8, renameSync as renameSync3, unlinkSync as unlinkSync2 } from "node:fs";
+import { linkSync as linkSync2, lstatSync as lstatSync3, mkdirSync as mkdirSync13, readdirSync as readdirSync8, renameSync as renameSync3, unlinkSync as unlinkSync2 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
-import { dirname as dirname19, isAbsolute as isAbsolute6, join as join26 } from "node:path";
+import { dirname as dirname19, isAbsolute as isAbsolute6, join as join27 } from "node:path";
 var LEAD_RECORD_MAX_BYTES = 4096;
 var LEAD_RUNS_BRIEF_MAX = 24;
 var LEAD_SCAN_MAX = 1024;
 var PRESENTATION_MAX_BYTES = 256;
 var LEAD_FRESH_MS = 9e4;
 var LEAD_STALE_MS = 6e5;
-var supervisionRoot = () => join26(homedir9(), ".pi", "agent", "conductor", "supervision");
-var leadsDir = () => join26(supervisionRoot(), "leads");
+var supervisionRoot = () => join27(homedir9(), ".pi", "agent", "conductor", "supervision");
+var leadsDir = () => join27(supervisionRoot(), "leads");
 var fileName = (sessionId) => `${createHash5("sha256").update(sessionId).digest("hex")}.json`;
-var leadPath = (sessionId) => join26(leadsDir(), fileName(sessionId));
+var leadPath = (sessionId) => join27(leadsDir(), fileName(sessionId));
 var RECORD_FILE = /^[0-9a-f]{64}\.json$/;
 var TEMP_FILE = /^[0-9a-f]{64}\.json-[0-9a-f-]{36}\.(claim|tmp|sweep)$/;
 var KEYS = /* @__PURE__ */ new Set([
@@ -10603,11 +11081,11 @@ var sameLeadIdentity = (a, b) => a.sessionId === b.sessionId && a.sessionFile ==
 var sameLeadVersion = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 var ensureLeadsDir = (create) => ensurePrivateDirs([supervisionRoot(), leadsDir()], create);
 function ensurePrivateDirs(dirs, create) {
-  if (create) mkdirSync12(dirname19(dirs[0]), { recursive: true });
+  if (create) mkdirSync13(dirname19(dirs[0]), { recursive: true });
   for (const dir of dirs) {
     if (create) {
       try {
-        mkdirSync12(dir, { mode: 448 });
+        mkdirSync13(dir, { mode: 448 });
       } catch (e) {
         if (e.code !== "EEXIST") throw e;
       }
@@ -10686,7 +11164,7 @@ function scanLeads(options = {}) {
   const now = (options.now ?? Date.now)();
   const offLinux = (options.platform ?? process.platform) !== "linux";
   for (const name2 of names.sort()) {
-    const path2 = join26(dir, name2);
+    const path2 = join27(dir, name2);
     if (TEMP_FILE.test(name2)) {
       try {
         const stat6 = lstatSync3(path2);
@@ -10726,8 +11204,8 @@ function scanLeads(options = {}) {
 var LEASE_FILE_MAX_BYTES = 4096;
 var LEASE_ENTRIES_MAX = 4096;
 var KEYS2 = ["v", "socketPath", "sessionId", "sessionFile", "pid", "startTime", "epoch", "generation", "at"];
-var chiefRoot = () => join27(supervisionRoot(), "chief");
-var chiefLeaseDir = (socketPath) => join27(chiefRoot(), createHash6("sha256").update(socketPath).digest("hex"));
+var chiefRoot = () => join28(supervisionRoot(), "chief");
+var chiefLeaseDir = (socketPath) => join28(chiefRoot(), createHash6("sha256").update(socketPath).digest("hex"));
 var ensureLeaseDir = (socketPath, create) => ensurePrivateDirs([supervisionRoot(), chiefRoot(), chiefLeaseDir(socketPath)], create);
 var claimName = (generation) => `${String(generation).padStart(6, "0")}.json`;
 var invalid = () => new Error("invalid chief lease; preserved for inspection");
@@ -10757,7 +11235,7 @@ function readChiefLease(socketPath) {
   let holder;
   for (const [generation, name2] of claims.entries()) {
     if (name2 !== claimName(generation)) throw invalid();
-    const value = readFile6(join27(dir, name2));
+    const value = readFile6(join28(dir, name2));
     if (!validClaim(value, socketPath, generation)) throw invalid();
     holder = value;
   }
@@ -10765,7 +11243,7 @@ function readChiefLease(socketPath) {
   if (!holder) return { released: false };
   const marker = `${claimName(holder.generation)}.released`;
   if (!names.includes(marker)) return { holder, released: false };
-  const release = readFile6(join27(dir, marker));
+  const release = readFile6(join28(dir, marker));
   if (!validClaim(release, socketPath, holder.generation) || !sameClaim(release, holder)) throw invalid();
   return { holder, released: true };
 }
@@ -10788,7 +11266,7 @@ function claimChiefLease(socketPath, identity, options = {}) {
   }
   const claim = { v: 1, socketPath, ...identity, generation: previous.holder ? previous.holder.generation + 1 : 0, at: (options.now ?? Date.now)() };
   try {
-    publishJson(join27(dir, claimName(claim.generation)), claim, () => {
+    publishJson(join28(dir, claimName(claim.generation)), claim, () => {
       const current = readChiefLease(socketPath).holder;
       if (previous.holder ? !current || !sameClaim(current, previous.holder) : current !== void 0) throw new Error("chief lease changed while claiming; not claimed");
     }, 384);
@@ -10816,7 +11294,7 @@ function assertChiefLease(claim) {
   if (!lease.holder || !sameClaim(lease.holder, claim) || lease.released) throw new Error(`chief lease generation ${claim.generation} fenced: no longer this lead's`);
 }
 function releaseChiefLease(claim) {
-  publishJson(join27(chiefLeaseDir(claim.socketPath), `${claimName(claim.generation)}.released`), claim, () => assertChiefLease(claim), 384);
+  publishJson(join28(chiefLeaseDir(claim.socketPath), `${claimName(claim.generation)}.released`), claim, () => assertChiefLease(claim), 384);
 }
 var CHIEF_ROLE_ENTRY = "conductor-role";
 var STAFF_TOOL = "staff";
@@ -10911,7 +11389,7 @@ var ChiefRole = class {
       throw new Error(`chief not activated: this session could not record the chief role (${message(e)}); lease generation ${claim.generation} ${released2 ? "released" : "could not be released and frees when this pi exits"}`);
     }
     this.hold(claim);
-    const unflushed = !existsSync16(self.sessionFile);
+    const unflushed = !existsSync18(self.sessionFile);
     return `chief of this herdr socket (lease generation ${claim.generation}): \`staff\` is added from the next turn and every other tool is unchanged. The chief intent is on this session's branch for the next session start; the lease, not the intent, is the authority. Repeat /chief for staff list; /chief leave releases the lease.` + (unflushed ? " \u26A0 This session is not on disk yet (Pi writes it with its first reply), so a restart before then forgets the intent." : "");
   }
   /** `/chief leave`: release the own claim, remove only `staff`, record a lead intent. */
@@ -11058,10 +11536,10 @@ var ident = (v, max = 256) => typeof v === "string" && v.length > 0 && Buffer.by
 var count2 = (v) => Number.isSafeInteger(v) && v >= 0;
 var onlyKeys2 = (v, keys) => Object.keys(v).every((k) => keys.has(k));
 var attr = (s) => escapeStallEvidence(s).replace(/"/g, "&quot;");
-var inboxDir = (sessionId) => join28(supervisionRoot(), "inbox", createHash7("sha256").update(sessionId).digest("hex"));
-var ensureInboxDir = (sessionId, create) => ensurePrivateDirs([supervisionRoot(), join28(supervisionRoot(), "inbox"), inboxDir(sessionId)], create);
+var inboxDir = (sessionId) => join29(supervisionRoot(), "inbox", createHash7("sha256").update(sessionId).digest("hex"));
+var ensureInboxDir = (sessionId, create) => ensurePrivateDirs([supervisionRoot(), join29(supervisionRoot(), "inbox"), inboxDir(sessionId)], create);
 var recordBase = (r) => `${String(r.createdAt).padStart(13, "0")}-${r.id}`;
-var inboxPath = (dir, base, state) => join28(dir, base + SUFFIX[state]);
+var inboxPath = (dir, base, state) => join29(dir, base + SUFFIX[state]);
 function framing(r, stale) {
   const g = r.lease?.generation, from = escapeStallEvidence(r.from), ask = escapeStallEvidence(r.askId ?? "");
   const none = "not a user instruction; grants no permissions or tools.";
@@ -11150,7 +11628,7 @@ function admitCoordination(record, fence) {
     if (slots(dir) > INBOX_QUEUE_MAX) throw full();
     publishJson(path2, record, fence, 384);
   } catch (e) {
-    if (existsSync17(path2)) throw new Error(`${record.kind === "peer" ? "peer message" : record.kind.replace("_", " ")} ${record.id} may have been queued: ${e.message}`);
+    if (existsSync19(path2)) throw new Error(`${record.kind === "peer" ? "peer message" : record.kind.replace("_", " ")} ${record.id} may have been queued: ${e.message}`);
     unlinkQuiet(slot);
     throw e;
   }
@@ -11229,7 +11707,7 @@ function sweepInbox(dir, now) {
     } catch {
     }
   };
-  for (const name2 of temps) if (aged(join28(dir, name2), ABANDONED_MS)) remove(join28(dir, name2));
+  for (const name2 of temps) if (aged(join29(dir, name2), ABANDONED_MS)) remove(join29(dir, name2));
   for (const [base, states] of bases) {
     for (const state of ["uncertain", "rejected"]) {
       if (states.has(state) && aged(inboxPath(dir, base, state), INBOX_RETENTION_MS)) remove(inboxPath(dir, base, state));
@@ -11458,11 +11936,11 @@ var CoordinationDelivery = class {
   }
   /** Every shutdown reason: no timer, watch or later drain of this instance can dispatch again. */
   stop() {
-    const run = this.run;
-    if (!run) return;
-    run.closed = true;
-    if (run.timer !== void 0) this.timers.clearTimeout(run.timer);
-    run.watcher?.close();
+    const run2 = this.run;
+    if (!run2) return;
+    run2.closed = true;
+    if (run2.timer !== void 0) this.timers.clearTimeout(run2.timer);
+    run2.watcher?.close();
     this.run = void 0;
   }
   status() {
@@ -11471,68 +11949,68 @@ var CoordinationDelivery = class {
   }
   /** session_before_compact opens the window; session_compact or _failed ends it, cleared once idle or at a turn boundary. */
   compaction(phase) {
-    const run = this.run;
-    if (!run) return;
+    const run2 = this.run;
+    if (!run2) return;
     if (phase === "start") {
-      run.compacting = true;
-      run.compactionDone = false;
+      run2.compacting = true;
+      run2.compactionDone = false;
       return;
     }
-    run.compactionDone = true;
+    run2.compactionDone = true;
     this.schedule(0);
   }
   boundary() {
-    const run = this.run;
-    if (run?.compactionDone) {
-      run.compacting = false;
-      run.compactionDone = false;
+    const run2 = this.run;
+    if (run2?.compactionDone) {
+      run2.compacting = false;
+      run2.compactionDone = false;
     }
   }
   /** message_start: Pi began this coordination card, so from here its run (or its receipt) decides; no other card is released. */
   messageStarted(message4) {
-    const run = this.run;
-    if (!run || !isRecord(message4) || message4.role !== "custom" || message4.customType !== COORDINATION_TYPE || !isRecord(message4.details)) return;
+    const run2 = this.run;
+    if (!run2 || !isRecord(message4) || message4.role !== "custom" || message4.customType !== COORDINATION_TYPE || !isRecord(message4.details)) return;
     const d = message4.details;
     if (d.notice !== void 0 || typeof d.coordinationId !== "string") return;
-    run.held.delete(d.coordinationId);
-    if (run.inherit) run.startedEarly.add(d.coordinationId);
+    run2.held.delete(d.coordinationId);
+    if (run2.inherit) run2.startedEarly.add(d.coordinationId);
   }
   /** Synchronous and re-entrancy guarded: one pass at a time per instance. */
   drain() {
-    const run = this.run;
-    if (!run || run.closed) return;
-    if (run.draining) {
-      run.again = true;
+    const run2 = this.run;
+    if (!run2 || run2.closed) return;
+    if (run2.draining) {
+      run2.again = true;
       return;
     }
-    run.draining = true;
+    run2.draining = true;
     try {
       do {
-        run.again = false;
-        this.pass(run);
-      } while (run.again && !run.closed && this.run === run);
+        run2.again = false;
+        this.pass(run2);
+      } while (run2.again && !run2.closed && this.run === run2);
       this.lastError = void 0;
     } catch (e) {
-      if (this.lastError !== message2(e)) run.notify(`conductor supervision: inbox unavailable: ${message2(e)}`, "warning");
+      if (this.lastError !== message2(e)) run2.notify(`conductor supervision: inbox unavailable: ${message2(e)}`, "warning");
       this.lastError = message2(e);
     } finally {
-      run.draining = false;
+      run2.draining = false;
     }
   }
   schedule(ms) {
-    const run = this.run;
-    if (!run || run.closed) return;
+    const run2 = this.run;
+    if (!run2 || run2.closed) return;
     const due = this.now() + ms;
-    if (run.timer !== void 0 && run.due <= due) return;
-    if (run.timer !== void 0) this.timers.clearTimeout(run.timer);
-    run.due = due;
-    run.timer = this.timers.setTimeout(() => {
-      if (this.run !== run || run.closed) return;
-      run.timer = void 0;
+    if (run2.timer !== void 0 && run2.due <= due) return;
+    if (run2.timer !== void 0) this.timers.clearTimeout(run2.timer);
+    run2.due = due;
+    run2.timer = this.timers.setTimeout(() => {
+      if (this.run !== run2 || run2.closed) return;
+      run2.timer = void 0;
       this.drain();
       this.schedule(DRAIN_POLL_MS);
     }, ms);
-    run.timer.unref?.();
+    run2.timer.unref?.();
   }
   owned() {
     try {
@@ -11541,13 +12019,13 @@ var CoordinationDelivery = class {
       return void 0;
     }
   }
-  pass(run) {
+  pass(run2) {
     const self = this.owned();
     if (!self) return;
     const dir = ensureInboxDir(self.sessionId, true);
-    this.watch(run, dir);
-    if (!run.swept) {
-      run.swept = true;
+    this.watch(run2, dir);
+    if (!run2.swept) {
+      run2.swept = true;
       sweepInbox(dir, this.now());
     }
     const { bases } = listInbox(dir);
@@ -11559,26 +12037,26 @@ var CoordinationDelivery = class {
         try {
           pending.push(readDispatched(dir, base, self.sessionId));
         } catch {
-          this.reject(run, dir, base, "sending");
+          this.reject(run2, dir, base, "sending");
           continue;
         }
         for (const state of ["json", "slot"]) if (states.has(state)) unlinkQuiet(inboxPath(dir, base, state));
       } else if (states.has("json")) queued.push(base);
     }
-    if (run.inherit) {
-      run.inherit = false;
-      for (const p of pending) if (p.dispatcher.woken && this.sameProcess(p, self) && !run.startedEarly.has(p.id)) run.held.add(p.id);
-      run.startedEarly.clear();
+    if (run2.inherit) {
+      run2.inherit = false;
+      for (const p of pending) if (p.dispatcher.woken && this.sameProcess(p, self) && !run2.startedEarly.has(p.id)) run2.held.add(p.id);
+      run2.startedEarly.clear();
     }
-    this.settle(run, self, dir, pending);
+    this.settle(run2, self, dir, pending);
     const staged = this.deps.asks?.staged();
-    if (staged !== void 0 && run.session.isIdle()) this.deps.asks.unstage(staged);
-    if (run.compacting) {
-      if (!(run.compactionDone && run.session.isIdle())) return;
-      run.compacting = false;
-      run.compactionDone = false;
+    if (staged !== void 0 && run2.session.isIdle()) this.deps.asks.unstage(staged);
+    if (run2.compacting) {
+      if (!(run2.compactionDone && run2.session.isIdle())) return;
+      run2.compacting = false;
+      run2.compactionDone = false;
     }
-    const replying = new Set(pending.filter((p) => p.kind === "chief_reply" && existsSync18(inboxPath(dir, recordBase(p), "sending"))).map((p) => p.askId));
+    const replying = new Set(pending.filter((p) => p.kind === "chief_reply" && existsSync20(inboxPath(dir, recordBase(p), "sending"))).map((p) => p.askId));
     const dispatched = [];
     for (const base of queued.slice(0, INBOX_QUEUE_MAX)) {
       let record;
@@ -11589,15 +12067,15 @@ var CoordinationDelivery = class {
         try {
           record = readQueued(dir, base, self.sessionId);
         } catch {
-          this.reject(run, dir, base, "json");
+          this.reject(run2, dir, base, "json");
           continue;
         }
       }
       const current = this.owned();
-      if (!current || current.generation !== self.generation || run.closed || this.run !== run) return;
-      const plan = this.disposition(run, self, record, replying);
+      if (!current || current.generation !== self.generation || run2.closed || this.run !== run2) return;
+      const plan = this.disposition(run2, self, record, replying);
       if (!plan.deliver) {
-        if ("reject" in plan) this.rejectReply(run, dir, base, record, plan.reject);
+        if ("reject" in plan) this.rejectReply(run2, dir, base, record, plan.reject);
         continue;
       }
       const dispatcher = {
@@ -11611,18 +12089,18 @@ var CoordinationDelivery = class {
         ...plan.wake ? { woken: true } : {}
       };
       const fence = () => {
-        if (this.owned()?.generation !== self.generation || this.run !== run) throw new Error("coordination dispatch fenced: superseded");
+        if (this.owned()?.generation !== self.generation || this.run !== run2) throw new Error("coordination dispatch fenced: superseded");
       };
       if (!claimCoordination(dir, record, dispatcher, fence)) continue;
       if (record.kind === "chief_reply") replying.add(record.askId);
-      if (plan.wake) run.held.add(record.id);
+      if (plan.wake) run2.held.add(record.id);
       this.deps.pi.sendMessage(coordinationMessage(record, plan.stale), { deliverAs: "followUp", triggerTurn: plan.wake });
       dispatched.push({ ...record, dispatcher });
     }
-    this.settle(run, self, dir, dispatched);
+    this.settle(run2, self, dir, dispatched);
   }
   /** Peer: never wakes. Chief kinds: wake only for the current matching holder; a reply must also answer this branch's outstanding ask. */
-  disposition(run, self, r, replying) {
+  disposition(run2, self, r, replying) {
     if (r.kind === "peer") return { deliver: true, wake: false, stale: false };
     const sameSocket = r.socketPath === self.socketPath;
     if (isLeadKind(r.kind)) {
@@ -11642,7 +12120,7 @@ var CoordinationDelivery = class {
     if (!current) return { deliver: false, reject: `it is from a former chief (lease generation ${r.lease.generation} is not this socket's live holder)` };
     const asks = this.deps.asks;
     if (asks?.staged()) {
-      if (!run.session.isIdle()) return { deliver: false, defer: true };
+      if (!run2.session.isIdle()) return { deliver: false, defer: true };
       asks.unstage(asks.staged());
     }
     if (replying.has(r.askId)) return { deliver: false, defer: true };
@@ -11651,58 +12129,58 @@ var CoordinationDelivery = class {
     return { deliver: true, wake: true, stale: false };
   }
   /** Retire persisted receipts; keep what this process may still append; everything else is durable uncertainty. */
-  settle(run, self, dir, pending) {
+  settle(run2, self, dir, pending) {
     if (pending.length === 0) return;
     const ids = new Set(pending.map((p) => p.id));
-    const from = Math.min(...pending.map((p) => run.cursors.get(p.id) ?? p.dispatcher.sessionOffset));
+    const from = Math.min(...pending.map((p) => run2.cursors.get(p.id) ?? p.dispatcher.sessionOffset));
     const scan = self.sessionFile === void 0 ? void 0 : scanPersistedReceipts(self.sessionFile, self.sessionId, ids, from, RECEIPT_SCAN_BYTES);
     for (const p of pending) {
       const base = recordBase(p);
       if (scan?.found.has(p.id)) {
         unlinkQuiet(inboxPath(dir, base, "sending"));
-        run.cursors.delete(p.id);
-        run.held.delete(p.id);
+        run2.cursors.delete(p.id);
+        run2.held.delete(p.id);
         continue;
       }
       if (scan && !scan.complete) {
-        run.cursors.set(p.id, scan.next);
+        run2.cursors.set(p.id, scan.next);
         continue;
       }
-      if (this.sameProcess(p, self) && (scan === void 0 || !run.session.isIdle() || run.session.hasPendingMessages() || run.held.has(p.id))) {
-        if (scan) run.cursors.set(p.id, scan.next);
+      if (this.sameProcess(p, self) && (scan === void 0 || !run2.session.isIdle() || run2.session.hasPendingMessages() || run2.held.has(p.id))) {
+        if (scan) run2.cursors.set(p.id, scan.next);
         continue;
       }
-      run.cursors.delete(p.id);
-      run.held.delete(p.id);
+      run2.cursors.delete(p.id);
+      run2.held.delete(p.id);
       if (!markUncertain(dir, p, this.now())) continue;
       const who = p.fromName ? `${p.fromName} (${p.from})` : p.from;
-      run.notify(`conductor supervision: ${COORDINATION_LABEL[p.kind]} ${p.id} from ${who} may or may not have been delivered; not replayed.`, "warning");
+      run2.notify(`conductor supervision: ${COORDINATION_LABEL[p.kind]} ${p.id} from ${who} may or may not have been delivered; not replayed.`, "warning");
       this.deps.pi.sendMessage(uncertaintyMessage(p), { deliverAs: "followUp", triggerTurn: false });
     }
   }
   sameProcess(p, self) {
     return p.dispatcher.pid === this.pid && p.dispatcher.pidStartTime === this.pidStartTime && p.dispatcher.sessionFile === self.sessionFile;
   }
-  reject(run, dir, base, state) {
+  reject(run2, dir, base, state) {
     if (!quarantine(dir, base, state)) return;
-    run.notify(`conductor supervision: rejected malformed coordination record ${base}; preserved as ${base}.rejected.json, not delivered.`, "warning");
+    run2.notify(`conductor supervision: rejected malformed coordination record ${base}; preserved as ${base}.rejected.json, not delivered.`, "warning");
   }
   /** Never reaches the model and never touches the ask; kept for inspection with one notice. */
-  rejectReply(run, dir, base, r, why2) {
+  rejectReply(run2, dir, base, r, why2) {
     if (!quarantine(dir, base, "json")) return;
-    run.notify(`conductor supervision: rejected chief reply ${r.id} from ${r.from} for ask ${r.askId}: ${why2}; preserved as ${base}.rejected.json, not delivered.`, "warning");
+    run2.notify(`conductor supervision: rejected chief reply ${r.id} from ${r.from} for ask ${r.askId}: ${why2}; preserved as ${base}.rejected.json, not delivered.`, "warning");
   }
   /** One watch per session start on its own inbox; on any watch failure the 5 s poll still drains. */
-  watch(run, dir) {
-    if (run.watcher) return;
+  watch(run2, dir) {
+    if (run2.watcher) return;
     try {
       const w = watch2(dir, { persistent: false }, () => {
-        if (this.run === run && !run.closed) this.schedule(0);
+        if (this.run === run2 && !run2.closed) this.schedule(0);
       });
       w.on("error", () => w.close());
-      run.watcher = w;
+      run2.watcher = w;
     } catch {
-      run.watcher = { close() {
+      run2.watcher = { close() {
       } };
     }
   }
@@ -12372,7 +12850,7 @@ function runStop(opts, ctx, arg) {
       n++;
     }
   }
-  ctx.ui.notify(targets.some((run) => run.runtime === "herdr") ? `stop requested for ${n} sub-agent(s); herdr child exit requires proof, panes/worktrees retained until explicit cleanup.` : `stopped ${n} sub-agent(s)`, "info");
+  ctx.ui.notify(targets.some((run2) => run2.runtime === "herdr") ? `stop requested for ${n} sub-agent(s); herdr child exit requires proof, panes/worktrees retained until explicit cleanup.` : `stopped ${n} sub-agent(s)`, "info");
 }
 function runPause(opts, ctx, arg) {
   const registry = opts.getRegistry();
@@ -12477,30 +12955,30 @@ async function runSendCmd(opts, ctx, arg) {
   }
   const { agentId, message: message4, behavior } = parsed;
   const registry = opts.getRegistry();
-  const run = registry.get(agentId);
-  if (!run) {
+  const run2 = registry.get(agentId);
+  if (!run2) {
     ctx.ui.notify(
       `agent_id "${agentId}" not found. Run /conductor status to see active sub-agents.`,
       "warning"
     );
     return;
   }
-  const check = validateSendable(run, "auto", opts.getSessionId?.());
+  const check = validateSendable(run2, "auto", opts.getSessionId?.());
   if (!check.ok && behavior === "auto") {
     ctx.ui.notify(check.reason, "warning");
     return;
   }
-  const cwd = sendCwd(run, opts.getCwd());
+  const cwd = sendCwd(run2, opts.getCwd());
   const cfg = loadConfig(cwd);
-  const baseOv = cfg.personaOverrides[run.persona] ?? {};
+  const baseOv = cfg.personaOverrides[run2.persona] ?? {};
   const resolved = await resolvePersonas({
     cwd,
     personaOverrides: cfg.personaOverrides
   });
-  const persona = resolved.personas.get(run.persona);
+  const persona = resolved.personas.get(run2.persona);
   const timeoutMs = resolveTimeoutMs(persona, baseOv, cfg);
-  const answering = run.pendingAsk;
-  const result = sendToRun(run, message4, {
+  const answering = run2.pendingAsk;
+  const result = sendToRun(run2, message4, {
     sessionId: opts.getSessionId?.(),
     registry,
     timeoutMs,
@@ -12522,7 +13000,7 @@ async function runSendCmd(opts, ctx, arg) {
       (ack) => {
         try {
           ctx.ui.notify(
-            run.runtime === "herdr" ? `${agentId}: ${describeDelivery(ack)}` : `${agentId} ack delivered (\u0394 ${ack.deliveredAt - run.lastEventAt}ms)`,
+            run2.runtime === "herdr" ? `${agentId}: ${describeDelivery(ack)}` : `${agentId} ack delivered (\u0394 ${ack.deliveredAt - run2.lastEventAt}ms)`,
             ack.delivered ? "info" : "warning"
           );
         } catch {
@@ -12541,7 +13019,7 @@ async function runSendCmd(opts, ctx, arg) {
     return;
   }
   ctx.ui.notify(
-    answering ? `${agentId} answering ${answering.askId}: ${answering.question}` : run.runtime === "herdr" ? `${agentId} relaunching saved session in herdr (streaming_behavior=${behavior})` : `${agentId} resuming via fresh subprocess (streaming_behavior=${behavior})`,
+    answering ? `${agentId} answering ${answering.askId}: ${answering.question}` : run2.runtime === "herdr" ? `${agentId} relaunching saved session in herdr (streaming_behavior=${behavior})` : `${agentId} resuming via fresh subprocess (streaming_behavior=${behavior})`,
     "info"
   );
 }
@@ -12554,7 +13032,7 @@ function formatRunRow(r, livenessProbe = defaultLivenessProbe) {
 }
 function runHistory(_opts, ctx, arg) {
   const root = runsRoot();
-  if (!existsSync19(root)) {
+  if (!existsSync21(root)) {
     ctx.ui.notify(
       "no run history yet. Spawn a sub-agent and it'll show up here.",
       "info"
@@ -12573,24 +13051,24 @@ function runHistory(_opts, ctx, arg) {
         }
       },
       readRecord: (id) => {
-        const p = join29(runDir(id), "record.json");
+        const p = join30(runDir(id), "record.json");
         try {
-          return JSON.parse(readFileSync16(p, "utf8"));
+          return JSON.parse(readFileSync18(p, "utf8"));
         } catch {
           return void 0;
         }
       },
       readFinalText: (id) => {
-        const p = join29(runDir(id), "final.md");
+        const p = join30(runDir(id), "final.md");
         try {
-          return readFileSync16(p, "utf8");
+          return readFileSync18(p, "utf8");
         } catch {
           return void 0;
         }
       },
       statMtime: (id) => {
         try {
-          return statSync6(join29(runDir(id), "record.json")).mtimeMs;
+          return statSync6(join30(runDir(id), "record.json")).mtimeMs;
         } catch {
           try {
             return statSync6(runDir(id)).mtimeMs;
@@ -12599,8 +13077,8 @@ function runHistory(_opts, ctx, arg) {
           }
         }
       },
-      isPinned: (id) => existsSync19(join29(runDir(id), ".pinned")),
-      isArchived: (id) => existsSync19(join29(runDir(id), ".archived"))
+      isPinned: (id) => existsSync21(join30(runDir(id), ".pinned")),
+      isArchived: (id) => existsSync21(join30(runDir(id), ".archived"))
     },
     { limit }
   );
@@ -12618,7 +13096,7 @@ async function runPin(ctx, arg) {
     return;
   }
   const root = runsRoot();
-  if (!existsSync19(join29(root, id))) {
+  if (!existsSync21(join30(root, id))) {
     ctx.ui.notify(`No such run: ${id}`, "warning");
     return;
   }
@@ -12644,7 +13122,7 @@ async function runUnpin(ctx, arg) {
     return;
   }
   const root = runsRoot();
-  if (!existsSync19(join29(root, id))) {
+  if (!existsSync21(join30(root, id))) {
     ctx.ui.notify(`No such run: ${id}`, "warning");
     return;
   }
@@ -12931,13 +13409,13 @@ async function runEffortCmd(opts, ctx, args) {
 Recheck source/process identity and rerun baseline. Delivery-uncertain callbacks are NOT replayed; manual reposts can duplicate earlier delivery.`)) return;
         await recoverEffort(record, { ...recovery, resume: true });
       } else {
-        const run = opts.getRegistry().get(name2);
-        if (!run?.effort || run.effort.gitRoot !== gitRoot2) throw new Error("preserved effort run not found in this repository; reconcile first");
+        const run2 = opts.getRegistry().get(name2);
+        if (!run2?.effort || run2.effort.gitRoot !== gitRoot2) throw new Error("preserved effort run not found in this repository; reconcile first");
         const parsed = /^(?:--oid=([0-9a-f]{40,64})(?: |$))?(?:--hook ([\s\S]+))?$/.exec(tail);
         if (!parsed) throw new Error("usage: effort requeue <run-id> [--oid=<oid>] [--hook <replacement command>]");
         if (!await ctx.ui.confirm("Requeue preserved work?", parsed[2] ? `Explicit replacement of original hook: ${parsed[2]}
 Required repository hooks and effort verification remain active.` : "Rerun the original resolved hook on a fresh private source checkout, then recheck baseline and verified integration. A pause caused by this member is retried; unrelated/unknown pauses are retained.")) return;
-        await requeueEffortRun(run, recovery, parsed[2], parsed[1]);
+        await requeueEffortRun(run2, recovery, parsed[2], parsed[1]);
       }
       ctx.ui.notify("Recovery checked; inspect effort status for queue, pause cause and delivery uncertainty.", "info");
       return;
@@ -12979,44 +13457,44 @@ async function runWorktreeCmd(opts, ctx, subRest) {
         ctx.ui.notify("Usage: /conductor worktree merge <run-id>", "warning");
         return;
       }
-      const run = opts.getRegistry().get(runId);
-      if (!run) {
+      const run2 = opts.getRegistry().get(runId);
+      if (!run2) {
         ctx.ui.notify(
           `Run "${runId}" not found. Use /conductor worktree list to see runs with worktrees.`,
           "error"
         );
         return;
       }
-      if (run.effort) {
+      if (run2.effort) {
         ctx.ui.notify(`Legacy worktree merge refuses effort assets. ${EFFORT_NOTICE}`, "error");
         return;
       }
-      if (run.status !== "merge_conflict") {
+      if (run2.status !== "merge_conflict") {
         ctx.ui.notify(
-          `Run ${runId} is not in merge_conflict status (current: ${run.status}). Only merge_conflict runs can be re-merged.`,
+          `Run ${runId} is not in merge_conflict status (current: ${run2.status}). Only merge_conflict runs can be re-merged.`,
           "warning"
         );
         return;
       }
-      if (!run.worktreePath || !run.worktreeBranch) {
+      if (!run2.worktreePath || !run2.worktreeBranch) {
         ctx.ui.notify(
           `Run ${runId} has no worktree path. It may have already been cleaned up.`,
           "error"
         );
         return;
       }
-      const isCurrent = worktreeCleanupGuard(run, () => opts.getRegistry().get(runId));
-      if (!isCurrent() || !await herdrChildGone(run) || !await releaseRunPane(run, isCurrent) || !isCurrent()) {
-        run.worktreeKept ??= "worktree kept: pane release or current invocation unconfirmed";
-        ctx.ui.notify(run.worktreeKept, "warning");
+      const isCurrent = worktreeCleanupGuard(run2, () => opts.getRegistry().get(runId));
+      if (!isCurrent() || !await herdrChildGone(run2) || !await releaseRunPane(run2, isCurrent) || !isCurrent()) {
+        run2.worktreeKept ??= "worktree kept: pane release or current invocation unconfirmed";
+        ctx.ui.notify(run2.worktreeKept, "warning");
         return;
       }
-      const gitRoot2 = dirname20(dirname20(dirname20(run.worktreePath)));
-      const baseBranch = run.worktreeBaseBranch ?? "master";
-      const strategy = run.mergeStrategy && run.mergeStrategy !== "none" ? run.mergeStrategy : "squash";
-      const commitMessage = buildMergeCommitMessage(run.persona, run.id, run.task);
+      const gitRoot2 = dirname20(dirname20(dirname20(run2.worktreePath)));
+      const baseBranch = run2.worktreeBaseBranch ?? "master";
+      const strategy = run2.mergeStrategy && run2.mergeStrategy !== "none" ? run2.mergeStrategy : "squash";
+      const commitMessage = buildMergeCommitMessage(run2.persona, run2.id, run2.task);
       ctx.ui.notify(
-        `Attempting ${strategy} merge of ${run.worktreeBranch} \u2192 ${baseBranch}\u2026`,
+        `Attempting ${strategy} merge of ${run2.worktreeBranch} \u2192 ${baseBranch}\u2026`,
         "info"
       );
       try {
@@ -13025,7 +13503,7 @@ async function runWorktreeCmd(opts, ctx, subRest) {
           return;
         }
         const result = await mergeWorktree(
-          { gitRoot: gitRoot2, worktreePath: run.worktreePath, branch: run.worktreeBranch },
+          { gitRoot: gitRoot2, worktreePath: run2.worktreePath, branch: run2.worktreeBranch },
           { strategy, baseBranch, commitMessage }
         );
         if (result.success) {
@@ -13033,8 +13511,8 @@ async function runWorktreeCmd(opts, ctx, subRest) {
             ctx.ui.notify("Cleanup refused: ownership changed after merge; work preserved.", "warning");
             return;
           }
-          run.worktreeKept = void 0;
-          const removed = await releaseWorktree(run, { keepBranch: false, isCurrent });
+          run2.worktreeKept = void 0;
+          const removed = await releaseWorktree(run2, { keepBranch: false, isCurrent });
           if (!isCurrent(removed)) {
             ctx.ui.notify("Original merge completed, but current invocation changed during cleanup; no completion assigned.", "warning");
             return;
@@ -13045,11 +13523,11 @@ async function runWorktreeCmd(opts, ctx, subRest) {
             errorMessage: void 0,
             ...removed ? { worktreePath: void 0, worktreeBranch: void 0 } : {}
           };
-          Object.assign(run, completion);
+          Object.assign(run2, completion);
           Object.assign(opts.getRegistry().get(runId), completion);
           ctx.ui.notify(
-            `\u2714 Merged ${run.id} \u2192 ${baseBranch}. Run is now completed.` + (run.worktreeKept ? `
-${run.worktreeKept}` : ""),
+            `\u2714 Merged ${run2.id} \u2192 ${baseBranch}. Run is now completed.` + (run2.worktreeKept ? `
+${run2.worktreeKept}` : ""),
             "info"
           );
         } else {
@@ -13099,11 +13577,11 @@ Resolve manually in the worktree and run /conductor worktree merge ${runId} agai
 
 // src/tools.ts
 import { Type as Type4 } from "@sinclair/typebox";
-import { readFileSync as readFileSync19, existsSync as existsSync22 } from "node:fs";
+import { readFileSync as readFileSync21, existsSync as existsSync24 } from "node:fs";
 import { dirname as dirname22 } from "node:path";
 
 // src/chain.ts
-import { readFileSync as readFileSync17, existsSync as existsSync20 } from "node:fs";
+import { readFileSync as readFileSync19, existsSync as existsSync22 } from "node:fs";
 var DEFAULT_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nOriginal task:\n{task}\n\n---\nFinal output:\n{final}";
 var WORKTREE_CHAIN_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nThe work is on branch `{worktreeBranch}` (not yet merged to `{baseBranch}`).\nRun the following to inspect the changes:\n\n```bash\ngit diff {baseBranch}...{worktreeBranch}\n```\n\nOriginal task:\n{task}";
 var FINAL_PLACEHOLDER = "(no final output)";
@@ -13123,9 +13601,9 @@ function buildChainTask(taskTemplate, context) {
     template = DEFAULT_TEMPLATE;
   }
   let finalContent = FINAL_PLACEHOLDER;
-  if (existsSync20(context.finalPath)) {
+  if (existsSync22(context.finalPath)) {
     try {
-      finalContent = readFileSync17(context.finalPath, "utf-8");
+      finalContent = readFileSync19(context.finalPath, "utf-8");
     } catch {
     }
   }
@@ -13573,7 +14051,7 @@ var LeadPresence = class {
 };
 
 // src/delegate-tool.ts
-import { existsSync as existsSync21, mkdirSync as mkdirSync13, readFileSync as readFileSync18, watch as watch3 } from "node:fs";
+import { existsSync as existsSync23, mkdirSync as mkdirSync14, readFileSync as readFileSync20, watch as watch3 } from "node:fs";
 import { dirname as dirname21 } from "node:path";
 import { Type as Type3 } from "@sinclair/typebox";
 var NAME = /^[A-Za-z0-9_.:-]+$/;
@@ -13605,7 +14083,7 @@ function registerDelegate(pi, env) {
       if (!parsed.ok) throw new Error(`delegate rejected: ${parsed.reason}`);
       if (signal?.aborted) throw new Error("delegate aborted");
       const paths = delegatePaths(runDir2, toolCallId);
-      if (existsSync21(paths.claim) || existsSync21(paths.response)) throw new Error(`delegate rejected: call id ${toolCallId} was already used in this run`);
+      if (existsSync23(paths.claim) || existsSync23(paths.response)) throw new Error(`delegate rejected: call id ${toolCallId} was already used in this run`);
       const startedAt = Date.now();
       onUpdate?.({ content: [{ type: "text", text: `delegating to ${parsed.args.persona}; waiting for the lead` }], details: {} });
       let personaTimeoutMs;
@@ -13637,7 +14115,7 @@ function validResponse(value, expect) {
 }
 function waitForDelegateResponse(path2, expect, deadlineAt, signal) {
   return new Promise((resolve7, reject) => {
-    mkdirSync13(dirname21(path2), { recursive: true });
+    mkdirSync14(dirname21(path2), { recursive: true });
     let settled = false;
     const cleanup = [];
     const finish = (error, value) => {
@@ -13648,10 +14126,10 @@ function waitForDelegateResponse(path2, expect, deadlineAt, signal) {
       else resolve7(value);
     };
     const check = () => {
-      if (settled || !existsSync21(path2)) return;
+      if (settled || !existsSync23(path2)) return;
       let value;
       try {
-        value = JSON.parse(readFileSync18(path2, "utf8"));
+        value = JSON.parse(readFileSync20(path2, "utf8"));
       } catch {
         value = void 0;
       }
@@ -13689,14 +14167,14 @@ function capBlock(block, limit, width) {
   const hidden = block.length - limit;
   return [...block.slice(0, limit), truncateOrPad(foldMarker(hidden), width)];
 }
-function renderHeader(run, width, now = Date.now()) {
-  const elapsed = elapsedStr(run.startTime, run.finishedAt);
-  const usage = formatUsage(run.usage);
-  const glyph = STATUS_GLYPH[run.status] ?? "\xB7";
-  const baseLeft = `${glyph} ${run.persona} (${run.id}) \u2014 ${run.status} ${elapsed}`;
+function renderHeader(run2, width, now = Date.now()) {
+  const elapsed = elapsedStr(run2.startTime, run2.finishedAt);
+  const usage = formatUsage(run2.usage);
+  const glyph = STATUS_GLYPH[run2.status] ?? "\xB7";
+  const baseLeft = `${glyph} ${run2.persona} (${run2.id}) \u2014 ${run2.status} ${elapsed}`;
   const right = usage ? `[${usage}]` : "";
   const sep4 = "\u2500".repeat(Math.max(0, width));
-  const activity = deriveActivity(run, now);
+  const activity = deriveActivity(run2, now);
   let left = baseLeft;
   if (activity !== void 0) {
     const sepText = " \xB7 ";
@@ -13713,9 +14191,9 @@ function renderHeader(run, width, now = Date.now()) {
   return [sep4, headerLine3];
 }
 var IDLE_THRESHOLD_MS = 5e3;
-function deriveActivity(run, nowMs) {
-  if (run.status !== "running") return void 0;
-  const lastEvent = run.lastEventAt ?? run.startTime;
+function deriveActivity(run2, nowMs) {
+  if (run2.status !== "running") return void 0;
+  const lastEvent = run2.lastEventAt ?? run2.startTime;
   const idleMs = nowMs - lastEvent;
   if (idleMs >= IDLE_THRESHOLD_MS) {
     const totalSecs = Math.floor(idleMs / 1e3);
@@ -13725,7 +14203,7 @@ function deriveActivity(run, nowMs) {
     }
     return `idle ${totalSecs}s`;
   }
-  const last = run.messages.at(-1);
+  const last = run2.messages.at(-1);
   if (!last) return void 0;
   const role = last.role;
   if (role !== "assistant") return void 0;
@@ -13742,12 +14220,12 @@ function deriveActivity(run, nowMs) {
   }
   return void 0;
 }
-function renderTranscript(run, opts) {
+function renderTranscript(run2, opts) {
   const out = [];
   let assistantTurnIndex = 0;
   let msgIdx = -1;
   const resultsByCallId = /* @__PURE__ */ new Map();
-  for (const msg of run.messages) {
+  for (const msg of run2.messages) {
     if (msg.role !== "toolResult") continue;
     const content = msg.content;
     if (!Array.isArray(content)) continue;
@@ -13757,7 +14235,7 @@ function renderTranscript(run, opts) {
       }
     }
   }
-  for (const msg of run.messages) {
+  for (const msg of run2.messages) {
     msgIdx += 1;
     const role = msg.role;
     if (role === "user" || role === "toolResult") {
@@ -14005,9 +14483,9 @@ function applyThemeToLines(lines, classify, theme, opts = {}) {
 }
 
 // src/foreground-stream.ts
-function countToolResultMessages(run) {
+function countToolResultMessages(run2) {
   let n = 0;
-  for (const m of run.messages) {
+  for (const m of run2.messages) {
     if (m.role === "toolResult") n += 1;
   }
   return n;
@@ -14015,15 +14493,15 @@ function countToolResultMessages(run) {
 var SUMMARY_EXCERPT_MAX = 120;
 var SUMMARY_HINT_MAX = 400;
 var STREAM_MAX_CHARS = 32 * 1024;
-function renderForegroundStream(run, width, theme) {
-  const headerLines = renderHeader(run, width);
-  const bodyLines = renderTranscript(run, {
+function renderForegroundStream(run2, width, theme) {
+  const headerLines = renderHeader(run2, width);
+  const bodyLines = renderTranscript(run2, {
     width,
     collapseToolCalls: true,
     showThinking: false
   });
   const merged = bodyLines.length === 0 ? headerLines : [...headerLines, ...bodyLines];
-  const lines = theme ? applyThemeToLines(merged, classifyLine, theme, { status: run.status }) : merged;
+  const lines = theme ? applyThemeToLines(merged, classifyLine, theme, { status: run2.status }) : merged;
   const out = lines.join("\n");
   if (out.length <= STREAM_MAX_CHARS) return out;
   let cut = out.length - STREAM_MAX_CHARS;
@@ -14033,49 +14511,49 @@ function renderForegroundStream(run, width, theme) {
   return `\u2026 (transcript truncated to last ~${STREAM_MAX_CHARS} chars) \u2026
 ${tail}`;
 }
-function renderForegroundSummary(run, actions = availableActions(run)) {
-  const glyph = STATUS_GLYPH[run.status] ?? "\xB7";
-  const verb = run.status === "completed" ? "completed" : run.status === "killed" ? "killed" : run.status === "timeout" ? "timed out" : run.status;
-  const perSendStart = run.thisInvocationStartedAt ?? run.startTime;
-  const baseline = run.thisInvocationUsageBaseline ?? {
+function renderForegroundSummary(run2, actions = availableActions(run2)) {
+  const glyph = STATUS_GLYPH[run2.status] ?? "\xB7";
+  const verb = run2.status === "completed" ? "completed" : run2.status === "killed" ? "killed" : run2.status === "timeout" ? "timed out" : run2.status;
+  const perSendStart = run2.thisInvocationStartedAt ?? run2.startTime;
+  const baseline = run2.thisInvocationUsageBaseline ?? {
     turns: 0,
     input: 0,
     output: 0,
     cost: 0
   };
-  const elapsed = elapsedStr(perSendStart, run.finishedAt);
+  const elapsed = elapsedStr(perSendStart, run2.finishedAt);
   const perSendUsage = {
-    turns: Math.max(0, run.usage.turns - baseline.turns),
-    input: Math.max(0, run.usage.input - baseline.input),
-    output: Math.max(0, run.usage.output - baseline.output),
-    cost: Math.max(0, run.usage.cost - baseline.cost)
+    turns: Math.max(0, run2.usage.turns - baseline.turns),
+    input: Math.max(0, run2.usage.input - baseline.input),
+    output: Math.max(0, run2.usage.output - baseline.output),
+    cost: Math.max(0, run2.usage.cost - baseline.cost)
   };
   const usage = formatUsage(perSendUsage);
   const usagePart = usage ? ` [${usage}]` : "";
   const lines = [];
-  let headline = `${glyph} ${run.persona}:${run.id} ${verb} in ${elapsed}${usagePart}`;
-  if (sendsSinceSpawn(run) >= 1) {
-    const lifetimeElapsed = elapsedStr(run.startTime, run.finishedAt);
-    const lifetimeCost = run.usage.cost ? ` $${run.usage.cost.toFixed(3)}` : "";
+  let headline = `${glyph} ${run2.persona}:${run2.id} ${verb} in ${elapsed}${usagePart}`;
+  if (sendsSinceSpawn(run2) >= 1) {
+    const lifetimeElapsed = elapsedStr(run2.startTime, run2.finishedAt);
+    const lifetimeCost = run2.usage.cost ? ` $${run2.usage.cost.toFixed(3)}` : "";
     headline += ` \xB7 lifetime ${lifetimeElapsed}${lifetimeCost}`;
   }
   lines.push(headline);
   lines.push(`  available_actions=${actions.join(",") || "(none)"}`);
-  const retirement = contextRetirementNotice(run);
+  const retirement = contextRetirementNotice(run2);
   if (retirement) lines.push(`  ${retirement}`);
-  if (run.status === "completed") {
-    const final = getFinalText(run.messages);
+  if (run2.status === "completed") {
+    const final = getFinalText(run2.messages);
     if (final) {
       lines.push(`  \u2192 "${truncate2(collapseWhitespace2(final), SUMMARY_EXCERPT_MAX)}"`);
     }
-  } else if (run.errorMessage) {
-    lines.push(`  \u2192 ${truncate2(collapseWhitespace2(run.errorMessage), SUMMARY_EXCERPT_MAX)}`);
+  } else if (run2.errorMessage) {
+    lines.push(`  \u2192 ${truncate2(collapseWhitespace2(run2.errorMessage), SUMMARY_EXCERPT_MAX)}`);
   }
-  if (run.worktreeKept) {
-    lines.push(`  \u26A0 ${truncate2(collapseWhitespace2(run.worktreeKept), SUMMARY_HINT_MAX)}`);
+  if (run2.worktreeKept) {
+    lines.push(`  \u26A0 ${truncate2(collapseWhitespace2(run2.worktreeKept), SUMMARY_HINT_MAX)}`);
   }
-  if (run.transcriptPath) {
-    lines.push(`  Transcript: ${run.transcriptPath}`);
+  if (run2.transcriptPath) {
+    lines.push(`  Transcript: ${run2.transcriptPath}`);
   }
   return lines.join("\n");
 }
@@ -14103,17 +14581,17 @@ async function awaitOrDetach(done, detach) {
     detach.then(() => ({ kind: "detached" }))
   ]);
 }
-function renderForegroundDetachedResult(run) {
-  const text5 = `detached-as-background: ${run.id}
-persona=${run.persona} mode=background (was foreground)
+function renderForegroundDetachedResult(run2) {
+  const text5 = `detached-as-background: ${run2.id}
+persona=${run2.persona} mode=background (was foreground)
 
 Foreground stream detached on user request. The sub-agent continues running in the background; completion will arrive as a <sub-agent-completed> notification. Do NOT re-spawn.`;
   return {
     content: [{ type: "text", text: text5 }],
     details: {
       status: "detached-as-background",
-      agent_id: run.id,
-      persona: run.persona,
+      agent_id: run2.id,
+      persona: run2.persona,
       mode: "background"
     }
   };
@@ -14175,20 +14653,20 @@ function createUpdateThrottle(fire, opts) {
     }
   };
 }
-function installPostDetachCompletionListener(run, registry, pushNotification) {
+function installPostDetachCompletionListener(run2, registry, pushNotification) {
   let active = true;
   const unsub = registry.onChange((r) => {
     if (!active) return;
-    if (r.id !== run.id) return;
+    if (r.id !== run2.id) return;
     if (!isSettled(r.status)) return;
     active = false;
     unsub();
     pushNotification(r);
   });
-  if (active && isSettled(run.status)) {
+  if (active && isSettled(run2.status)) {
     active = false;
     unsub();
-    pushNotification(run);
+    pushNotification(run2);
   }
   return () => {
     if (!active) return;
@@ -14405,11 +14883,11 @@ function awaitTerminal(registry, runId) {
   let settled = false;
   let resolveFn;
   let unsub;
-  const settle = (run) => {
+  const settle = (run2) => {
     if (settled) return;
     settled = true;
     unsub?.();
-    resolveFn(run);
+    resolveFn(run2);
   };
   const promise = new Promise((resolve7) => {
     resolveFn = resolve7;
@@ -14486,6 +14964,7 @@ function registerAutoTool(pi, opts, env) {
         const resolved = await resolvePersonas({ cwd: c, personaOverrides: stepCfg.personaOverrides });
         contexts.set(c, { cfg: stepCfg, personas: resolved.personas });
       }
+      if (params.steps.some((s) => s.persona === MERGER_PERSONA)) return halted(`the ${MERGER_PERSONA} persona is driver-owned: only effort integration launches it`);
       const unknown2 = params.steps.filter((s, i) => !contexts.get(stepCwds[i]).personas.get(s.persona)).map((s) => s.persona);
       if (unknown2.length) {
         return halted(
@@ -14546,21 +15025,21 @@ function registerAutoTool(pi, opts, env) {
           // NO onRetry / onChain: the executor is the sole retry + sequencing
           // authority (avoids double-fire with S2's background retry and the
           // default builder->critic chain).
-          onComplete: (run) => {
-            opts.pushCompletionNotification(run);
-            settleRef(run);
+          onComplete: (run2) => {
+            opts.pushCompletionNotification(run2);
+            settleRef(run2);
           },
           events
         });
         const trackedId = spawned.kind === "spawned" ? spawned.run.id : spawned.placeholderRun.id;
         const { promise, settle } = awaitTerminal(registry, trackedId);
         settleRef = settle;
-        return promise.then((run) => ({
-          status: run.status,
-          failureClass: run.failureClass,
-          // N4: the step's own cost plus its own leaves', each counted once.
-          costUsd: subtreeCost(run, registry.list()),
-          finalText: getCompletionText(run)
+        return promise.then((run2) => ({
+          status: run2.status,
+          failureClass: run2.failureClass,
+          // N4: the step's own cost plus its own leaves', each counted once; M6a adds its persisted merger cost.
+          costUsd: stepCost(run2, registry.list()),
+          finalText: getCompletionText(run2)
         }));
       };
       const outcome = await runAutonomous(plan, { maxSteps: params.max_steps, budgetUsd: params.budget_usd, retryPolicy }, {
@@ -14700,6 +15179,7 @@ function registerSpawnTool(pi, opts, env) {
           `persona "${params.persona}" not found. Run ensemble_list to see what's available.`
         );
       }
+      if (persona.name === MERGER_PERSONA) return errorResult(`the ${MERGER_PERSONA} persona is driver-owned: only effort integration launches it, on a conflict or red verify under efforts.merger "auto".`);
       let runtime;
       try {
         runtime = prepareSpawnRuntime({ persona, cwd, runtime: params.runtime, runtimeEnv: env }).runtime;
@@ -14772,7 +15252,7 @@ ${params.foreground !== false ? "Foreground effort spawn downgraded to backgroun
         onUpdate: foreground ? () => {
         } : void 0,
         // foreground uses our own onUpdate below
-        onComplete: foreground ? void 0 : (run) => opts.pushCompletionNotification(run),
+        onComplete: foreground ? void 0 : (run2) => opts.pushCompletionNotification(run2),
         // v0.15 chains: resolve the chain step and provide the onChain callback.
         // Not provided when chain: false is passed, preventing the auto-spawn.
         // Chain-spawned runs also don't receive onChain (no chain-of-chains).
@@ -14813,10 +15293,10 @@ ${params.foreground !== false ? "Foreground effort spawn downgraded to backgroun
         const p = result.placeholderRun;
         const downgradedNote = result.downgraded ? "Foreground spawn auto-downgraded to background because the concurrency cap is full. The sub-agent is queued; completion will arrive as a <sub-agent-completed> notification." : "Spawn queued; completion will arrive as a <sub-agent-completed> notification.";
         if (result.downgraded) {
-          const unsub = registry.onChange((run) => {
-            if (run.id === p.id && isSettled(run.status)) {
+          const unsub = registry.onChange((run2) => {
+            if (run2.id === p.id && isSettled(run2.status)) {
               unsub();
-              opts.pushCompletionNotification(run);
+              opts.pushCompletionNotification(run2);
             }
           });
         }
@@ -14992,22 +15472,22 @@ function registerSendTool(pi, opts) {
       const stallRange = validateStallThresholdSeconds(params.stall_threshold_seconds);
       if (stallRange) return errorResult(stallRange);
       const registry = opts.getRegistry();
-      const run = registry.get(params.agent_id);
-      if (!run) {
+      const run2 = registry.get(params.agent_id);
+      if (!run2) {
         return errorResult(
           `agent_id "${params.agent_id}" not found. Run ensemble_status to see active sub-agents.`
         );
       }
-      const cwd = sendCwd(run, opts.getCwd());
+      const cwd = sendCwd(run2, opts.getCwd());
       const cfg = loadConfig(cwd);
       const foreground = params.foreground !== false;
       const resolved = await resolvePersonas({ cwd, personaOverrides: cfg.personaOverrides });
-      const persona = resolved.personas.get(run.persona);
-      const baseOv = cfg.personaOverrides[run.persona] ?? {};
+      const persona = resolved.personas.get(run2.persona);
+      const baseOv = cfg.personaOverrides[run2.persona] ?? {};
       const ov = params.timeout_minutes !== void 0 ? { ...baseOv, timeoutMinutes: params.timeout_minutes } : baseOv;
       const timeoutMs = resolveTimeoutMs(persona, ov, cfg);
-      const answering = run.pendingAsk;
-      const result = sendToRun(run, params.message, {
+      const answering = run2.pendingAsk;
+      const result = sendToRun(run2, params.message, {
         sessionId: opts.getSessionId?.(),
         files: params.files,
         callerCwd: opts.getCwd(),
@@ -15036,9 +15516,9 @@ function registerSendTool(pi, opts) {
       if (result.ack !== void 0) {
         try {
           const ackResult = await result.ack;
-          if (run.runtime === "herdr") return {
-            content: [{ type: "text", text: `${run.id}: ${describeDelivery(ackResult)}` }],
-            details: { status: ackResult.delivered ? "accepted-input" : ackResult.definite ? "rejected" : "unconfirmed", agent_id: run.id, persona: run.persona, ...ackResult }
+          if (run2.runtime === "herdr") return {
+            content: [{ type: "text", text: `${run2.id}: ${describeDelivery(ackResult)}` }],
+            details: { status: ackResult.delivered ? "accepted-input" : ackResult.definite ? "rejected" : "unconfirmed", agent_id: run2.id, persona: run2.persona, ...ackResult }
           };
           return {
             content: [
@@ -15157,28 +15637,28 @@ function registerPauseTool(pi, opts) {
     }),
     async execute(_id, params) {
       const registry = opts.getRegistry();
-      const run = registry.get(params.agent_id);
-      if (!run) {
+      const run2 = registry.get(params.agent_id);
+      if (!run2) {
         const r = errorResult(
           `agent_id "${params.agent_id}" not found. Run ensemble_status to see active sub-agents.`
         );
         return r;
       }
-      const blocker = validateRunAction(run, "pause");
+      const blocker = validateRunAction(run2, "pause");
       if (blocker) {
         const r = errorResult(blocker);
         return r;
       }
-      const ok = pauseRun(run, registry);
+      const ok = pauseRun(run2, registry);
       if (!ok) {
         const r = errorResult(
-          `pause failed for ${run.id}: process handle missing or signal rejected.`
+          `pause failed for ${run2.id}: process handle missing or signal rejected.`
         );
         return r;
       }
       return {
-        content: [{ type: "text", text: `paused: ${run.id}` }],
-        details: { status: "paused", agent_id: run.id, persona: run.persona }
+        content: [{ type: "text", text: `paused: ${run2.id}` }],
+        details: { status: "paused", agent_id: run2.id, persona: run2.persona }
       };
     }
   });
@@ -15198,28 +15678,28 @@ function registerResumeTool(pi, opts) {
     }),
     async execute(_id, params) {
       const registry = opts.getRegistry();
-      const run = registry.get(params.agent_id);
-      if (!run) {
+      const run2 = registry.get(params.agent_id);
+      if (!run2) {
         const r = errorResult(
           `agent_id "${params.agent_id}" not found. Run ensemble_status to see active sub-agents.`
         );
         return r;
       }
-      const blocker = validateRunAction(run, "resume");
+      const blocker = validateRunAction(run2, "resume");
       if (blocker) {
         const r = errorResult(blocker);
         return r;
       }
-      const ok = resumeRun(run, registry);
+      const ok = resumeRun(run2, registry);
       if (!ok) {
         const r = errorResult(
-          `resume failed for ${run.id}: process handle missing or signal rejected.`
+          `resume failed for ${run2.id}: process handle missing or signal rejected.`
         );
         return r;
       }
       return {
-        content: [{ type: "text", text: `resumed: ${run.id}` }],
-        details: { status: "running", agent_id: run.id, persona: run.persona }
+        content: [{ type: "text", text: `resumed: ${run2.id}` }],
+        details: { status: "running", agent_id: run2.id, persona: run2.persona }
       };
     }
   });
@@ -15243,32 +15723,32 @@ function registerKillTool(pi, opts) {
     async execute(_id, params) {
       const registry = opts.getRegistry();
       const queue = opts.getQueue();
-      const run = registry.get(params.agent_id);
-      if (!run) {
+      const run2 = registry.get(params.agent_id);
+      if (!run2) {
         const r = errorResult(
           `agent_id "${params.agent_id}" not found. Run ensemble_status to see active sub-agents.`
         );
         return r;
       }
-      if (isTerminal(run.status)) {
+      if (isTerminal(run2.status)) {
         return {
-          content: [{ type: "text", text: `already ${run.status}: ${run.id} (no-op)` }],
-          details: { status: run.status, agent_id: run.id, persona: run.persona }
+          content: [{ type: "text", text: `already ${run2.status}: ${run2.id} (no-op)` }],
+          details: { status: run2.status, agent_id: run2.id, persona: run2.persona }
         };
       }
-      const blocker = validateRunAction(run, "kill");
+      const blocker = validateRunAction(run2, "kill");
       if (blocker) {
         const r = errorResult(blocker);
         return r;
       }
-      if (run.status === "queued") {
-        queue.removeQueued(run.id);
+      if (run2.status === "queued") {
+        queue.removeQueued(run2.id);
       } else {
-        forceTerminate(run, "killed", registry);
+        forceTerminate(run2, "killed", registry);
       }
       return {
-        content: [{ type: "text", text: run.runtime === "herdr" ? `termination requested: ${run.id}; logical status=${run.status}. Child exit requires proof; pane/worktree cleanup is not implied. Inspect conductor doctor for retained resources.` : `killed: ${run.id}` }],
-        details: { status: "killed", agent_id: run.id, persona: run.persona }
+        content: [{ type: "text", text: run2.runtime === "herdr" ? `termination requested: ${run2.id}; logical status=${run2.status}. Child exit requires proof; pane/worktree cleanup is not implied. Inspect conductor doctor for retained resources.` : `killed: ${run2.id}` }],
+        details: { status: "killed", agent_id: run2.id, persona: run2.persona }
       };
     }
   });
@@ -15423,6 +15903,8 @@ function toStatusSummary(r, canFocus, sessionId, registry) {
       children: children.map((c) => ({ id: c.id, persona: c.persona, status: c.status, cost: c.usage.cost, result_ref: resultRef(c) })),
       subtree_cost: subtreeCost(r, runs)
     } : {},
+    ...r.integration?.merger ? { merger: { id: r.integration.merger.runId, kind: r.integration.merger.kind, outcome: r.integration.merger.outcome ?? (r.integration.state === "resolving" ? "resolving" : "unsettled"), reason: r.integration.merger.reason, cost: r.integration.merger.cost }, step_cost: stepCost(r, runs) } : {},
+    ...r.mergerFor ? { merger_for: r.mergerFor.writerId } : {},
     available_actions: computeAvailableActions(r, observed),
     wait_reason: r.waitReason ?? observed.effortAdmissionError,
     persona: r.persona,
@@ -15565,9 +16047,9 @@ function buildOnChainCallback(args) {
     let overrideTask;
     if (step.reevaluate) {
       let parentFinal = "";
-      if (existsSync22(parentRun.finalPath)) {
+      if (existsSync24(parentRun.finalPath)) {
         try {
-          parentFinal = readFileSync19(parentRun.finalPath, "utf-8");
+          parentFinal = readFileSync21(parentRun.finalPath, "utf-8");
         } catch {
         }
       }
@@ -15642,11 +16124,11 @@ function buildOnChainCallback(args) {
       // HEAD by now, which is where the successor's worktree branches from.
       worktree: chainCfg.worktreeMode === "conductor" && chainPersona.worktree === true,
       mergeStrategy: resolveSpawnMergeStrategy(chainCfg, chainPersona),
-      onComplete: (run) => args.pushNotification(run),
+      onComplete: (run2) => args.pushNotification(run2),
       // no onChain: depth-1 cap (chain-spawned runs do not chain further)
       events: args.events
     };
-    const refusal = WRITE_CAPABLE_PERSONAS.has(chainPersona.name) ? keptParentRefusal(parentRun, chainPersona.name) : void 0;
+    const refusal = chainPersona.name === MERGER_PERSONA ? `chain: the ${MERGER_PERSONA} persona is driver-owned and never a chain successor of ${parentRun.id}` : WRITE_CAPABLE_PERSONAS.has(chainPersona.name) ? keptParentRefusal(parentRun, chainPersona.name) : void 0;
     if (refusal) {
       failBeforeSpawn({ ...spawn2, registry: args.registry }, refusal);
       return;
@@ -15664,7 +16146,7 @@ function keptParentRefusal(parent, successor) {
 }
 function buildOnRetryCallback(args) {
   const self = (failedRun) => {
-    if (failedRun.effort) return;
+    if (failedRun.effort || failedRun.mergerFor || args.persona.name === MERGER_PERSONA) return;
     const failedAttempt = failedRun.retryAttempt ?? 0;
     const maxAttempts = failedRun.retryPolicy?.maxAttempts ?? 1;
     const ov = args.cfg.personaOverrides[args.persona.name] ?? {};
@@ -15694,7 +16176,7 @@ function buildOnRetryCallback(args) {
       retryAttempt: failedAttempt + 1,
       retryMaxAttempts: args.retryMaxAttempts,
       onRetry: self,
-      onComplete: (run) => args.pushNotification(run),
+      onComplete: (run2) => args.pushNotification(run2),
       events: args.events
     });
   };
@@ -15702,8 +16184,8 @@ function buildOnRetryCallback(args) {
 }
 
 // src/queue.ts
-import { mkdirSync as mkdirSync14 } from "node:fs";
-import { join as join30 } from "node:path";
+import { mkdirSync as mkdirSync15 } from "node:fs";
+import { join as join31 } from "node:path";
 var SpawnQueue = class {
   constructor(registry, maxConcurrent, maxConcurrentWriteCapable = 1, spawn2 = spawnRun) {
     this.registry = registry;
@@ -15745,6 +16227,7 @@ var SpawnQueue = class {
   enqueueOrSpawn(opts) {
     opts = prepareSpawnRuntime(leafSpawnOptions(opts));
     opts = prepareSpawnEvidence(opts, opts.registry ?? this.registry);
+    prepareSpawnMerger(opts, opts.registry ?? this.registry, opts.mergerFor?.runId);
     const effort = prepareSpawnEffort(opts);
     if (opts.touches) opts = { ...opts, touches: [...opts.touches] };
     const { registry: callerRegistry, ...spawn2 } = opts;
@@ -15755,10 +16238,10 @@ var SpawnQueue = class {
       const result = this.spawn({ ...spawn2, registry });
       return { kind: "spawned", run: result.run, done: result.done };
     }
-    const id = allocateRunId(opts.persona.name, mapFromRegistry2(registry));
+    const id = opts.mergerFor?.runId ?? allocateRunId(opts.persona.name, mapFromRegistry2(registry));
     if (effort) addEffortMember(effort, id);
     const dir = runDir(id);
-    mkdirSync14(dir, { recursive: true });
+    mkdirSync15(dir, { recursive: true });
     const placeholder = {
       id,
       runtime: opts.runtime,
@@ -15773,15 +16256,16 @@ var SpawnQueue = class {
       ...opts.delegation ? { depth: 2, delegateAllow: [], parentRunId: opts.delegation.parentRunId, delegateToolCallId: opts.delegation.delegateToolCallId } : {},
       waitReason,
       ...effort ? { parentPid: effort.owner.pid, parentStartTime: effort.owner.startTime, parentSessionId: effort.owner.sessionId } : {},
+      ...opts.mergerFor ? { mergerFor: opts.mergerFor, parentPid: process.pid, parentSessionId: opts.parentSessionId } : {},
       effort: effort ? { owner: effort.owner, name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches ? [...opts.touches] : void 0 } : void 0,
       startTime: Date.now(),
       lastEventAt: Date.now(),
       messages: [],
       usage: emptyUsage(),
       cwd: opts.cwd,
-      recordPath: join30(dir, "record.json"),
-      transcriptPath: join30(dir, "transcript.jsonl"),
-      finalPath: join30(dir, "final.md")
+      recordPath: join31(dir, "record.json"),
+      transcriptPath: join31(dir, "transcript.jsonl"),
+      finalPath: join31(dir, "final.md")
     };
     registry.register(placeholder);
     if (effort) void writeRecord(placeholder);
@@ -15870,10 +16354,10 @@ var SpawnQueue = class {
         this.pending.splice(i, 1);
         this.spawn({ ...next.spawn, mode: next.effectiveMode, registry: this.registry, preAllocatedId: next.id });
       } catch (e) {
-        if (!placeholder.effort && !next.spawn.delegation) throw e;
+        if (!placeholder.effort && !next.spawn.delegation && !next.spawn.mergerFor) throw e;
         if (this.pending[i]?.id === next.id) this.pending.splice(i, 1);
         const current = this.registry.get(next.id);
-        void failEffortLaunch(current, this.registry, `${placeholder.effort ? "effort" : "delegated leaf"} launch refused: ${e.message}`, next.spawn.onComplete).done;
+        void failEffortLaunch(current, this.registry, `${placeholder.effort ? "effort" : next.spawn.mergerFor ? "merger" : "delegated leaf"} launch refused: ${e.message}`, next.spawn.onComplete).done;
       }
     }
   }
@@ -15885,14 +16369,14 @@ function mapFromRegistry2(r) {
 }
 
 // src/delegation-broker.ts
-import { existsSync as existsSync23, readFileSync as readFileSync20, readdirSync as readdirSync13 } from "node:fs";
-import { dirname as dirname23, join as join31 } from "node:path";
+import { existsSync as existsSync25, readFileSync as readFileSync22, readdirSync as readdirSync13 } from "node:fs";
+import { dirname as dirname23, join as join32 } from "node:path";
 var LEAF_OUTCOME_UNCERTAIN = "leaf outcome uncertain after lead restart; not replayed";
 var HERDR_RELOAD_CANCELLED = "lead /reload stopped a leaf it could not hand over (queued, launching or subprocess); delegate again";
 var DelegationBroker = class {
   constructor(deps) {
     this.deps = deps;
-    deps.registry.onChange((run) => this.changed(run));
+    deps.registry.onChange((run2) => this.changed(run2));
   }
   deps;
   starts = /* @__PURE__ */ new Map();
@@ -15941,7 +16425,7 @@ var DelegationBroker = class {
     if (!d) return;
     this.deferred.delete(key);
     if (!this.current(d.parent) || d.parent.herdrOwnership !== d.ownership || d.parent.herdr?.launchNonce !== d.nonce || !brokerable(d.parent)) return;
-    if (d.ended && !existsSync23(delegatePaths(dirname23(d.parent.recordPath), d.id).claim)) return;
+    if (d.ended && !existsSync25(delegatePaths(dirname23(d.parent.recordPath), d.id).claim)) return;
     this.claim(d.parent, d.id, key, d.args, d.cwd, d.ended);
   }
   /** Synchronous, before any await: exclusive claim, then count and notify, so a duplicate never spawns twice. */
@@ -15997,7 +16481,7 @@ var DelegationBroker = class {
    */
   rebind(parent, id, key, ended) {
     const paths = delegatePaths(dirname23(parent.recordPath), id);
-    if (existsSync23(paths.response)) return;
+    if (existsSync25(paths.response)) return;
     let claim;
     try {
       claim = read(paths.claim);
@@ -16103,16 +16587,16 @@ var DelegationBroker = class {
       this.deps.queue.removeQueued(leaf.id);
     } else forceTerminate(leaf, "timeout", this.deps.registry);
   }
-  changed(run) {
-    if (isTerminal(run.status)) {
-      for (const key of this.starts.keys()) if (key.startsWith(`${run.id}\0`)) this.starts.delete(key);
+  changed(run2) {
+    if (isTerminal(run2.status)) {
+      for (const key of this.starts.keys()) if (key.startsWith(`${run2.id}\0`)) this.starts.delete(key);
     }
-    if (run.parentRunId !== void 0 && run.delegateToolCallId !== void 0 && isTerminal(run.status) && !run.processOpen) {
-      const call = this.calls.get(`${run.parentRunId}\0${run.delegateToolCallId}`);
-      if (call && !call.done && !call.finishing) call.finishing = this.finish(call, run);
+    if (run2.parentRunId !== void 0 && run2.delegateToolCallId !== void 0 && isTerminal(run2.status) && !run2.processOpen) {
+      const call = this.calls.get(`${run2.parentRunId}\0${run2.delegateToolCallId}`);
+      if (call && !call.done && !call.finishing) call.finishing = this.finish(call, run2);
     }
-    if (isTerminal(run.status) && (run.pendingDelegations ?? 0) > 0) {
-      this.cancelAll([...this.calls.values()].filter((call) => call.parent === run), () => `parent ${run.id} ended (${run.status})`);
+    if (isTerminal(run2.status) && (run2.pendingDelegations ?? 0) > 0) {
+      this.cancelAll([...this.calls.values()].filter((call) => call.parent === run2), () => `parent ${run2.id} ended (${run2.status})`);
     }
   }
   /** Queued leaves first, so a cancelled sibling's freed slot never launches a leaf about to be cancelled. */
@@ -16222,7 +16706,7 @@ function durableLeaves(lineage) {
   }
   return names.flatMap((name2) => {
     try {
-      const record = JSON.parse(readFileSync20(join31(root, name2, "record.json"), "utf8"));
+      const record = JSON.parse(readFileSync22(join32(root, name2, "record.json"), "utf8"));
       return record.id === name2 && lineage(record) ? [record] : [];
     } catch {
       return [];
@@ -16233,7 +16717,7 @@ function recordedLeaf(record) {
   const leaf = buildOrphanRun(record, record.status);
   let text5 = "";
   try {
-    if (!record.herdrExitUnconfirmed && !record.herdrResultUnavailable) text5 = readFileSync20(record.finalPath, "utf8");
+    if (!record.herdrExitUnconfirmed && !record.herdrResultUnavailable) text5 = readFileSync22(record.finalPath, "utf8");
   } catch {
   }
   if (text5) leaf.messages = [{ role: "assistant", content: [{ type: "text", text: text5 }] }];
@@ -16244,8 +16728,8 @@ function recordedLeaf(record) {
 import { Text } from "@earendil-works/pi-tui";
 var WIDGET_KEY = "conductor-ensemble";
 var FINISHED_LINGER_MS = 8e3;
-function isActiveRun(run) {
-  return !isTerminal(run.status);
+function isActiveRun(run2) {
+  return !isTerminal(run2.status);
 }
 var CHIEF_WAIT_MAX_CHARS = 80;
 function formatChiefWait(question, theme) {
@@ -16300,12 +16784,12 @@ function mountEnsembleWidget(registry, getCtx, getWatchdogConfig, getCwdOverride
       lingerTimer = setTimeout(render, Math.max(50, nextExpiry - now));
     }
   };
-  const unsubscribe = registry.onChange((run) => {
-    if (run.status === "completed" || run.status === "failed" || run.status === "killed" || run.status === "timeout" || run.status === "hook_failed" || run.status === "merge_conflict" || // pre-existing omission fixed
-    run.status === "aborted") {
-      const existing = recentlyFinished.find((e) => e.run.id === run.id);
+  const unsubscribe = registry.onChange((run2) => {
+    if (run2.status === "completed" || run2.status === "failed" || run2.status === "killed" || run2.status === "timeout" || run2.status === "hook_failed" || run2.status === "merge_conflict" || // pre-existing omission fixed
+    run2.status === "aborted") {
+      const existing = recentlyFinished.find((e) => e.run.id === run2.id);
       if (existing) existing.expiresAt = Date.now() + FINISHED_LINGER_MS;
-      else recentlyFinished.push({ run, expiresAt: Date.now() + FINISHED_LINGER_MS });
+      else recentlyFinished.push({ run: run2, expiresAt: Date.now() + FINISHED_LINGER_MS });
     }
     render();
   });
@@ -16870,8 +17354,8 @@ If your reason isn't on this list, default back to the canonical chain. "I think
 }
 
 // src/child-bridge.ts
-import { closeSync as closeSync9, constants as constants7, fstatSync as fstatSync6, lstatSync as lstatSync8, mkdirSync as mkdirSync15, openSync as openSync8, readFileSync as readFileSync21, realpathSync as realpathSync8, writeSync as writeSync2 } from "node:fs";
-import { basename as basename4, dirname as dirname24, isAbsolute as isAbsolute8, join as join32, resolve as resolve6 } from "node:path";
+import { closeSync as closeSync9, constants as constants7, fstatSync as fstatSync6, lstatSync as lstatSync8, mkdirSync as mkdirSync16, openSync as openSync8, readFileSync as readFileSync23, realpathSync as realpathSync10, writeSync as writeSync2 } from "node:fs";
+import { basename as basename4, dirname as dirname24, isAbsolute as isAbsolute8, join as join33, resolve as resolve6 } from "node:path";
 
 // package.json
 var package_default = {
@@ -16962,7 +17446,7 @@ function readJson(file) {
   const fd = openSync8(file, constants7.O_RDONLY | constants7.O_NOFOLLOW);
   try {
     if (!fstatSync6(fd).isFile()) throw new Error("invalid identity file");
-    return JSON.parse(readFileSync21(fd, "utf8"));
+    return JSON.parse(readFileSync23(fd, "utf8"));
   } finally {
     closeSync9(fd);
   }
@@ -17179,8 +17663,8 @@ function installChildBridge(pi, options = {}) {
     try {
       const runId = env.CONDUCTOR_RUN_ID, runDir3 = env.CONDUCTOR_RUN_DIR;
       const sessionId = ctx.sessionManager.getSessionId(), sessionFile = ctx.sessionManager.getSessionFile();
-      if (!token2(nonce) || !token2(runId) || !path(runDir3) || basename4(runDir3) !== runId || realpathSync8(runDir3) !== runDir3 || !token2(sessionId) || !path(sessionFile) || dirname24(sessionFile) !== join32(runDir3, "session") || realpathSync8(dirname24(sessionFile)) !== dirname24(sessionFile)) throw new Error("invalid invocation paths or identity");
-      const record = readJson(join32(runDir3, "record.json"));
+      if (!token2(nonce) || !token2(runId) || !path(runDir3) || basename4(runDir3) !== runId || realpathSync10(runDir3) !== runDir3 || !token2(sessionId) || !path(sessionFile) || dirname24(sessionFile) !== join33(runDir3, "session") || realpathSync10(dirname24(sessionFile)) !== dirname24(sessionFile)) throw new Error("invalid invocation paths or identity");
+      const record = readJson(join33(runDir3, "record.json"));
       const b = isRecord(record) && record.herdr;
       if (!isRecord(record) || record.id !== runId || record.runtime !== "herdr" || !isRecord(b) || b.runId !== runId || b.launchNonce !== nonce || b.sessionId !== sessionId || b.sessionFile !== sessionFile || env.HERDR_ENV !== "1" || !path(b.socketPath) || b.socketPath !== env.HERDR_SOCKET_PATH || !text4(b.paneId) || b.paneId !== env.HERDR_PANE_ID || !text4(b.tabId) || b.tabId !== env.HERDR_TAB_ID || !text4(b.workspaceId) || b.workspaceId !== env.HERDR_WORKSPACE_ID || !text4(b.terminalId) || typeof b.createdTab !== "boolean") throw new Error("run binding mismatch");
       try {
@@ -17209,10 +17693,10 @@ function installChildBridge(pi, options = {}) {
         at: Date.now()
       };
       if (processState[faultKey]?.has(faultIdentity(expected))) throw new Error("invocation tee previously failed; reload cannot resume it; preserve evidence for the parent");
-      const launchDir = join32(runDir3, "launch");
-      mkdirSync15(launchDir, { recursive: true });
-      if (realpathSync8(launchDir) !== launchDir) throw new Error("invalid launch directory");
-      const claim = join32(launchDir, `${nonce}.json`);
+      const launchDir = join33(runDir3, "launch");
+      mkdirSync16(launchDir, { recursive: true });
+      if (realpathSync10(launchDir) !== launchDir) throw new Error("invalid launch directory");
+      const claim = join33(launchDir, `${nonce}.json`);
       let reload = false;
       try {
         exclusive(claim, expected);
@@ -17223,7 +17707,7 @@ function installChildBridge(pi, options = {}) {
         expected.at = prior.at;
         reload = true;
       }
-      statePath = join32(launchDir, nonce);
+      statePath = join33(launchDir, nonce);
       accepted = statePresent(`${statePath}.accepted.json`, expected) || readInbox(runDir3, nonce).some(({ request }) => (request.kind === "initial" || request.kind === "reply") && readInboxAck(runDir3, request)?.accepted === true);
       closing = statePresent(`${statePath}.closing.json`, expected);
       if (closing && !accepted) throw new Error("closing without initial acceptance");
@@ -17237,7 +17721,7 @@ function installChildBridge(pi, options = {}) {
       phase.signal = signal;
       phase.owner = phaseOwner;
       phases.set(runDir3, phase);
-      fd = openSync8(join32(runDir3, "transcript.jsonl"), constants7.O_APPEND | constants7.O_CREAT | constants7.O_WRONLY | constants7.O_NOFOLLOW, 384);
+      fd = openSync8(join33(runDir3, "transcript.jsonl"), constants7.O_APPEND | constants7.O_CREAT | constants7.O_WRONLY | constants7.O_NOFOLLOW, 384);
       if (!fstatSync6(fd).isFile() || fstatSync6(fd).nlink !== 1) throw new Error("invalid transcript file");
       if (!reload) write({ type: "conductor_child", event: "launch", ...hello });
       timer = setInterval(pump, 250);
@@ -17423,10 +17907,10 @@ var FocusedStreamModel = class {
   // ── Read-only accessors ────────────────────────────────────────────
   focused() {
     if (!this._focusedId) return void 0;
-    const run = this.registry.get(this._focusedId);
-    if (!run) return void 0;
-    if (!this.isLocal(run)) return void 0;
-    return run;
+    const run2 = this.registry.get(this._focusedId);
+    if (!run2) return void 0;
+    if (!this.isLocal(run2)) return void 0;
+    return run2;
   }
   collapseToolCalls() {
     return this._collapseToolCalls;
@@ -17633,8 +18117,8 @@ var FocusedStreamModel = class {
    * - `parentPid === process.pid` → owned by this host. Local.
    * - anything else → foreign sibling-session run; filter out.
    */
-  isLocal(run) {
-    return run.parentPid === void 0 || run.parentPid === process.pid;
+  isLocal(run2) {
+    return run2.parentPid === void 0 || run2.parentPid === process.pid;
   }
   /**
    * Slice 4: compute the renderable bottom for the focused agent based
@@ -18058,8 +18542,8 @@ function createFocusedOverlayComponent(deps) {
     model: deps.model,
     onClose: () => deps.done(void 0),
     onKill: (id) => {
-      const run = deps.registry.get(id);
-      if (run) deps.forceTerminate(run, "killed", deps.registry);
+      const run2 = deps.registry.get(id);
+      if (run2) deps.forceTerminate(run2, "killed", deps.registry);
       deps.model.refresh();
     },
     onSend: (id) => {
@@ -18339,10 +18823,10 @@ function installSanitizerHook(pi, opts) {
 
 // src/shutdown.ts
 async function handleSessionShutdown(event, deps) {
-  if (event.reason === "reload") for (const run of deps.runs) run.herdrPipeline?.suspend();
-  for (const run of deps.runs) if (run.effort) run.integrationSuspended = true;
-  const integrations = deps.runs.flatMap((run) => {
-    const transition = run.integrationSuspension ?? run.integrationControl?.suspend();
+  if (event.reason === "reload") for (const run2 of deps.runs) run2.herdrPipeline?.suspend();
+  for (const run2 of deps.runs) if (run2.effort) run2.integrationSuspended = true;
+  const integrations = deps.runs.flatMap((run2) => {
+    const transition = run2.integrationSuspension ?? run2.integrationControl?.suspend();
     return transition ? [transition] : [];
   });
   if (integrations.length) {
@@ -18350,13 +18834,13 @@ async function handleSessionShutdown(event, deps) {
     const failure2 = results.find((r) => r.status === "rejected");
     if (failure2?.status === "rejected") throw failure2.reason;
   }
-  const settlements = deps.runs.flatMap((run) => run.integrationSettlement ? [run.integrationSettlement] : []);
+  const settlements = deps.runs.flatMap((run2) => run2.integrationSettlement ? [run2.integrationSettlement] : []);
   if (settlements.length) await Promise.allSettled(settlements);
-  const uncertain = deps.runs.find((run) => run.status === "integrating" && run.integration?.teardownError);
+  const uncertain = deps.runs.find((run2) => run2.status === "integrating" && run2.integration?.teardownError);
   if (uncertain) throw new Error(uncertain.integration.teardownError);
   if (event.reason === "reload") {
     await deps.delegation?.close();
-    await Promise.all(deps.runs.filter((run) => run.runtime === "herdr").map(detachHerdrRun));
+    await Promise.all(deps.runs.filter((run2) => run2.runtime === "herdr").map(detachHerdrRun));
     return;
   }
   const stillActive = [];
@@ -18371,7 +18855,7 @@ async function handleSessionShutdown(event, deps) {
       }
     }
   }
-  const panes = deps.runs.filter((run) => run.runtime === "herdr" && ownsHerdrRun(run));
+  const panes = deps.runs.filter((run2) => run2.runtime === "herdr" && ownsHerdrRun(run2));
   if (panes.length) {
     const abort = new AbortController();
     let timer;
@@ -18381,8 +18865,8 @@ async function handleSessionShutdown(event, deps) {
         resolve7();
       }, 5e3);
     });
-    const cleanup = Promise.allSettled(panes.map(async (run) => {
-      const transport = run.transport;
+    const cleanup = Promise.allSettled(panes.map(async (run2) => {
+      const transport = run2.transport;
       if (transport?.kind === "herdr" && transport.shutdown) await transport.shutdown(abort.signal);
     }));
     try {
@@ -18390,18 +18874,18 @@ async function handleSessionShutdown(event, deps) {
     } finally {
       clearTimeout(timer);
     }
-    for (const run of panes) {
-      if (run.transport?.kind !== "herdr" || !run.transport.childExited) run.herdrExitUnconfirmed = true;
-      if (abort.signal.aborted) run.worktreeKept = "pane shutdown budget expired; pane/worktree and ownership evidence preserved";
-      else if (run.transport?.stderr) run.worktreeKept = run.transport.stderr;
-      else if (run.transport?.kind !== "herdr") run.worktreeKept = "pane shutdown unavailable: unattached herdr run; ownership evidence preserved";
+    for (const run2 of panes) {
+      if (run2.transport?.kind !== "herdr" || !run2.transport.childExited) run2.herdrExitUnconfirmed = true;
+      if (abort.signal.aborted) run2.worktreeKept = "pane shutdown budget expired; pane/worktree and ownership evidence preserved";
+      else if (run2.transport?.stderr) run2.worktreeKept = run2.transport.stderr;
+      else if (run2.transport?.kind !== "herdr") run2.worktreeKept = "pane shutdown unavailable: unattached herdr run; ownership evidence preserved";
     }
-    await Promise.all(panes.map((run) => writeRecord(run)));
+    await Promise.all(panes.map((run2) => writeRecord(run2)));
   }
   let reconciliation = void 0;
   if (stillActive.length > 0 && deps.reconcileRunning) {
     try {
-      reconciliation = deps.reconcileRunning(stillActive.filter((run) => run.status !== "integrating" && run.status !== "completed"), event.reason);
+      reconciliation = deps.reconcileRunning(stillActive.filter((run2) => run2.status !== "integrating" && run2.status !== "completed"), event.reason);
     } catch {
     }
   }
@@ -18410,15 +18894,15 @@ async function handleSessionShutdown(event, deps) {
     await reconciliation;
   } catch {
   }
-  for (const run of panes) run.herdrPipeline?.suspend();
+  for (const run2 of panes) run2.herdrPipeline?.suspend();
   await Promise.all(panes.map(detachHerdrRun));
 }
-function detachHerdrRun(run) {
-  return run.herdrShutdown ??= (async () => {
-    if (run.herdrPipeline) await run.herdrPipeline.quiesce();
-    else if (run.transport?.kind === "herdr") await run.transport.detach?.();
-    await run.recordWrite;
-    run.herdrOwnership?.release();
+function detachHerdrRun(run2) {
+  return run2.herdrShutdown ??= (async () => {
+    if (run2.herdrPipeline) await run2.herdrPipeline.quiesce();
+    else if (run2.transport?.kind === "herdr") await run2.transport.detach?.();
+    await run2.recordWrite;
+    run2.herdrOwnership?.release();
   })();
 }
 
@@ -18469,7 +18953,7 @@ var ConductorEventEmitter = class {
 };
 
 // src/rpc-detach.ts
-import { existsSync as existsSync24, unlinkSync as unlinkSync4 } from "node:fs";
+import { existsSync as existsSync26, unlinkSync as unlinkSync4 } from "node:fs";
 function createRpcDetach(filePath, intervalMs = 200) {
   let resolveDetach = () => {
   };
@@ -18477,7 +18961,7 @@ function createRpcDetach(filePath, intervalMs = 200) {
     resolveDetach = res;
   });
   const pollTimer = setInterval(() => {
-    if (existsSync24(filePath)) {
+    if (existsSync26(filePath)) {
       try {
         unlinkSync4(filePath);
       } catch {
@@ -18489,7 +18973,7 @@ function createRpcDetach(filePath, intervalMs = 200) {
   const unregister = () => {
     clearInterval(pollTimer);
     try {
-      if (existsSync24(filePath)) unlinkSync4(filePath);
+      if (existsSync26(filePath)) unlinkSync4(filePath);
     } catch {
     }
   };
@@ -18500,12 +18984,12 @@ function createRpcDetach(filePath, intervalMs = 200) {
 async function executePromptAndSend(deps, agentId, presuppliedText) {
   const ctx = deps.getCtx();
   if (!ctx) return;
-  const run = deps.registry.get(agentId);
-  if (!run) {
+  const run2 = deps.registry.get(agentId);
+  if (!run2) {
     ctx.ui.notify(`agent_id "${agentId}" not found.`, "warning");
     return;
   }
-  const check = deps.validateSendable(run, "auto", deps.getSessionId?.());
+  const check = deps.validateSendable(run2, "auto", deps.getSessionId?.());
   if (!check.ok) {
     try {
       ctx.ui.notify(check.reason, "warning");
@@ -18529,7 +19013,7 @@ async function executePromptAndSend(deps, agentId, presuppliedText) {
   } else {
     try {
       message4 = await ctx.ui.input(
-        run.pendingAsk ? `Answer ${run.pendingAsk.askId}: ${run.pendingAsk.question}` : `Send to ${agentId}`,
+        run2.pendingAsk ? `Answer ${run2.pendingAsk.askId}: ${run2.pendingAsk.question}` : `Send to ${agentId}`,
         "Type a follow-up message; Esc to cancel."
       );
     } catch {
@@ -18538,16 +19022,16 @@ async function executePromptAndSend(deps, agentId, presuppliedText) {
     if (!message4 || !message4.trim()) return;
     message4 = message4.trim();
   }
-  const cwd = sendCwd(run, deps.cwd);
+  const cwd = sendCwd(run2, deps.cwd);
   const cfg = deps.loadConfig(cwd);
-  const ov = cfg.personaOverrides[run.persona] ?? {};
+  const ov = cfg.personaOverrides[run2.persona] ?? {};
   const resolved = await deps.resolvePersonas({
     cwd,
     personaOverrides: cfg.personaOverrides
   });
-  const persona = resolved.personas.get(run.persona);
+  const persona = resolved.personas.get(run2.persona);
   const timeoutMs = deps.resolveTimeoutMs(persona, ov, cfg);
-  const result = deps.sendToRun(run, message4, {
+  const result = deps.sendToRun(run2, message4, {
     sessionId: deps.getSessionId?.(),
     registry: deps.registry,
     timeoutMs,
@@ -18556,10 +19040,10 @@ async function executePromptAndSend(deps, agentId, presuppliedText) {
     currentModelProvider,
     persona
   });
-  if (result.kind === "started" && run.runtime === "herdr" && result.ack) {
+  if (result.kind === "started" && run2.runtime === "herdr" && result.ack) {
     const ack = await result.ack;
     try {
-      ctx.ui.notify(`${run.id}: ${describeDelivery(ack)}`, ack.delivered ? "info" : "warning");
+      ctx.ui.notify(`${run2.id}: ${describeDelivery(ack)}`, ack.delivered ? "info" : "warning");
     } catch {
     }
   }
@@ -18666,7 +19150,7 @@ function index_default(pi) {
         loadConfig,
         resolvePersonas: (args) => resolvePersonas(args),
         resolveTimeoutMs: (p, ov, cfg) => resolveTimeoutMs(p, ov, cfg),
-        sendToRun: (run, message4, sendOpts) => sendToRun(run, message4, sendOpts),
+        sendToRun: (run2, message4, sendOpts) => sendToRun(run2, message4, sendOpts),
         pushCompletionNotification: (r) => opts.pushCompletionNotification(r)
       },
       agentId,
@@ -18806,10 +19290,10 @@ function index_default(pi) {
       };
       return { detachSignal, unregister };
     },
-    pushCompletionNotification: (run) => {
-      if (!pushCompletionCard(run, pi, supportsFocus(ctxRef), opts.getSessionId(), opts.getRegistry())) return;
-      if (run.status === "blocked") completionWakeTracker.drop(run.id);
-      else completionWakeTracker.track(run.id, Date.now());
+    pushCompletionNotification: (run2) => {
+      if (!pushCompletionCard(run2, pi, supportsFocus(ctxRef), opts.getSessionId(), opts.getRegistry())) return;
+      if (run2.status === "blocked") completionWakeTracker.drop(run2.id);
+      else completionWakeTracker.track(run2.id, Date.now());
     }
   };
   pi.on("session_start", async (event, ctx) => {
@@ -18899,13 +19383,13 @@ function index_default(pi) {
                 const { done } = readoptHerdrRun(record, { registry, runtime: herdrRuntime, sessionId: selfSessionId, onComplete: opts.pushCompletionNotification, events: conductorEvents });
                 void done.catch((error) => console.error(`herdr recovery: ${error.message}`));
               },
-              stopOrphanLeaf: (run) => forceTerminate(run, "killed", registry),
+              stopOrphanLeaf: (run2) => forceTerminate(run2, "killed", registry),
               now: Date.now()
             })
           ).then(async (result) => {
             lastReconcile = result;
             if (!selfSessionId) return;
-            const roots = new Set(registry.list().flatMap((run) => run.effort ? [run.effort.gitRoot] : []));
+            const roots = new Set(registry.list().flatMap((run2) => run2.effort ? [run2.effort.gitRoot] : []));
             try {
               roots.add(effortRepository(cwd()).gitRoot);
             } catch {
@@ -18955,11 +19439,11 @@ function index_default(pi) {
         log: {
           warn: (msg, data) => {
             const meta = data;
-            const run = meta?.agentId ? registry.get(meta.agentId) : void 0;
-            if (run && meta?.severity && typeof meta.silentSeconds === "number") {
+            const run2 = meta?.agentId ? registry.get(meta.agentId) : void 0;
+            if (run2 && meta?.severity && typeof meta.silentSeconds === "number") {
               try {
                 pi.sendMessage(
-                  buildStallMessage(run, meta, supportsFocus(ctxRef), opts.getSessionId()),
+                  buildStallMessage(run2, meta, supportsFocus(ctxRef), opts.getSessionId()),
                   { triggerTurn: false, deliverAs: "followUp" }
                 );
               } catch (err) {
@@ -18974,30 +19458,30 @@ function index_default(pi) {
             console.error(`watchdog: ${msg}`);
           }
         },
-        dialog: (run) => {
+        dialog: (run2) => {
           try {
-            pi.sendMessage(buildDialogMessage(run), { triggerTurn: false, deliverAs: "followUp" });
+            pi.sendMessage(buildDialogMessage(run2), { triggerTurn: false, deliverAs: "followUp" });
           } catch {
-            console.error(`herdr: ${run.id} waiting for human UI`);
+            console.error(`herdr: ${run2.id} waiting for human UI`);
           }
         },
         now: () => Date.now(),
         // The run's own onComplete posts its card: the close handler skips
         // onComplete once forceTerminate has settled the run.
-        kill: (run, reason) => {
-          forceTerminate(run, reason, registry, run.onComplete);
+        kill: (run2, reason) => {
+          forceTerminate(run2, reason, registry, run2.onComplete);
         },
         // v0.10 Slice 3 + backlog item 2: per-run `kill_on_stall` overrides the
         // conductor-wide default. `resolveKillOnStallForPersona` adds a
         // persona-class-aware built-in: write-capable personas default to
         // `true` (zombie holds the m_w_c=1 write slot; auto-kill unblocks the
         // chain). Read-only personas keep `false`.
-        isKillOnStall: (run) => resolveKillOnStallForPersona(
-          run,
+        isKillOnStall: (run2) => resolveKillOnStallForPersona(
+          run2,
           cfg.watchdog.defaultKillOnStall,
-          isWriteCapable(run.persona)
+          isWriteCapable(run2.persona)
         ),
-        observeActions: (run) => availableActions(run, supportsFocus(ctxRef), opts.getSessionId()),
+        observeActions: (run2) => availableActions(run2, supportsFocus(ctxRef), opts.getSessionId()),
         isEnabled: () => cfg.watchdog.enabled
       });
       watchdogDispose = wd.start();
@@ -19006,12 +19490,12 @@ function index_default(pi) {
     completionWakeTimer = setInterval(() => {
       const result = completionWakeTracker.tick(Date.now());
       for (const runId of result.refire) {
-        const run = registry.get(runId);
-        if (!run) {
+        const run2 = registry.get(runId);
+        if (!run2) {
           completionWakeTracker.drop(runId);
           continue;
         }
-        pi.sendMessage(buildCompletionMessage(run, supportsFocus(ctxRef), opts.getSessionId(), opts.getRegistry()), buildCompletionSendMessageOptions(run));
+        pi.sendMessage(buildCompletionMessage(run2, supportsFocus(ctxRef), opts.getSessionId(), opts.getRegistry()), buildCompletionSendMessageOptions(run2));
       }
       for (const runId of result.expired) {
         ctxRef?.ui.notify(
@@ -19049,7 +19533,7 @@ function index_default(pi) {
       resetSanitizer: () => sanitizerHook.reset(),
       delegation: registry.delegation,
       removeQueued: (id) => void queue.removeQueued(id),
-      terminateHerdr: (run) => forceTerminate(run, "killed", registry),
+      terminateHerdr: (run2) => forceTerminate(run2, "killed", registry),
       // A1: close the orphan-creation window. SIGTERM races the runtime
       // teardown; without this the on-disk record stays "running" until
       // the next session_start runs the GC orphan sweep.
@@ -19124,6 +19608,7 @@ ${chiefNote}` : merged };
       syncAsk();
     });
   }
+  if (process.env.CONDUCTOR_SUBAGENT !== "1") registry.integrations.configureMerger(createMergerLauncher({ queue, notify: (run2) => opts.pushCompletionNotification(run2), events: conductorEvents }));
   registerTools(pi, opts);
   registerCommands(pi, opts);
   registerNotificationRenderer(pi);

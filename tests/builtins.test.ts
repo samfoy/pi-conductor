@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { resolvePersonas, builtinPersonasDir } from "../src/personas.ts";
 import { readdirSync } from "node:fs";
 
-test("all 17 shipped personas load without errors", async () => {
+test("all 18 shipped personas load without errors", async () => {
   // Use a tmp HOME so user/project directories don't pollute results.
   const realHome = process.env.HOME;
   process.env.HOME = "/tmp/__nonexistent_home_for_conductor_test__";
@@ -21,7 +21,7 @@ test("all 17 shipped personas load without errors", async () => {
       .map((f) => f.replace(/\.md$/, ""))
       .sort();
 
-    assert.equal(expected.length, 17, `expected 17 personas, found ${expected.length}`);
+    assert.equal(expected.length, 18, `expected 18 personas, found ${expected.length}`);
 
     const got = [...r.personas.keys()].sort();
     assert.deepEqual(got, expected);
@@ -59,6 +59,7 @@ test("starter roster matches the v0.4 PRD list", async () => {
       "finalizer",
       "inspector",
       "investigator",
+      "merger",
       "oracle",
       "planner",
       "profiler",

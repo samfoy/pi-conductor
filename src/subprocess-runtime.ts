@@ -20,7 +20,8 @@ export class SubprocessRuntime implements RunRuntime {
       shell: false,
       stdio: [rpc ? "pipe" : "ignore", "pipe", "pipe"],
       // Worktrees may not contain the spawning project's untracked config.
-      env: buildSubagentEnv(process.env, { CONDUCTOR_CONFIG_CWD: run.cwd, CONDUCTOR_RUN_ID: run.id,
+      // M6a: a merger's git must see only its candidate cwd, never a lead's inherited repository scope.
+      env: buildSubagentEnv(run.mergerFor ? Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_"))) : process.env, { CONDUCTOR_CONFIG_CWD: run.cwd, CONDUCTOR_RUN_ID: run.id,
         ...childScopeEnv(dirname(run.recordPath), childToolScope(run), run.deadlineAt), ...(tmp ? { TMPDIR: tmp } : {}) }),
     });
     const closed = new Promise<void>(resolve => proc.once("close", () => resolve()));

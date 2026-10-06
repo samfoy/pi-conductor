@@ -500,7 +500,7 @@ test("builtins: read-only reviewers exclude the edit/write tools; others declare
   ]);
   const dir = builtinPersonasDir();
   const files = readdirSync(dir).filter((f) => f.endsWith(".md") && !f.startsWith("_"));
-  assert.equal(files.length, 17);
+  assert.equal(files.length, 18);
   for (const file of files) {
     const { frontmatter } = parseFrontmatter(readFileSync(join(dir, file), "utf8"));
     const name = String(frontmatter.name);

@@ -244,15 +244,17 @@ test("personas: v0.8.1 inherit_context audit (PRD Open Q #16 fold-in)", () => {
     finalizer: "filtered",
     designer: "filtered",
     planner: "filtered",
+    // M6a: the driver-owned merger gets everything it needs as files.
+    merger: "none",
     simplifier: "filtered_compact",
     builder: "filtered_compact",
   };
 
   const dir = builtinPersonasDir();
   const files = readdirSync(dir).filter((f) => f.endsWith(".md") && !f.startsWith("_"));
-  // Sanity: 17 shipped personas. If this fails, either a persona was added
+  // Sanity: 18 shipped personas. If this fails, either a persona was added
   // or removed without updating the audit — update the table above first.
-  assert.equal(files.length, 17, `expected 17 personas, found ${files.length}`);
+  assert.equal(files.length, 18, `expected 18 personas, found ${files.length}`);
 
   for (const file of files) {
     const text = readFileSync(join(dir, file), "utf8");
@@ -306,11 +308,13 @@ test("personas: read_only audit (docs/backlog.md item 13 fix candidate #1)", () 
     scribe: false,
     simplifier: false,
     writer: false,
+    // M6a: commits a proposal in a driver-owned candidate; not in WRITE_CAPABLE_PERSONAS.
+    merger: false,
   };
 
   const dir = builtinPersonasDir();
   const files = readdirSync(dir).filter((f) => f.endsWith(".md") && !f.startsWith("_"));
-  assert.equal(files.length, 17, `expected 17 personas, found ${files.length}`);
+  assert.equal(files.length, 18, `expected 18 personas, found ${files.length}`);
 
   for (const file of files) {
     const text = readFileSync(join(dir, file), "utf8");

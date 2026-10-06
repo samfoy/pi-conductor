@@ -7,7 +7,7 @@ import { RunRegistry, runsRoot, writeRecord, getFinalText } from "../runs.ts";
 import { settleRun } from "../run-pipeline.ts";
 import { runHook } from "../hook-runner.ts";
 import { measureEffortFootprint } from "./admit.ts";
-import type { Run, RunRecord, ResolvedHook } from "../types.ts";
+import { isTerminal, type Run, type RunRecord, type ResolvedHook } from "../types.ts";
 import type { ConductorEventEmitter } from "../conductor-events.ts";
 import { effortGit, effortOwner, effortTip } from "./open.ts";
 import { acquireClaim, adoptEffort, assertRunEffortOwner, effortDir, readEffort, releaseClaim, writeEffort, writeDurableFile, type EffortRecord } from "./store.ts";
@@ -49,6 +49,13 @@ function provenNoop(record: EffortRecord, run: Run): boolean {
   const merged = mergeTree(record.gitRoot, tip, run.integration.branchHead);
   return merged.kind === "clean" && merged.tree === effortGit(record.gitRoot, "rev-parse", `${tip}^{tree}`);
 }
+/** M6a: a merger candidate is disposable only once a reachable landed commit names that merger. */
+function landedByMerger(record: EffortRecord, run: Run, oid: string): boolean {
+  const m = run.integration?.merger;
+  if (m?.outcome !== "accepted" || oid !== m.outputOid || !run.landedCommit) return false;
+  effortGit(record.gitRoot, "merge-base", "--is-ancestor", run.landedCommit, record.intRef);
+  return effortGit(record.gitRoot, "show", "-s", "--format=%B", run.landedCommit).split("\n").filter(line => line === `Conductor-Merger: ${m.runId}`).length === 1;
+}
 /** Only known clean detached ancestors are disposable; failed/unreachable/dirty evidence stays. */
 async function cleanupCandidates(record: EffortRecord, run: Run): Promise<void> {
   const e = run.integration;
@@ -63,7 +70,8 @@ async function cleanupCandidates(record: EffortRecord, run: Run): Promise<void> 
       const oid = effortGit(path, "rev-parse", "HEAD");
       assertCandidate(path, oid);
       if (effortGit(path, "status", "--porcelain", "--ignored", "--untracked-files=all")) continue;
-      effortGit(record.gitRoot, "merge-base", "--is-ancestor", oid, record.intRef);
+      if (path === e.merger?.candidatePath) { if (!landedByMerger(record, run, oid)) continue; }
+      else effortGit(record.gitRoot, "merge-base", "--is-ancestor", oid, record.intRef);
       assertRunEffortOwner(run);
       effortGit(record.gitRoot, "worktree", "remove", path);
       removed.add(path);
@@ -169,18 +177,20 @@ export async function recoverEffort(original: EffortRecord, opts: RecoveryOption
         }
         const e = run.integration;
         if (!e || !e.branchHead || !Number.isFinite(e.enqueuedAt) || e.verifyIdentity.command !== record.policy.verify || e.verifyIdentity.timeoutSeconds !== record.policy.verifyTimeoutSeconds || e.verifyIdentity.retries !== record.policy.verifyRetries) throw new Error("integration WAL or frozen verification policy missing/mismatched");
-        if (!["queued", "merging", "generating", "verifying", "verified", "paused", "cancelled"].includes(e.state)) throw new Error(`unsupported recovery state ${e.state}; preserve for human inspection`);
+        if (!["queued", "merging", "generating", "verifying", "verified", "resolving", "paused", "cancelled"].includes(e.state)) throw new Error(`unsupported recovery state ${e.state}; preserve for human inspection`);
         if (e.commandPending && !e.process) throw new Error("interrupted command launch has unknown process identity; preserve work");
         if (e.process) await stopOwnedProcessGroup(e.process);
         e.process = undefined; e.commandPending = false; e.teardownError = undefined;
-        if (validateSource(run) !== e.branchHead) throw new Error("source branch head changed; original OID and work retained");
+        if (validateSource(run) !== (e.sourceHead ?? e.branchHead)) throw new Error("source branch head changed; original OID and work retained");
         if (record.status === "paused" || (e.state === "paused" && !opts.resume) || e.state === "cancelled") throw new Error(record.pausedReason ?? e.reason ?? "paused entry requires explicit human resume");
-        e.state = "queued"; e.reason = undefined;
+        if (e.state === "resolving") await restoreMerger(run, opts);
+        else { e.state = "queued"; e.reason = undefined; }
         if (opts.resume) e.casFailures = 0;
         await writeRecord(run, () => assertRunEffortOwner(run));
         runnable.push(run);
       } catch (error) {
-        if (run.integration) { run.integration.state = "paused"; run.integration.reason = (error as Error).message; }
+        // A resolving entry keeps its merger claim's state, so a human resume re-reads that merger.
+        if (run.integration) { if (run.integration.state !== "resolving" || !run.integration.merger) run.integration.state = "paused"; run.integration.reason = (error as Error).message; }
         run.integrationSuspended = true;
         record = { ...readEffort(record.gitRoot, record.name)!, status: "paused", pausedReason: (error as Error).message, pausedRun: run.id };
         writeEffort(record);
@@ -199,6 +209,36 @@ export async function recoverEffort(original: EffortRecord, opts: RecoveryOption
   return { runs: restored, done };
 }
 
+/**
+ * M6a: register the claimed merger's canonical record, or decide it never ran. A live or unknown
+ * merger pauses for a human with zero signals; a dead non-terminal one is lost, never authority.
+ */
+async function restoreMerger(writer: Run, opts: RecoveryOptions): Promise<void> {
+  const wal = writer.integration!.merger;
+  if (!wal) throw new Error("resolving entry has no merger claim; preserve for inspection");
+  if (wal.outcome) return;
+  let merger = opts.registry.get(wal.runId);
+  const path = join(runsRoot(), wal.runId, "record.json");
+  if (!merger && existsSync(path)) {
+    const saved = JSON.parse(readFileSync(path, "utf8")) as RunRecord;
+    if (saved.id !== wal.runId || saved.recordPath !== path || saved.mergerFor?.writerId !== writer.id || saved.mergerFor.nonce !== wal.nonce) throw new Error(`noncanonical merger record ${wal.runId}; preserve for inspection`);
+    merger = buildOrphanRun(saved, saved.status);
+  }
+  if (!merger) return; // claim without a record: the driver spends the attempt
+  if (!isTerminal(merger.status) && merger.status !== "blocked") {
+    let live = merger.status !== "queued";
+    if (merger.pid) {
+      try { process.kill(merger.pid, 0); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") live = false; }
+    }
+    if (live) throw new Error(`merger ${merger.id} live or unknown after restart; no signal sent. Resume the effort once it settles`);
+    merger.status = "killed"; merger.finishedAt = Date.now();
+    merger.errorMessage = "lost merger: its process is gone without a terminal record; not authority";
+    await writeRecord(merger);
+  }
+  if (!opts.registry.get(merger.id)) opts.registry.register(merger);
+}
+
 /** Slash-command only: the caller has obtained explicit human confirmation. */
 export async function requeueEffortRun(run: Run, opts: RecoveryOptions, replacement?: string, expectedOid?: string): Promise<{ done: Promise<void> }> {
   assertSupportedRuntime(run.runtime);
@@ -212,7 +252,7 @@ export async function requeueEffortRun(run: Run, opts: RecoveryOptions, replacem
     const gate: ResolvedHook | null | undefined = replacement === undefined ? run.effort.gate : { command: replacement, source: "per-call", timeoutSeconds: run.effort.gate?.timeoutSeconds ?? 300 };
     if (gate === undefined) throw new Error("original hook is unknown/unreconstructable; provide an explicit human replacement with --hook <command>");
     const head = validateSource(run);
-    if (head !== (run.integration?.branchHead ?? head) && expectedOid !== head) throw new Error(`source branch head changed; inspect and confirm exact OID with --oid=${head}`);
+    if (head !== (run.integration?.sourceHead ?? run.integration?.branchHead ?? head) && expectedOid !== head) throw new Error(`source branch head changed; inspect and confirm exact OID with --oid=${head}`);
     if (expectedOid && expectedOid !== head) throw new Error("source OID no longer matches human confirmation");
     if (run.integration?.commandPending && !run.integration.process) throw new Error("previous gate launch identity unknown; preserve and inspect");
     if (run.integration?.process) await stopOwnedProcessGroup(run.integration.process);
@@ -220,7 +260,8 @@ export async function requeueEffortRun(run: Run, opts: RecoveryOptions, replacem
     run.parentPid = record.owner.pid; run.parentSessionId = record.owner.sessionId; run.parentStartTime = record.owner.startTime;
     const path = join(record.gitRoot, ".worktrees", "conductor-cand", record.name, `${run.id}-regate-${randomUUID()}`);
     const prior = run.integration;
-    run.integration = { state: "paused", branchHead: head, enqueuedAt: Date.now(), attempts: 0,
+    // The merger attempt never decrements: a requeue re-gates the source without a second merger.
+    run.integration = { state: "paused", branchHead: head, sourceHead: head, enqueuedAt: Date.now(), attempts: 0, ...(prior?.merger ? { merger: prior.merger } : {}),
       verifyIdentity: { command: record.policy.verify, timeoutSeconds: record.policy.verifyTimeoutSeconds, retries: record.policy.verifyRetries },
       resultText: prior?.resultText || getFinalText(run.messages) || (existsSync(run.finalPath) ? readFileSync(run.finalPath, "utf8") : "(no saved result)"),
       candidates: [...(prior?.candidates ?? []), path], candidatePath: path, commandPending: !!gate };

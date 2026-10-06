@@ -12,13 +12,16 @@ export interface EffortPolicy {
   history: "squash";
 }
 
-export const EFFORT_NOTICE = "M5: disjoint effort writers run in independent worktrees within global/effort limits; integration remains serial after optional generated artifact regeneration, baseline/candidate verification and repository hooks. Legacy work remains UNINTEGRATED. Crash recovery uses owner fencing and reachable Git proof; uncertain work pauses for human effort resume/requeue. Delivery-uncertain callbacks are never replayed automatically. Merger, landing, readers, auto plans, chains and retries remain unavailable.";
+export const EFFORT_NOTICE = "M6a: disjoint effort writers run in independent worktrees within global/effort limits; integration remains serial after optional generated artifact regeneration, baseline/candidate verification and repository hooks. Under efforts.merger \"auto\", a textual conflict or twice-red verify parks that writer while one driver-owned merger proposes a hooked commit in a detached candidate; the proposal is re-gated by the same queue against the current tip, once per writer. \"ask\"/\"off\" keep merge_conflict (no resolve action yet). Legacy work remains UNINTEGRATED. Crash recovery uses owner fencing and reachable Git proof; uncertain work pauses for human effort resume/requeue. Delivery-uncertain callbacks are never replayed automatically. Landing, readers, auto plans, chains and retries remain unavailable.";
 
 export function effortSummary(run: import("../types.ts").Run): string {
   if (!run.effort) return "";
   const state = run.landedCommit ? `integrated ${run.landedCommit.slice(0, 12)}` : run.mergeResult?.nothingToCommit ? "tree-equal no-op" : run.status === "integrating" ? `integrating (${run.integration?.state ?? "paused"})` : "UNINTEGRATED";
   const violations = run.integration?.touchViolations ?? run.effort.touchViolations;
-  return `${run.effort.name}: ${state}${run.mergeResult?.verifyDisabled ? " (effort verify disabled; repository hooks still required)" : ""}${run.integration?.reason ? `: ${run.integration.reason}` : ""}${violations?.length ? `; touches violations: ${JSON.stringify(violations)}` : ""}`;
+  const m = run.integration?.merger;
+  // A merger's own text is never proof; only its Git-checked outcome and persisted cost are reported.
+  const merger = m ? `; merger ${m.runId} ${m.outcome === "accepted" ? `proposal ${m.outputOid?.slice(0, 12)} accepted for re-gating` : m.outcome === "rejected" ? `exhausted: ${m.reason}` : "resolving"}${m.cost !== undefined ? ` ($${m.cost.toFixed(4)})` : ""}` : "";
+  return `${run.effort.name}: ${state}${run.mergeResult?.verifyDisabled ? " (effort verify disabled; repository hooks still required)" : ""}${run.integration?.reason ? `: ${run.integration.reason}` : ""}${merger}${violations?.length ? `; touches violations: ${JSON.stringify(violations)}` : ""}`;
 }
 
 export function validateEffortName(name: string): void {

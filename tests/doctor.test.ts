@@ -96,7 +96,7 @@ test("buildDoctorReport: includes the personas section with builtin count", asyn
       conductorMode: false,
     });
     assert.match(out, /## Personas/);
-    assert.match(out, /builtin=17/); // we ship 17 personas
+    assert.match(out, /builtin=18/); // we ship 18 personas
   } finally {
     teardown(fx);
   }

@@ -505,7 +505,7 @@ settlement. Prompt rejection is a failed run, not completion. As with explicit
 RPC, extension dialogs are auto-cancelled; provider extensions remain enabled.
 This does not address independently oversized persona/system-prompt argv.
 
-## Named efforts (M5 — fenced crash recovery, verified integration)
+## Named efforts (M5 — fenced crash recovery, verified integration; M6a — automatic merger)
 
 `ensemble_effort({action:"open", effort:"feature", verify:"npm test"})` captures
 an attached base branch and commit from the conductor's requested checkout and
@@ -533,7 +533,7 @@ two reds settle `merge_conflict` with `verify_failed` or `verify_timeout`.
 Command launch/output failures, required-hook failures, missing prerequisites,
 unexpected dirty changes, ownership uncertainty and WAL failures pause for
 inspection. A stale CAS rebuilds and reverifies against the actual tip; three
-failures pause the effort rather than overwrite an external ref update. No builder retry or automatic merger is attempted.
+failures pause the effort rather than overwrite an external ref update. No builder retry is attempted; under `merger:"auto"` a conflict or a twice-red verify goes to the M6a merger (below).
 
 `ensemble_status` exposes the integration stage, captured OIDs, reason, bounded
 logs and verification duration; completed cards include the same evidence.
@@ -570,6 +570,65 @@ unreachable/unmerged, ignored-file and ambiguous workspaces stay. Legacy
 worktree merge/clean and GC still skip effort assets. No effort TTL purge,
 abandon, landing or source-branch deletion is introduced.
 
+### Automatic merger (M6a)
+
+Under `efforts.merger:"auto"` (the default), a textual conflict or a twice-red verify
+(`verify_failed` / `verify_timeout`) **parks** that writer in `integrating (resolving)`
+while other queue entries keep integrating. The driver first persists a fenced,
+acknowledged claim on the writer's WAL (`integration.merger`: attempt 1, nonce,
+preallocated merger id, kind, immutable setup OID, source head, expected tip,
+candidate path), and only then prepares a fresh detached candidate, resolves the
+`merger` persona from the main checkout's roster and enqueues it. The attempt never
+decrements: one merger per writer, at most one live merger per effort (a second
+conflict waits, then is recomputed against the tip). `ask`/`off` keep the M5
+`merge_conflict` outcome; there is no `resolve` action yet (M6b).
+
+The candidate starts at the expected tip with a real `git merge --no-ff --no-commit`
+of the writer head (its unmerged paths must equal `merge-tree`'s, else the effort
+pauses), or at the failed candidate for a red verify. Evidence (conflict summary,
+both diffs, the writer's report and task, the verify tail) lives in the effort
+directory and is attached as A5 files, never written into the candidate. The merger
+is a root (depth-1) run with no effort, worktree, merge strategy, chain, retry,
+delegation or steering; only the driver's claimed spawn launches it (public spawn,
+`ensemble_auto`, chains and retries refuse the persona, and a `read_only`, `agents`
+or `worktree` override settles `merge_conflict` without a spawn). Its own commits
+run the repository's ordinary hooks, and its process inherits no `GIT_*` repository
+scope from the lead, so its git sees only the candidate.
+
+Merger text can only reject (`## Verdict: cannot-resolve`). Acceptance requires all
+of: a `completed` merger whose process exited; matching id, nonce, candidate path
+and repository; a detached HEAD that differs from and descends from the setup OID;
+no `MERGE_HEAD`, unmerged entries or hidden index flags; a clean tree including
+ignored and untracked files; and `diff --check` free of conflict markers (whitespace
+policy stays with the hooks). Failed, killed, timed-out, lost, uncommitted or dirty
+proposals are rejected and preserved untouched. An accepted proposal re-enters at the
+front of the same M2/M3 queue against the **current** tip: merge-tree, regeneration,
+an ordinary hooked one-parent squash commit with `Conductor-Merger: <id>` (checked
+once after the hook, like the effort and run trailers), verify of the exact
+post-hook commit, durable WAL and checked CAS. A re-entry conflict or red verify
+ends in `merge_conflict`; no second merger runs. `branchHead` then names the
+proposal while `sourceHead` keeps the writer's original head for source validation.
+
+The writer's single card and callback come only from its final outcome, through the
+existing at-most-once delivery ledger. A blocked merger's `ask_owner` reaches the
+owner as the merger's own card; `ensemble_send` answers it only while the writer's
+claim is open, resuming in the same candidate. A running merger accepts only kill.
+Killing the writer cancels a queued, launching, running or blocked merger, waits for
+its exit and settles once with work preserved; killing the merger exhausts the
+writer. Suspend/reload stop watching and signal nothing. Recovery re-parks a blocked
+merger (its answer still resumes it), runs acceptance for a terminal one, pauses for
+a human resume while a merger is live or unknown (no signals), treats a dead
+non-terminal merger as lost (never authority) and a claim without a record as an
+uncertain, spent launch. Startup reconcile and GC never readopt, kill or reclaim
+merger records; a merger candidate is reclaimed only once a reachable landed commit
+names that merger. The merger's cost is persisted once on the writer and reported as
+`step_cost` (`subtreeCost` plus that cost). Status and cards show `resolving: merger
+<id> …`, the outcome and the cost; merger output is never treated as proof.
+
+Not covered: `ask` resolve (M6b), more attempts, real herdr merger panes, human TUI
+acceptance and rollout. This repository's own pre-commit hook needs a local
+`node_modules`, which candidates lack, so its own dogfood still pauses at the hook.
+
 Spawn with `effort:"feature"` and optional `touches:["src/**"]`. The first spawn
 can open the effort using config. Every effort writer gets its own worktree,
 even with persona `worktree:false`, and foreground requests become background.
@@ -593,7 +652,7 @@ the weaker guarantee. Verify and candidate hooks have bounded output and a timeo
 and use private temporary directories. Candidate hooks may stage changes, but the
 resulting post-hook tree must be clean and pass verification. There is no automatic
 dependency installation or base `node_modules` modification: hooks needing a local
-installation pause when it is missing. Merger and land remain captured-only. Names match
+installation pause when it is missing. `land` remains captured-only; `merger` drives M6a (below). Names match
 `^[a-z][a-z0-9-]{0,39}$`. Scope/generated paths are nonempty repo-relative
 literal (including Unicode letters/numbers), `*` or `**` globs; traversal, absolute
 paths and other glob syntax are rejected. Omitted or empty `touches` means universal
@@ -1115,7 +1174,7 @@ receipt, SIGSTOP refusing takeover, SIGKILL takeover only after the proven exit,
 real herdr 0.9.1 session through the H11 fixture: claim, peer, ask, transcript, reply, `/reload`
 reclaim and a SIGKILL crash takeover, proving the socket before every control and signal, with
 an exact-identity teardown. It passes on 0.87.1 and 1.0.4. Not covered: human TUI acceptance,
-off Linux, paid models. M6 (merger, readers, waves, landing) is separate and not done.
+off Linux, paid models. M6a (automatic merger) is implemented with automated evidence only; M6b–M10 (resolve, readers, waves, landing) are not done.
 
 ## Configuration
 

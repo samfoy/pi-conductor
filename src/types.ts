@@ -547,7 +547,45 @@ export interface RunEffort {
   footprintUnknown?: boolean;
 }
 
+/**
+ * M6a: one driver-owned merger attempt. The claim (every field but the outcome) is durable and
+ * fenced before persona resolution or spawn; it is never cleared, so the attempt never decrements.
+ */
+export interface MergerWal {
+  attempt: 1;
+  nonce: string;
+  runId: string;
+  kind: "conflict" | "verify_failed" | "verify_timeout";
+  /** Immutable: the expected tip for a conflict, the failed candidate for a red verify. */
+  setupOid: string;
+  sourceHead: string;
+  expectedTip: string;
+  candidatePath: string;
+  claimedAt: number;
+  conflicts?: string[];
+  contextDir?: string;
+  outcome?: "accepted" | "rejected";
+  reason?: string;
+  outputOid?: string;
+  /** The merger's own cost, persisted once when the outcome is decided. */
+  cost?: number;
+}
+
+/** M6a: a merger run's only authority link, checked against the writer's durable claim. */
+export interface MergerFor {
+  writerId: string;
+  /** The merger's own claimed id; queue and spawn use it instead of allocating one. */
+  runId: string;
+  nonce: string;
+  effort: string;
+  gitRoot: string;
+  owner: import("./effort/store.ts").EffortOwner;
+}
+
 export interface RunIntegration {
+  /** The writer's original branch head; `branchHead` may later name an accepted merger proposal. */
+  sourceHead?: string;
+  merger?: MergerWal;
   resultText?: string;
   verifiedOid?: string;
   noopTip?: string;
@@ -560,7 +598,7 @@ export interface RunIntegration {
   deliveryProtocol?: 1;
   changedPaths?: string[];
   touchViolations?: string[];
-  state: "queued" | "merging" | "generating" | "verifying" | "verified" | "paused" | "accepted" | "cancelled";
+  state: "queued" | "merging" | "generating" | "verifying" | "verified" | "resolving" | "paused" | "accepted" | "cancelled";
   enqueuedAt: number;
   branchHead: string;
   expectedTip?: string;
@@ -607,6 +645,8 @@ export interface Run {
   recordWrite?: Promise<void>;
   effort?: RunEffort;
   integration?: RunIntegration;
+  /** M6a: set only on a driver-owned merger; it has no `effort` and is not a delegated leaf. */
+  mergerFor?: MergerFor;
   landedCommit?: string;
   /** Stable id, e.g. `oracle-7f3a`. Used by ensemble_send/stop/etc. */
   id: string;
@@ -1098,6 +1138,7 @@ export interface RunRecord {
   herdrUsageBaseline?: { launchNonce: string; usage: Usage };
   effort?: RunEffort;
   integration?: RunIntegration;
+  mergerFor?: MergerFor;
   landedCommit?: string;
   id: string;
   persona: string;
@@ -1300,6 +1341,7 @@ export function toRunRecord(r: Run): RunRecord {
     worktreeBranch: r.worktreeBranch,
     effort: r.effort,
     integration: r.integration,
+    mergerFor: r.mergerFor,
     landedCommit: r.landedCommit,
     worktreeBaseBranch: r.worktreeBaseBranch,
     mergeStrategy: r.mergeStrategy,

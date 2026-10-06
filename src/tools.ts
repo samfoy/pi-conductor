@@ -41,7 +41,8 @@ import { registerChiefTool, registerPeerTool, registerStaffTool } from "./superv
 import type { ChiefRole } from "./supervision/lease.ts";
 import type { LeadAsks } from "./supervision/ask.ts";
 import { registerDelegate } from "./delegate-tool.ts";
-import { awaitingChildren, childrenOf, subtreeCost } from "./delegation.ts";
+import { awaitingChildren, childrenOf, stepCost, subtreeCost } from "./delegation.ts";
+import { MERGER_PERSONA } from "./effort/merger.ts";
 import { isSettled, isTerminal } from "./types.ts";
 import { SpawnQueue } from "./queue.ts";
 import { resolveMergeStrategy, resolveWorktreeSpec } from "./worktree.ts";
@@ -509,6 +510,7 @@ function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts, env: Runtim
         const resolved = await resolvePersonas({ cwd: c, personaOverrides: stepCfg.personaOverrides });
         contexts.set(c, { cfg: stepCfg, personas: resolved.personas });
       }
+      if (params.steps.some(s => s.persona === MERGER_PERSONA)) return halted(`the ${MERGER_PERSONA} persona is driver-owned: only effort integration launches it`);
       const unknown = params.steps
         .filter((s, i) => !contexts.get(stepCwds[i]!)!.personas.get(s.persona))
         .map((s) => s.persona);
@@ -600,8 +602,8 @@ function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts, env: Runtim
         return promise.then((run) => ({
           status: run.status,
           failureClass: run.failureClass,
-          // N4: the step's own cost plus its own leaves', each counted once.
-          costUsd: subtreeCost(run, registry.list()),
+          // N4: the step's own cost plus its own leaves', each counted once; M6a adds its persisted merger cost.
+          costUsd: stepCost(run, registry.list()),
           finalText: getCompletionText(run),
         }));
       };
@@ -769,6 +771,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts, env: Runti
           `persona "${params.persona}" not found. Run ensemble_list to see what's available.`,
         );
       }
+      if (persona.name === MERGER_PERSONA) return errorResult(`the ${MERGER_PERSONA} persona is driver-owned: only effort integration launches it, on a conflict or red verify under efforts.merger "auto".`);
 
       let runtime: RuntimeKind;
       try { runtime = prepareSpawnRuntime({ persona, cwd, runtime: params.runtime, runtimeEnv: env }).runtime; }
@@ -1667,6 +1670,8 @@ function toStatusSummary(r: Run, canFocus: boolean, sessionId?: string, registry
       children: children.map(c => ({ id: c.id, persona: c.persona, status: c.status, cost: c.usage.cost, result_ref: resultRef(c) })),
       subtree_cost: subtreeCost(r, runs),
     } : {}),
+    ...(r.integration?.merger ? { merger: { id: r.integration.merger.runId, kind: r.integration.merger.kind, outcome: r.integration.merger.outcome ?? (r.integration.state === "resolving" ? "resolving" : "unsettled"), reason: r.integration.merger.reason, cost: r.integration.merger.cost }, step_cost: stepCost(r, runs) } : {}),
+    ...(r.mergerFor ? { merger_for: r.mergerFor.writerId } : {}),
     available_actions: computeAvailableActions(r, observed),
     wait_reason: r.waitReason ?? observed.effortAdmissionError,
     persona: r.persona,
@@ -1954,7 +1959,8 @@ export function buildOnChainCallback(
       // no onChain: depth-1 cap (chain-spawned runs do not chain further)
       events: args.events,
     };
-    const refusal = WRITE_CAPABLE_PERSONAS.has(chainPersona.name) ? keptParentRefusal(parentRun, chainPersona.name) : undefined;
+    const refusal = chainPersona.name === MERGER_PERSONA ? `chain: the ${MERGER_PERSONA} persona is driver-owned and never a chain successor of ${parentRun.id}`
+      : WRITE_CAPABLE_PERSONAS.has(chainPersona.name) ? keptParentRefusal(parentRun, chainPersona.name) : undefined;
     if (refusal) {
       failBeforeSpawn({ ...spawn, registry: args.registry }, refusal);
       return;
@@ -2020,7 +2026,7 @@ export function buildOnRetryCallback(
   args: OnRetryCallbackOpts,
 ): (run: Run) => void {
   const self = (failedRun: Run): void => {
-    if (failedRun.effort) return;
+    if (failedRun.effort || failedRun.mergerFor || args.persona.name === MERGER_PERSONA) return;
     const failedAttempt = failedRun.retryAttempt ?? 0;
     const maxAttempts = failedRun.retryPolicy?.maxAttempts ?? 1;
     const ov = args.cfg.personaOverrides[args.persona.name] ?? {};

@@ -119,7 +119,8 @@ for (const [label, status, alive, expected] of [
       const dir = join(runsRoot, "builder-full");
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "session.jsonl"), "{}\n");
-      const record = toRunRecord(fullRun(dir, { status, contextRetired: true, integration: { state: "paused", enqueuedAt: 1, branchHead: "a".repeat(40), attempts: 0, verifyIdentity: { command: "true", timeoutSeconds: 1, retries: 1 } }, landedCommit: "b".repeat(40), effort: { name: "feature", gitRoot: dir, role: "writer", spawnBase: "a".repeat(40), touches: ["src/**"], cwd: dir } }));
+      const record = toRunRecord(fullRun(dir, { status, contextRetired: true, integration: { state: "paused", enqueuedAt: 1, branchHead: "a".repeat(40), attempts: 0, verifyIdentity: { command: "true", timeoutSeconds: 1, retries: 1 } }, landedCommit: "b".repeat(40), effort: { name: "feature", gitRoot: dir, role: "writer", spawnBase: "a".repeat(40), touches: ["src/**"], cwd: dir },
+        mergerFor: { writerId: "builder-w", runId: "builder-full", nonce: "n", effort: "feature", gitRoot: dir, owner: { sessionId: "s", pid: 1, startTime: 1 } } }));
       const unset = Object.entries(record).filter(([, v]) => v === undefined).map(([k]) => k);
       assert.deepEqual(unset, [], "fixture sets every persisted field");
       writeFileSync(record.recordPath, JSON.stringify(record));

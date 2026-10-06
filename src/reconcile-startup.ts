@@ -83,6 +83,7 @@ export type ClassifyResult =
   | "restore-effort"
   | "restore-integrating"
   | "restore-blocked"
+  | "preserve-merger"
   | "skip-unsupported-runtime"
   | "skip-malformed-scope"
   | "skip-terminal"
@@ -150,6 +151,7 @@ export function classifyRecord(
     if (isRequestedTermination(record.status)) return "skip-terminal";
     if (herdrProbe === "other-socket" || herdrProbe === "unknown") return "skip-foreign";
     if (record.status === "integrating" || (record.effort && record.integration)) return "restore-integrating";
+    if (record.mergerFor && record.status !== "blocked") return "preserve-merger";
     return "readopt-herdr";
   }
   if (unsupportedRuntimeReason(record.runtime)) return "skip-unsupported-runtime";
@@ -187,6 +189,8 @@ export function classifyRecord(
   if (status === "integrating") return "restore-integrating";
   if (status === "blocked") return "restore-blocked";
   if (record.effort) return "restore-effort";
+  // M6a: only effort recovery decides a merger's fate from its writer's claim; never readopt or kill it here.
+  if (record.mergerFor) return "preserve-merger";
 
   // A queued run never spawned. Status → failed regardless of any
   // (defensive) pid the record might carry.
@@ -573,6 +577,8 @@ export async function reconcileOrphansAtStartup(
         case "skip-terminal":
           // GC owns these; reconcile is a no-op.
           break;
+        case "preserve-merger":
+          break;
 
         case "skip-foreign":
           // Owned by a sibling pi session whose host process is still
@@ -813,6 +819,7 @@ export function buildOrphanRun(record: RunRecord, status: RunStatus): Run {
     worktreeBranch: record.worktreeBranch,
     effort: record.effort,
     integration: record.integration,
+    mergerFor: record.mergerFor,
     landedCommit: record.landedCommit,
     worktreeBaseBranch: record.worktreeBaseBranch,
     mergeStrategy: record.mergeStrategy,

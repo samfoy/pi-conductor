@@ -75,7 +75,7 @@ for (const phase of ["legacy", "unknown-process", "resolving", "queued-order", "
     }
     if (phase === "changed-source" || phase === "unknown-process" || phase === "resolving") {
       const recovered = JSON.parse(readFileSync(path, "utf8"));
-      assert.equal(recovered.integration.state, "paused"); assert.match(recovered.integration.reason, phase === "changed-source" ? /source branch head changed/ : phase === "unknown-process" ? /unknown process identity/ : /unsupported.*resolving/);
+      assert.equal(recovered.integration.state, "paused"); assert.match(recovered.integration.reason, phase === "changed-source" ? /source branch head changed/ : phase === "unknown-process" ? /unknown process identity/ : /resolving entry has no merger claim/);
       assert.equal(recovered.integration.branchHead, wal.integration.branchHead);
       assert.equal(git(cwd, "rev-parse", wal.worktreeBranch), changedHead ?? wal.integration.branchHead);
       assert.equal(git(cwd, "rev-parse", "conductor-int/receipt"), base);

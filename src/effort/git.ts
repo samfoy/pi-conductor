@@ -42,7 +42,8 @@ export function integratedCandidate(record: import("./store.ts").EffortRecord, r
       (e.verifyIdentity.command && (!e.verify?.passed || e.verify.command !== e.verifyIdentity.command))) return;
   const root = record.gitRoot;
   const body = effortGit(root, "show", "-s", "--format=%B", e.candidateOid).split("\n");
-  if ([`Conductor-Effort: ${record.name}`, `Conductor-Run: ${run.id}`].some(trailer => body.filter(line => line === trailer).length !== 1)) return;
+  const m = e.merger?.outcome === "accepted" && e.branchHead === e.merger.outputOid ? e.merger.runId : undefined;
+  if ([`Conductor-Effort: ${record.name}`, `Conductor-Run: ${run.id}`, ...(m ? [`Conductor-Merger: ${m}`] : [])].some(trailer => body.filter(line => line === trailer).length !== 1)) return;
   if (effortGit(root, "show", "-s", "--format=%P", e.candidateOid) !== e.expectedTip || effortGit(root, "rev-parse", `${e.candidateOid}^{tree}`) !== e.candidateTree) return;
   const result = spawnSync("git", ["merge-base", "--is-ancestor", e.candidateOid, record.intRef], { cwd: root, env: gitEnv(), timeout: 30000 });
   if (result.status === 0) return e.candidateOid;

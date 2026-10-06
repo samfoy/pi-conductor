@@ -174,6 +174,7 @@ function decideForEntry(
     if (!isTerminal(entry.status)) return { kind: "keep", id: entry.id, reason: "herdr status unresolved" };
   } else if (unsupportedRuntimeReason(entry.runtime) || unsupportedRuntimeReason(entry.inMemory?.runtime)) return { kind: "keep", id: entry.id, reason: "unsupported runtime; evidence preserved" };
   if (entry.effort || entry.inMemory?.effort) return { kind: "keep", id: entry.id, reason: "unresolved effort ownership" };
+  if (entry.mergerFor || entry.inMemory?.mergerFor) return { kind: "keep", id: entry.id, reason: "effort merger evidence; effort recovery owns it" };
   // Rule 1: active-in-memory gate (load-bearing per slice 1 acceptance).
   if (entry.inMemory) {
     const mem = entry.inMemory;

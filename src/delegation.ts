@@ -132,6 +132,11 @@ export function subtreeCost(root: Run, runs: readonly Run[]): number {
   return childrenOf(root, runs).reduce((sum, leaf) => sum + leaf.usage.cost, root.usage.cost);
 }
 
+/** M6a: a step's subtree cost plus its writer's persisted merger cost, persisted once at the merger outcome. */
+export function stepCost(root: Run, runs: readonly Run[]): number {
+  return subtreeCost(root, runs) + (root.integration?.merger?.cost ?? 0);
+}
+
 /** 2 s TERM→KILL plus time to reap and close the pipes. */
 const CHILD_EXIT_BOUND_MS = 2_500;
 

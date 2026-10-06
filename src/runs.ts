@@ -30,6 +30,7 @@ import { capabilitiesFor, subprocessRuntime } from "./subprocess-runtime.ts";
 import { ownedEffort, effortOwner, effortRepository, effortTip } from "./effort/open.ts";
 import { effortEnv } from "./effort/git.ts";
 import { EffortDriver } from "./effort/driver.ts";
+import { mergerClaimError, mergerSpawnError } from "./effort/merger.ts";
 import { addEffortMember, assertEffortOwner, assertRunEffortOwner, readEffort, listEfforts, writeDurableJson, writeDurableFile, type EffortRecord } from "./effort/store.ts";
 import { admitEffortWriter, consumesSlot, type AdmissionLimits } from "./effort/admit.ts";
 import { EFFORT_NOTICE, effortSummary, validateTouches } from "./effort/policy.ts";
@@ -947,7 +948,7 @@ export class RunRegistry {
   /** N2: this module instance's broker for subprocess delegators' `delegate` calls. */
   delegation?: import("./delegation-broker.ts").DelegationObserver;
   admissionLimits?: AdmissionLimits;
-  readonly integrations = new EffortDriver();
+  readonly integrations = new EffortDriver(this);
   private runs = new Map<string, Run>();
   private listeners = new Set<RunListener>();
 
@@ -1175,6 +1176,14 @@ export interface SpawnOptions {
    * chain, retry, inherited context or steering, whatever else is passed.
    */
   delegation?: { parentRunId: string; delegateToolCallId: string };
+  /** M6a: set only by the effort driver's launcher, after its durable claim. */
+  mergerFor?: import("./types.ts").MergerFor;
+}
+
+/** M6a: refuse any merger spawn that is not the registered writer's open claim. */
+export function prepareSpawnMerger(opts: Pick<SpawnOptions, "persona" | "mergerFor" | "cwd" | "effort" | "touches" | "worktree" | "mergeStrategy" | "delegation" | "onChain" | "onRetry" | "retryMaxAttempts" | "steerable">, registry: RunRegistry, id?: string): void {
+  const refused = mergerSpawnError(opts, id, opts.mergerFor && registry.get(opts.mergerFor.writerId));
+  if (refused) throw new Error(refused);
 }
 
 /**
@@ -1188,7 +1197,7 @@ export function leafSpawnOptions<T extends Partial<SpawnOptions>>(opts: T): T {
   }
   return { ...opts, mode: "background", worktree: false, mergeStrategy: "none", onCompleteHook: "", onCompleteHookTimeoutSeconds: undefined,
     effort: undefined, touches: undefined, onChain: undefined, onRetry: undefined, retryMaxAttempts: 1, retryAttempt: 0, inheritContextOverride: "none",
-    parentMessages: undefined, steerable: false };
+    parentMessages: undefined, steerable: false, mergerFor: undefined };
 }
 
 /**
@@ -1328,8 +1337,11 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
   opts = prepareSpawnRuntime(opts);
   if (opts.runtime === "herdr" && !opts.registry.herdrAdmissionOpen) throw new Error("herdr runtime shutting down; launch refused");
   opts = prepareSpawnEvidence(opts, opts.registry);
+  prepareSpawnMerger(opts, opts.registry, opts.preAllocatedId ?? opts.mergerFor?.runId);
   const effort = prepareSpawnEffort(opts);
-  const id = opts.preAllocatedId ?? allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
+  const id = opts.preAllocatedId ?? opts.mergerFor?.runId ?? allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
+  // A merger id launches once: only its own queued placeholder may precede it.
+  if (opts.mergerFor && (existsSync(join(runDir(id), "record.json")) || (opts.registry.has(id) && opts.registry.get(id)!.status !== "queued"))) throw new Error(`merger ${id} already launched; refusing a second launch`);
   if (effort) addEffortMember(effort, id);
   const dir = runDir(id);
   mkdirSync(dir, { recursive: true });
@@ -1370,6 +1382,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     parentRunId: opts.delegation?.parentRunId,
     delegateToolCallId: opts.delegation?.delegateToolCallId,
     herdrParent: opts.delegation ? opts.registry.get(opts.delegation.parentRunId) : undefined,
+    mergerFor: opts.mergerFor,
     // Item 15: per-invocation markers. Initial spawn IS the start of
     // the (sole, so far) invocation, so:
     //   - thisInvocationStartedAt mirrors startTime
@@ -1911,12 +1924,15 @@ export function supportsFocus(ctx?: { mode?: string; hasUI?: boolean } | null): 
 /** Read-only I/O boundary. A snapshot is advisory, never authorization. */
 export function observeRunActions(run: Run, canFocus = false, sessionId?: string, registry?: RunRegistry) {
   let effortOwnershipError: string | undefined;
-  if (run.effort) {
+  // M6a: a merger answers to its writer's effort owner; it has no effort of its own.
+  const owned = run.effort ? { gitRoot: run.effort.gitRoot, name: run.effort.name, generation: run.effort.owner?.generation }
+    : run.mergerFor && { gitRoot: run.mergerFor.gitRoot, name: run.mergerFor.effort, generation: run.mergerFor.owner.generation };
+  if (owned) {
     try {
-      const effort = readEffort(run.effort.gitRoot, run.effort.name);
+      const effort = readEffort(owned.gitRoot, owned.name);
       if (!effort) throw new Error("effort record missing; ownership unresolved");
-      assertEffortOwner(effort, { ...effortOwner(sessionId), generation: run.effort.owner?.generation });
-    } catch (e) { effortOwnershipError = `cannot send to effort ${run.effort.name}: ${(e as Error).message}`; }
+      assertEffortOwner(effort, { ...effortOwner(sessionId), generation: owned.generation });
+    } catch (e) { effortOwnershipError = `cannot send to effort ${owned.name}: ${(e as Error).message}`; }
   }
   const sessionPath = findRunSessionFile(run);
   let sessionMissing = false;
@@ -1952,6 +1968,8 @@ export function runActionError(run: Run, action: RunAction, observed: ActionObse
   }
   // N4: its delegating parent consumes a leaf's result and is its only messenger; the lead may only kill it.
   if (action !== "kill" && isDelegatedLeaf(run)) return `sub-agent ${run.id} is owned by ${run.parentRunId ?? "its delegating parent"}; only kill. Its parent consumes the result.`;
+  // M6a: the integration driver consumes a merger's result; the owner may only answer its question or kill it.
+  if (run.mergerFor && action !== "kill" && !(action === "send" && run.status === "blocked")) return `merger ${run.id} belongs to ${run.mergerFor.writerId}'s effort integration: only answer its blocked question (send) or kill it.`;
   if (run.runtime === "herdr") {
     if (!ownsHerdrRun(run)) return "herdr owner generation fenced; action refused";
     if (run.transport?.kind !== "herdr") return "herdr runtime unavailable here: stream is not attached";
@@ -2229,6 +2247,14 @@ export function sendToRun(
   const behavior: StreamingBehavior = opts.streamingBehavior ?? "auto";
   const check = validateSendable(run, behavior, opts.sessionId);
   if (!check.ok) return { kind: "rejected", reason: check.reason };
+  if (run.mergerFor) {
+    // Only the writer's still-open claim may resume its merger, in that same candidate.
+    const claim = mergerClaimError(opts.registry.get(run.mergerFor.writerId), run.id, run.cwd, run.mergerFor);
+    if (claim) return { kind: "rejected", reason: `cannot answer merger ${run.id}: ${claim}` };
+    const forward = opts.onComplete;
+    // Its terminal result is the writer's card; only a further owner question is its own.
+    opts = { ...opts, onComplete: r => { if (r.status === "blocked") forward?.(r); } };
+  }
   if (opts.files !== undefined) {
     if (!opts.callerCwd) return { kind: "rejected", reason: "files require an explicit callerCwd" };
     try {
