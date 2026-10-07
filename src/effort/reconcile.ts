@@ -165,12 +165,17 @@ export async function recoverEffort(original: EffortRecord, opts: RecoveryOption
               try { process.kill(run.pid, 0); }
               catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") liveOrUnknown = false; }
             }
+            const reader = run.effort!.role === "reader";
             if (liveOrUnknown) {
-              run.status = "paused"; run.errorMessage = "lost writer process identity unresolved; no automatic gate or requeue";
-            } else { run.status = "killed"; run.errorMessage = "lost writer; explicit human requeue requires source and original hook validation"; }
+              run.status = "paused"; run.errorMessage = reader ? `lost reader process identity unresolved; no signal sent; view ${run.worktreePath ?? "unavailable"} kept` : "lost writer process identity unresolved; no automatic gate or requeue";
+            } else if (reader) { run.status = "killed"; run.errorMessage = `lost reader; view ${run.worktreePath ?? "unavailable"} kept for inspection; spawn a fresh reader at the current tip`; }
+            else { run.status = "killed"; run.errorMessage = "lost writer; explicit human requeue requires source and original hook validation"; }
           }
-          if (run.status === "completed") { run.status = "merge_conflict"; run.mergeResult = { success: false, reason: "error" }; run.errorMessage = "completed JSON has no reachable correlated integration proof; work preserved"; }
-          if (run.effort) run.effort.footprintUnknown = !run.mergeResult?.success;
+          // A completed reader proved nothing that integration could lose; only writers owe integration proof.
+          if (run.effort!.role === "writer") {
+            if (run.status === "completed") { run.status = "merge_conflict"; run.mergeResult = { success: false, reason: "error" }; run.errorMessage = "completed JSON has no reachable correlated integration proof; work preserved"; }
+            run.effort!.footprintUnknown = !run.mergeResult?.success;
+          }
           await writeRecord(run, () => assertRunEffortOwner(run));
           if (order.includes(run.id)) throw new Error("queue/WAL disagreement: no durable hook-passed integrating record");
           continue;
@@ -237,7 +242,7 @@ async function restoreMerger(writer: Run, opts: RecoveryOptions): Promise<void> 
 /** Slash-command only: the caller has obtained explicit human confirmation. */
 export async function requeueEffortRun(run: Run, opts: RecoveryOptions, replacement?: string, expectedOid?: string): Promise<{ done: Promise<void> }> {
   assertSupportedRuntime(run.runtime);
-  if (!run.effort || run.status === "blocked" || run.status === "running" || run.status === "paused" || (run.status === "integrating" && (!run.integrationSuspended || run.integrationControl || run.integration?.state !== "paused"))) throw new Error("requeue requires a stopped preserved writer, never a blocked ask or live assignment");
+  if (run.effort?.role !== "writer" || run.status === "blocked" || run.status === "running" || run.status === "paused" || (run.status === "integrating" && (!run.integrationSuspended || run.integrationControl || run.integration?.state !== "paused"))) throw new Error("requeue requires a stopped preserved writer, never a blocked ask or live assignment");
   let record = adoptEffort(readEffort(run.effort.gitRoot, run.effort.name)!, effortOwner(opts.sessionId));
   const lock = join(effortDir(record.gitRoot, "integration-driver"), "driver.lock");
   const claim = acquireClaim(lock, effortOwner(randomUUID()));
@@ -316,7 +321,7 @@ const RESOLVABLE: readonly string[] = ["conflict", "verify_failed", "verify_time
 /** M6b advisory hint, never an action token or authority: the interactive command revalidates everything. */
 export function humanResolution(run: Run): string | undefined {
   const e = run.integration;
-  if (!run.effort || run.mergerFor || run.status !== "merge_conflict" || e?.state !== "paused" || !RESOLVABLE.includes(e.reason ?? "") || e.merger || e.previous || e.resolveRequested) return undefined;
+  if (run.effort?.role !== "writer" || run.mergerFor || run.status !== "merge_conflict" || e?.state !== "paused" || !RESOLVABLE.includes(e.reason ?? "") || e.merger || e.previous || e.resolveRequested) return undefined;
   try { if (readEffort(run.effort.gitRoot, run.effort.name)?.policy.merger === "off") return undefined; }
   catch { return undefined; }
   return `/conductor effort resolve ${run.id}`;
@@ -333,7 +338,7 @@ function resolvePlan(run: Run, sessionId: string): ResolvePlan {
   if (process.env.CONDUCTOR_SUBAGENT === "1") throw new Error("effort resolve requires an interactive human command, never a child");
   assertSupportedRuntime(run.runtime);
   const e = run.integration;
-  if (!run.effort || run.mergerFor) throw new Error(`${run.id} is not an effort writer`);
+  if (run.effort?.role !== "writer" || run.mergerFor) throw new Error(`${run.id} is not an effort writer`);
   if (run.status !== "merge_conflict" || e?.state !== "paused" || !RESOLVABLE.includes(e.reason ?? "") || run.mergeResult?.reason !== e.reason)
     throw new Error(`resolve requires an effort writer settled merge_conflict by conflict, verify_failed or verify_timeout; ${run.id} is ${run.status}${e?.reason ? ` (${e.reason})` : ""}`);
   if (e.merger) throw new Error(`merger attempt already spent (${e.merger.runId}: ${e.merger.outcome ?? "unsettled"}); no second attempt`);

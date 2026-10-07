@@ -24,6 +24,7 @@ import { effortRepository, effortGit } from "./effort/open.ts";
 import { readEffort, listEfforts } from "./effort/store.ts";
 import { humanResolution, recoverEffort, requeueEffortRun, resolveEffortRun } from "./effort/reconcile.ts";
 import { EFFORT_NOTICE } from "./effort/policy.ts";
+import { finalizerStatus } from "./effort/reader.ts";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import type { Persona, PersonaResolution, Run, RunRecord, RunStatus } from "./types.ts";
@@ -1309,6 +1310,13 @@ export function buildWatchdogStatusReport(args: {
   return lines.join("\n");
 }
 
+/** M7: the current tip, and the finalizer verdict judged against it (stale once the tip moved). */
+function withTip(effort: NonNullable<ReturnType<typeof readEffort>>) {
+  const tip = effortGit(effort.gitRoot, "rev-parse", "--verify", `${effort.intRef}^{commit}`);
+  const finalizer = finalizerStatus(effort, tip);
+  return { tip, ...(finalizer ? { finalizer } : {}) };
+}
+
 export async function runEffortCmd(opts: Pick<RegisterCommandsOpts, "getCwd" | "getRegistry" | "getSessionId" | "pushCompletionNotification" | "getEvents">, ctx: ExtensionCommandContext, args: string): Promise<void> {
   try {
     const fields = /^(\S+)(?:\s+(\S+))?(?:\s+([\s\S]*))?$/.exec(args.trim());
@@ -1347,7 +1355,7 @@ export async function runEffortCmd(opts: Pick<RegisterCommandsOpts, "getCwd" | "
     if (action !== "list" && action !== "status") throw new Error("Use effort list/status/resume/requeue/resolve");
     const records = action === "list" ? listEfforts(gitRoot) : [readEffort(gitRoot, name!)];
     if (records.some(r => !r)) throw new Error("effort not found");
-    ctx.ui.notify(`${EFFORT_NOTICE}\n${JSON.stringify(records.map(effort => ({ effort, tip: effortGit(effort!.gitRoot, "rev-parse", "--verify", `${effort!.intRef}^{commit}`), members: opts.getRegistry().list().filter(r => r.effort?.gitRoot === gitRoot && r.effort.name === effort!.name).map(r => ({ id: r.id, status: r.status, integration: r.integration, error: r.errorMessage, human_resolution: humanResolution(r) })) })), null, 2)}`, "info");
+    ctx.ui.notify(`${EFFORT_NOTICE}\n${JSON.stringify(records.map(effort => ({ effort, ...withTip(effort!), members: opts.getRegistry().list().filter(r => r.effort?.gitRoot === gitRoot && r.effort.name === effort!.name).map(r => ({ id: r.id, role: r.effort!.role, status: r.status, integration: r.integration, error: r.errorMessage, human_resolution: humanResolution(r) })) })), null, 2)}`, "info");
   } catch (error) { ctx.ui.notify((error as Error).message, "error"); }
 }
 

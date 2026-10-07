@@ -28,6 +28,25 @@ export const WORKTREE_CHAIN_TEMPLATE =
   "```\n\n" +
   "Original task:\n{task}";
 
+/** M7: the source writer's own work landed on the effort tip; the successor's workspace may be later. */
+export const EFFORT_CHAIN_TEMPLATE =
+  "Review the preceding {persona} run ({runId}) in effort {effort}.\n\n" +
+  "Its work was integrated into the effort tip as {landedCommit}. Your workspace starts from the effort tip " +
+  "at your own launch, named in your workspace notes; if that is not {landedCommit}, later integrations landed after it.\n" +
+  "Inspect the integrated change with:\n\n" +
+  "```bash\n" +
+  "git show {landedCommit}\n" +
+  "```\n\n" +
+  "Original task:\n{task}\n\n---\nFinal output:\n{final}";
+
+/** M7: a reader source integrated nothing; only the commit its clean view reviewed is named. */
+export const EFFORT_READER_CHAIN_TEMPLATE =
+  "Follow up on the preceding {persona} review ({runId}) in effort {effort}.\n\n" +
+  "That run was a reader: it integrated nothing (landed commit: {landedCommit}). It reviewed the effort tip " +
+  "{reviewedCommit} in a detached view. Your workspace starts from the effort tip at your own launch, named in " +
+  "your workspace notes; if that is not {reviewedCommit}, the tip moved after its review.\n\n" +
+  "Original task:\n{task}\n\n---\nIts final output:\n{final}";
+
 const FINAL_PLACEHOLDER = "(no final output)";
 
 /**
@@ -56,6 +75,12 @@ export function resolveChain(
  *   {final}          — contents of `finalPath` on disk (or placeholder)
  *   {worktreeBranch} — worktree branch name (if set on run)
  *   {baseBranch}     — base branch name (if set on run)
+ *   {effort}         — M7 effort name (empty outside an effort)
+ *   {landedCommit}   — M7 the writer source's landed commit; "none" for a reader source
+ *   {reviewedCommit} — M7 the reader source's reviewed commit; "none" for a writer source
+ *
+ * An effort source with no explicit template uses `EFFORT_CHAIN_TEMPLATE` (writer) or
+ * `EFFORT_READER_CHAIN_TEMPLATE` (reader).
  *
  * Template selection (when `taskTemplate` is undefined):
  *   - `mergeStrategy === "none"` AND `worktreeBranch` is set → `WORKTREE_CHAIN_TEMPLATE`
@@ -71,11 +96,14 @@ export function buildChainTask(
     worktreeBranch?: string;
     baseBranch?: string;
     mergeStrategy?: string;
+    effort?: { name: string; role: "writer" | "reader"; landedCommit?: string; reviewedCommit?: string };
   },
 ): string {
   let template: string;
   if (taskTemplate !== undefined) {
     template = taskTemplate;
+  } else if (context.effort) {
+    template = context.effort.role === "reader" ? EFFORT_READER_CHAIN_TEMPLATE : EFFORT_CHAIN_TEMPLATE;
   } else if (
     context.mergeStrategy === "none" &&
     context.worktreeBranch
@@ -100,7 +128,10 @@ export function buildChainTask(
     .replace(/\{task\}/g, context.task)
     .replace(/\{final\}/g, finalContent)
     .replace(/\{worktreeBranch\}/g, context.worktreeBranch ?? "")
-    .replace(/\{baseBranch\}/g, context.baseBranch ?? "");
+    .replace(/\{baseBranch\}/g, context.baseBranch ?? "")
+    .replace(/\{effort\}/g, context.effort?.name ?? "")
+    .replace(/\{landedCommit\}/g, context.effort?.landedCommit ?? "none")
+    .replace(/\{reviewedCommit\}/g, context.effort?.reviewedCommit ?? "none");
 }
 
 // ── v0.18 plans-as-hypotheses re-evaluation ─────────────────────────────

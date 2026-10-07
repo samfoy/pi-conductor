@@ -529,18 +529,29 @@ export function emptyUsage(): Usage {
  * Persistence to disk happens via `runs.ts` — record.json is written on every
  * status change; transcript.jsonl is appended per stream event.
  */
+/** M7: frozen at spawn from `read_only` alone; never re-derived from a later persona file. */
+export type EffortRole = "writer" | "reader";
+export type FinalizerVerdict = "complete" | "continue" | "failed";
+
 export interface RunEffort {
   owner?: import("./effort/store.ts").EffortOwner;
-  /** undefined is an unreconstructable legacy gate; null proves no configured hook. */
+  /** undefined is an unreconstructable legacy gate; null proves no configured hook. Writers only. */
   gate?: ResolvedHook | null;
   name: string;
   gitRoot: string;
-  role: "writer";
-  /** Absent while queued; resolved at actual launch, never request time. */
+  role: EffortRole;
+  /** Absent while queued; resolved at actual launch, never request time. A reader's view commit. */
   spawnBase?: string;
   /** Actual child cwd, captured after linked-checkout subdirectory mapping. */
   cwd?: string;
+  /** Writers only: readers reserve no paths. */
   touches?: string[];
+  /** Reader: set only by a live completion whose view was proven clean and detached at `spawnBase`. */
+  reviewed?: string;
+  /** Reader `finalizer`: the verdict it recorded on the effort for `reviewed`. */
+  verdict?: FinalizerVerdict;
+  /** Writer retry: earlier attempts of this assignment, whose preserved reservations it replaces. */
+  retryOf?: string[];
   /** Measured while blocked; dirty or unreadable assignments reserve all paths. */
   changedPaths?: string[];
   touchViolations?: string[];

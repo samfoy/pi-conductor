@@ -4,6 +4,7 @@ import { measureEffortFootprint } from "./effort/admit.ts";
 import { effortGit } from "./effort/open.ts";
 import { assertRunEffortOwner, readEffort } from "./effort/store.ts";
 import { effortSummary, resolveEffortPolicy } from "./effort/policy.ts";
+import { settleReaderView } from "./effort/reader.ts";
 import { appendFile } from "node:fs/promises";
 import type { RunRuntime, RunTransport } from "./runtime.ts";
 import { runtimeFor } from "./runtime.ts";
@@ -79,7 +80,7 @@ export function createRunPipeline(
   const rpc = piArgs[1] === "rpc";
   run.onComplete = opts.onComplete;
   const recoveredAnswer = !!opts.answer && !!run.reconciledAtStartup && !!run.effort && run.effort.gate !== undefined;
-  if (!opts.reattach && run.effort && (!run.reconciledAtStartup || run.effort.gate !== undefined)) run.effort.gate = opts.resolvedHook ?? null;
+  if (!opts.reattach && run.effort?.role === "writer" && (!run.reconciledAtStartup || run.effort.gate !== undefined)) run.effort.gate = opts.resolvedHook ?? null;
 
   let awaitingAnswer = opts.answer !== undefined;
   let answerRecord = Promise.resolve();
@@ -187,7 +188,8 @@ export function createRunPipeline(
           donePromiseResolve(run);
           return;
         }
-        if (run.effort) {
+        // A blocked reader keeps its view untouched and reserves no paths.
+        if (run.effort?.role === "writer") {
           try {
             const policy = readEffort(run.effort.gitRoot, run.effort.name)!.policy;
             const measured = measureEffortFootprint(run, effortGit(run.worktreePath!, "rev-parse", "HEAD"), policy);
@@ -253,7 +255,11 @@ export function createRunPipeline(
       }
     }
     check();
-    if (run.effort && terminal === "completed" && !isTerminal(run.status)) {
+    if (run.effort?.role === "reader") {
+      // M7: never the writer gate, integration or legacy merge; the closed process left only its view.
+      run.proc = undefined;
+      settleReaderView(run, { completed: terminal === "completed" && !isTerminal(run.status), live: !opts.reattach && !run.reconciledAtStartup, finalText: getFinalText(run.messages) });
+    } else if (run.effort && terminal === "completed" && !isTerminal(run.status)) {
       run.proc = undefined;
       run.pid = undefined;
       try {
@@ -596,7 +602,7 @@ async function settleRunEffects(
     discoverSessionPathIfMissing(run, opts.sessionDir);
     run.proc = undefined;
     if (!run.effort) terminal = await settleWorktree(run, terminal);
-    else run.worktreeKept = `${effortSummary(run)}. Branch ${run.worktreeBranch} and worktree ${run.worktreePath} preserved.`;
+    else if (run.effort.role === "writer") run.worktreeKept = `${effortSummary(run)}. Branch ${run.worktreeBranch} and worktree ${run.worktreePath} preserved.`;
     fence();
     // Re-apply the terminal to the run record now that merge may have flipped it.
     if (terminal === "merge_conflict") run.status = terminal;

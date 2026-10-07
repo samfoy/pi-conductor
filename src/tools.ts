@@ -10,6 +10,7 @@
 import { openEffort, effortRepository, effortGit } from "./effort/open.ts";
 import { readEffort, type EffortRecord } from "./effort/store.ts";
 import { EFFORT_NOTICE, effortSummary } from "./effort/policy.ts";
+import { effortRole, finalizerStatus } from "./effort/reader.ts";
 import type { RuntimeKind, RuntimeEnvironment } from "./runtime.ts";
 import { describeDelivery, runtimeFor } from "./runtime.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -34,7 +35,7 @@ import {
 } from "./autonomous.ts";
 import { resolveRetryPolicy } from "./retry.ts";
 import { collapseSteerableCascade } from "./steerable.ts";
-import { prepareSpawnRuntime, prepareSpawnEffort, availableActions, observeRunActions, computeAvailableActions, supportsFocus, validateRunAction, elapsedStr, failBeforeSpawn, forceTerminate, formatUsage, getCompletionText, keptBranchHint, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendCwd, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
+import { prepareSpawnRuntime, prepareSpawnEffort, effortChainRefusal, effortRetryRefusal, availableActions, observeRunActions, computeAvailableActions, supportsFocus, validateRunAction, elapsedStr, failBeforeSpawn, forceTerminate, formatUsage, getCompletionText, keptBranchHint, modelRegistryPredicate, pauseRun, resolveTimeoutMs, resumeRun, sendCwd, sendToRun, type RunRegistry, type SpawnOptions, type SendToRunOptions } from "./runs.ts";
 import { registerAskOwner } from "./ask-owner.ts";
 import { herdrLeadEnv, type LeadPresence } from "./supervision/presence.ts";
 import { registerChiefTool, registerPeerTool, registerStaffTool } from "./supervision/tools.ts";
@@ -207,7 +208,7 @@ function registerEffortTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       verify: Type.Optional(Type.String({ description: 'Open override; "" explicitly disables verification.' })),
       land: Type.Optional(Type.Union([Type.Literal("branch"), Type.Literal("base")])),
     }),
-    async execute(_id, params): Promise<{ content: { type: "text"; text: string }[]; details: { effort?: EffortRecord; tip?: string; error?: string } }> {
+    async execute(_id, params): Promise<{ content: { type: "text"; text: string }[]; details: { effort?: EffortRecord; tip?: string; finalizer?: ReturnType<typeof finalizerStatus>; error?: string } }> {
       try {
         if (params.action !== "open" && params.action !== "status") throw new Error("Only effort open/status are supported");
         const cwd = opts.getCwd();
@@ -219,7 +220,8 @@ function registerEffortTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
           : readEffort(effortRepository(cwd).gitRoot, params.effort);
         if (!effort) throw new Error("effort not found");
         const tip = effortGit(effort.gitRoot, "rev-parse", "--verify", `${effort.intRef}^{commit}`);
-        return { content: [{ type: "text" as const, text: `${EFFORT_NOTICE}\n${!effort.baseline ? "Baseline not verified yet; gated on first integration." : effort.baseline.disabled ? "Effort verify disabled; repository hooks still required." : "Baseline result recorded."}\n${JSON.stringify({ effort, tip }, null, 2)}` }], details: { effort, tip } };
+        const finalizer = finalizerStatus(effort, tip);
+        return { content: [{ type: "text" as const, text: `${EFFORT_NOTICE}\n${!effort.baseline ? "Baseline not verified yet; gated on first integration." : effort.baseline.disabled ? "Effort verify disabled; repository hooks still required." : "Baseline result recorded."}\n${finalizer ? `${finalizer.summary}\n` : ""}${JSON.stringify({ effort, tip, ...(finalizer ? { finalizer } : {}) }, null, 2)}` }], details: { effort, tip, finalizer } };
       } catch (e) { return errorResult(`${(e as Error).message}. ${EFFORT_NOTICE}`); }
     },
   });
@@ -656,8 +658,8 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts, env: Runti
     ],
     parameters: Type.Object({
       runtime: runtimeSchema,
-      effort: Type.Optional(Type.String({ description: `Named effort; auto-opens from config on first use. Always background with mandatory writer isolation. ${EFFORT_NOTICE}` })),
-      touches: Type.Optional(Type.Array(Type.String(), { description: "Effort writer repo-relative globs (literal, * or **). Omitted scope is undeclared; concurrency is not relaxed in M1." })),
+      effort: Type.Optional(Type.String({ description: `Named effort; auto-opens from config on first use. Always background: a writer gets a mandatory isolated worktree, a read_only persona a detached reader view of the tip. ${EFFORT_NOTICE}` })),
+      touches: Type.Optional(Type.Array(Type.String(), { description: "Effort writer repo-relative globs (literal, * or **); refused for read_only readers. Omitted scope is universal and runs serially." })),
 
       persona: Type.String({
         description: "Persona name. Run ensemble_list to see what's available.",
@@ -787,7 +789,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts, env: Runti
       try { task = appendFileEvidence(params.task, params.files, { cwd, registry, limit: cfg.inlineAttachmentLimitBytes }); }
       catch (e) { return errorResult((e as Error).message); }
 
-      try { prepareSpawnEffort({ persona, cwd, effort: params.effort, touches: params.touches, parentSessionId: opts.getSessionId?.() }); }
+      try { prepareSpawnEffort({ persona, cwd, effort: params.effort, touches: params.touches, parentSessionId: opts.getSessionId?.(), runtime, onCompleteHook: params.on_complete_hook }); }
       catch (e) { return errorResult(`${(e as Error).message}. ${EFFORT_NOTICE}`); }
 
       // Per-call `timeout_minutes` arg wins over persona override, which wins
@@ -859,7 +861,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts, env: Runti
         // Chain-spawned runs also don't receive onChain (no chain-of-chains).
         onChain: buildOnChainCallback({
           runtimeEnv: env,
-          chainEnabled: params.chain !== false && params.effort === undefined,
+          chainEnabled: params.chain !== false,
           personaName: persona.name,
           cfg,
           queue,
@@ -874,7 +876,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts, env: Runti
         // callback. Undefined per-call falls through the cascade to
         // config/persona/built-in (default maxAttempts 1 = no retry).
         retryMaxAttempts: params.retry_max_attempts,
-        onRetry: params.effort === undefined ? buildOnRetryCallback({
+        onRetry: buildOnRetryCallback({
           originalTask: task,
           persona,
           cfg,
@@ -886,7 +888,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts, env: Runti
           getParentMessages: opts.getParentMessages,
           getSessionId: opts.getSessionId,
           events: opts.getEvents?.(),
-        }) : undefined,
+        }),
         // v0.16 event bus: thread the adapter so emit sites in spawnRun/finalize fire.
         events: opts.getEvents?.(),
       });
@@ -1872,7 +1874,9 @@ export function buildOnChainCallback(
   if (!step) return undefined;
 
   return async (parentRun: Run) => {
-    if (parentRun.effort) return;
+    // M7: an effort source chains only from its own live first dispatch, and only inside its effort.
+    if (effortChainRefusal(parentRun)) return;
+    const effort = parentRun.effort;
     const chainCwd = parentRun.cwd;
     const chainCfg = loadConfig(chainCwd);
 
@@ -1930,6 +1934,8 @@ export function buildOnChainCallback(
         worktreeBranch: parentRun.worktreeBranch,
         baseBranch: parentRun.worktreeBaseBranch,
         mergeStrategy: parentRun.mergeStrategy,
+        effort: effort && { name: effort.name, role: effort.role,
+          landedCommit: effort.role === "writer" ? parentRun.landedCommit : undefined, reviewedCommit: effort.role === "reader" ? effort.reviewed : undefined },
       });
     const baseOv = chainCfg.personaOverrides[chainPersona.name] ?? {};
     const chainTimeoutMs = step.timeoutMinutes
@@ -1962,6 +1968,7 @@ export function buildOnChainCallback(
       onComplete: (run: Run) => args.pushNotification(run),
       // no onChain: depth-1 cap (chain-spawned runs do not chain further)
       events: args.events,
+      ...(effort ? { effort: effort.name } : {}),
     };
     const refusal = chainPersona.name === MERGER_PERSONA ? `chain: the ${MERGER_PERSONA} persona is driver-owned and never a chain successor of ${parentRun.id}`
       : WRITE_CAPABLE_PERSONAS.has(chainPersona.name) ? keptParentRefusal(parentRun, chainPersona.name) : undefined;
@@ -1969,7 +1976,12 @@ export function buildOnChainCallback(
       failBeforeSpawn({ ...spawn, registry: args.registry }, refusal);
       return;
     }
-    args.queue.enqueueOrSpawn(spawn as SpawnOptions);
+    try { args.queue.enqueueOrSpawn(spawn as SpawnOptions); }
+    catch (e) {
+      // Never a fallback outside the effort: an ownership or validation error is the successor's card.
+      if (!effort) throw e;
+      failBeforeSpawn({ ...spawn, registry: args.registry }, `chain: ${chainPersona.name} not started after ${parentRun.id}: ${(e as Error).message}`);
+    }
   };
 }
 
@@ -2030,7 +2042,10 @@ export function buildOnRetryCallback(
   args: OnRetryCallbackOpts,
 ): (run: Run) => void {
   const self = (failedRun: Run): void => {
-    if (failedRun.effort || failedRun.mergerFor || args.persona.name === MERGER_PERSONA) return;
+    if (failedRun.mergerFor || args.persona.name === MERGER_PERSONA || effortRetryRefusal(failedRun)) return;
+    // M7: the captured persona, never a re-resolved one, and never a different role than the frozen one.
+    const effort = failedRun.effort;
+    if (effort && effortRole(args.persona) !== effort.role) return;
     const failedAttempt = failedRun.retryAttempt ?? 0;
     const maxAttempts = failedRun.retryPolicy?.maxAttempts ?? 1;
     const ov = args.cfg.personaOverrides[args.persona.name] ?? {};
@@ -2041,7 +2056,7 @@ export function buildOnRetryCallback(
       maxAttempts,
       errorMessage: failedRun.errorMessage,
     });
-    args.queue.enqueueOrSpawn({
+    const spawn = {
       persona: args.persona,
       runtime: failedRun.runtime === undefined ? "subprocess" : failedRun.runtime,
       task,
@@ -2062,7 +2077,16 @@ export function buildOnRetryCallback(
       onRetry: self,
       onComplete: (run) => args.pushNotification(run),
       events: args.events,
-    } as SpawnOptions);
+      // Same effort and scope from the current tip; a writer replaces only its own earlier attempts' reservations.
+      ...(effort ? { effort: effort.name, touches: effort.touches ? [...effort.touches] : undefined,
+        retryOf: effort.role === "writer" ? [...(effort.retryOf ?? []), failedRun.id] : undefined } : {}),
+    } as SpawnOptions;
+    try { args.queue.enqueueOrSpawn(spawn); }
+    catch (e) {
+      if (!effort) throw e;
+      // Never retried outside the effort; the failed run's own card already reported the failure.
+      process.stderr.write(`[conductor] retry of ${failedRun.id} refused inside effort ${effort.name}: ${(e as Error).message}\n`);
+    }
   };
   return self;
 }

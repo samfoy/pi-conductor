@@ -34,6 +34,7 @@ import { mergerClaimError, mergerSpawnError } from "./effort/merger.ts";
 import { addEffortMember, assertEffortOwner, assertRunEffortOwner, readEffort, listEfforts, writeDurableJson, writeDurableFile, type EffortRecord } from "./effort/store.ts";
 import { admitEffortWriter, consumesSlot, type AdmissionLimits } from "./effort/admit.ts";
 import { EFFORT_NOTICE, effortSummary, validateTouches } from "./effort/policy.ts";
+import { DIRTY_VIEW, createReaderView, effortAssignment, effortRole, readerViewProblem } from "./effort/reader.ts";
 import { resolveRuntime, unsupportedRuntimeReason, type RuntimeKind, type RuntimeChoice, type RuntimeEnvironment, type Signaler } from "./runtime.ts";
 export type { Signaler } from "./runtime.ts";
 export { buildSubagentEnv, capabilitiesFor, createLineDecoder, RPC_ACK_TIMEOUT_MS } from "./subprocess-runtime.ts";
@@ -352,6 +353,8 @@ export interface SubAgentPromptPlace {
   /** The spawn's requested cwd, on the main checkout side. */
   requestedCwd: string;
   worktree?: { path: string; branch: string; gitRoot: string };
+  /** M7: an effort reader's detached view of exactly `oid`. */
+  view?: { path: string; oid: string; effort: string; gitRoot: string };
 }
 
 /**
@@ -390,6 +393,15 @@ export function buildSubAgentPrompt(
     parts.push(
       `You are working in the git worktree ${wt.path} (branch ${wt.branch}). ` +
         `Edit and commit only there; do not modify the main checkout at ${wt.gitRoot}.`,
+      "",
+    );
+  }
+  if (place?.view) {
+    const v = place.view;
+    parts.push(
+      `You are reading the detached view ${v.path} of effort ${v.effort} at commit ${v.oid}. It is read-only: do not edit, ` +
+        `commit or switch branches there. Anything left in it keeps the view for human inspection and voids your review. ` +
+        `Do not modify the main checkout at ${v.gitRoot}.`,
       "",
     );
   }
@@ -1178,6 +1190,8 @@ export interface SpawnOptions {
   delegation?: { parentRunId: string; delegateToolCallId: string };
   /** M6a: set only by the effort driver's launcher, after its durable claim. */
   mergerFor?: import("./types.ts").MergerFor;
+  /** M7: an effort writer retry's earlier attempts (see `RunEffort.retryOf`). */
+  retryOf?: string[];
 }
 
 /** M6a: refuse any merger spawn that is not the registered writer's open claim. */
@@ -1318,13 +1332,22 @@ export function prepareSpawnRuntime<T extends Pick<SpawnOptions, "runtime" | "ru
 }
 
 /** Validate before registry/queue/process effects, shared by immediate and queued spawns. */
-export function prepareSpawnEffort(opts: Pick<SpawnOptions, "effort" | "touches" | "persona" | "cwd" | "parentSessionId">): EffortRecord | undefined {
+export function prepareSpawnEffort(opts: Pick<SpawnOptions, "effort" | "touches" | "persona" | "cwd" | "parentSessionId" | "runtime" | "onCompleteHook">): EffortRecord | undefined {
   if (opts.effort === undefined) {
     if (opts.touches !== undefined) throw new Error("touches requires an effort");
     return undefined;
   }
-  if (opts.persona.readOnly) throw new Error(`effort readers are unsupported. ${EFFORT_NOTICE}`);
-  if (opts.touches !== undefined && (!Array.isArray(opts.touches) || opts.touches.length > 0)) validateTouches(opts.touches);
+  switch (effortRole(opts.persona)) {
+    case "reader":
+      // M7: a reader writes nothing integrated, so it has no scope, no gate and no herdr settlement path.
+      if (opts.touches !== undefined) throw new Error(`effort readers take no touches: ${opts.persona.name} is read_only and reserves no paths`);
+      if (opts.runtime === "herdr") throw new Error(`effort readers run on the subprocess runtime only; pass runtime: "subprocess" for ${opts.persona.name}`);
+      if (opts.onCompleteHook) throw new Error(`effort readers run no on_complete hook; ${opts.persona.name} integrates nothing to gate`);
+      break;
+    case "writer":
+      if (opts.touches !== undefined && (!Array.isArray(opts.touches) || opts.touches.length > 0)) validateTouches(opts.touches);
+      break;
+  }
   return ownedEffort(opts.cwd, opts.effort, opts.parentSessionId);
 }
 
@@ -1356,7 +1379,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     model: opts.model,
     thinking: opts.thinking,
     mode: effort ? "background" : opts.mode,
-    effort: effort ? { owner: effort.owner, name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches ? [...opts.touches] : undefined } : undefined,
+    effort: effort ? effortAssignment(effort, opts) : undefined,
     status: "running",
     startTime: Date.now(),
     lastEventAt: Date.now(),
@@ -1513,7 +1536,16 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
     // cwds — fall back to shared cwd with a warning rather than failing.
     let effectiveCwd = opts.cwd;
     let worktreeFence: SubAgentPromptPlace["worktree"];
-    if (opts.worktree || effort) {
+    let viewFence: SubAgentPromptPlace["view"];
+    if (effort && run.effort?.role === "reader") {
+      // M7: a detached view of the tip at this actual launch; the persona's worktree flag never applies.
+      const tip = effortTip(effort);
+      run.worktreePath = createReaderView(effort.gitRoot, run.id, tip);
+      run.effort.spawnBase = tip;
+      effectiveCwd = worktreeCwd({ gitRoot: effortRepository(opts.cwd).requestedRoot, worktreePath: run.worktreePath }, opts.cwd);
+      run.effort.cwd = effectiveCwd;
+      viewFence = { path: run.worktreePath, oid: tip, effort: effort.name, gitRoot: effort.gitRoot };
+    } else if (opts.worktree || effort) {
       const spec = resolveWorktreeSpec(effort?.gitRoot ?? opts.cwd, run.id);
       if (spec === null) {
         if (effort) throw new Error("effort repository disappeared; refusing shared cwd fallback");
@@ -1553,6 +1585,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
       cwd: effectiveCwd,
       requestedCwd: opts.cwd,
       worktree: worktreeFence,
+      view: viewFence,
     }, scope);
     const sessionDir = join(dir, "session");
     mkdirSync(sessionDir, { recursive: true });
@@ -1629,7 +1662,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
       // current config layers + persona frontmatter. Per-call args land
       // in slice 3; for slice 2 the per-call layer is always undefined.
       // Tests inject `resolvedHook` directly via the spawn-options surface.
-      resolvedHook: opts.delegation ? undefined : resolveCloseHook(
+      resolvedHook: opts.delegation || run.effort?.role === "reader" ? undefined : resolveCloseHook(
         opts.cwd,
         opts.persona.name,
         hookSpecFromOpts(opts.onCompleteHook, opts.onCompleteHookTimeoutSeconds), // per-call (slice 3)
@@ -2132,7 +2165,9 @@ export function resolveSendStrategy(
 
   if (run.status === "integrating") return { strategy: { kind: "rejected", reason: `sub-agent ${run.id} is integrating; no saved-session continuation is available.` } };
 
-  if (run.effort && isTerminal(run.status)) return { strategy: { kind: "rejected", reason: `${EFFORT_NOTICE} Start a fresh effort writer; only blocked assignments accept owner answers.` } };
+  if (run.effort && isTerminal(run.status)) return { strategy: { kind: "rejected", reason: run.effort.role === "reader"
+    ? `${EFFORT_NOTICE} Spawn a fresh effort reader instead: it views the current tip. A settled reader's view is never resumed or rematerialized.`
+    : `${EFFORT_NOTICE} Start a fresh effort writer; only blocked assignments accept owner answers.` } };
 
   // terminal — explicit steer/follow_up never makes sense.
   if (behavior === "steer") {
@@ -2320,8 +2355,13 @@ export function sendToRun(
   // but TS can't see through a free-function call — capture it.
   const sessionPath = run.sessionPath as string;
   const answer = run.pendingAsk ? { ask: run.pendingAsk, cwd: run.cwd } : undefined;
-  if (run.effort && (!run.effort.cwd || !run.worktreeBranch || !refExists(run.effort.gitRoot, `refs/heads/${run.worktreeBranch}`))) {
+  if (run.effort?.role === "writer" && (!run.effort.cwd || !run.worktreeBranch || !refExists(run.effort.gitRoot, `refs/heads/${run.worktreeBranch}`))) {
     return { kind: "rejected", reason: "effort assignment branch/cwd is missing; preserve the outstanding question and inspect the effort before recovery" };
+  }
+  if (run.effort?.role === "reader") {
+    // The answer continues the same review: the frozen view, still detached at its spawn commit.
+    const view = !run.effort.cwd || !existsSync(run.effort.cwd) ? "view cwd missing" : readerViewProblem(run);
+    if (view && view !== DIRTY_VIEW) return { kind: "rejected", reason: `effort reader view unusable (${view}); the question stays outstanding. Kill it and spawn a fresh reader at the current tip` };
   }
   if (run.effort) {
     const reason = effortAnswerWaitReason(run, opts.registry);
@@ -2401,7 +2441,7 @@ export function sendToRun(
     // honored (§4.6: each terminal is a fresh gate). Per-call layer
     // (slice 3) reads from `Run.onCompleteHook` — stamped at spawn time
     // by `spawnRun` and replaceable by per-send overrides above.
-    resolvedHook: run.reconciledAtStartup && run.effort
+    resolvedHook: run.effort?.role === "reader" ? undefined : run.reconciledAtStartup && run.effort
       ? run.effort.gate ?? undefined
       : resolveCloseHook(
         run.cwd,
@@ -2775,13 +2815,40 @@ export function applyChainIfPresent(
   terminal: RunStatus,
   onChain: ((run: Run) => void) | undefined,
 ): void {
-  if (run.effort || terminal !== "completed") return;
+  if (terminal !== "completed" || effortChainRefusal(run)) return;
   if (!onChain) return;
   try {
     onChain(run);
   } catch {
     // never crash the finalize path on chain errors
   }
+}
+
+/**
+ * M7: why a settled effort run may not chain, or undefined. Only a live first dispatch counts: a
+ * writer whose own work landed (delivery intent), or a reader whose clean view proved its review.
+ */
+export function effortChainRefusal(run: Run): string | undefined {
+  const e = run.effort;
+  if (run.mergerFor) return "merger";
+  if (!e) return undefined;
+  if (run.reconciledAtStartup) return "recovered settlement";
+  switch (e.role) {
+    case "writer":
+      return run.mergeResult?.success && run.landedCommit && run.integration?.delivery === "intent" ? undefined : "no landed integration in this dispatch";
+    case "reader":
+      return e.reviewed && e.reviewed === e.spawnBase ? undefined : "no proven clean review";
+  }
+}
+
+/** M7: an effort run retries only an ordinary failure, never anything that reached integration. */
+export function effortRetryRefusal(run: Run): string | undefined {
+  if (run.mergerFor) return "merger";
+  if (!run.effort) return undefined;
+  if (run.reconciledAtStartup) return "recovered settlement";
+  if (run.integration) return "integration outcome";
+  if (!["failed", "timeout", "killed", "aborted"].includes(run.status)) return `${run.status} is not an ordinary failure`;
+  return run.failureClass === "permission" ? "permission" : undefined;
 }
 
 /**
@@ -2803,7 +2870,7 @@ export function applyRetryIfNeeded(
   run: Run,
   onRetry: ((run: Run) => void) | undefined,
 ): boolean {
-  if (run.effort || !onRetry) return false;
+  if (!onRetry || effortRetryRefusal(run)) return false;
   if (run.status === "completed") return false;
   if (!run.retryPolicy || !run.failureClass) return false;
   const attempt = run.retryAttempt ?? 0;

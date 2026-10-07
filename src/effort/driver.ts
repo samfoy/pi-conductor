@@ -71,7 +71,7 @@ export class EffortDriver {
     const owner = run.effort!.owner ?? effortOwner(run.parentSessionId);
     const record = readEffort(run.effort!.gitRoot, run.effort!.name)!;
     assertEffortOwner(record, owner);
-    if (run.status !== "integrating" || !run.integration || run.pendingAsk || (run.reconciledAtStartup && !recovered)) throw new Error("only observed hook-passed completions may enter integration");
+    if (run.effort!.role !== "writer" || run.status !== "integrating" || !run.integration || run.pendingAsk || (run.reconciledAtStartup && !recovered)) throw new Error("only observed hook-passed writer completions may enter integration");
     run.integration.deliveryProtocol = 1;
     const prior = this.queues.get(record.gitRoot)?.find(job => job.run.id === run.id && !job.finished && !job.suspended);
     if (prior) return prior.result!;

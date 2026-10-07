@@ -1,6 +1,6 @@
-// M6a native merger child: the real Pi CLI `main()` from one explicit installed root (bundled
-// with an esbuild alias by tests/effort-merger-smoke.test.ts), the real conductor extension
-// (child ask_owner) and an offline faux model that drives Pi's real bash tool in the candidate.
+// M6a native merger child (and the M7 "reader" scenario): the real Pi CLI `main()` from one explicit
+// installed root (bundled with an esbuild alias by tests/effort-merger-smoke.test.ts), the real conductor
+// extension (child ask_owner) and an offline faux model that drives Pi's real bash tool in its cwd.
 // Fixture model: faux/faux-1 is named on the command line whenever the conductor passed no
 // --model (see main() below), and only a registered faux model may serve a response.
 import { existsSync, writeFileSync } from "node:fs";
@@ -34,6 +34,13 @@ function respond(messages: Message[]) {
   const results = messages.filter(m => m.role === "toolResult");
   const leaked = Object.keys(process.env).filter(k => k.startsWith("GIT_")).join(",");
   writeFileSync(join(fixture, `merger-turn-${process.pid}-${results.length}`), `${VERSION}\n${leaked}\n${process.cwd()}`);
+  if (scenario === "reader") {
+    // M7: a read-only finalizer asks inside its view, then inspects it with real git and reports a verdict.
+    const answer = messages.map(m => m.role === "user" ? text(m) : "").find(t => t.includes("<owner-answer"))?.match(/Answer: (.*)/)?.[1];
+    if (!answer) return fauxAssistantMessage([fauxToolCall("ask_owner", { question: "Review only the integrated tip?" }, { id: "reader_ask" })], { stopReason: "toolUse" });
+    if (!results.some(r => r.toolCallId === "reader_bash")) return fauxAssistantMessage([fauxToolCall("bash", { command: "git rev-parse HEAD; git rev-parse --abbrev-ref HEAD; git status --porcelain --ignored --untracked-files=all; echo end-of-status" }, { id: "reader_bash" })], { stopReason: "toolUse" });
+    return fauxAssistantMessage(`## Verdict: complete\n\n## End-to-end verification I ran\n- git status in the view after the owner's answer (${answer}):\n${text(results.at(-1))}`);
+  }
   if (scenario === "ask") {
     const answer = messages.map(m => m.role === "user" ? text(m) : "").find(t => t.includes("<owner-answer"))?.match(/Answer: (.*)/)?.[1];
     if (!answer) return fauxAssistantMessage([fauxToolCall("ask_owner", { question: "Keep landed first, or writer first?" }, { id: "merger_ask" })], { stopReason: "toolUse" });

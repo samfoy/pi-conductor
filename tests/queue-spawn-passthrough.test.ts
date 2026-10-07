@@ -296,6 +296,8 @@ function everyOption(): Required<Omit<QueuedOptions, "effort" | "touches" | "del
     retryMaxAttempts: 3,
     retryAttempt: 2,
     onRetry: () => {},
+    // M7: meaningful only on an effort writer's assignment; passed through verbatim.
+    retryOf: ["builder-earlier"],
   };
 }
 

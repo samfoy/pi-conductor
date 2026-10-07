@@ -155,9 +155,14 @@ for (const terminal of ["failed", "hook_failed", "killed", "completed"] as const
     assert.equal(git(cwd, "rev-parse", "HEAD"), base, "legacy merge must not touch base");
     let chains = 0, retries = 0;
     applyChainIfPresent(run, "completed", () => { chains++; });
-    run.status = "failed"; run.failureClass = "environment"; run.retryPolicy = { maxAttempts: 2, retryableClasses: ["environment"] };
+    // M7: an integration failure never retries, whatever the configured classes; an ordinary failure may,
+    // and buildOnRetryCallback keeps that retry inside the effort (tests/effort-readers.test.ts).
+    run.status = "merge_conflict"; run.failureClass = "logic"; run.retryPolicy = { maxAttempts: 2, retryableClasses: ["environment", "logic"] };
     applyRetryIfNeeded(run, () => { retries++; });
     assert.equal(chains, 0); assert.equal(retries, 0);
+    run.status = "failed"; run.failureClass = "environment";
+    applyRetryIfNeeded(run, () => { retries++; });
+    assert.equal(retries, 1);
   });
 }
 
@@ -169,12 +174,12 @@ function tools(cwd: string, registry: RunRegistry, queue: SpawnQueue) {
   } as any, {});
   return map;
 }
-test("M1 registered spawn exposes effort/touches and foreground downgrade; rejects reader/auto/invalid input before queue", { timeout: 15000 }, async t => {
+test("M1 registered spawn exposes effort/touches and foreground downgrade; rejects reader touches/auto/invalid input before queue", { timeout: 15000 }, async t => {
   const cwd = repo(); const { procs } = fake(t); const registry = new RunRegistry(); const queue = new SpawnQueue(registry, 1);
   t.after(() => { for (const run of registry.list()) forceTerminate(run, "killed", registry); });
   const map = tools(cwd, registry, queue); const tool = map.get("ensemble_spawn");
   assert.ok(tool.parameters.properties.effort); assert.ok(tool.parameters.properties.touches);
-  for (const params of [ { persona: "inspector", effort: "one" }, { persona: "builder", effort: "../bad" }, { persona: "builder", effort: "one", touches: ["../bad"] }, { persona: "builder", touches: ["src/**"] } ]) {
+  for (const params of [ { persona: "inspector", effort: "one", touches: ["pkg/**"] }, { persona: "builder", effort: "../bad" }, { persona: "builder", effort: "one", touches: ["../bad"] }, { persona: "builder", touches: ["src/**"] } ]) {
     const r = await tool.execute("bad", { task: "t", foreground: false, ...params });
     assert.ok(r.details.error, r.content[0].text); assert.equal(queue.size(), 0); assert.equal(registry.list().length, 0); assert.equal(procs.length, 0);
   }

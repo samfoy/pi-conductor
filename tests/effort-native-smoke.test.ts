@@ -42,7 +42,8 @@ for (const action of ["accept", "kill"] as const) test(`native writer ${action}:
   else { forceTerminate(run, "killed", registry); forceTerminate(run, "killed", registry); }
   await done;
   assert.equal(run.status, action === "accept" ? "completed" : "killed");
-  assert.equal(cards.length, 1); assert.equal(doneCount, 1); assert.equal(chainCount, 0); assert.equal(retryCount, 0);
+  assert.equal(cards.length, 1); assert.equal(doneCount, 1); assert.equal(retryCount, 0);
+  assert.equal(chainCount, action === "accept" ? 1 : 0, "M7: an accepted integration chains once, inside its first dispatch; a killed one never");
   if (action === "accept") {
     assert.equal(git(f.root, "rev-parse", f.record.intRef), run.landedCommit);
     assert.equal(git(f.root, "show", `${run.landedCommit}:native-change`), "work");

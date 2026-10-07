@@ -28,7 +28,8 @@ function covered(glob: string, generated: EffortPolicy["generated"]): boolean {
   return generated.paths.some(g => g === glob || (g.endsWith("/**") && !/[*?\[\]{}()!+@\\]/.test(g.slice(0, -3)) && glob.startsWith(g.slice(0, -2))));
 }
 function holdsFootprint(run: Run): boolean {
-  if (!run.effort || run.mergeResult?.success) return false;
+  // M7: a reader writes nothing integrated, so it reserves no paths.
+  if (run.effort?.role !== "writer" || run.mergeResult?.success) return false;
   // Cancelled placeholders never owned a workspace. Lost/failed writers retain their reservation.
   return run.status === "queued" || consumesSlot(run) || run.status === "blocked" || run.status === "integrating" || !!run.effort.spawnBase || !!run.worktreeBranch;
 }
@@ -40,13 +41,20 @@ export function admitEffortWriter(candidate: { id?: string; persona: string; eff
     if (WRITE_CAPABLE_PERSONAS.has(candidate.persona) && active.filter(r => !r.effort && WRITE_CAPABLE_PERSONAS.has(r.persona)).length >= limits.maxConcurrentWriteCapable) return `waits for maxConcurrentWriteCapable (${limits.maxConcurrentWriteCapable})`;
     return;
   }
-  if (!record || candidate.effort.role !== "writer" || record.gitRoot !== candidate.effort.gitRoot || record.name !== candidate.effort.name) return "effort admission requires a validated isolated writer assignment";
+  if (!record || record.gitRoot !== candidate.effort.gitRoot || record.name !== candidate.effort.name) return "effort admission requires a validated isolated writer assignment";
+  switch (candidate.effort.role) {
+    case "reader": return; // the general cap above only: no maxParallel charge, no footprint
+    case "writer": break;
+    default: return "effort admission requires a validated isolated writer assignment";
+  }
   if (efforts.some(e => e.owner.sessionId !== record.owner.sessionId || e.owner.pid !== record.owner.pid || e.owner.startTime !== record.owner.startTime)) return "waits for same-repository effort ownership resolution (foreign effort)";
   if (efforts.some(e => e.members.some(id => id !== candidate.id && !members.some(r => r.id === id)))) return "waits for unobserved same-repository effort assignments; recovery required";
-  if (active.filter(r => r.effort?.gitRoot === record.gitRoot && r.effort.name === record.name).length >= record.policy.maxParallel) return `waits for effort maxParallel (${record.policy.maxParallel})`;
+  if (active.filter(r => r.effort?.role === "writer" && r.effort.gitRoot === record.gitRoot && r.effort.name === record.name).length >= record.policy.maxParallel) return `waits for effort maxParallel (${record.policy.maxParallel})`;
   const touches = [...declared(candidate.effort.touches), ...(candidate.effort.changedPaths ?? []), ...(candidate.effort.footprintUnknown ? ["**"] : [])];
   for (const run of others) {
     if (waitingBehind.has(run.id) && run.status === "queued") continue;
+    // A retry replaces its own earlier attempts' preserved reservations, and nobody else's.
+    if (candidate.effort.retryOf?.includes(run.id)) continue;
     if (!holdsFootprint(run) || run.effort!.gitRoot !== record.gitRoot) continue;
     // Different efforts can freeze different generated policies. Never infer shared permission.
     const footprint = [...declared(run.effort!.touches), ...(run.integration?.changedPaths ?? run.effort!.changedPaths ?? [])];

@@ -108,9 +108,15 @@ function processIdentityState(owner, deps = {}) {
 
 // src/effort/policy.ts
 import { matchesGlob } from "node:path";
-var EFFORT_NOTICE = 'M6b: disjoint effort writers run in independent worktrees within global/effort limits; integration remains serial after optional generated artifact regeneration, baseline/candidate verification and repository hooks. Under efforts.merger "auto", a textual conflict or twice-red verify parks that writer while one driver-owned merger proposes a hooked commit in a detached candidate; the proposal is re-gated by the same queue against the current tip, once per writer. Under "ask" that writer settles merge_conflict with no merger until a human runs the interactive /conductor effort resolve <run-id> and confirms one attempt; there is no agent-callable resolve. "off" refuses resolution. Legacy work remains UNINTEGRATED. Crash recovery uses owner fencing and reachable Git proof; uncertain work pauses for human effort resume/requeue. Delivery-uncertain callbacks are never replayed automatically. Landing, readers, auto plans, chains and retries remain unavailable.';
+var EFFORT_NOTICE = 'M7: disjoint effort writers run in independent worktrees within global/effort limits; integration remains serial after optional generated artifact regeneration, baseline/candidate verification and repository hooks. Under efforts.merger "auto", a textual conflict or twice-red verify parks that writer while one driver-owned merger proposes a hooked commit in a detached candidate; the proposal is re-gated by the same queue against the current tip, once per writer. Under "ask" that writer settles merge_conflict with no merger until a human runs the interactive /conductor effort resolve <run-id> and confirms one attempt; there is no agent-callable resolve. "off" refuses resolution. A read_only persona joins as a reader: a detached view of the tip at its launch, no touches, no reserved paths, no on_complete hook and never integrated; a clean view is removed, anything else is kept. Chains and classified retries stay in the owned effort: a writer chains only after its work landed, a reader only after a proven clean review; integration failures never retry. A finalizer verdict is recorded only for the exact commit it viewed and is stale once the tip moves. Legacy work remains UNINTEGRATED. Crash recovery uses owner fencing and reachable Git proof; uncertain work pauses for human effort resume/requeue. Delivery-uncertain callbacks are never replayed automatically. Landing and auto plans remain unavailable.';
 function effortSummary(run2) {
   if (!run2.effort) return "";
+  if (run2.effort.role === "reader") {
+    const e = run2.effort, short = (oid) => oid ? oid.slice(0, 12) : "pending";
+    const verdict = run2.persona === "finalizer" && run2.status === "completed" ? e.verdict ? `; finalizer verdict ${e.verdict} recorded for ${short(e.reviewed)} only` : "; finalizer verdict NOT recorded" : "";
+    const view = run2.worktreePath ? `; view ${run2.worktreePath}` : e.spawnBase ? "; view removed" : "";
+    return `${e.name}: reader at ${short(e.spawnBase)}, integrates nothing${e.reviewed ? `; clean review of ${short(e.reviewed)}` : ""}${verdict}${view}`;
+  }
   const state = run2.landedCommit ? `integrated ${run2.landedCommit.slice(0, 12)}` : run2.mergeResult?.nothingToCommit ? "tree-equal no-op" : run2.status === "integrating" ? `integrating (${run2.integration?.state ?? "paused"})` : "UNINTEGRATED";
   const violations = run2.integration?.touchViolations ?? run2.effort.touchViolations;
   const m = run2.integration?.merger;
@@ -2045,7 +2051,7 @@ function herdrEffectFence(run2) {
 // src/herdr/runtime.ts
 import { createHash as createHash4, randomUUID as randomUUID5 } from "node:crypto";
 import { closeSync as closeSync5, constants as constants4, fstatSync as fstatSync4, openSync as openSync5, readSync as readSync4, statSync as statSync4, writeFileSync as writeFileSync6, mkdirSync as mkdirSync11 } from "node:fs";
-import { dirname as dirname16, isAbsolute as isAbsolute5, join as join19 } from "node:path";
+import { dirname as dirname16, isAbsolute as isAbsolute5, join as join20 } from "node:path";
 import { setTimeout as delay2 } from "node:timers/promises";
 import { getAgentDir, hasTrustRequiringProjectResources, ProjectTrustStore, SessionManager as SessionManager2, SettingsManager } from "@earendil-works/pi-coding-agent";
 
@@ -3181,7 +3187,7 @@ function covered(glob, generated) {
   return generated.paths.some((g) => g === glob || g.endsWith("/**") && !/[*?\[\]{}()!+@\\]/.test(g.slice(0, -3)) && glob.startsWith(g.slice(0, -2)));
 }
 function holdsFootprint(run2) {
-  if (!run2.effort || run2.mergeResult?.success) return false;
+  if (run2.effort?.role !== "writer" || run2.mergeResult?.success) return false;
   return run2.status === "queued" || consumesSlot(run2) || run2.status === "blocked" || run2.status === "integrating" || !!run2.effort.spawnBase || !!run2.worktreeBranch;
 }
 function admitEffortWriter(candidate, members, limits, record, efforts = [], waitingBehind = /* @__PURE__ */ new Set()) {
@@ -3192,13 +3198,23 @@ function admitEffortWriter(candidate, members, limits, record, efforts = [], wai
     if (WRITE_CAPABLE_PERSONAS2.has(candidate.persona) && active.filter((r) => !r.effort && WRITE_CAPABLE_PERSONAS2.has(r.persona)).length >= limits.maxConcurrentWriteCapable) return `waits for maxConcurrentWriteCapable (${limits.maxConcurrentWriteCapable})`;
     return;
   }
-  if (!record || candidate.effort.role !== "writer" || record.gitRoot !== candidate.effort.gitRoot || record.name !== candidate.effort.name) return "effort admission requires a validated isolated writer assignment";
+  if (!record || record.gitRoot !== candidate.effort.gitRoot || record.name !== candidate.effort.name) return "effort admission requires a validated isolated writer assignment";
+  switch (candidate.effort.role) {
+    case "reader":
+      return;
+    // the general cap above only: no maxParallel charge, no footprint
+    case "writer":
+      break;
+    default:
+      return "effort admission requires a validated isolated writer assignment";
+  }
   if (efforts.some((e) => e.owner.sessionId !== record.owner.sessionId || e.owner.pid !== record.owner.pid || e.owner.startTime !== record.owner.startTime)) return "waits for same-repository effort ownership resolution (foreign effort)";
   if (efforts.some((e) => e.members.some((id) => id !== candidate.id && !members.some((r) => r.id === id)))) return "waits for unobserved same-repository effort assignments; recovery required";
-  if (active.filter((r) => r.effort?.gitRoot === record.gitRoot && r.effort.name === record.name).length >= record.policy.maxParallel) return `waits for effort maxParallel (${record.policy.maxParallel})`;
+  if (active.filter((r) => r.effort?.role === "writer" && r.effort.gitRoot === record.gitRoot && r.effort.name === record.name).length >= record.policy.maxParallel) return `waits for effort maxParallel (${record.policy.maxParallel})`;
   const touches = [...declared(candidate.effort.touches), ...candidate.effort.changedPaths ?? [], ...candidate.effort.footprintUnknown ? ["**"] : []];
   for (const run2 of others) {
     if (waitingBehind.has(run2.id) && run2.status === "queued") continue;
+    if (candidate.effort.retryOf?.includes(run2.id)) continue;
     if (!holdsFootprint(run2) || run2.effort.gitRoot !== record.gitRoot) continue;
     const footprint = [...declared(run2.effort.touches), ...run2.integration?.changedPaths ?? run2.effort.changedPaths ?? []];
     if (run2.effort.footprintUnknown || isSettled(run2.status) && run2.status !== "blocked") footprint.push("**");
@@ -3211,6 +3227,92 @@ function measureEffortFootprint(run2, branchHead, policy) {
   const changedPaths2 = changedPaths(run2.effort.gitRoot, run2.effort.spawnBase, branchHead);
   const touchViolations = changedPaths2.filter((path2) => !isGeneratedPath(path2, policy.generated) && !declared(run2.effort.touches).some((glob) => matchesGlob2(path2, glob)));
   return { changedPaths: changedPaths2, touchViolations };
+}
+
+// src/effort/reader.ts
+import { existsSync as existsSync7, realpathSync as realpathSync7 } from "node:fs";
+import { join as join13 } from "node:path";
+var effortRole = (persona) => persona.readOnly === true ? "reader" : "writer";
+function effortAssignment(effort, opts) {
+  const role = effortRole(opts.persona);
+  return {
+    owner: effort.owner,
+    name: effort.name,
+    gitRoot: effort.gitRoot,
+    role,
+    ...role === "writer" ? { touches: opts.touches ? [...opts.touches] : void 0, ...opts.retryOf?.length ? { retryOf: [...opts.retryOf] } : {} } : {}
+  };
+}
+var viewPath = (gitRoot2, runId) => join13(gitRoot2, ".worktrees", "conductor-view", runId);
+function createReaderView(gitRoot2, runId, tip) {
+  const path2 = viewPath(gitRoot2, runId);
+  effortGit(gitRoot2, "worktree", "add", "--detach", path2, tip);
+  return path2;
+}
+var DIRTY_VIEW = "changes, untracked or ignored files";
+function readerViewProblem(run2) {
+  const e = run2.effort, path2 = run2.worktreePath;
+  if (e?.role !== "reader" || !e.spawnBase || !path2) return "view unknown";
+  try {
+    if (path2 !== viewPath(e.gitRoot, run2.id) || !existsSync7(path2) || realpathSync7(path2) !== path2) return "not this run's own view path";
+    const entry = effortGit(e.gitRoot, "worktree", "list", "--porcelain").split("\n\n").map((block) => block.split("\n")).find((lines) => lines[0] === `worktree ${path2}`);
+    if (!entry?.includes("detached") || !entry.includes(`HEAD ${e.spawnBase}`)) return `not detached at ${e.spawnBase}`;
+    if (effortGit(path2, "rev-parse", "HEAD") !== e.spawnBase) return "view HEAD moved";
+    try {
+      assertCandidateIndexFlags(path2);
+    } catch {
+      return "unsafe index flags can hide changes";
+    }
+    if (effortGit(path2, "status", "--porcelain", "--ignored", "--untracked-files=all")) return DIRTY_VIEW;
+    return void 0;
+  } catch (error) {
+    return `state unknown: ${error.message}`;
+  }
+}
+function settleReaderView(run2, outcome) {
+  const e = run2.effort;
+  let problem2 = run2.integrationSuspended ? "owner runtime shut down" : childExitUnconfirmed(run2) ? "delegated child exit unconfirmed" : readerViewProblem(run2);
+  if (!problem2 && outcome.completed && outcome.live) {
+    e.reviewed = e.spawnBase;
+    if (run2.persona === "finalizer") recordFinalizerVerdict(run2, outcome.finalText);
+  }
+  if (!problem2) {
+    try {
+      assertRunEffortOwner(run2);
+      effortGit(e.gitRoot, "worktree", "remove", run2.worktreePath);
+      run2.worktreePath = void 0;
+      run2.worktreeKept = void 0;
+      return;
+    } catch (error) {
+      problem2 = `removal refused: ${error.message}`;
+    }
+  }
+  run2.worktreeKept = `reader view kept (${problem2}): ${run2.worktreePath ?? "unavailable"}, detached at ${e.spawnBase ?? "unknown"}; nothing integrated, reset or discarded`;
+}
+function parseFinalizerVerdict(text5) {
+  const lines = text5.split(/\r?\n/);
+  const first = lines.findIndex((line) => line.trim() !== "");
+  const verdict = first < 0 ? void 0 : /^## Verdict: (complete|continue|failed)$/.exec(lines[first])?.[1];
+  if (!verdict || lines.some((line, i) => i !== first && /^[\s>]*#{1,6}\s*verdict\b/i.test(line))) return void 0;
+  return verdict;
+}
+function recordFinalizerVerdict(run2, text5) {
+  const e = run2.effort, verdict = parseFinalizerVerdict(text5);
+  if (!verdict || !e.reviewed) return;
+  try {
+    const record = readEffort(e.gitRoot, e.name);
+    if (!record) return;
+    assertRunEffortOwner(run2);
+    writeEffort({ ...record, finalizer: { runId: run2.id, tip: e.reviewed, verdict, at: Date.now() }, updatedAt: Date.now() });
+    e.verdict = verdict;
+  } catch {
+  }
+}
+function finalizerStatus(record, tip) {
+  const f = record.finalizer;
+  if (!f) return void 0;
+  const stale = f.tip !== tip;
+  return { ...f, stale, summary: `Finalizer ${f.runId}: ${f.verdict} at ${stale ? `${f.tip} is STALE: the tip is now ${tip}` : `the current tip ${tip}`}. Landing is not available in M7.` };
 }
 
 // src/run-pipeline.ts
@@ -3546,9 +3648,9 @@ function shouldRetry(cls, attempt, policy) {
 }
 
 // src/memory.ts
-import { existsSync as existsSync7, mkdirSync as mkdirSync5, readFileSync as readFileSync10, appendFileSync as appendFileSync2 } from "node:fs";
+import { existsSync as existsSync8, mkdirSync as mkdirSync5, readFileSync as readFileSync10, appendFileSync as appendFileSync2 } from "node:fs";
 import { homedir as homedir5 } from "node:os";
-import { join as join13, dirname as dirname9 } from "node:path";
+import { join as join14, dirname as dirname9 } from "node:path";
 import { createHash as createHash3 } from "node:crypto";
 var STOPWORDS = /* @__PURE__ */ new Set([
   "the",
@@ -3617,7 +3719,7 @@ function scoreOutcomes(records2, shape, now) {
 function memoryPath() {
   const override = process.env.CONDUCTOR_MEMORY_PATH;
   if (override && override.trim()) return override;
-  return join13(homedir5(), ".pi", "agent", "conductor", "memory", "outcomes.jsonl");
+  return join14(homedir5(), ".pi", "agent", "conductor", "memory", "outcomes.jsonl");
 }
 function appendOutcome(rec, path2 = memoryPath()) {
   try {
@@ -3627,7 +3729,7 @@ function appendOutcome(rec, path2 = memoryPath()) {
   }
 }
 function loadOutcomes(path2 = memoryPath()) {
-  if (!existsSync7(path2)) return [];
+  if (!existsSync8(path2)) return [];
   let raw;
   try {
     raw = readFileSync10(path2, "utf-8");
@@ -3665,8 +3767,8 @@ function scoreForShape(task, now = Date.now(), path2 = memoryPath()) {
 }
 
 // src/delegation.ts
-import { existsSync as existsSync8 } from "node:fs";
-import { dirname as dirname10, join as join14 } from "node:path";
+import { existsSync as existsSync9 } from "node:fs";
+import { dirname as dirname10, join as join15 } from "node:path";
 
 // src/compaction-hook.ts
 var KEEP_RECENT_ENVELOPES = 2;
@@ -4221,8 +4323,8 @@ function isDelegateCallId(id) {
   return typeof id === "string" && CALL_ID.test(id);
 }
 function delegatePaths(runDir2, toolCallId) {
-  const dir = join14(runDir2, "delegate");
-  return { dir, claim: join14(dir, `${toolCallId}.claim.json`), response: join14(dir, `${toolCallId}.json`) };
+  const dir = join15(runDir2, "delegate");
+  return { dir, claim: join15(dir, `${toolCallId}.claim.json`), response: join15(dir, `${toolCallId}.json`) };
 }
 function parseDelegateArgs(args) {
   if (!args || typeof args !== "object" || Array.isArray(args)) return { ok: false, reason: "arguments must be an object" };
@@ -4320,7 +4422,7 @@ async function settleOwnedChildren(parent, registry, since, reattached = false) 
   const invocation = parent.transport;
   parent.delegationClosed = true;
   const abandoned = new Set(parent.abandonedChildren?.map((c) => c.id));
-  const answered = (c) => reattached && !!c.delegateToolCallId && existsSync8(delegatePaths(dirname10(parent.recordPath), c.delegateToolCallId).response);
+  const answered = (c) => reattached && !!c.delegateToolCallId && existsSync9(delegatePaths(dirname10(parent.recordPath), c.delegateToolCallId).response);
   const owned = childrenOf(parent, registry.list(), since).filter((c) => !answered(c) && (abandoned.has(c.id) || !isTerminal(c.status) || observedExit(c) !== "confirmed"));
   if (!owned.length) return;
   terminateChildren(parent, registry, reattached ? owned : void 0);
@@ -4438,7 +4540,7 @@ function createRunPipeline(run2, piArgs, opts) {
   const rpc = piArgs[1] === "rpc";
   run2.onComplete = opts.onComplete;
   const recoveredAnswer = !!opts.answer && !!run2.reconciledAtStartup && !!run2.effort && run2.effort.gate !== void 0;
-  if (!opts.reattach && run2.effort && (!run2.reconciledAtStartup || run2.effort.gate !== void 0)) run2.effort.gate = opts.resolvedHook ?? null;
+  if (!opts.reattach && run2.effort?.role === "writer" && (!run2.reconciledAtStartup || run2.effort.gate !== void 0)) run2.effort.gate = opts.resolvedHook ?? null;
   let awaitingAnswer = opts.answer !== void 0;
   let answerRecord = Promise.resolve();
   const restoreAnswer = async (reason) => {
@@ -4564,7 +4666,7 @@ function createRunPipeline(run2, piArgs, opts) {
           donePromiseResolve(run2);
           return;
         }
-        if (run2.effort) {
+        if (run2.effort?.role === "writer") {
           try {
             const policy = readEffort(run2.effort.gitRoot, run2.effort.name).policy;
             const measured = measureEffortFootprint(run2, effortGit(run2.worktreePath, "rev-parse", "HEAD"), policy);
@@ -4636,7 +4738,10 @@ function createRunPipeline(run2, piArgs, opts) {
       }
     }
     check();
-    if (run2.effort && terminal === "completed" && !isTerminal(run2.status)) {
+    if (run2.effort?.role === "reader") {
+      run2.proc = void 0;
+      settleReaderView(run2, { completed: terminal === "completed" && !isTerminal(run2.status), live: !opts.reattach && !run2.reconciledAtStartup, finalText: getFinalText(run2.messages) });
+    } else if (run2.effort && terminal === "completed" && !isTerminal(run2.status)) {
       run2.proc = void 0;
       run2.pid = void 0;
       try {
@@ -4991,7 +5096,7 @@ async function settleRunEffects(run2, terminal, exitCode, opts, transport = { st
   discoverSessionPathIfMissing(run2, opts.sessionDir);
   run2.proc = void 0;
   if (!run2.effort) terminal = await settleWorktree(run2, terminal);
-  else run2.worktreeKept = `${effortSummary(run2)}. Branch ${run2.worktreeBranch} and worktree ${run2.worktreePath} preserved.`;
+  else if (run2.effort.role === "writer") run2.worktreeKept = `${effortSummary(run2)}. Branch ${run2.worktreeBranch} and worktree ${run2.worktreePath} preserved.`;
   fence();
   if (terminal === "merge_conflict") run2.status = terminal;
   if (terminal !== "completed") {
@@ -5082,8 +5187,8 @@ function dispatchHerdrSettlement(run2, dispatch) {
 
 // src/effort/driver.ts
 import { randomUUID as randomUUID4 } from "node:crypto";
-import { copyFileSync, existsSync as existsSync10, mkdirSync as mkdirSync9, readFileSync as readFileSync13, realpathSync as realpathSync8, writeFileSync as writeFileSync5 } from "node:fs";
-import { dirname as dirname13, join as join16 } from "node:path";
+import { copyFileSync, existsSync as existsSync11, mkdirSync as mkdirSync9, readFileSync as readFileSync13, realpathSync as realpathSync9, writeFileSync as writeFileSync5 } from "node:fs";
+import { dirname as dirname13, join as join17 } from "node:path";
 
 // src/hook-runner.ts
 import {
@@ -5335,8 +5440,8 @@ function renderTail(lines) {
 
 // src/effort/merger.ts
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { existsSync as existsSync9, mkdirSync as mkdirSync8, readFileSync as readFileSync12, realpathSync as realpathSync7, writeFileSync as writeFileSync4 } from "node:fs";
-import { join as join15 } from "node:path";
+import { existsSync as existsSync10, mkdirSync as mkdirSync8, readFileSync as readFileSync12, realpathSync as realpathSync8, writeFileSync as writeFileSync4 } from "node:fs";
+import { join as join16 } from "node:path";
 var scrubbed = () => Object.fromEntries(Object.entries(gitEnv()).filter(([key]) => !key.startsWith("HERDR_")));
 var run = (cwd, args) => spawnSync2("git", args, { cwd, env: scrubbed(), encoding: "utf8", timeout: 3e4, maxBuffer: 16 * 1024 * 1024 });
 var MERGER_PERSONA = "merger";
@@ -5349,7 +5454,7 @@ function mergerPersonaError(persona) {
 function mergerClaimError(writer, id, cwd, mergerFor) {
   let record;
   try {
-    record = writer && existsSync9(writer.recordPath) ? JSON.parse(readFileSync12(writer.recordPath, "utf8")) : void 0;
+    record = writer && existsSync10(writer.recordPath) ? JSON.parse(readFileSync12(writer.recordPath, "utf8")) : void 0;
   } catch {
     record = void 0;
   }
@@ -5377,7 +5482,7 @@ function prepareMergerWorkspace(root, wal) {
   if (JSON.stringify(unmerged) !== JSON.stringify(expected)) throw new Error(`merger setup unmerged paths ${JSON.stringify(unmerged)} differ from merge-tree conflicts ${JSON.stringify(expected)}`);
 }
 function writeMergerContext(root, effort, writer, wal, verifyLog) {
-  const dir = join15(effortDir(root, effort), "merge", `${writer.id}-${wal.attempt}`);
+  const dir = join16(effortDir(root, effort), "merge", `${writer.id}-${wal.attempt}`);
   mkdirSync8(dir, { recursive: true });
   const base = effortGit(root, "merge-base", wal.expectedTip, wal.sourceHead);
   const paths = wal.kind === "conflict" ? ["--", ...wal.conflicts ?? []] : [];
@@ -5401,9 +5506,9 @@ ${writer.task}
     "writer-report.md": writer.integration?.resultText || "(no saved writer report)"
   };
   if (verifyLog !== void 0) files["verify.log"] = verifyLog;
-  for (const [name2, text5] of Object.entries(files)) writeFileSync4(join15(dir, name2), text5 || "(empty)\n");
+  for (const [name2, text5] of Object.entries(files)) writeFileSync4(join16(dir, name2), text5 || "(empty)\n");
   wal.contextDir = dir;
-  return Object.keys(files).map((name2) => join15(dir, name2));
+  return Object.keys(files).map((name2) => join16(dir, name2));
 }
 function mergerTask(writer, wal, verify) {
   const what = wal.kind === "conflict" ? `Resolve the textual conflict between the effort integration tip and writer ${writer.id}. The merge is in progress in your cwd.` : `Fix the effort verify failure on writer ${writer.id}'s candidate in your cwd.`;
@@ -5417,7 +5522,7 @@ function observeMerger(merger, wal, finalText, exitConfirmed) {
     const r = run(cwd, args);
     return r.status === 0 ? r.stdout.trim() : void 0;
   };
-  const exists = existsSync9(cwd);
+  const exists = existsSync10(cwd);
   const head = exists ? out(["rev-parse", "--verify", "HEAD^{commit}"]) : void 0;
   const common = exists ? out(["rev-parse", "--path-format=absolute", "--git-common-dir"]) : void 0;
   return {
@@ -5425,7 +5530,7 @@ function observeMerger(merger, wal, finalText, exitConfirmed) {
     runId: merger.id,
     nonce: merger.mergerFor?.nonce,
     cwd: merger.cwd,
-    repository: common && existsSync9(common) ? realpathSync7(common) : void 0,
+    repository: common && existsSync10(common) ? realpathSync8(common) : void 0,
     head,
     detached: exists && run(cwd, ["symbolic-ref", "-q", "HEAD"]).status === 1,
     descends: !!head && run(cwd, ["merge-base", "--is-ancestor", wal.setupOid, head]).status === 0,
@@ -5533,7 +5638,7 @@ var EffortDriver = class {
     const owner = run2.effort.owner ?? effortOwner(run2.parentSessionId);
     const record = readEffort(run2.effort.gitRoot, run2.effort.name);
     assertEffortOwner(record, owner);
-    if (run2.status !== "integrating" || !run2.integration || run2.pendingAsk || run2.reconciledAtStartup && !recovered) throw new Error("only observed hook-passed completions may enter integration");
+    if (run2.effort.role !== "writer" || run2.status !== "integrating" || !run2.integration || run2.pendingAsk || run2.reconciledAtStartup && !recovered) throw new Error("only observed hook-passed writer completions may enter integration");
     run2.integration.deliveryProtocol = 1;
     const prior = this.queues.get(record.gitRoot)?.find((job2) => job2.run.id === run2.id && !job2.finished && !job2.suspended);
     if (prior) return prior.result;
@@ -5674,7 +5779,7 @@ var EffortDriver = class {
   }
   async drain(root) {
     const lockDir = effortDir(root, "integration-driver");
-    const lock = join16(lockDir, "driver.lock");
+    const lock = join17(lockDir, "driver.lock");
     let claim;
     let claimed = false;
     const seen = /* @__PURE__ */ new Set();
@@ -5742,7 +5847,7 @@ var EffortDriver = class {
     const run2 = job.run;
     const entry = run2.integration;
     entry.logPath = logPath;
-    const tmpDir = join16(dirname13(logPath), "tmp");
+    const tmpDir = join17(dirname13(logPath), "tmp");
     mkdirSync9(tmpDir, { recursive: true });
     entry.commandPending = true;
     entry.process = void 0;
@@ -5842,16 +5947,16 @@ var EffortDriver = class {
     entry.attempts = 0;
     entry.verify = void 0;
     await this.persist(job);
-    const dir = join16(effortDir(root, record.name), "verify", `${run2.id}-${randomUUID4()}`);
+    const dir = join17(effortDir(root, record.name), "verify", `${run2.id}-${randomUUID4()}`);
     mkdirSync9(dir, { recursive: true });
-    const candidate = join16(root, ".worktrees", "conductor-cand", record.name, `${run2.id}-${randomUUID4()}`);
+    const candidate = join17(root, ".worktrees", "conductor-cand", record.name, `${run2.id}-${randomUUID4()}`);
     entry.candidatePath = candidate;
     entry.candidates = [.../* @__PURE__ */ new Set([...entry.candidates ?? [], candidate])];
     await this.persist(job);
     this.fence(job);
     effortGit(root, "worktree", "add", "--detach", candidate, expected);
     if (record.gatedTip !== expected) {
-      const result = entry.verifyIdentity.command ? await this.command(job, candidate, entry.verifyIdentity.command, join16(dir, "baseline.log")) : void 0;
+      const result = entry.verifyIdentity.command ? await this.command(job, candidate, entry.verifyIdentity.command, join17(dir, "baseline.log")) : void 0;
       assertCandidate(candidate, expected);
       record = this.fence(job);
       writeEffort({ ...record, baseline: { oid: expected, result, disabled: !result }, ...result?.passed === false ? {} : { gatedTip: expected }, updatedAt: Date.now() });
@@ -5870,12 +5975,12 @@ var EffortDriver = class {
     if (generated) {
       entry.mergeTree = merged.tree;
       entry.conflicts = merged.kind === "conflict" ? [...merged.conflicts] : [];
-      entry.mergeEvidencePath = join16(dir, "merge-tree.z");
+      entry.mergeEvidencePath = join17(dir, "merge-tree.z");
       writeFileSync5(entry.mergeEvidencePath, merged.output);
       this.fence(job);
       assertCandidate(candidate, expected);
       effortGit(candidate, "read-tree", "--reset", "-u", merged.tree);
-      copyFileSync(effortGit(candidate, "rev-parse", "--git-path", "index"), join16(dir, "merge.index"));
+      copyFileSync(effortGit(candidate, "rev-parse", "--git-path", "index"), join17(dir, "merge.index"));
       await this.persist(job);
     }
     if (merged.kind === "conflict" && (!generated || !merged.conflicts.every((path2) => isGeneratedPath(path2, generated)))) {
@@ -5905,8 +6010,8 @@ var EffortDriver = class {
       entry.preGenerationTree = effortGit(candidate, "write-tree");
       entry.state = "generating";
       await this.persist(job);
-      const result = await regenerateCandidate(candidate, expected, generated, join16(dir, "generation-before.json"), async () => {
-        entry.generation = await this.command(job, candidate, generated.command, join16(dir, "generate.log"));
+      const result = await regenerateCandidate(candidate, expected, generated, join17(dir, "generation-before.json"), async () => {
+        entry.generation = await this.command(job, candidate, generated.command, join17(dir, "generate.log"));
         return entry.generation;
       }, () => {
         this.fence(job);
@@ -5919,12 +6024,12 @@ var EffortDriver = class {
     }
     const merger = entry.merger?.outcome === "accepted" && entry.branchHead === entry.merger.outputOid ? entry.merger.runId : void 0;
     const trailers = [`Conductor-Effort: ${record.name}`, `Conductor-Run: ${run2.id}`, ...merger ? [`Conductor-Merger: ${merger}`] : []];
-    const message4 = join16(dir, "commit-message");
+    const message4 = join17(dir, "commit-message");
     writeFileSync5(message4, `${buildMergeCommitMessage(run2.persona, run2.id, run2.task)}
 
 ${trailers.join("\n")}
 `);
-    entry.commitHook = await this.command(job, candidate, `git commit -F ${shellQuote2(message4)}`, join16(dir, "commit.log"));
+    entry.commitHook = await this.command(job, candidate, `git commit -F ${shellQuote2(message4)}`, join17(dir, "commit.log"));
     if (!entry.commitHook.passed) {
       this.pause(job, `candidate commit hooks failed: ${entry.commitHook.logPath}: ${entry.commitHook.tailText}`);
       return;
@@ -5940,7 +6045,7 @@ ${trailers.join("\n")}
     if (entry.verifyIdentity.command) {
       for (; ; ) {
         entry.attempts++;
-        entry.verify = await this.command(job, candidate, entry.verifyIdentity.command, join16(dir, `verify-${entry.attempts}.log`));
+        entry.verify = await this.command(job, candidate, entry.verifyIdentity.command, join17(dir, `verify-${entry.attempts}.log`));
         assertCandidate(candidate, entry.candidateOid);
         const action = nextIntegration(entry.verify, entry.attempts, entry.verifyIdentity.retries);
         await this.persist(job);
@@ -5999,7 +6104,7 @@ ${trailers.join("\n")}
       sourceHead: entry.sourceHead,
       expectedTip: entry.expectedTip,
       claimedAt: Date.now(),
-      candidatePath: join16(root, ".worktrees", "conductor-cand", record.name, `${run2.id}-merger-1`),
+      candidatePath: join17(root, ".worktrees", "conductor-cand", record.name, `${run2.id}-merger-1`),
       ...extra.conflicts ? { conflicts: [...extra.conflicts] } : {}
     };
     entry.merger = wal;
@@ -6075,8 +6180,8 @@ ${trailers.join("\n")}
         await m.recordWrite;
         if (job.finished || job.suspended || job.cancelled) return;
         this.fence(job);
-        const finalText = getFinalText(m.messages) || (existsSync10(m.finalPath) ? readFileSync13(m.finalPath, "utf8") : "");
-        const verdict = acceptMergerOutcome(wal, realpathSync8(effortGit(root, "rev-parse", "--path-format=absolute", "--git-common-dir")), observeMerger(m, wal, finalText, exited));
+        const finalText = getFinalText(m.messages) || (existsSync11(m.finalPath) ? readFileSync13(m.finalPath, "utf8") : "");
+        const verdict = acceptMergerOutcome(wal, realpathSync9(effortGit(root, "rev-parse", "--path-format=absolute", "--git-common-dir")), observeMerger(m, wal, finalText, exited));
         wal.cost ??= subtreeCost(m, this.#registry.list());
         job.parked = false;
         if (verdict.ok) {
@@ -6143,10 +6248,10 @@ ${trailers.join("\n")}
 };
 
 // src/runs.ts
-import { existsSync as existsSync12, mkdirSync as mkdirSync10, readFileSync as readFileSync15, readdirSync as readdirSync6, statSync as statSync3 } from "node:fs";
+import { existsSync as existsSync13, mkdirSync as mkdirSync10, readFileSync as readFileSync15, readdirSync as readdirSync6, statSync as statSync3 } from "node:fs";
 import { mkdir, writeFile as writeFile2 } from "node:fs/promises";
 import { homedir as homedir7 } from "node:os";
-import { dirname as dirname15, join as join18, resolve as resolve5, sep as sep3 } from "node:path";
+import { dirname as dirname15, join as join19, resolve as resolve5, sep as sep3 } from "node:path";
 
 // src/gc/id-reuse.ts
 var recentlyDeletedIds = /* @__PURE__ */ new Set();
@@ -6498,9 +6603,9 @@ ${diag}
 }
 
 // src/workspace-doctrine.ts
-import { existsSync as existsSync11, readFileSync as readFileSync14, statSync as statSync2 } from "node:fs";
+import { existsSync as existsSync12, readFileSync as readFileSync14, statSync as statSync2 } from "node:fs";
 import { homedir as homedir6, tmpdir } from "node:os";
-import { dirname as dirname14, join as join17, relative as relative2, resolve as resolve4, sep as sep2 } from "node:path";
+import { dirname as dirname14, join as join18, relative as relative2, resolve as resolve4, sep as sep2 } from "node:path";
 var MAX_WALK_DEPTH = 6;
 var MAX_DOCTRINE_CHARS = 24e3;
 var DOCTRINE_HEADING = "## Workspace doctrine";
@@ -6519,7 +6624,7 @@ function walkDirs(start) {
 }
 function findAgentsMd(start) {
   for (const dir of walkDirs(start)) {
-    const candidate = join17(dir, "AGENTS.md");
+    const candidate = join18(dir, "AGENTS.md");
     try {
       if (statSync2(candidate).isFile()) return candidate;
     } catch {
@@ -6530,7 +6635,7 @@ function findAgentsMd(start) {
 function gitRoot(start) {
   let current = resolve4(start);
   while (true) {
-    if (existsSync11(join17(current, ".git"))) return current;
+    if (existsSync12(join18(current, ".git"))) return current;
     const parent = dirname14(current);
     if (parent === current) return void 0;
     current = parent;
@@ -6545,7 +6650,7 @@ function childNativeAgentsDirs(workdir) {
   const dirs = [root];
   let current = root;
   for (const part of rel.split(sep2).filter(Boolean)) {
-    current = join17(current, part);
+    current = join18(current, part);
     dirs.push(current);
   }
   return dirs;
@@ -6579,17 +6684,17 @@ ${text5}`;
 
 // src/runs.ts
 function runsRoot() {
-  return join18(homedir7(), ".pi", "agent", "conductor", "runs");
+  return join19(homedir7(), ".pi", "agent", "conductor", "runs");
 }
 function runDir(id) {
-  return join18(runsRoot(), id);
+  return join19(runsRoot(), id);
 }
 function collectInheritedSkillPaths(opts) {
   const home = opts.homeDir ?? homedir7();
-  const exists = opts.existsFn ?? existsSync12;
+  const exists = opts.existsFn ?? existsSync13;
   const candidates = [
-    join18(home, ".pi", "agent", "skills"),
-    join18(opts.cwd, ".pi", "skills")
+    join19(home, ".pi", "agent", "skills"),
+    join19(opts.cwd, ".pi", "skills")
   ];
   return candidates.filter((p) => exists(p));
 }
@@ -6608,7 +6713,7 @@ function findSessionFile(sessionDir) {
   let bestMtime = -Infinity;
   for (const name2 of entries) {
     if (!name2.endsWith(".jsonl")) continue;
-    const full = join18(sessionDir, name2);
+    const full = join19(sessionDir, name2);
     let st;
     try {
       st = statSync3(full);
@@ -6640,7 +6745,7 @@ function shortHash() {
 function allocateRunId(persona, registry) {
   for (let i = 0; i < 32; i++) {
     const id = `${persona}-${shortHash()}`;
-    if (!registry.has(id) && !existsSync12(runDir(id))) {
+    if (!registry.has(id) && !existsSync13(runDir(id))) {
       noteAllocatedId(id);
       return id;
     }
@@ -6680,7 +6785,7 @@ var READ_ONLY_PERSONA_ENFORCER = [
 function assemblePersonaSystemPrompt(persona, cwd) {
   const blocks = persona.readOnly === true ? [READ_ONLY_PERSONA_ENFORCER, persona.systemPrompt] : [persona.systemPrompt];
   try {
-    const preamble = readFileSync15(join18(builtinPersonasDir(), "_preamble.md"), "utf8").trim();
+    const preamble = readFileSync15(join19(builtinPersonasDir(), "_preamble.md"), "utf8").trim();
     if (preamble) blocks.push(preamble);
   } catch {
   }
@@ -6693,7 +6798,7 @@ function assemblePersonaSystemPrompt(persona, cwd) {
 function resolveDefaultReads(reads, childCwd, requestedCwd) {
   return reads.map((f) => {
     const own = resolve5(childCwd, f);
-    return existsSync12(own) ? own : resolve5(requestedCwd, f);
+    return existsSync13(own) ? own : resolve5(requestedCwd, f);
   });
 }
 function buildSubAgentPrompt(persona, task, place, scope = LEGACY_CHILD_SCOPE) {
@@ -6704,6 +6809,13 @@ ${LEAF_GUARD}` : isDelegating(scope) ? delegatingGuard(scope.delegateAllow) : SU
     const wt = place.worktree;
     parts.push(
       `You are working in the git worktree ${wt.path} (branch ${wt.branch}). Edit and commit only there; do not modify the main checkout at ${wt.gitRoot}.`,
+      ""
+    );
+  }
+  if (place?.view) {
+    const v = place.view;
+    parts.push(
+      `You are reading the detached view ${v.path} of effort ${v.effort} at commit ${v.oid}. It is read-only: do not edit, commit or switch branches there. Anything left in it keeps the view for human inspection and voids your review. Do not modify the main checkout at ${v.gitRoot}.`,
       ""
     );
   }
@@ -6862,7 +6974,7 @@ function planSpawnPiArgs(opts) {
     seedMessages = [filteredHistorySentinel(), ...seedMessages];
   }
   if (seedMessages) {
-    const seededSessionPath = join18(sessionDir, "seeded.jsonl");
+    const seededSessionPath = join19(sessionDir, "seeded.jsonl");
     seedSessionFile(seededSessionPath, seedMessages, cwd);
     return {
       mode: "resume",
@@ -7043,8 +7155,16 @@ function prepareSpawnEffort(opts) {
     if (opts.touches !== void 0) throw new Error("touches requires an effort");
     return void 0;
   }
-  if (opts.persona.readOnly) throw new Error(`effort readers are unsupported. ${EFFORT_NOTICE}`);
-  if (opts.touches !== void 0 && (!Array.isArray(opts.touches) || opts.touches.length > 0)) validateTouches(opts.touches);
+  switch (effortRole(opts.persona)) {
+    case "reader":
+      if (opts.touches !== void 0) throw new Error(`effort readers take no touches: ${opts.persona.name} is read_only and reserves no paths`);
+      if (opts.runtime === "herdr") throw new Error(`effort readers run on the subprocess runtime only; pass runtime: "subprocess" for ${opts.persona.name}`);
+      if (opts.onCompleteHook) throw new Error(`effort readers run no on_complete hook; ${opts.persona.name} integrates nothing to gate`);
+      break;
+    case "writer":
+      if (opts.touches !== void 0 && (!Array.isArray(opts.touches) || opts.touches.length > 0)) validateTouches(opts.touches);
+      break;
+  }
   return ownedEffort(opts.cwd, opts.effort, opts.parentSessionId);
 }
 function spawnRun(opts) {
@@ -7056,7 +7176,7 @@ function spawnRun(opts) {
   prepareSpawnMerger(opts, opts.registry, opts.preAllocatedId ?? opts.mergerFor?.runId);
   const effort = prepareSpawnEffort(opts);
   const id = opts.preAllocatedId ?? opts.mergerFor?.runId ?? allocateRunId(opts.persona.name, mapFromRegistry(opts.registry));
-  if (opts.mergerFor && (existsSync12(join18(runDir(id), "record.json")) || opts.registry.has(id) && opts.registry.get(id).status !== "queued")) throw new Error(`merger ${id} already launched; refusing a second launch`);
+  if (opts.mergerFor && (existsSync13(join19(runDir(id), "record.json")) || opts.registry.has(id) && opts.registry.get(id).status !== "queued")) throw new Error(`merger ${id} already launched; refusing a second launch`);
   if (effort) addEffortMember(effort, id);
   const dir = runDir(id);
   mkdirSync10(dir, { recursive: true });
@@ -7070,16 +7190,16 @@ function spawnRun(opts) {
     model: opts.model,
     thinking: opts.thinking,
     mode: effort ? "background" : opts.mode,
-    effort: effort ? { owner: effort.owner, name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches ? [...opts.touches] : void 0 } : void 0,
+    effort: effort ? effortAssignment(effort, opts) : void 0,
     status: "running",
     startTime: Date.now(),
     lastEventAt: Date.now(),
     messages: [],
     usage: emptyUsage(),
     cwd: opts.cwd,
-    recordPath: join18(dir, "record.json"),
-    transcriptPath: join18(dir, "transcript.jsonl"),
-    finalPath: join18(dir, "final.md"),
+    recordPath: join19(dir, "record.json"),
+    transcriptPath: join19(dir, "transcript.jsonl"),
+    finalPath: join19(dir, "final.md"),
     sessionPath: void 0,
     // Capture the persona body now so future ensemble_send calls can
     // re-pass it on resume. Pi doesn't persist system prompts to disk.
@@ -7188,7 +7308,15 @@ function spawnRun(opts) {
     });
     let effectiveCwd = opts.cwd;
     let worktreeFence;
-    if (opts.worktree || effort) {
+    let viewFence;
+    if (effort && run2.effort?.role === "reader") {
+      const tip = effortTip(effort);
+      run2.worktreePath = createReaderView(effort.gitRoot, run2.id, tip);
+      run2.effort.spawnBase = tip;
+      effectiveCwd = worktreeCwd({ gitRoot: effortRepository(opts.cwd).requestedRoot, worktreePath: run2.worktreePath }, opts.cwd);
+      run2.effort.cwd = effectiveCwd;
+      viewFence = { path: run2.worktreePath, oid: tip, effort: effort.name, gitRoot: effort.gitRoot };
+    } else if (opts.worktree || effort) {
       const spec = resolveWorktreeSpec(effort?.gitRoot ?? opts.cwd, run2.id);
       if (spec === null) {
         if (effort) throw new Error("effort repository disappeared; refusing shared cwd fallback");
@@ -7220,9 +7348,10 @@ function spawnRun(opts) {
     const prompt = buildSubAgentPrompt(opts.persona, opts.task, {
       cwd: effectiveCwd,
       requestedCwd: opts.cwd,
-      worktree: worktreeFence
+      worktree: worktreeFence,
+      view: viewFence
     }, scope);
-    const sessionDir = join18(dir, "session");
+    const sessionDir = join19(dir, "session");
     mkdirSync10(sessionDir, { recursive: true });
     const plan = planSpawnPiArgs({
       persona: opts.persona,
@@ -7296,7 +7425,7 @@ function spawnRun(opts) {
       // current config layers + persona frontmatter. Per-call args land
       // in slice 3; for slice 2 the per-call layer is always undefined.
       // Tests inject `resolvedHook` directly via the spawn-options surface.
-      resolvedHook: opts.delegation ? void 0 : resolveCloseHook(
+      resolvedHook: opts.delegation || run2.effort?.role === "reader" ? void 0 : resolveCloseHook(
         opts.cwd,
         opts.persona.name,
         hookSpecFromOpts(opts.onCompleteHook, opts.onCompleteHookTimeoutSeconds),
@@ -7357,9 +7486,9 @@ function failBeforeSpawn(opts, errorMessage) {
     messages: [],
     usage: emptyUsage(),
     cwd: opts.cwd,
-    recordPath: join18(dir, "record.json"),
-    transcriptPath: join18(dir, "transcript.jsonl"),
-    finalPath: join18(dir, "final.md"),
+    recordPath: join19(dir, "record.json"),
+    transcriptPath: join19(dir, "transcript.jsonl"),
+    finalPath: join19(dir, "final.md"),
     parentPid: process.pid,
     parentStartTime: readProcessStartTime(process.pid),
     parentSessionId: opts.parentSessionId,
@@ -7562,7 +7691,7 @@ function resolveSendStrategy(run2, behavior = "auto") {
     if (behavior === "steer" || behavior === "follow_up") return { strategy: { kind: "rejected", reason: `sub-agent ${run2.id} is blocked on an owner question. Answer with auto or resume to continue its saved session.` } };
   }
   if (run2.status === "integrating") return { strategy: { kind: "rejected", reason: `sub-agent ${run2.id} is integrating; no saved-session continuation is available.` } };
-  if (run2.effort && isTerminal(run2.status)) return { strategy: { kind: "rejected", reason: `${EFFORT_NOTICE} Start a fresh effort writer; only blocked assignments accept owner answers.` } };
+  if (run2.effort && isTerminal(run2.status)) return { strategy: { kind: "rejected", reason: run2.effort.role === "reader" ? `${EFFORT_NOTICE} Spawn a fresh effort reader instead: it views the current tip. A settled reader's view is never resumed or rematerialized.` : `${EFFORT_NOTICE} Start a fresh effort writer; only blocked assignments accept owner answers.` } };
   if (behavior === "steer") {
     return {
       strategy: {
@@ -7596,18 +7725,18 @@ function restoreResumeWorktree(run2, readSession) {
   } catch {
     return void 0;
   }
-  if (!path2 || existsSync12(path2)) return void 0;
-  const layout = `${sep3}${join18(".worktrees", "conductor-wt", run2.id)}`;
+  if (!path2 || existsSync13(path2)) return void 0;
+  const layout = `${sep3}${join19(".worktrees", "conductor-wt", run2.id)}`;
   const at = `${path2}${sep3}`.lastIndexOf(`${layout}${sep3}`);
   if (at < 0) return void 0;
   const gitRoot2 = path2.slice(0, at);
   const root = path2.slice(0, at + layout.length);
-  if (existsSync12(root)) return void 0;
+  if (existsSync13(root)) return void 0;
   const spawnFresh = `spawn a fresh ${run2.persona} instead`;
   const kept = run2.worktreeBranch && refExists(gitRoot2, `refs/heads/${run2.worktreeBranch}`) ? run2.worktreeBranch : void 0;
   const base = run2.worktreeBaseBranch ?? "master";
   if (!kept && !refExists(gitRoot2, base)) {
-    const gone = existsSync12(gitRoot2) ? `its base branch ${base}` : `its repo ${gitRoot2}`;
+    const gone = existsSync13(gitRoot2) ? `its base branch ${base}` : `its repo ${gitRoot2}`;
     return `cannot resume ${run2.id}: its worktree ${root} was removed, and ${gone} is gone; ${spawnFresh}.`;
   }
   const branch = kept ?? `conductor-wt/${run2.id}-r${(run2.resumeCount ?? 0) + 1}`;
@@ -7679,8 +7808,12 @@ function sendToRun(run2, message4, opts) {
   }
   const sessionPath = run2.sessionPath;
   const answer = run2.pendingAsk ? { ask: run2.pendingAsk, cwd: run2.cwd } : void 0;
-  if (run2.effort && (!run2.effort.cwd || !run2.worktreeBranch || !refExists(run2.effort.gitRoot, `refs/heads/${run2.worktreeBranch}`))) {
+  if (run2.effort?.role === "writer" && (!run2.effort.cwd || !run2.worktreeBranch || !refExists(run2.effort.gitRoot, `refs/heads/${run2.worktreeBranch}`))) {
     return { kind: "rejected", reason: "effort assignment branch/cwd is missing; preserve the outstanding question and inspect the effort before recovery" };
+  }
+  if (run2.effort?.role === "reader") {
+    const view = !run2.effort.cwd || !existsSync13(run2.effort.cwd) ? "view cwd missing" : readerViewProblem(run2);
+    if (view && view !== DIRTY_VIEW) return { kind: "rejected", reason: `effort reader view unusable (${view}); the question stays outstanding. Kill it and spawn a fresh reader at the current tip` };
   }
   if (run2.effort) {
     const reason = effortAnswerWaitReason(run2, opts.registry);
@@ -7744,7 +7877,7 @@ function sendToRun(run2, message4, opts) {
     // honored (§4.6: each terminal is a fresh gate). Per-call layer
     // (slice 3) reads from `Run.onCompleteHook` — stamped at spawn time
     // by `spawnRun` and replaceable by per-send overrides above.
-    resolvedHook: run2.reconciledAtStartup && run2.effort ? run2.effort.gate ?? void 0 : resolveCloseHook(
+    resolvedHook: run2.effort?.role === "reader" ? void 0 : run2.reconciledAtStartup && run2.effort ? run2.effort.gate ?? void 0 : resolveCloseHook(
       run2.cwd,
       run2.persona,
       hookSpecFromOpts(run2.onCompleteHook, run2.onCompleteHookTimeoutSeconds),
@@ -7946,15 +8079,35 @@ async function releaseWorktree(run2, opts) {
   }
 }
 function applyChainIfPresent(run2, terminal, onChain) {
-  if (run2.effort || terminal !== "completed") return;
+  if (terminal !== "completed" || effortChainRefusal(run2)) return;
   if (!onChain) return;
   try {
     onChain(run2);
   } catch {
   }
 }
+function effortChainRefusal(run2) {
+  const e = run2.effort;
+  if (run2.mergerFor) return "merger";
+  if (!e) return void 0;
+  if (run2.reconciledAtStartup) return "recovered settlement";
+  switch (e.role) {
+    case "writer":
+      return run2.mergeResult?.success && run2.landedCommit && run2.integration?.delivery === "intent" ? void 0 : "no landed integration in this dispatch";
+    case "reader":
+      return e.reviewed && e.reviewed === e.spawnBase ? void 0 : "no proven clean review";
+  }
+}
+function effortRetryRefusal(run2) {
+  if (run2.mergerFor) return "merger";
+  if (!run2.effort) return void 0;
+  if (run2.reconciledAtStartup) return "recovered settlement";
+  if (run2.integration) return "integration outcome";
+  if (!["failed", "timeout", "killed", "aborted"].includes(run2.status)) return `${run2.status} is not an ordinary failure`;
+  return run2.failureClass === "permission" ? "permission" : void 0;
+}
 function applyRetryIfNeeded(run2, onRetry) {
-  if (run2.effort || !onRetry) return false;
+  if (!onRetry || effortRetryRefusal(run2)) return false;
   if (run2.status === "completed") return false;
   if (!run2.retryPolicy || !run2.failureClass) return false;
   const attempt = run2.retryAttempt ?? 0;
@@ -7969,7 +8122,7 @@ async function applyHookToTerminal(run2, resolvedHook, terminal, deps = {}) {
   const fence = herdrEffectFence(run2);
   fence();
   try {
-    if (run2.effort) await writeFile2(join18(dirname15(run2.recordPath), "gate-final.md"), getFinalText(run2.messages) || "(no output)");
+    if (run2.effort) await writeFile2(join19(dirname15(run2.recordPath), "gate-final.md"), getFinalText(run2.messages) || "(no output)");
     else await writeFinal(run2);
   } catch {
   }
@@ -7982,12 +8135,12 @@ async function applyHookToTerminal(run2, resolvedHook, terminal, deps = {}) {
       runId: run2.id,
       persona: run2.persona,
       runDir: dirname15(run2.finalPath),
-      finalPath: run2.effort ? join18(dirname15(run2.recordPath), "gate-final.md") : run2.finalPath,
+      finalPath: run2.effort ? join19(dirname15(run2.recordPath), "gate-final.md") : run2.finalPath,
       transcriptPath: run2.transcriptPath,
       parentCwd: run2.cwd,
       cwd: run2.effort?.cwd,
       extraEnv: run2.effort ? effortEnv() : void 0,
-      tmpDir: run2.effort ? join18(dirname15(run2.recordPath), "tmp") : void 0,
+      tmpDir: run2.effort ? join19(dirname15(run2.recordPath), "tmp") : void 0,
       worktreePath: run2.worktreePath,
       onProc: (proc) => {
         run2.hookProc = proc;
@@ -8176,7 +8329,7 @@ async function reconcileRecord(run2, status, errorMessage, finishedAt) {
   run2.errorMessage = errorMessage;
   await writeRecord(run2);
 }
-function findRunSessionFile(run2, sessionDir = join18(dirname15(run2.recordPath), "session")) {
+function findRunSessionFile(run2, sessionDir = join19(dirname15(run2.recordPath), "session")) {
   return run2.sessionPath ?? findSessionFile(sessionDir);
 }
 function discoverContextRetirement(run2, sessionDir) {
@@ -8416,11 +8569,11 @@ function piVersionWarning(lead, child) {
 }
 function herdrChildAbsent(run2) {
   const b = run2.herdr;
-  if (!b || b.runId !== run2.id || typeof b.sessionFile !== "string" || typeof b.socketPath !== "string" || !isAbsolute5(b.socketPath) || !/^[A-Za-z0-9_-]+$/.test(b.launchNonce) || dirname16(b.sessionFile) !== join19(dirname16(run2.recordPath), "session")) return false;
+  if (!b || b.runId !== run2.id || typeof b.sessionFile !== "string" || typeof b.socketPath !== "string" || !isAbsolute5(b.socketPath) || !/^[A-Za-z0-9_-]+$/.test(b.launchNonce) || dirname16(b.sessionFile) !== join20(dirname16(run2.recordPath), "session")) return false;
   try {
     const owner = readHerdrOwner(dirname16(run2.recordPath));
     if (owner && (owner.generation !== b.ownerGeneration || owner.launchNonce !== b.launchNonce || owner.runId !== run2.id || owner.socketPath !== b.socketPath)) return false;
-    const hello = read(join19(dirname16(run2.recordPath), "launch", `${b.launchNonce}.json`));
+    const hello = read(join20(dirname16(run2.recordPath), "launch", `${b.launchNonce}.json`));
     const proof = proveChildProcess({
       binding: b,
       current: b,
@@ -8485,8 +8638,8 @@ var HerdrRuntime = class {
     if (!this.options || !run2.herdr || run2.herdr.socketPath !== this.options.cli.socketPath) throw failure("other-socket");
     const { cli } = this.options, probe = this.options.probe ?? probeProcess;
     const binding = { ...run2.herdr }, nonce = binding.launchNonce, dir = dirname16(run2.recordPath);
-    if (binding.runId !== run2.id || !/^[A-Za-z0-9_-]+$/.test(nonce) || dirname16(binding.sessionFile) !== join19(dir, "session")) throw failure("reattach binding mismatch");
-    const claim = read(join19(dir, "launch", `${nonce}.json`));
+    if (binding.runId !== run2.id || !/^[A-Za-z0-9_-]+$/.test(nonce) || dirname16(binding.sessionFile) !== join20(dir, "session")) throw failure("reattach binding mismatch");
+    const claim = read(join20(dir, "launch", `${nonce}.json`));
     if (!isRecord(claim)) throw failure("reattach missing child hello");
     const hello = claim;
     binding.childPid ??= hello.pid;
@@ -8651,7 +8804,7 @@ var HerdrRuntime = class {
     };
     const readHello = () => {
       try {
-        return read(join19(dir, "launch", `${nonce}.json`));
+        return read(join20(dir, "launch", `${nonce}.json`));
       } catch (e) {
         if (e.code === "ENOENT") return;
         throw failure("invalid launch hello");
@@ -8744,14 +8897,14 @@ var HerdrRuntime = class {
       const scope = childToolScope(run2);
       if (run2.pendingAsk && (core.kind !== "resume" || core.sessionPath !== run2.sessionPath)) throw failure("answer requires the original session");
       if (core.kind === "resume" && run2.sessionPath && core.sessionPath !== run2.sessionPath) throw failure("resume session mismatch");
-      const sessionDir = join19(dir, "session");
-      const sessionFile = core.kind === "resume" ? core.sessionPath : join19(sessionDir, `${nonce}.jsonl`);
+      const sessionDir = join20(dir, "session");
+      const sessionFile = core.kind === "resume" ? core.sessionPath : join20(sessionDir, `${nonce}.jsonl`);
       if (dirname16(sessionFile) !== sessionDir) throw failure("session outside run directory");
       if (core.kind === "fresh") seedSessionFile(sessionFile, [], cwd);
       const session = SessionManager2.open(sessionFile, sessionDir);
       if (session.getCwd() !== cwd) throw failure("session cwd mismatch");
       const invocation = { runId: run2.id, launchNonce: nonce, sessionId: session.getSessionId(), sessionFile };
-      const promptPath = join19(dir, `system-prompt-${nonce}.md`);
+      const promptPath = join20(dir, `system-prompt-${nonce}.md`);
       writeFileSync6(promptPath, core.systemPrompt ?? "", { flag: "wx", mode: 384 });
       const args = [
         ...buildPiCoreArgs({ ...core, scope, kind: "resume", sessionPath: sessionFile, systemPrompt: promptPath }),
@@ -8771,9 +8924,9 @@ var HerdrRuntime = class {
         }
       }
       if (run2.herdr !== previous) throw failure("launch binding replaced; preserving resources");
-      if (run2.effort) mkdirSync11(join19(dir, "tmp"), { recursive: true });
+      if (run2.effort) mkdirSync11(join20(dir, "tmp"), { recursive: true });
       if (!binding) {
-        const paneEnv = buildHerdrEnv(env, { runId: run2.id, runDir: dir, configCwd: run2.cwd, scope, ...run2.effort ? { tmpDir: join19(dir, "tmp") } : {} });
+        const paneEnv = buildHerdrEnv(env, { runId: run2.id, runDir: dir, configCwd: run2.cwd, scope, ...run2.effort ? { tmpDir: join20(dir, "tmp") } : {} });
         let placement;
         if (run2.depth === 2) {
           const prior = await priorLeaf;
@@ -9144,25 +9297,25 @@ var HerdrRuntime = class {
 
 // src/effort/reconcile.ts
 import { randomUUID as randomUUID6 } from "node:crypto";
-import { existsSync as existsSync13, mkdirSync as mkdirSync12, readFileSync as readFileSync16, readdirSync as readdirSync7, realpathSync as realpathSync9 } from "node:fs";
-import { dirname as dirname17, join as join20, relative as relative3 } from "node:path";
+import { existsSync as existsSync14, mkdirSync as mkdirSync12, readFileSync as readFileSync16, readdirSync as readdirSync7, realpathSync as realpathSync10 } from "node:fs";
+import { dirname as dirname17, join as join21, relative as relative3 } from "node:path";
 function validateSource(run2) {
   if (!run2.effort || !run2.worktreeBranch) throw new Error("preserved source branch missing");
   const oid = effortGit(run2.effort.gitRoot, "rev-parse", "--verify", `refs/heads/${run2.worktreeBranch}^{commit}`);
-  if (run2.worktreePath && existsSync13(run2.worktreePath)) {
+  if (run2.worktreePath && existsSync14(run2.worktreePath)) {
     assertCandidateIndexFlags(run2.worktreePath);
     if (effortGit(run2.worktreePath, "rev-parse", "HEAD") !== oid || effortGit(run2.worktreePath, "status", "--porcelain", "--untracked-files=all")) throw new Error("source changed or dirty; preserve and inspect before requeue");
   }
   return oid;
 }
 function records(record) {
-  if (!existsSync13(runsRoot())) return [];
+  if (!existsSync14(runsRoot())) return [];
   return readdirSync7(runsRoot()).sort().flatMap((id) => {
-    const path2 = join20(runsRoot(), id, "record.json");
-    if (!existsSync13(path2)) return [];
+    const path2 = join21(runsRoot(), id, "record.json");
+    if (!existsSync14(path2)) return [];
     const r = JSON.parse(readFileSync16(path2, "utf8"));
     if (r.effort?.gitRoot !== record.gitRoot || r.effort.name !== record.name) return [];
-    if (r.id !== id || r.recordPath !== path2 || r.finalPath !== join20(runsRoot(), id, "final.md") || r.transcriptPath !== join20(runsRoot(), id, "transcript.jsonl")) throw new Error(`noncanonical effort run record: ${id}`);
+    if (r.id !== id || r.recordPath !== path2 || r.finalPath !== join21(runsRoot(), id, "final.md") || r.transcriptPath !== join21(runsRoot(), id, "transcript.jsonl")) throw new Error(`noncanonical effort run record: ${id}`);
     return [r];
   });
 }
@@ -9183,12 +9336,12 @@ async function cleanupCandidates(record, run2) {
   const e = run2.integration;
   if (!e || e.commandPending || e.process || !run2.mergeResult?.success) return;
   const others = records(record).filter((r) => r.id !== run2.id && (r.status === "integrating" || r.status === "running" || r.status === "paused"));
-  const prefix2 = join20(record.gitRoot, ".worktrees", "conductor-cand", record.name) + "/";
+  const prefix2 = join21(record.gitRoot, ".worktrees", "conductor-cand", record.name) + "/";
   const removed = /* @__PURE__ */ new Set();
   for (const path2 of e.candidates ?? []) {
-    if (!path2.startsWith(prefix2) || !existsSync13(path2) || others.some((r) => r.integration?.candidatePath === path2 || r.integration?.candidates?.includes(path2) || r.worktreePath === path2)) continue;
+    if (!path2.startsWith(prefix2) || !existsSync14(path2) || others.some((r) => r.integration?.candidatePath === path2 || r.integration?.candidates?.includes(path2) || r.worktreePath === path2)) continue;
     try {
-      if (realpathSync9(path2) !== path2) continue;
+      if (realpathSync10(path2) !== path2) continue;
       const oid = effortGit(path2, "rev-parse", "HEAD");
       assertCandidate(path2, oid);
       if (effortGit(path2, "status", "--porcelain", "--ignored", "--untracked-files=all")) continue;
@@ -9226,7 +9379,7 @@ async function recoverEffort(original, opts) {
     }
     await opts.registry.integrations.whenIdle(original.gitRoot);
   }
-  const lock = join20(effortDir(original.gitRoot, "integration-driver"), "driver.lock");
+  const lock = join21(effortDir(original.gitRoot, "integration-driver"), "driver.lock");
   const claim = acquireClaim(lock, effortOwner(randomUUID6()));
   const runnable = [], restored = [];
   try {
@@ -9310,20 +9463,26 @@ async function recoverEffort(original, opts) {
                 if (error.code === "ESRCH") liveOrUnknown = false;
               }
             }
+            const reader = run2.effort.role === "reader";
             if (liveOrUnknown) {
               run2.status = "paused";
-              run2.errorMessage = "lost writer process identity unresolved; no automatic gate or requeue";
+              run2.errorMessage = reader ? `lost reader process identity unresolved; no signal sent; view ${run2.worktreePath ?? "unavailable"} kept` : "lost writer process identity unresolved; no automatic gate or requeue";
+            } else if (reader) {
+              run2.status = "killed";
+              run2.errorMessage = `lost reader; view ${run2.worktreePath ?? "unavailable"} kept for inspection; spawn a fresh reader at the current tip`;
             } else {
               run2.status = "killed";
               run2.errorMessage = "lost writer; explicit human requeue requires source and original hook validation";
             }
           }
-          if (run2.status === "completed") {
-            run2.status = "merge_conflict";
-            run2.mergeResult = { success: false, reason: "error" };
-            run2.errorMessage = "completed JSON has no reachable correlated integration proof; work preserved";
+          if (run2.effort.role === "writer") {
+            if (run2.status === "completed") {
+              run2.status = "merge_conflict";
+              run2.mergeResult = { success: false, reason: "error" };
+              run2.errorMessage = "completed JSON has no reachable correlated integration proof; work preserved";
+            }
+            run2.effort.footprintUnknown = !run2.mergeResult?.success;
           }
-          if (run2.effort) run2.effort.footprintUnknown = !run2.mergeResult?.success;
           await writeRecord(run2, () => assertRunEffortOwner(run2));
           if (order.includes(run2.id)) throw new Error("queue/WAL disagreement: no durable hook-passed integrating record");
           continue;
@@ -9372,8 +9531,8 @@ async function restoreMerger(writer, opts) {
   if (!wal) throw new Error("resolving entry has no merger claim; preserve for inspection");
   if (wal.outcome) return;
   let merger = opts.registry.get(wal.runId);
-  const path2 = join20(runsRoot(), wal.runId, "record.json");
-  if (!merger && existsSync13(path2)) {
+  const path2 = join21(runsRoot(), wal.runId, "record.json");
+  if (!merger && existsSync14(path2)) {
     const saved = JSON.parse(readFileSync16(path2, "utf8"));
     if (saved.id !== wal.runId || saved.recordPath !== path2 || saved.mergerFor?.writerId !== writer.id || saved.mergerFor.nonce !== wal.nonce) throw new Error(`noncanonical merger record ${wal.runId}; preserve for inspection`);
     merger = buildOrphanRun(saved, saved.status);
@@ -9398,9 +9557,9 @@ async function restoreMerger(writer, opts) {
 }
 async function requeueEffortRun(run2, opts, replacement, expectedOid) {
   assertSupportedRuntime(run2.runtime);
-  if (!run2.effort || run2.status === "blocked" || run2.status === "running" || run2.status === "paused" || run2.status === "integrating" && (!run2.integrationSuspended || run2.integrationControl || run2.integration?.state !== "paused")) throw new Error("requeue requires a stopped preserved writer, never a blocked ask or live assignment");
+  if (run2.effort?.role !== "writer" || run2.status === "blocked" || run2.status === "running" || run2.status === "paused" || run2.status === "integrating" && (!run2.integrationSuspended || run2.integrationControl || run2.integration?.state !== "paused")) throw new Error("requeue requires a stopped preserved writer, never a blocked ask or live assignment");
   let record = adoptEffort(readEffort(run2.effort.gitRoot, run2.effort.name), effortOwner(opts.sessionId));
-  const lock = join20(effortDir(record.gitRoot, "integration-driver"), "driver.lock");
+  const lock = join21(effortDir(record.gitRoot, "integration-driver"), "driver.lock");
   const claim = acquireClaim(lock, effortOwner(randomUUID6()));
   try {
     if (record.status === "paused" && record.pausedRun !== run2.id) throw new Error(`effort paused: ${record.pausedReason}; use human effort resume first`);
@@ -9416,7 +9575,7 @@ async function requeueEffortRun(run2, opts, replacement, expectedOid) {
     run2.parentPid = record.owner.pid;
     run2.parentSessionId = record.owner.sessionId;
     run2.parentStartTime = record.owner.startTime;
-    const path2 = join20(record.gitRoot, ".worktrees", "conductor-cand", record.name, `${run2.id}-regate-${randomUUID6()}`);
+    const path2 = join21(record.gitRoot, ".worktrees", "conductor-cand", record.name, `${run2.id}-regate-${randomUUID6()}`);
     const prior = run2.integration;
     run2.integration = {
       state: "paused",
@@ -9426,7 +9585,7 @@ async function requeueEffortRun(run2, opts, replacement, expectedOid) {
       attempts: 0,
       ...prior?.merger ? { merger: prior.merger } : {},
       verifyIdentity: { command: record.policy.verify, timeoutSeconds: record.policy.verifyTimeoutSeconds, retries: record.policy.verifyRetries },
-      resultText: prior?.resultText || getFinalText(run2.messages) || (existsSync13(run2.finalPath) ? readFileSync16(run2.finalPath, "utf8") : "(no saved result)"),
+      resultText: prior?.resultText || getFinalText(run2.messages) || (existsSync14(run2.finalPath) ? readFileSync16(run2.finalPath, "utf8") : "(no saved result)"),
       candidates: [...prior?.candidates ?? [], path2],
       candidatePath: path2,
       commandPending: !!gate
@@ -9436,8 +9595,8 @@ async function requeueEffortRun(run2, opts, replacement, expectedOid) {
     if (gate) {
       const subdir = run2.worktreePath && run2.effort.cwd ? relative3(run2.worktreePath, run2.effort.cwd) : "";
       if (subdir.startsWith("..")) throw new Error("original hook cwd cannot be reconstructed safely");
-      const cwd = join20(path2, subdir);
-      const dir = join20(effortDir(record.gitRoot, record.name), "verify", `${run2.id}-regate-${randomUUID6()}`);
+      const cwd = join21(path2, subdir);
+      const dir = join21(effortDir(record.gitRoot, record.name), "verify", `${run2.id}-regate-${randomUUID6()}`);
       mkdirSync12(dir, { recursive: true });
       let recording = Promise.resolve();
       let teardown;
@@ -9448,7 +9607,7 @@ async function requeueEffortRun(run2, opts, replacement, expectedOid) {
         });
         return teardown;
       };
-      const finalPath = join20(dirname17(run2.recordPath), "gate-final.md");
+      const finalPath = join21(dirname17(run2.recordPath), "gate-final.md");
       writeDurableFile(finalPath, run2.integration.resultText, () => assertRunEffortOwner(run2));
       const result = await runHook({
         resolved: gate,
@@ -9460,8 +9619,8 @@ async function requeueEffortRun(run2, opts, replacement, expectedOid) {
         parentCwd: run2.cwd,
         cwd,
         worktreePath: path2,
-        logPath: join20(dir, "gate.log"),
-        tmpDir: join20(dir, "tmp"),
+        logPath: join21(dir, "gate.log"),
+        tmpDir: join21(dir, "tmp"),
         extraEnv: effortEnv(),
         deps: { killGroup: () => {
           void stop();
@@ -9514,7 +9673,7 @@ async function reenter(run2, opts) {
 var RESOLVABLE = ["conflict", "verify_failed", "verify_timeout"];
 function humanResolution(run2) {
   const e = run2.integration;
-  if (!run2.effort || run2.mergerFor || run2.status !== "merge_conflict" || e?.state !== "paused" || !RESOLVABLE.includes(e.reason ?? "") || e.merger || e.previous || e.resolveRequested) return void 0;
+  if (run2.effort?.role !== "writer" || run2.mergerFor || run2.status !== "merge_conflict" || e?.state !== "paused" || !RESOLVABLE.includes(e.reason ?? "") || e.merger || e.previous || e.resolveRequested) return void 0;
   try {
     if (readEffort(run2.effort.gitRoot, run2.effort.name)?.policy.merger === "off") return void 0;
   } catch {
@@ -9526,7 +9685,7 @@ function resolvePlan(run2, sessionId) {
   if (process.env.CONDUCTOR_SUBAGENT === "1") throw new Error("effort resolve requires an interactive human command, never a child");
   assertSupportedRuntime(run2.runtime);
   const e = run2.integration;
-  if (!run2.effort || run2.mergerFor) throw new Error(`${run2.id} is not an effort writer`);
+  if (run2.effort?.role !== "writer" || run2.mergerFor) throw new Error(`${run2.id} is not an effort writer`);
   if (run2.status !== "merge_conflict" || e?.state !== "paused" || !RESOLVABLE.includes(e.reason ?? "") || run2.mergeResult?.reason !== e.reason)
     throw new Error(`resolve requires an effort writer settled merge_conflict by conflict, verify_failed or verify_timeout; ${run2.id} is ${run2.status}${e?.reason ? ` (${e.reason})` : ""}`);
   if (e.merger) throw new Error(`merger attempt already spent (${e.merger.runId}: ${e.merger.outcome ?? "unsettled"}); no second attempt`);
@@ -9554,7 +9713,7 @@ function resolvePlan(run2, sessionId) {
   const head = validateSource(run2);
   if (head !== e.sourceHead) throw new Error(`source branch head changed (${head}, integrated ${e.sourceHead}); preserve and use human effort requeue`);
   const tip = effortTip(record);
-  const lease = readClaim(join20(effortDir(record.gitRoot, record.name), "effort.lock"));
+  const lease = readClaim(join21(effortDir(record.gitRoot, record.name), "effort.lock"));
   const fingerprint = JSON.stringify([run2.status, e, run2.effort.owner, gate, record.owner, record.status, record.policy.merger, lease, head, tip]);
   const short = (oid) => oid.slice(0, 12);
   const text5 = [
@@ -9576,7 +9735,7 @@ async function resolveEffortRun(run2, opts, confirm) {
     return now;
   };
   revalidate();
-  const lock = join20(effortDir(before.record.gitRoot, "integration-driver"), "driver.lock");
+  const lock = join21(effortDir(before.record.gitRoot, "integration-driver"), "driver.lock");
   mkdirSync12(dirname17(lock), { recursive: true });
   let claim;
   try {
@@ -9657,8 +9816,8 @@ import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
 
 // src/commands.ts
-import { existsSync as existsSync21, readdirSync as readdirSync12, readFileSync as readFileSync18, statSync as statSync6 } from "node:fs";
-import { join as join30, dirname as dirname20 } from "node:path";
+import { existsSync as existsSync22, readdirSync as readdirSync12, readFileSync as readFileSync18, statSync as statSync6 } from "node:fs";
+import { join as join31, dirname as dirname20 } from "node:path";
 
 // src/status-glyph.ts
 var STATUS_GLYPH = {
@@ -9679,19 +9838,19 @@ var STATUS_GLYPH = {
 };
 
 // src/doctor.ts
-import { existsSync as existsSync16, accessSync, constants as constants5 } from "node:fs";
+import { existsSync as existsSync17, accessSync, constants as constants5 } from "node:fs";
 import { homedir as homedir8 } from "node:os";
-import { delimiter, join as join23 } from "node:path";
+import { delimiter, join as join24 } from "node:path";
 
 // src/gc/last-gc.ts
-import { existsSync as existsSync14, statSync as statSync5, utimesSync, writeFileSync as writeFileSync7 } from "node:fs";
-import { dirname as dirname18, join as join21 } from "node:path";
+import { existsSync as existsSync15, statSync as statSync5, utimesSync, writeFileSync as writeFileSync7 } from "node:fs";
+import { dirname as dirname18, join as join22 } from "node:path";
 function lastGcMarkerPath(runsRoot2) {
-  return join21(dirname18(runsRoot2), ".last-gc");
+  return join22(dirname18(runsRoot2), ".last-gc");
 }
 function readLastGcMtime(runsRoot2) {
   const path2 = lastGcMarkerPath(runsRoot2);
-  if (!existsSync14(path2)) return null;
+  if (!existsSync15(path2)) return null;
   try {
     return statSync5(path2).mtimeMs;
   } catch {
@@ -9701,7 +9860,7 @@ function readLastGcMtime(runsRoot2) {
 function writeLastGcMtime(runsRoot2, now) {
   const path2 = lastGcMarkerPath(runsRoot2);
   try {
-    if (!existsSync14(path2)) writeFileSync7(path2, "");
+    if (!existsSync15(path2)) writeFileSync7(path2, "");
     const t = new Date(now);
     utimesSync(path2, t, t);
   } catch {
@@ -9710,8 +9869,8 @@ function writeLastGcMtime(runsRoot2, now) {
 
 // src/gc/inventory.ts
 import { readdir as readdir3, readFile as readFile3, stat as stat3 } from "node:fs/promises";
-import { existsSync as existsSync15 } from "node:fs";
-import { join as join22 } from "node:path";
+import { existsSync as existsSync16 } from "node:fs";
+import { join as join23 } from "node:path";
 async function safeStat(path2) {
   try {
     const s = await stat3(path2);
@@ -9722,7 +9881,7 @@ async function safeStat(path2) {
 }
 async function readRecord(runDir2) {
   try {
-    const text5 = await readFile3(join22(runDir2, "record.json"), "utf-8");
+    const text5 = await readFile3(join23(runDir2, "record.json"), "utf-8");
     const parsed = JSON.parse(text5);
     if (typeof parsed.id !== "string" || typeof parsed.persona !== "string") {
       return null;
@@ -9733,8 +9892,8 @@ async function readRecord(runDir2) {
   }
 }
 async function detectSessionPath(runDir2) {
-  const sessionDir = join22(runDir2, "session");
-  if (!existsSync15(sessionDir)) return false;
+  const sessionDir = join23(runDir2, "session");
+  if (!existsSync16(sessionDir)) return false;
   try {
     const entries = await readdir3(sessionDir);
     return entries.some((e) => e.endsWith(".jsonl"));
@@ -9743,7 +9902,7 @@ async function detectSessionPath(runDir2) {
   }
 }
 async function walkInventory(runsRoot2, registry) {
-  if (!existsSync15(runsRoot2)) return [];
+  if (!existsSync16(runsRoot2)) return [];
   let entries;
   try {
     entries = await readdir3(runsRoot2);
@@ -9752,7 +9911,7 @@ async function walkInventory(runsRoot2, registry) {
   }
   const out = [];
   for (const id of entries) {
-    const runDir2 = join22(runsRoot2, id);
+    const runDir2 = join23(runsRoot2, id);
     let isDir = false;
     try {
       isDir = (await stat3(runDir2)).isDirectory();
@@ -9766,11 +9925,11 @@ async function walkInventory(runsRoot2, registry) {
 }
 async function buildEntry(id, runDir2, registry) {
   const record = await readRecord(runDir2);
-  const transcriptStat = await safeStat(join22(runDir2, "transcript.jsonl"));
-  const recordStat = await safeStat(join22(runDir2, "record.json"));
-  const finalStat = await safeStat(join22(runDir2, "final.md"));
-  const archivedStat = await safeStat(join22(runDir2, ".archived"));
-  const pinned = existsSync15(join22(runDir2, ".pinned"));
+  const transcriptStat = await safeStat(join23(runDir2, "transcript.jsonl"));
+  const recordStat = await safeStat(join23(runDir2, "record.json"));
+  const finalStat = await safeStat(join23(runDir2, "final.md"));
+  const archivedStat = await safeStat(join23(runDir2, ".archived"));
+  const pinned = existsSync16(join23(runDir2, ".pinned"));
   const sessionPathPresent = await detectSessionPath(runDir2);
   const inMemory = registry.get(id);
   const transcriptSizeBytes = transcriptStat?.size ?? 0;
@@ -9821,7 +9980,7 @@ async function buildEntry(id, runDir2, registry) {
     mergerFor: record.mergerFor,
     runtime: record.runtime,
     herdr: record.herdr && { ...record.herdr },
-    herdrChildAbsent: record.runtime === "herdr" ? herdrChildAbsent({ ...record, recordPath: join22(runDir2, "record.json") }) : void 0
+    herdrChildAbsent: record.runtime === "herdr" ? herdrChildAbsent({ ...record, recordPath: join23(runDir2, "record.json") }) : void 0
   };
 }
 
@@ -10084,13 +10243,13 @@ async function buildDoctorReport(opts) {
   lines.push("## Config files");
   const userPath = userConfigPath();
   const projectPath = projectConfigPath(opts.cwd);
-  lines.push(`  user:    ${existsSync16(userPath) ? "\u2713" : "\xB7"} ${userPath}`);
-  lines.push(`  project: ${existsSync16(projectPath) ? "\u2713" : "\xB7"} ${projectPath}`);
+  lines.push(`  user:    ${existsSync17(userPath) ? "\u2713" : "\xB7"} ${userPath}`);
+  lines.push(`  project: ${existsSync17(projectPath) ? "\u2713" : "\xB7"} ${projectPath}`);
   const home = opts.homeDir ?? homedir8();
-  const legacyDir = join23(home, ".pi", "agent", "extensions", "conductor");
-  const legacyJs = join23(legacyDir, "index.js");
-  const legacyTs = join23(legacyDir, "index.ts");
-  const legacyEntry = existsSync16(legacyJs) ? legacyJs : existsSync16(legacyTs) ? legacyTs : null;
+  const legacyDir = join24(home, ".pi", "agent", "extensions", "conductor");
+  const legacyJs = join24(legacyDir, "index.js");
+  const legacyTs = join24(legacyDir, "index.ts");
+  const legacyEntry = existsSync17(legacyJs) ? legacyJs : existsSync17(legacyTs) ? legacyTs : null;
   if (legacyEntry !== null) {
     lines.push("");
     lines.push("## Legacy install path detected");
@@ -10141,7 +10300,7 @@ async function buildDoctorReport(opts) {
     );
   }
   {
-    const root = opts.runsRoot ?? join23(opts.homeDir ?? homedir8(), ".pi", "agent", "conductor", "runs");
+    const root = opts.runsRoot ?? join24(opts.homeDir ?? homedir8(), ".pi", "agent", "conductor", "runs");
     const lastMs = readLastGcMtime(root);
     const lastStr = lastMs === null ? "never" : new Date(lastMs).toISOString().replace("T", " ").slice(0, 19) + " UTC";
     lines.push(`  gc last run:           ${lastStr} (${lastGcMarkerPath(root)})`);
@@ -10159,10 +10318,10 @@ async function buildDoctorReport(opts) {
   lines.push("## Supervision");
   lines.push(...supervisionLines(opts.supervision));
   {
-    const runsRoot2 = opts.runsRoot ?? join23(opts.homeDir ?? homedir8(), ".pi", "agent", "conductor", "runs");
+    const runsRoot2 = opts.runsRoot ?? join24(opts.homeDir ?? homedir8(), ".pi", "agent", "conductor", "runs");
     lines.push("");
     lines.push(`## Run records (under ${runsRoot2})`);
-    if (!existsSync16(runsRoot2)) {
+    if (!existsSync17(runsRoot2)) {
       lines.push("  (no run records)");
     } else {
       let inventory;
@@ -10347,7 +10506,7 @@ function isBinaryOnPath(command) {
   if ([":", "cd", "export", "unset", "set", "test", "[", "command", "eval", "exec", "exit", "read"].includes(bin)) return true;
   return (process.env.PATH ?? "").split(delimiter).some((dir) => {
     try {
-      accessSync(join23(dir, bin), constants5.X_OK);
+      accessSync(join24(dir, bin), constants5.X_OK);
       return true;
     } catch {
       return false;
@@ -10423,12 +10582,12 @@ function collapseWhitespace(s) {
 }
 
 // src/gc/pinning.ts
-import { existsSync as existsSync17 } from "node:fs";
+import { existsSync as existsSync18 } from "node:fs";
 import { stat as stat4, unlink, writeFile as writeFile3 } from "node:fs/promises";
-import { join as join24 } from "node:path";
+import { join as join25 } from "node:path";
 var SIDECAR = ".pinned";
 async function pinRun(runsRoot2, agentId) {
-  const dir = join24(runsRoot2, agentId);
+  const dir = join25(runsRoot2, agentId);
   let st;
   try {
     st = await stat4(dir);
@@ -10438,10 +10597,10 @@ async function pinRun(runsRoot2, agentId) {
   if (!st.isDirectory()) {
     throw new Error(`not a directory: ${dir}`);
   }
-  await writeFile3(join24(dir, SIDECAR), "");
+  await writeFile3(join25(dir, SIDECAR), "");
 }
 async function unpinRun(runsRoot2, agentId) {
-  const path2 = join24(runsRoot2, agentId, SIDECAR);
+  const path2 = join25(runsRoot2, agentId, SIDECAR);
   try {
     await unlink(path2);
   } catch (e) {
@@ -10451,19 +10610,19 @@ async function unpinRun(runsRoot2, agentId) {
   }
 }
 function isPinned(runsRoot2, agentId) {
-  return existsSync17(join24(runsRoot2, agentId, SIDECAR));
+  return existsSync18(join25(runsRoot2, agentId, SIDECAR));
 }
 
 // src/gc/reconcile.ts
 import { readFile as readFile4, writeFile as writeFile4 } from "node:fs/promises";
-import { join as join25 } from "node:path";
+import { join as join26 } from "node:path";
 async function reconcileOrphans(actions, runsRoot2, now) {
   const reconciled = [];
   const failed = [];
   for (const action of actions) {
     if (action.kind !== "reconcile-orphan") continue;
     const agentId = action.id;
-    const recordPath = join25(runsRoot2, agentId, "record.json");
+    const recordPath = join26(runsRoot2, agentId, "record.json");
     let raw;
     try {
       raw = await readFile4(recordPath, "utf-8");
@@ -10503,7 +10662,7 @@ async function reconcileOrphans(actions, runsRoot2, now) {
 
 // src/gc/executor.ts
 import { readFile as readFile5, rm, stat as stat5, unlink as unlink2, utimes, writeFile as writeFile5, readdir as readdir4 } from "node:fs/promises";
-import { join as join26 } from "node:path";
+import { join as join27 } from "node:path";
 import { readFileSync as readFileSync17 } from "node:fs";
 async function executeReclaim(actions, runsRoot2, registryActive, now, options = {}) {
   const archived = [];
@@ -10512,7 +10671,7 @@ async function executeReclaim(actions, runsRoot2, registryActive, now, options =
   for (const action of actions) {
     if (action.kind !== "cold-archive" && action.kind !== "delete") continue;
     const agentId = action.id;
-    const runDir2 = join26(runsRoot2, agentId);
+    const runDir2 = join27(runsRoot2, agentId);
     const actionKind = action.kind;
     const active = () => (typeof registryActive === "function" ? registryActive() : registryActive).has(agentId);
     if (active()) {
@@ -10523,7 +10682,7 @@ async function executeReclaim(actions, runsRoot2, registryActive, now, options =
       });
       continue;
     }
-    const recordPath = join26(runDir2, "record.json");
+    const recordPath = join27(runDir2, "record.json");
     let record;
     try {
       const raw = await readFile5(recordPath, "utf-8");
@@ -10616,7 +10775,7 @@ async function executeReclaim(actions, runsRoot2, registryActive, now, options =
   return { archived, deleted, failed };
 }
 async function coldArchive(runDir2, now, assertCurrent) {
-  const transcriptPath = join26(runDir2, "transcript.jsonl");
+  const transcriptPath = join27(runDir2, "transcript.jsonl");
   let bytes = 0;
   try {
     const s = await stat5(transcriptPath);
@@ -10633,7 +10792,7 @@ async function coldArchive(runDir2, now, assertCurrent) {
       bytes = 0;
     }
   }
-  const sidecarPath = join26(runDir2, ".archived");
+  const sidecarPath = join27(runDir2, ".archived");
   assertCurrent();
   await writeFile5(sidecarPath, "");
   const nowSec = now / 1e3;
@@ -10666,7 +10825,7 @@ async function walkSize(path2) {
   let total = 0;
   const entries = await readdir4(path2, { withFileTypes: true });
   for (const entry of entries) {
-    const child = join26(path2, entry.name);
+    const child = join27(path2, entry.name);
     if (entry.isDirectory()) {
       total += await walkSize(child);
     } else if (entry.isFile()) {
@@ -11126,33 +11285,33 @@ import { Type as Type2 } from "@sinclair/typebox";
 import { lstatSync as lstatSync7 } from "node:fs";
 
 // src/supervision/delivery.ts
-import { closeSync as closeSync8, existsSync as existsSync20, lstatSync as lstatSync6, readdirSync as readdirSync11, readSync as readSync6, watch as watch2 } from "node:fs";
+import { closeSync as closeSync8, existsSync as existsSync21, lstatSync as lstatSync6, readdirSync as readdirSync11, readSync as readSync6, watch as watch2 } from "node:fs";
 
 // src/supervision/inbox.ts
 import { createHash as createHash7, randomUUID as randomUUID9 } from "node:crypto";
-import { closeSync as closeSync6, existsSync as existsSync19, linkSync as linkSync3, lstatSync as lstatSync4, openSync as openSync6, readdirSync as readdirSync10, unlinkSync as unlinkSync3 } from "node:fs";
-import { isAbsolute as isAbsolute7, join as join29 } from "node:path";
+import { closeSync as closeSync6, existsSync as existsSync20, linkSync as linkSync3, lstatSync as lstatSync4, openSync as openSync6, readdirSync as readdirSync10, unlinkSync as unlinkSync3 } from "node:fs";
+import { isAbsolute as isAbsolute7, join as join30 } from "node:path";
 
 // src/supervision/lease.ts
 import { createHash as createHash6, randomUUID as randomUUID8 } from "node:crypto";
-import { existsSync as existsSync18, readdirSync as readdirSync9 } from "node:fs";
-import { join as join28 } from "node:path";
+import { existsSync as existsSync19, readdirSync as readdirSync9 } from "node:fs";
+import { join as join29 } from "node:path";
 
 // src/supervision/store.ts
 import { createHash as createHash5, randomUUID as randomUUID7 } from "node:crypto";
 import { linkSync as linkSync2, lstatSync as lstatSync3, mkdirSync as mkdirSync13, readdirSync as readdirSync8, renameSync as renameSync3, unlinkSync as unlinkSync2 } from "node:fs";
 import { homedir as homedir9 } from "node:os";
-import { dirname as dirname19, isAbsolute as isAbsolute6, join as join27 } from "node:path";
+import { dirname as dirname19, isAbsolute as isAbsolute6, join as join28 } from "node:path";
 var LEAD_RECORD_MAX_BYTES = 4096;
 var LEAD_RUNS_BRIEF_MAX = 24;
 var LEAD_SCAN_MAX = 1024;
 var PRESENTATION_MAX_BYTES = 256;
 var LEAD_FRESH_MS = 9e4;
 var LEAD_STALE_MS = 6e5;
-var supervisionRoot = () => join27(homedir9(), ".pi", "agent", "conductor", "supervision");
-var leadsDir = () => join27(supervisionRoot(), "leads");
+var supervisionRoot = () => join28(homedir9(), ".pi", "agent", "conductor", "supervision");
+var leadsDir = () => join28(supervisionRoot(), "leads");
 var fileName = (sessionId) => `${createHash5("sha256").update(sessionId).digest("hex")}.json`;
-var leadPath = (sessionId) => join27(leadsDir(), fileName(sessionId));
+var leadPath = (sessionId) => join28(leadsDir(), fileName(sessionId));
 var RECORD_FILE = /^[0-9a-f]{64}\.json$/;
 var TEMP_FILE = /^[0-9a-f]{64}\.json-[0-9a-f-]{36}\.(claim|tmp|sweep)$/;
 var KEYS = /* @__PURE__ */ new Set([
@@ -11305,7 +11464,7 @@ function scanLeads(options = {}) {
   const now = (options.now ?? Date.now)();
   const offLinux = (options.platform ?? process.platform) !== "linux";
   for (const name2 of names.sort()) {
-    const path2 = join27(dir, name2);
+    const path2 = join28(dir, name2);
     if (TEMP_FILE.test(name2)) {
       try {
         const stat6 = lstatSync3(path2);
@@ -11345,8 +11504,8 @@ function scanLeads(options = {}) {
 var LEASE_FILE_MAX_BYTES = 4096;
 var LEASE_ENTRIES_MAX = 4096;
 var KEYS2 = ["v", "socketPath", "sessionId", "sessionFile", "pid", "startTime", "epoch", "generation", "at"];
-var chiefRoot = () => join28(supervisionRoot(), "chief");
-var chiefLeaseDir = (socketPath) => join28(chiefRoot(), createHash6("sha256").update(socketPath).digest("hex"));
+var chiefRoot = () => join29(supervisionRoot(), "chief");
+var chiefLeaseDir = (socketPath) => join29(chiefRoot(), createHash6("sha256").update(socketPath).digest("hex"));
 var ensureLeaseDir = (socketPath, create) => ensurePrivateDirs([supervisionRoot(), chiefRoot(), chiefLeaseDir(socketPath)], create);
 var claimName = (generation) => `${String(generation).padStart(6, "0")}.json`;
 var invalid = () => new Error("invalid chief lease; preserved for inspection");
@@ -11376,7 +11535,7 @@ function readChiefLease(socketPath) {
   let holder;
   for (const [generation, name2] of claims.entries()) {
     if (name2 !== claimName(generation)) throw invalid();
-    const value = readFile6(join28(dir, name2));
+    const value = readFile6(join29(dir, name2));
     if (!validClaim(value, socketPath, generation)) throw invalid();
     holder = value;
   }
@@ -11384,7 +11543,7 @@ function readChiefLease(socketPath) {
   if (!holder) return { released: false };
   const marker = `${claimName(holder.generation)}.released`;
   if (!names.includes(marker)) return { holder, released: false };
-  const release = readFile6(join28(dir, marker));
+  const release = readFile6(join29(dir, marker));
   if (!validClaim(release, socketPath, holder.generation) || !sameClaim(release, holder)) throw invalid();
   return { holder, released: true };
 }
@@ -11407,7 +11566,7 @@ function claimChiefLease(socketPath, identity, options = {}) {
   }
   const claim = { v: 1, socketPath, ...identity, generation: previous.holder ? previous.holder.generation + 1 : 0, at: (options.now ?? Date.now)() };
   try {
-    publishJson(join28(dir, claimName(claim.generation)), claim, () => {
+    publishJson(join29(dir, claimName(claim.generation)), claim, () => {
       const current = readChiefLease(socketPath).holder;
       if (previous.holder ? !current || !sameClaim(current, previous.holder) : current !== void 0) throw new Error("chief lease changed while claiming; not claimed");
     }, 384);
@@ -11435,7 +11594,7 @@ function assertChiefLease(claim) {
   if (!lease.holder || !sameClaim(lease.holder, claim) || lease.released) throw new Error(`chief lease generation ${claim.generation} fenced: no longer this lead's`);
 }
 function releaseChiefLease(claim) {
-  publishJson(join28(chiefLeaseDir(claim.socketPath), `${claimName(claim.generation)}.released`), claim, () => assertChiefLease(claim), 384);
+  publishJson(join29(chiefLeaseDir(claim.socketPath), `${claimName(claim.generation)}.released`), claim, () => assertChiefLease(claim), 384);
 }
 var CHIEF_ROLE_ENTRY = "conductor-role";
 var STAFF_TOOL = "staff";
@@ -11530,7 +11689,7 @@ var ChiefRole = class {
       throw new Error(`chief not activated: this session could not record the chief role (${message(e)}); lease generation ${claim.generation} ${released2 ? "released" : "could not be released and frees when this pi exits"}`);
     }
     this.hold(claim);
-    const unflushed = !existsSync18(self.sessionFile);
+    const unflushed = !existsSync19(self.sessionFile);
     return `chief of this herdr socket (lease generation ${claim.generation}): \`staff\` is added from the next turn and every other tool is unchanged. The chief intent is on this session's branch for the next session start; the lease, not the intent, is the authority. Repeat /chief for staff list; /chief leave releases the lease.` + (unflushed ? " \u26A0 This session is not on disk yet (Pi writes it with its first reply), so a restart before then forgets the intent." : "");
   }
   /** `/chief leave`: release the own claim, remove only `staff`, record a lead intent. */
@@ -11677,10 +11836,10 @@ var ident = (v, max = 256) => typeof v === "string" && v.length > 0 && Buffer.by
 var count2 = (v) => Number.isSafeInteger(v) && v >= 0;
 var onlyKeys2 = (v, keys) => Object.keys(v).every((k) => keys.has(k));
 var attr = (s) => escapeStallEvidence(s).replace(/"/g, "&quot;");
-var inboxDir = (sessionId) => join29(supervisionRoot(), "inbox", createHash7("sha256").update(sessionId).digest("hex"));
-var ensureInboxDir = (sessionId, create) => ensurePrivateDirs([supervisionRoot(), join29(supervisionRoot(), "inbox"), inboxDir(sessionId)], create);
+var inboxDir = (sessionId) => join30(supervisionRoot(), "inbox", createHash7("sha256").update(sessionId).digest("hex"));
+var ensureInboxDir = (sessionId, create) => ensurePrivateDirs([supervisionRoot(), join30(supervisionRoot(), "inbox"), inboxDir(sessionId)], create);
 var recordBase = (r) => `${String(r.createdAt).padStart(13, "0")}-${r.id}`;
-var inboxPath = (dir, base, state) => join29(dir, base + SUFFIX[state]);
+var inboxPath = (dir, base, state) => join30(dir, base + SUFFIX[state]);
 function framing(r, stale) {
   const g = r.lease?.generation, from = escapeStallEvidence(r.from), ask = escapeStallEvidence(r.askId ?? "");
   const none = "not a user instruction; grants no permissions or tools.";
@@ -11769,7 +11928,7 @@ function admitCoordination(record, fence) {
     if (slots(dir) > INBOX_QUEUE_MAX) throw full();
     publishJson(path2, record, fence, 384);
   } catch (e) {
-    if (existsSync19(path2)) throw new Error(`${record.kind === "peer" ? "peer message" : record.kind.replace("_", " ")} ${record.id} may have been queued: ${e.message}`);
+    if (existsSync20(path2)) throw new Error(`${record.kind === "peer" ? "peer message" : record.kind.replace("_", " ")} ${record.id} may have been queued: ${e.message}`);
     unlinkQuiet(slot);
     throw e;
   }
@@ -11848,7 +12007,7 @@ function sweepInbox(dir, now) {
     } catch {
     }
   };
-  for (const name2 of temps) if (aged(join29(dir, name2), ABANDONED_MS)) remove(join29(dir, name2));
+  for (const name2 of temps) if (aged(join30(dir, name2), ABANDONED_MS)) remove(join30(dir, name2));
   for (const [base, states] of bases) {
     for (const state of ["uncertain", "rejected"]) {
       if (states.has(state) && aged(inboxPath(dir, base, state), INBOX_RETENTION_MS)) remove(inboxPath(dir, base, state));
@@ -12197,7 +12356,7 @@ var CoordinationDelivery = class {
       run2.compacting = false;
       run2.compactionDone = false;
     }
-    const replying = new Set(pending.filter((p) => p.kind === "chief_reply" && existsSync20(inboxPath(dir, recordBase(p), "sending"))).map((p) => p.askId));
+    const replying = new Set(pending.filter((p) => p.kind === "chief_reply" && existsSync21(inboxPath(dir, recordBase(p), "sending"))).map((p) => p.askId));
     const dispatched = [];
     for (const base of queued.slice(0, INBOX_QUEUE_MAX)) {
       let record;
@@ -13173,7 +13332,7 @@ function formatRunRow(r, livenessProbe = defaultLivenessProbe) {
 }
 function runHistory(_opts, ctx, arg) {
   const root = runsRoot();
-  if (!existsSync21(root)) {
+  if (!existsSync22(root)) {
     ctx.ui.notify(
       "no run history yet. Spawn a sub-agent and it'll show up here.",
       "info"
@@ -13192,7 +13351,7 @@ function runHistory(_opts, ctx, arg) {
         }
       },
       readRecord: (id) => {
-        const p = join30(runDir(id), "record.json");
+        const p = join31(runDir(id), "record.json");
         try {
           return JSON.parse(readFileSync18(p, "utf8"));
         } catch {
@@ -13200,7 +13359,7 @@ function runHistory(_opts, ctx, arg) {
         }
       },
       readFinalText: (id) => {
-        const p = join30(runDir(id), "final.md");
+        const p = join31(runDir(id), "final.md");
         try {
           return readFileSync18(p, "utf8");
         } catch {
@@ -13209,7 +13368,7 @@ function runHistory(_opts, ctx, arg) {
       },
       statMtime: (id) => {
         try {
-          return statSync6(join30(runDir(id), "record.json")).mtimeMs;
+          return statSync6(join31(runDir(id), "record.json")).mtimeMs;
         } catch {
           try {
             return statSync6(runDir(id)).mtimeMs;
@@ -13218,8 +13377,8 @@ function runHistory(_opts, ctx, arg) {
           }
         }
       },
-      isPinned: (id) => existsSync21(join30(runDir(id), ".pinned")),
-      isArchived: (id) => existsSync21(join30(runDir(id), ".archived"))
+      isPinned: (id) => existsSync22(join31(runDir(id), ".pinned")),
+      isArchived: (id) => existsSync22(join31(runDir(id), ".archived"))
     },
     { limit }
   );
@@ -13237,7 +13396,7 @@ async function runPin(ctx, arg) {
     return;
   }
   const root = runsRoot();
-  if (!existsSync21(join30(root, id))) {
+  if (!existsSync22(join31(root, id))) {
     ctx.ui.notify(`No such run: ${id}`, "warning");
     return;
   }
@@ -13263,7 +13422,7 @@ async function runUnpin(ctx, arg) {
     return;
   }
   const root = runsRoot();
-  if (!existsSync21(join30(root, id))) {
+  if (!existsSync22(join31(root, id))) {
     ctx.ui.notify(`No such run: ${id}`, "warning");
     return;
   }
@@ -13533,6 +13692,11 @@ function buildWatchdogStatusReport(args) {
   }
   return lines.join("\n");
 }
+function withTip(effort) {
+  const tip = effortGit(effort.gitRoot, "rev-parse", "--verify", `${effort.intRef}^{commit}`);
+  const finalizer = finalizerStatus(effort, tip);
+  return { tip, ...finalizer ? { finalizer } : {} };
+}
 async function runEffortCmd(opts, ctx, args) {
   try {
     const fields = /^(\S+)(?:\s+(\S+))?(?:\s+([\s\S]*))?$/.exec(args.trim());
@@ -13573,7 +13737,7 @@ Required repository hooks and effort verification remain active.` : "Rerun the o
     const records2 = action === "list" ? listEfforts(gitRoot2) : [readEffort(gitRoot2, name2)];
     if (records2.some((r) => !r)) throw new Error("effort not found");
     ctx.ui.notify(`${EFFORT_NOTICE}
-${JSON.stringify(records2.map((effort) => ({ effort, tip: effortGit(effort.gitRoot, "rev-parse", "--verify", `${effort.intRef}^{commit}`), members: opts.getRegistry().list().filter((r) => r.effort?.gitRoot === gitRoot2 && r.effort.name === effort.name).map((r) => ({ id: r.id, status: r.status, integration: r.integration, error: r.errorMessage, human_resolution: humanResolution(r) })) })), null, 2)}`, "info");
+${JSON.stringify(records2.map((effort) => ({ effort, ...withTip(effort), members: opts.getRegistry().list().filter((r) => r.effort?.gitRoot === gitRoot2 && r.effort.name === effort.name).map((r) => ({ id: r.id, role: r.effort.role, status: r.status, integration: r.integration, error: r.errorMessage, human_resolution: humanResolution(r) })) })), null, 2)}`, "info");
   } catch (error) {
     ctx.ui.notify(error.message, "error");
   }
@@ -13726,13 +13890,15 @@ Resolve manually in the worktree and run /conductor worktree merge ${runId} agai
 
 // src/tools.ts
 import { Type as Type4 } from "@sinclair/typebox";
-import { readFileSync as readFileSync21, existsSync as existsSync24 } from "node:fs";
+import { readFileSync as readFileSync21, existsSync as existsSync25 } from "node:fs";
 import { dirname as dirname22 } from "node:path";
 
 // src/chain.ts
-import { readFileSync as readFileSync19, existsSync as existsSync22 } from "node:fs";
+import { readFileSync as readFileSync19, existsSync as existsSync23 } from "node:fs";
 var DEFAULT_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nOriginal task:\n{task}\n\n---\nFinal output:\n{final}";
 var WORKTREE_CHAIN_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nThe work is on branch `{worktreeBranch}` (not yet merged to `{baseBranch}`).\nRun the following to inspect the changes:\n\n```bash\ngit diff {baseBranch}...{worktreeBranch}\n```\n\nOriginal task:\n{task}";
+var EFFORT_CHAIN_TEMPLATE = "Review the preceding {persona} run ({runId}) in effort {effort}.\n\nIts work was integrated into the effort tip as {landedCommit}. Your workspace starts from the effort tip at your own launch, named in your workspace notes; if that is not {landedCommit}, later integrations landed after it.\nInspect the integrated change with:\n\n```bash\ngit show {landedCommit}\n```\n\nOriginal task:\n{task}\n\n---\nFinal output:\n{final}";
+var EFFORT_READER_CHAIN_TEMPLATE = "Follow up on the preceding {persona} review ({runId}) in effort {effort}.\n\nThat run was a reader: it integrated nothing (landed commit: {landedCommit}). It reviewed the effort tip {reviewedCommit} in a detached view. Your workspace starts from the effort tip at your own launch, named in your workspace notes; if that is not {reviewedCommit}, the tip moved after its review.\n\nOriginal task:\n{task}\n\n---\nIts final output:\n{final}";
 var FINAL_PLACEHOLDER = "(no final output)";
 function resolveChain(personaName, chains) {
   if (!chains) return void 0;
@@ -13744,19 +13910,21 @@ function buildChainTask(taskTemplate, context) {
   let template;
   if (taskTemplate !== void 0) {
     template = taskTemplate;
+  } else if (context.effort) {
+    template = context.effort.role === "reader" ? EFFORT_READER_CHAIN_TEMPLATE : EFFORT_CHAIN_TEMPLATE;
   } else if (context.mergeStrategy === "none" && context.worktreeBranch) {
     template = WORKTREE_CHAIN_TEMPLATE;
   } else {
     template = DEFAULT_TEMPLATE;
   }
   let finalContent = FINAL_PLACEHOLDER;
-  if (existsSync22(context.finalPath)) {
+  if (existsSync23(context.finalPath)) {
     try {
       finalContent = readFileSync19(context.finalPath, "utf-8");
     } catch {
     }
   }
-  return template.replace(/\{persona\}/g, context.persona).replace(/\{runId\}/g, context.runId).replace(/\{task\}/g, context.task).replace(/\{final\}/g, finalContent).replace(/\{worktreeBranch\}/g, context.worktreeBranch ?? "").replace(/\{baseBranch\}/g, context.baseBranch ?? "");
+  return template.replace(/\{persona\}/g, context.persona).replace(/\{runId\}/g, context.runId).replace(/\{task\}/g, context.task).replace(/\{final\}/g, finalContent).replace(/\{worktreeBranch\}/g, context.worktreeBranch ?? "").replace(/\{baseBranch\}/g, context.baseBranch ?? "").replace(/\{effort\}/g, context.effort?.name ?? "").replace(/\{landedCommit\}/g, context.effort?.landedCommit ?? "none").replace(/\{reviewedCommit\}/g, context.effort?.reviewedCommit ?? "none");
 }
 var STOP_SIGNALS = [
   /chain: stop/i,
@@ -14200,7 +14368,7 @@ var LeadPresence = class {
 };
 
 // src/delegate-tool.ts
-import { existsSync as existsSync23, mkdirSync as mkdirSync14, readFileSync as readFileSync20, watch as watch3 } from "node:fs";
+import { existsSync as existsSync24, mkdirSync as mkdirSync14, readFileSync as readFileSync20, watch as watch3 } from "node:fs";
 import { dirname as dirname21 } from "node:path";
 import { Type as Type3 } from "@sinclair/typebox";
 var NAME = /^[A-Za-z0-9_.:-]+$/;
@@ -14232,7 +14400,7 @@ function registerDelegate(pi, env) {
       if (!parsed.ok) throw new Error(`delegate rejected: ${parsed.reason}`);
       if (signal?.aborted) throw new Error("delegate aborted");
       const paths = delegatePaths(runDir2, toolCallId);
-      if (existsSync23(paths.claim) || existsSync23(paths.response)) throw new Error(`delegate rejected: call id ${toolCallId} was already used in this run`);
+      if (existsSync24(paths.claim) || existsSync24(paths.response)) throw new Error(`delegate rejected: call id ${toolCallId} was already used in this run`);
       const startedAt = Date.now();
       onUpdate?.({ content: [{ type: "text", text: `delegating to ${parsed.args.persona}; waiting for the lead` }], details: {} });
       let personaTimeoutMs;
@@ -14275,7 +14443,7 @@ function waitForDelegateResponse(path2, expect, deadlineAt, signal) {
       else resolve7(value);
     };
     const check = () => {
-      if (settled || !existsSync23(path2)) return;
+      if (settled || !existsSync24(path2)) return;
       let value;
       try {
         value = JSON.parse(readFileSync20(path2, "utf8"));
@@ -14881,9 +15049,11 @@ function registerEffortTool(pi, opts) {
         }) : readEffort(effortRepository(cwd).gitRoot, params.effort);
         if (!effort) throw new Error("effort not found");
         const tip = effortGit(effort.gitRoot, "rev-parse", "--verify", `${effort.intRef}^{commit}`);
+        const finalizer = finalizerStatus(effort, tip);
         return { content: [{ type: "text", text: `${EFFORT_NOTICE}
 ${!effort.baseline ? "Baseline not verified yet; gated on first integration." : effort.baseline.disabled ? "Effort verify disabled; repository hooks still required." : "Baseline result recorded."}
-${JSON.stringify({ effort, tip }, null, 2)}` }], details: { effort, tip } };
+${finalizer ? `${finalizer.summary}
+` : ""}${JSON.stringify({ effort, tip, ...finalizer ? { finalizer } : {} }, null, 2)}` }], details: { effort, tip, finalizer } };
       } catch (e) {
         return errorResult(`${e.message}. ${EFFORT_NOTICE}`);
       }
@@ -15226,8 +15396,8 @@ function registerSpawnTool(pi, opts, env) {
     ],
     parameters: Type4.Object({
       runtime: runtimeSchema,
-      effort: Type4.Optional(Type4.String({ description: `Named effort; auto-opens from config on first use. Always background with mandatory writer isolation. ${EFFORT_NOTICE}` })),
-      touches: Type4.Optional(Type4.Array(Type4.String(), { description: "Effort writer repo-relative globs (literal, * or **). Omitted scope is undeclared; concurrency is not relaxed in M1." })),
+      effort: Type4.Optional(Type4.String({ description: `Named effort; auto-opens from config on first use. Always background: a writer gets a mandatory isolated worktree, a read_only persona a detached reader view of the tip. ${EFFORT_NOTICE}` })),
+      touches: Type4.Optional(Type4.Array(Type4.String(), { description: "Effort writer repo-relative globs (literal, * or **); refused for read_only readers. Omitted scope is universal and runs serially." })),
       persona: Type4.String({
         description: "Persona name. Run ensemble_list to see what's available."
       }),
@@ -15348,7 +15518,7 @@ ${params.foreground !== false ? "Foreground effort spawn downgraded to backgroun
         return errorResult(e.message);
       }
       try {
-        prepareSpawnEffort({ persona, cwd, effort: params.effort, touches: params.touches, parentSessionId: opts.getSessionId?.() });
+        prepareSpawnEffort({ persona, cwd, effort: params.effort, touches: params.touches, parentSessionId: opts.getSessionId?.(), runtime, onCompleteHook: params.on_complete_hook });
       } catch (e) {
         return errorResult(`${e.message}. ${EFFORT_NOTICE}`);
       }
@@ -15407,7 +15577,7 @@ ${params.foreground !== false ? "Foreground effort spawn downgraded to backgroun
         // Chain-spawned runs also don't receive onChain (no chain-of-chains).
         onChain: buildOnChainCallback({
           runtimeEnv: env,
-          chainEnabled: params.chain !== false && params.effort === void 0,
+          chainEnabled: params.chain !== false,
           personaName: persona.name,
           cfg,
           queue,
@@ -15422,7 +15592,7 @@ ${params.foreground !== false ? "Foreground effort spawn downgraded to backgroun
         // callback. Undefined per-call falls through the cascade to
         // config/persona/built-in (default maxAttempts 1 = no retry).
         retryMaxAttempts: params.retry_max_attempts,
-        onRetry: params.effort === void 0 ? buildOnRetryCallback({
+        onRetry: buildOnRetryCallback({
           originalTask: task,
           persona,
           cfg,
@@ -15434,7 +15604,7 @@ ${params.foreground !== false ? "Foreground effort spawn downgraded to backgroun
           getParentMessages: opts.getParentMessages,
           getSessionId: opts.getSessionId,
           events: opts.getEvents?.()
-        }) : void 0,
+        }),
         // v0.16 event bus: thread the adapter so emit sites in spawnRun/finalize fire.
         events: opts.getEvents?.()
       });
@@ -16192,14 +16362,15 @@ function buildOnChainCallback(args) {
   const step = resolveChain(args.personaName, args.cfg.chains);
   if (!step) return void 0;
   return async (parentRun) => {
-    if (parentRun.effort) return;
+    if (effortChainRefusal(parentRun)) return;
+    const effort = parentRun.effort;
     const chainCwd = parentRun.cwd;
     const chainCfg = loadConfig(chainCwd);
     let targetPersonaName = step.then;
     let overrideTask;
     if (step.reevaluate) {
       let parentFinal = "";
-      if (existsSync24(parentRun.finalPath)) {
+      if (existsSync25(parentRun.finalPath)) {
         try {
           parentFinal = readFileSync21(parentRun.finalPath, "utf-8");
         } catch {
@@ -16241,7 +16412,13 @@ function buildOnChainCallback(args) {
       finalPath: parentRun.finalPath,
       worktreeBranch: parentRun.worktreeBranch,
       baseBranch: parentRun.worktreeBaseBranch,
-      mergeStrategy: parentRun.mergeStrategy
+      mergeStrategy: parentRun.mergeStrategy,
+      effort: effort && {
+        name: effort.name,
+        role: effort.role,
+        landedCommit: effort.role === "writer" ? parentRun.landedCommit : void 0,
+        reviewedCommit: effort.role === "reader" ? effort.reviewed : void 0
+      }
     });
     const baseOv = chainCfg.personaOverrides[chainPersona.name] ?? {};
     const chainTimeoutMs = step.timeoutMinutes ? step.timeoutMinutes * 60 * 1e3 : resolveTimeoutMs(chainPersona, baseOv, chainCfg);
@@ -16278,14 +16455,20 @@ function buildOnChainCallback(args) {
       mergeStrategy: resolveSpawnMergeStrategy(chainCfg, chainPersona),
       onComplete: (run2) => args.pushNotification(run2),
       // no onChain: depth-1 cap (chain-spawned runs do not chain further)
-      events: args.events
+      events: args.events,
+      ...effort ? { effort: effort.name } : {}
     };
     const refusal = chainPersona.name === MERGER_PERSONA ? `chain: the ${MERGER_PERSONA} persona is driver-owned and never a chain successor of ${parentRun.id}` : WRITE_CAPABLE_PERSONAS.has(chainPersona.name) ? keptParentRefusal(parentRun, chainPersona.name) : void 0;
     if (refusal) {
       failBeforeSpawn({ ...spawn2, registry: args.registry }, refusal);
       return;
     }
-    args.queue.enqueueOrSpawn(spawn2);
+    try {
+      args.queue.enqueueOrSpawn(spawn2);
+    } catch (e) {
+      if (!effort) throw e;
+      failBeforeSpawn({ ...spawn2, registry: args.registry }, `chain: ${chainPersona.name} not started after ${parentRun.id}: ${e.message}`);
+    }
   };
 }
 function keptParentRefusal(parent, successor) {
@@ -16298,7 +16481,9 @@ function keptParentRefusal(parent, successor) {
 }
 function buildOnRetryCallback(args) {
   const self = (failedRun) => {
-    if (failedRun.effort || failedRun.mergerFor || args.persona.name === MERGER_PERSONA) return;
+    if (failedRun.mergerFor || args.persona.name === MERGER_PERSONA || effortRetryRefusal(failedRun)) return;
+    const effort = failedRun.effort;
+    if (effort && effortRole(args.persona) !== effort.role) return;
     const failedAttempt = failedRun.retryAttempt ?? 0;
     const maxAttempts = failedRun.retryPolicy?.maxAttempts ?? 1;
     const ov = args.cfg.personaOverrides[args.persona.name] ?? {};
@@ -16309,7 +16494,7 @@ function buildOnRetryCallback(args) {
       maxAttempts,
       errorMessage: failedRun.errorMessage
     });
-    args.queue.enqueueOrSpawn({
+    const spawn2 = {
       persona: args.persona,
       runtime: failedRun.runtime === void 0 ? "subprocess" : failedRun.runtime,
       task,
@@ -16329,15 +16514,28 @@ function buildOnRetryCallback(args) {
       retryMaxAttempts: args.retryMaxAttempts,
       onRetry: self,
       onComplete: (run2) => args.pushNotification(run2),
-      events: args.events
-    });
+      events: args.events,
+      // Same effort and scope from the current tip; a writer replaces only its own earlier attempts' reservations.
+      ...effort ? {
+        effort: effort.name,
+        touches: effort.touches ? [...effort.touches] : void 0,
+        retryOf: effort.role === "writer" ? [...effort.retryOf ?? [], failedRun.id] : void 0
+      } : {}
+    };
+    try {
+      args.queue.enqueueOrSpawn(spawn2);
+    } catch (e) {
+      if (!effort) throw e;
+      process.stderr.write(`[conductor] retry of ${failedRun.id} refused inside effort ${effort.name}: ${e.message}
+`);
+    }
   };
   return self;
 }
 
 // src/queue.ts
 import { mkdirSync as mkdirSync15 } from "node:fs";
-import { join as join31 } from "node:path";
+import { join as join32 } from "node:path";
 var SpawnQueue = class {
   constructor(registry, maxConcurrent, maxConcurrentWriteCapable = 1, spawn2 = spawnRun) {
     this.registry = registry;
@@ -16409,15 +16607,15 @@ var SpawnQueue = class {
       waitReason,
       ...effort ? { parentPid: effort.owner.pid, parentStartTime: effort.owner.startTime, parentSessionId: effort.owner.sessionId } : {},
       ...opts.mergerFor ? { mergerFor: opts.mergerFor, parentPid: process.pid, parentSessionId: opts.parentSessionId } : {},
-      effort: effort ? { owner: effort.owner, name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches ? [...opts.touches] : void 0 } : void 0,
+      effort: effort ? effortAssignment(effort, opts) : void 0,
       startTime: Date.now(),
       lastEventAt: Date.now(),
       messages: [],
       usage: emptyUsage(),
       cwd: opts.cwd,
-      recordPath: join31(dir, "record.json"),
-      transcriptPath: join31(dir, "transcript.jsonl"),
-      finalPath: join31(dir, "final.md")
+      recordPath: join32(dir, "record.json"),
+      transcriptPath: join32(dir, "transcript.jsonl"),
+      finalPath: join32(dir, "final.md")
     };
     registry.register(placeholder);
     if (effort) void writeRecord(placeholder);
@@ -16469,7 +16667,7 @@ var SpawnQueue = class {
     }
     const preceding = new Set(this.pending.slice(0, id ? this.pending.findIndex((p) => p.id === id) : void 0).map((p) => p.id));
     const waitingBehind = new Set(members.filter((r) => r.status === "queued" && !preceding.has(r.id)).map((r) => r.id));
-    return admitEffortWriter({ id, persona: opts.persona.name, effort: effort ? { owner: effort.owner, name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches } : void 0 }, members, { maxConcurrent: this.maxConcurrent, maxConcurrentWriteCapable: this.maxConcurrentWriteCapable }, effort, effort ? listEfforts(effort.gitRoot) : [], waitingBehind);
+    return admitEffortWriter({ id, persona: opts.persona.name, effort: effort ? effortAssignment(effort, opts) : void 0 }, members, { maxConcurrent: this.maxConcurrent, maxConcurrentWriteCapable: this.maxConcurrentWriteCapable }, effort, effort ? listEfforts(effort.gitRoot) : [], waitingBehind);
   }
   /** Revalidation and synchronous running registration precede any asynchronous launch effects. */
   drain() {
@@ -16521,8 +16719,8 @@ function mapFromRegistry2(r) {
 }
 
 // src/delegation-broker.ts
-import { existsSync as existsSync25, readFileSync as readFileSync22, readdirSync as readdirSync13 } from "node:fs";
-import { dirname as dirname23, join as join32 } from "node:path";
+import { existsSync as existsSync26, readFileSync as readFileSync22, readdirSync as readdirSync13 } from "node:fs";
+import { dirname as dirname23, join as join33 } from "node:path";
 var LEAF_OUTCOME_UNCERTAIN = "leaf outcome uncertain after lead restart; not replayed";
 var HERDR_RELOAD_CANCELLED = "lead /reload stopped a leaf it could not hand over (queued, launching or subprocess); delegate again";
 var DelegationBroker = class {
@@ -16577,7 +16775,7 @@ var DelegationBroker = class {
     if (!d) return;
     this.deferred.delete(key);
     if (!this.current(d.parent) || d.parent.herdrOwnership !== d.ownership || d.parent.herdr?.launchNonce !== d.nonce || !brokerable(d.parent)) return;
-    if (d.ended && !existsSync25(delegatePaths(dirname23(d.parent.recordPath), d.id).claim)) return;
+    if (d.ended && !existsSync26(delegatePaths(dirname23(d.parent.recordPath), d.id).claim)) return;
     this.claim(d.parent, d.id, key, d.args, d.cwd, d.ended);
   }
   /** Synchronous, before any await: exclusive claim, then count and notify, so a duplicate never spawns twice. */
@@ -16633,7 +16831,7 @@ var DelegationBroker = class {
    */
   rebind(parent, id, key, ended) {
     const paths = delegatePaths(dirname23(parent.recordPath), id);
-    if (existsSync25(paths.response)) return;
+    if (existsSync26(paths.response)) return;
     let claim;
     try {
       claim = read(paths.claim);
@@ -16858,7 +17056,7 @@ function durableLeaves(lineage) {
   }
   return names.flatMap((name2) => {
     try {
-      const record = JSON.parse(readFileSync22(join32(root, name2, "record.json"), "utf8"));
+      const record = JSON.parse(readFileSync22(join33(root, name2, "record.json"), "utf8"));
       return record.id === name2 && lineage(record) ? [record] : [];
     } catch {
       return [];
@@ -17506,8 +17704,8 @@ If your reason isn't on this list, default back to the canonical chain. "I think
 }
 
 // src/child-bridge.ts
-import { closeSync as closeSync9, constants as constants7, fstatSync as fstatSync6, lstatSync as lstatSync8, mkdirSync as mkdirSync16, openSync as openSync8, readFileSync as readFileSync23, realpathSync as realpathSync10, writeSync as writeSync2 } from "node:fs";
-import { basename as basename4, dirname as dirname24, isAbsolute as isAbsolute8, join as join33, resolve as resolve6 } from "node:path";
+import { closeSync as closeSync9, constants as constants7, fstatSync as fstatSync6, lstatSync as lstatSync8, mkdirSync as mkdirSync16, openSync as openSync8, readFileSync as readFileSync23, realpathSync as realpathSync11, writeSync as writeSync2 } from "node:fs";
+import { basename as basename4, dirname as dirname24, isAbsolute as isAbsolute8, join as join34, resolve as resolve6 } from "node:path";
 
 // package.json
 var package_default = {
@@ -17815,8 +18013,8 @@ function installChildBridge(pi, options = {}) {
     try {
       const runId = env.CONDUCTOR_RUN_ID, runDir3 = env.CONDUCTOR_RUN_DIR;
       const sessionId = ctx.sessionManager.getSessionId(), sessionFile = ctx.sessionManager.getSessionFile();
-      if (!token2(nonce) || !token2(runId) || !path(runDir3) || basename4(runDir3) !== runId || realpathSync10(runDir3) !== runDir3 || !token2(sessionId) || !path(sessionFile) || dirname24(sessionFile) !== join33(runDir3, "session") || realpathSync10(dirname24(sessionFile)) !== dirname24(sessionFile)) throw new Error("invalid invocation paths or identity");
-      const record = readJson(join33(runDir3, "record.json"));
+      if (!token2(nonce) || !token2(runId) || !path(runDir3) || basename4(runDir3) !== runId || realpathSync11(runDir3) !== runDir3 || !token2(sessionId) || !path(sessionFile) || dirname24(sessionFile) !== join34(runDir3, "session") || realpathSync11(dirname24(sessionFile)) !== dirname24(sessionFile)) throw new Error("invalid invocation paths or identity");
+      const record = readJson(join34(runDir3, "record.json"));
       const b = isRecord(record) && record.herdr;
       if (!isRecord(record) || record.id !== runId || record.runtime !== "herdr" || !isRecord(b) || b.runId !== runId || b.launchNonce !== nonce || b.sessionId !== sessionId || b.sessionFile !== sessionFile || env.HERDR_ENV !== "1" || !path(b.socketPath) || b.socketPath !== env.HERDR_SOCKET_PATH || !text4(b.paneId) || b.paneId !== env.HERDR_PANE_ID || !text4(b.tabId) || b.tabId !== env.HERDR_TAB_ID || !text4(b.workspaceId) || b.workspaceId !== env.HERDR_WORKSPACE_ID || !text4(b.terminalId) || typeof b.createdTab !== "boolean") throw new Error("run binding mismatch");
       try {
@@ -17845,10 +18043,10 @@ function installChildBridge(pi, options = {}) {
         at: Date.now()
       };
       if (processState[faultKey]?.has(faultIdentity(expected))) throw new Error("invocation tee previously failed; reload cannot resume it; preserve evidence for the parent");
-      const launchDir = join33(runDir3, "launch");
+      const launchDir = join34(runDir3, "launch");
       mkdirSync16(launchDir, { recursive: true });
-      if (realpathSync10(launchDir) !== launchDir) throw new Error("invalid launch directory");
-      const claim = join33(launchDir, `${nonce}.json`);
+      if (realpathSync11(launchDir) !== launchDir) throw new Error("invalid launch directory");
+      const claim = join34(launchDir, `${nonce}.json`);
       let reload = false;
       try {
         exclusive(claim, expected);
@@ -17859,7 +18057,7 @@ function installChildBridge(pi, options = {}) {
         expected.at = prior.at;
         reload = true;
       }
-      statePath = join33(launchDir, nonce);
+      statePath = join34(launchDir, nonce);
       accepted = statePresent(`${statePath}.accepted.json`, expected) || readInbox(runDir3, nonce).some(({ request }) => (request.kind === "initial" || request.kind === "reply") && readInboxAck(runDir3, request)?.accepted === true);
       closing = statePresent(`${statePath}.closing.json`, expected);
       if (closing && !accepted) throw new Error("closing without initial acceptance");
@@ -17873,7 +18071,7 @@ function installChildBridge(pi, options = {}) {
       phase.signal = signal;
       phase.owner = phaseOwner;
       phases.set(runDir3, phase);
-      fd = openSync8(join33(runDir3, "transcript.jsonl"), constants7.O_APPEND | constants7.O_CREAT | constants7.O_WRONLY | constants7.O_NOFOLLOW, 384);
+      fd = openSync8(join34(runDir3, "transcript.jsonl"), constants7.O_APPEND | constants7.O_CREAT | constants7.O_WRONLY | constants7.O_NOFOLLOW, 384);
       if (!fstatSync6(fd).isFile() || fstatSync6(fd).nlink !== 1) throw new Error("invalid transcript file");
       if (!reload) write({ type: "conductor_child", event: "launch", ...hello });
       timer = setInterval(pump, 250);
@@ -19105,7 +19303,7 @@ var ConductorEventEmitter = class {
 };
 
 // src/rpc-detach.ts
-import { existsSync as existsSync26, unlinkSync as unlinkSync4 } from "node:fs";
+import { existsSync as existsSync27, unlinkSync as unlinkSync4 } from "node:fs";
 function createRpcDetach(filePath, intervalMs = 200) {
   let resolveDetach = () => {
   };
@@ -19113,7 +19311,7 @@ function createRpcDetach(filePath, intervalMs = 200) {
     resolveDetach = res;
   });
   const pollTimer = setInterval(() => {
-    if (existsSync26(filePath)) {
+    if (existsSync27(filePath)) {
       try {
         unlinkSync4(filePath);
       } catch {
@@ -19125,7 +19323,7 @@ function createRpcDetach(filePath, intervalMs = 200) {
   const unregister = () => {
     clearInterval(pollTimer);
     try {
-      if (existsSync26(filePath)) unlinkSync4(filePath);
+      if (existsSync27(filePath)) unlinkSync4(filePath);
     } catch {
     }
   };

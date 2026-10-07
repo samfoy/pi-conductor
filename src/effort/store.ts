@@ -23,6 +23,8 @@ export interface EffortRecord {
   pausedRun?: string;
   gatedTip?: string;
   baseline?: { oid: string; result?: import("../types.ts").HookResult; disabled?: boolean };
+  /** M7: evidence for exactly `tip`, the OID a live clean finalizer viewed; stale once the tip moves. */
+  finalizer?: { runId: string; tip: string; verdict: import("../types.ts").FinalizerVerdict; at: number };
   createdAt: number;
   updatedAt: number;
 }

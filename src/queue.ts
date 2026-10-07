@@ -24,6 +24,7 @@ import {
 } from "./runs.ts";
 import { addEffortMember, listEfforts, readEffort, type EffortRecord } from "./effort/store.ts";
 import { admitEffortWriter } from "./effort/admit.ts";
+import { effortAssignment } from "./effort/reader.ts";
 import { awaitingChildren, delegationLoad } from "./delegation.ts";
 import type { Run, SpawnMode } from "./types.ts";
 import { emptyUsage } from "./types.ts";
@@ -138,7 +139,7 @@ export class SpawnQueue {
       waitReason,
       ...(effort ? { parentPid: effort.owner.pid, parentStartTime: effort.owner.startTime, parentSessionId: effort.owner.sessionId } : {}),
       ...(opts.mergerFor ? { mergerFor: opts.mergerFor, parentPid: process.pid, parentSessionId: opts.parentSessionId } : {}),
-      effort: effort ? { owner: effort.owner, name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches ? [...opts.touches] : undefined } : undefined,
+      effort: effort ? effortAssignment(effort, opts) : undefined,
       startTime: Date.now(),
       lastEventAt: Date.now(),
       messages: [],
@@ -206,7 +207,7 @@ export class SpawnQueue {
     // Earlier waiters reserve scope, not slots; independent work may pass them.
     const preceding = new Set(this.pending.slice(0, id ? this.pending.findIndex(p => p.id === id) : undefined).map(p => p.id));
     const waitingBehind = new Set(members.filter(r => r.status === "queued" && !preceding.has(r.id)).map(r => r.id));
-    return admitEffortWriter({ id, persona: opts.persona.name, effort: effort ? { owner: effort.owner, name: effort.name, gitRoot: effort.gitRoot, role: "writer", touches: opts.touches } : undefined }, members, { maxConcurrent: this.maxConcurrent, maxConcurrentWriteCapable: this.maxConcurrentWriteCapable }, effort, effort ? listEfforts(effort.gitRoot) : [], waitingBehind);
+    return admitEffortWriter({ id, persona: opts.persona.name, effort: effort ? effortAssignment(effort, opts) : undefined }, members, { maxConcurrent: this.maxConcurrent, maxConcurrentWriteCapable: this.maxConcurrentWriteCapable }, effort, effort ? listEfforts(effort.gitRoot) : [], waitingBehind);
   }
 
   /** Revalidation and synchronous running registration precede any asynchronous launch effects. */

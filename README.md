@@ -505,7 +505,7 @@ settlement. Prompt rejection is a failed run, not completion. As with explicit
 RPC, extension dialogs are auto-cancelled; provider extensions remain enabled.
 This does not address independently oversized persona/system-prompt argv.
 
-## Named efforts (M5 — fenced crash recovery, verified integration; M6a — automatic merger; M6b — human-confirmed resolve)
+## Named efforts (M5 — fenced crash recovery, verified integration; M6a — automatic merger; M6b — human-confirmed resolve; M7 — readers, owned chains/retries, OID-pinned finalizer verdicts)
 
 `ensemble_effort({action:"open", effort:"feature", verify:"npm test"})` captures
 an attached base branch and commit from the conductor's requested checkout and
@@ -686,6 +686,89 @@ acceptance and rollout; attribute-based marker evasion; `stepCost` under `ensemb
 recovered herdr merger record, which has no PID and so counts as exited. See `docs/backlog.md`. This repository's own pre-commit hook needs a local
 `node_modules`, which candidates lack, so its own dogfood still pauses at the hook.
 
+### Readers, owned chains and retries, finalizer verdicts (M7)
+
+**Role.** Every effort assignment carries `effort.role`, `"writer"` or `"reader"`,
+decided once from the persona's `read_only` flag and frozen with the run; no persona
+name or other flag turns a read-only persona into a writer, and a later persona override
+changes nothing for that run, its answers or its retries. A reader refuses `touches`, an
+explicit `on_complete_hook` and the herdr runtime (pass `runtime:"subprocess"` inside a
+herdr pane) before any registry, queue, effort-member or Git effect.
+
+**View.** At its actual launch (immediately, or when dequeued) a reader gets a detached
+`git worktree add --detach <gitRoot>/.worktrees/conductor-view/<run> <tip>` of the
+integration tip, never a branch, a writer worktree (even with persona `worktree:true`)
+or the shared checkout. `effort.spawnBase` freezes that OID; `effort.cwd`, the seeded
+session header and the child prompt use the repo-subdirectory mapping, and the prompt
+names the exact commit. Readers reserve no paths and take no `efforts.maxParallel`
+slot; `maxConcurrent`, including the N3 closing reservation, still applies. A reader
+never runs a close hook and never enters the writer gate, integration driver (which
+refuses non-writers) or legacy merge; it never moves the tip. The main checkout's HEAD,
+index and files stay identical (`tests/effort-readers.test.ts`).
+
+**Settlement.** After the reader's process (and any delegated leaf) has closed, the view
+is checked: this run's own registered path, detached at `spawnBase`, no unsafe index
+flags, and an empty `status --porcelain --ignored --untracked-files=all`. Only then is
+it removed with a plain `git worktree remove` under the current effort owner, and, if the
+live run completed, `effort.reviewed` records the OID it reviewed. A dirty, ignored-file,
+moved, flagged, unowned, uncertain or shut-down-owner view is kept with a
+`reader view kept (…)` hint; nothing is reset, discarded or deleted. A blocked A6 reader
+keeps its view; the owner's answer resumes in the same view cwd with the frozen prompt,
+tool policy and role (a view whose HEAD moved is refused, the question kept). A settled
+reader is never resumed or rematerialized: spawn a fresh reader, which views the current
+tip. Status and cards say `reader at <oid>, integrates nothing`, then `clean review of
+<oid>` and `view removed`, or the kept view.
+
+**Finalizer verdict.** Only a live, completed reader whose frozen persona is `finalizer`
+and whose view was proven clean records `finalizer {runId, tip, verdict, at}` on the
+effort, under the current owner's fence, with `tip` = the OID it viewed (not the tip at
+settlement). Its final text must start with exactly one `## Verdict: complete|continue|failed`
+line; a quoted, interior, repeated, contradictory or fenced lookalike records nothing. A
+failed, non-finalizer, recovered, readopted, malformed, dirty or moved run, or a changed
+owner, writes no mark (cards say `finalizer verdict NOT recorded`). `ensemble_effort`
+status and `/conductor effort status` report the verdict as current only while the tip
+equals that OID and as **STALE** once any later integration lands. There is still no
+land action; the verdict grants nothing yet.
+
+**Chains.** `ensemble_spawn` chains now apply to effort runs and stay in the owned
+effort (`effort` forwarded, ownership re-checked at the successor's own spawn). A writer
+chains only inside its first at-most-once dispatch after its own work landed
+(`landedCommit`; a tree-equal no-op, a conflict, an uncertain/attempted delivery or a
+recovered settlement chains nothing). `EFFORT_CHAIN_TEMPLATE` names `{effort}` and
+`{landedCommit}`. A reader chains only after a live proven clean review;
+`EFFORT_READER_CHAIN_TEMPLATE` says it integrated nothing (`{landedCommit}` = `none`) and
+names `{reviewedCommit}`. A read-only successor gets its own view at the tip at its own
+launch; when that is later than the source's commit, the template says so and the
+prompt names the actual view commit. An ownership or validation error refuses the
+successor as its own failed card; it never falls back to non-effort work. The default
+`builder → critic` chain therefore reviews the integrated tip in a view.
+
+**Retries.** Classified retries stay in the effort: the captured persona (never
+re-resolved), the same role, effort and `touches`, from the tip at the retry's own launch.
+Only an ordinary `failed`/`timeout`/`killed`/`aborted` run with no integration outcome
+retries; `merge_conflict`, `integrating`, `resolving`, any integration WAL, `hook_failed`,
+`permission`, recovered settlements and mergers never do, even if `logic` is configured
+retryable. A writer retry carries `effort.retryOf`, so it passes only its own earlier
+attempts' preserved universal reservations (which still block every other writer); the
+failed attempts' branches and worktrees are kept. A refused effort retry is logged, never
+launched outside the effort.
+
+**Recovery and GC.** Only writers get the completed→`merge_conflict` conversion. A
+reader record recovered `running` with no live process becomes `killed` (`lost reader;
+view … kept`), with no gate or requeue assumption; an unresolved identity pauses with no
+signal. Recovery never writes finalizer evidence. `requeue` and `resolve` refuse readers
+before any adoption or driver claim. GC keeps every effort record, so reader views and
+records stay while the effort is open or blocked (destructive policy is M9).
+
+Verified: `tests/effort-readers.test.ts` (private Git, fake Pi CLI only for child
+launches), and `tests/effort-reader-smoke.test.ts` on Pi 0.87.1 from the explicit
+`CONDUCTOR_NATIVE_PI_ROOT` (pi-coding-agent, pi-ai, pi-agent-core and pi-tui all 0.87.1)
+with a fixed faux model, real `ask_owner` and `bash` in the view, no hook markers, and
+`stepCost` 0.02 counted once across the ask and the answer. Not covered: herdr readers,
+`ensemble_auto` waves (M8), landing and destructive GC (M9), human TUI acceptance and
+rollout; a crash after the verdict write but before the reader's own record leaves the
+evidence with a reader recovered as lost.
+
 Spawn with `effort:"feature"` and optional `touches:["src/**"]`. The first spawn
 can open the effort using config. Every effort writer gets its own worktree,
 even with persona `worktree:false`, and foreground requests become background.
@@ -716,7 +799,8 @@ paths and other glob syntax are rejected. Omitted or empty `touches` means unive
 `**` and runs serially, including beside generated-only writers.
 
 **Parallel admission.** All non-read-only effort personas, including custom names,
-use one admission predicate at immediate spawn, dequeue and blocked-answer resume.
+use one admission predicate at immediate spawn, dequeue and blocked-answer resume
+(M7 readers take only the general `maxConcurrent` cap).
 `maxConcurrent` bounds running/paused children and pre-launch reservations;
 `efforts.maxParallel` additionally bounds executing writers in that effort.
 Validated effort writers alone escape the legacy `maxConcurrentWriteCapable` cap.
@@ -1231,7 +1315,7 @@ receipt, SIGSTOP refusing takeover, SIGKILL takeover only after the proven exit,
 real herdr 0.9.1 session through the H11 fixture: claim, peer, ask, transcript, reply, `/reload`
 reclaim and a SIGKILL crash takeover, proving the socket before every control and signal, with
 an exact-identity teardown. It passes on 0.87.1 and 1.0.4. Not covered: human TUI acceptance,
-off Linux, paid models. M6a (automatic merger) and M6b (human-confirmed resolve) are implemented with automated evidence only; M7–M10 (readers, waves, landing) are not done.
+off Linux, paid models. M6a (automatic merger), M6b (human-confirmed resolve) and M7 (readers, owned chains/retries, OID-pinned finalizer verdicts) are implemented with automated evidence only; M8–M10 (waves, landing, whole-vertical acceptance) are not done.
 
 ## Configuration
 

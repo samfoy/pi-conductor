@@ -12,10 +12,17 @@ export interface EffortPolicy {
   history: "squash";
 }
 
-export const EFFORT_NOTICE = "M6b: disjoint effort writers run in independent worktrees within global/effort limits; integration remains serial after optional generated artifact regeneration, baseline/candidate verification and repository hooks. Under efforts.merger \"auto\", a textual conflict or twice-red verify parks that writer while one driver-owned merger proposes a hooked commit in a detached candidate; the proposal is re-gated by the same queue against the current tip, once per writer. Under \"ask\" that writer settles merge_conflict with no merger until a human runs the interactive /conductor effort resolve <run-id> and confirms one attempt; there is no agent-callable resolve. \"off\" refuses resolution. Legacy work remains UNINTEGRATED. Crash recovery uses owner fencing and reachable Git proof; uncertain work pauses for human effort resume/requeue. Delivery-uncertain callbacks are never replayed automatically. Landing, readers, auto plans, chains and retries remain unavailable.";
+export const EFFORT_NOTICE = "M7: disjoint effort writers run in independent worktrees within global/effort limits; integration remains serial after optional generated artifact regeneration, baseline/candidate verification and repository hooks. Under efforts.merger \"auto\", a textual conflict or twice-red verify parks that writer while one driver-owned merger proposes a hooked commit in a detached candidate; the proposal is re-gated by the same queue against the current tip, once per writer. Under \"ask\" that writer settles merge_conflict with no merger until a human runs the interactive /conductor effort resolve <run-id> and confirms one attempt; there is no agent-callable resolve. \"off\" refuses resolution. A read_only persona joins as a reader: a detached view of the tip at its launch, no touches, no reserved paths, no on_complete hook and never integrated; a clean view is removed, anything else is kept. Chains and classified retries stay in the owned effort: a writer chains only after its work landed, a reader only after a proven clean review; integration failures never retry. A finalizer verdict is recorded only for the exact commit it viewed and is stale once the tip moves. Legacy work remains UNINTEGRATED. Crash recovery uses owner fencing and reachable Git proof; uncertain work pauses for human effort resume/requeue. Delivery-uncertain callbacks are never replayed automatically. Landing and auto plans remain unavailable.";
 
 export function effortSummary(run: import("../types.ts").Run): string {
   if (!run.effort) return "";
+  if (run.effort.role === "reader") {
+    const e = run.effort, short = (oid?: string) => oid ? oid.slice(0, 12) : "pending";
+    const verdict = run.persona === "finalizer" && run.status === "completed"
+      ? e.verdict ? `; finalizer verdict ${e.verdict} recorded for ${short(e.reviewed)} only` : "; finalizer verdict NOT recorded" : "";
+    const view = run.worktreePath ? `; view ${run.worktreePath}` : e.spawnBase ? "; view removed" : "";
+    return `${e.name}: reader at ${short(e.spawnBase)}, integrates nothing${e.reviewed ? `; clean review of ${short(e.reviewed)}` : ""}${verdict}${view}`;
+  }
   const state = run.landedCommit ? `integrated ${run.landedCommit.slice(0, 12)}` : run.mergeResult?.nothingToCommit ? "tree-equal no-op" : run.status === "integrating" ? `integrating (${run.integration?.state ?? "paused"})` : "UNINTEGRATED";
   const violations = run.integration?.touchViolations ?? run.effort.touchViolations;
   const m = run.integration?.merger;
