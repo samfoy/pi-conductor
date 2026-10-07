@@ -26,6 +26,7 @@ import { FocusedStreamModel } from "../src/focused-stream-model.ts";
 import { DEFAULT_CONFIG, emptyUsage, type MergerWal, type Persona, type Run } from "../src/types.ts";
 
 sandboxPi();
+const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
 const poll = async (cond: () => boolean, ms = 5000) => { const end = Date.now() + ms; while (!cond()) { if (Date.now() > end) throw new Error("condition not reached"); await new Promise(r => setTimeout(r, 10)); } };
 const resolveBoth = (cand: string, text = "landed\nwriter\n") => { writeFileSync(join(cand, "base"), text); git(cand, "add", "--", "base"); git(cand, "commit", "--no-edit"); return git(cand, "rev-parse", "HEAD"); };
 
@@ -309,6 +310,33 @@ for (const at of ["claim", "context"] as const) test(`M6a a kill delivered synch
   assert.equal(existsSync(a.integration!.merger!.candidatePath), at === "context", "a prepared candidate is preserved");
   assert.equal(f.tip(), landed);
   await new Promise(r => setTimeout(r, 50)); assert.equal(settled, 1);
+});
+
+test("M6a a suspend delivered synchronously at the merger context notification launches nothing and keeps the claim; recovery spends it once", { timeout: 20000 }, async t => {
+  const f = mergerFixture(t);
+  const a = f.writer("builder-a", { base: "writer\n" });
+  const landed = land(f.root, f.record.intRef, { base: "landed\n" });
+  const m = fakeMergers(f.registry);
+  let suspension: Promise<void> | undefined, settled = false;
+  f.registry.onChange(r => {
+    if (suspension || r !== a || r.integration?.state !== "resolving" || !r.integration.merger?.contextDir) return;
+    suspension = a.integrationControl!.suspend();
+  });
+  void f.start(a).then(() => { settled = true; });
+  await poll(() => !!suspension); await suspension;
+  await f.registry.integrations.whenIdle(f.root); await delay(100);
+  assert.equal(m.calls.length, 0, "a suspended setup launches no merger");
+  assert.equal(settled, false, "suspend settles nothing");
+  const saved = JSON.parse(readFileSync(a.recordPath, "utf8"));
+  assert.equal(saved.status, "integrating"); assert.equal(saved.integration.state, "resolving");
+  assert.equal(saved.integration.merger.outcome, undefined, "the durable claim is kept, unspent"); assert.ok(existsSync(saved.integration.merger.candidatePath));
+  const registry = new RunRegistry(), relaunch = fakeMergers(registry), cards: Run[] = [];
+  await reconcileOrphansAtStartup({ runsRoot: runsRoot(), registry, isAlive: () => false, selfSessionId: "owner", now: Date.now() });
+  for (let pass = 0; pass < 2; pass++) await (await recoverEffort(readEffort(f.root, "probe")!, { registry, sessionId: "owner", onComplete: r => cards.push(r) })).done;
+  const writer = registry.get(a.id)!;
+  assert.equal(writer.status, "merge_conflict"); assert.match(writer.integration!.merger!.reason!, /launch uncertain/);
+  assert.equal(cards.length, 1, "one callback across two recoveries"); assert.equal(relaunch.calls.length + m.calls.length, 0, "no merger ever launches");
+  assert.equal(f.tip(), landed);
 });
 
 test("M6a suspending a parked writer drops its merger listener and signals nothing", { timeout: 15000 }, async t => {

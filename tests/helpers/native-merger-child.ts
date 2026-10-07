@@ -42,7 +42,10 @@ function respond(messages: Message[]) {
   if (!results.length) return fauxAssistantMessage([fauxToolCall("bash", { command: SCRIPTS[scenario] ?? SCRIPTS.resolve! }, { id: "merger_bash" })], { stopReason: "toolUse" });
   // Crash probe: the proposal is committed, then the merger holds before it can settle.
   if (scenario === "commit-hold" && results.length === 1) {
-    return fauxAssistantMessage([fauxToolCall("bash", { command: `echo $$ > "${join(fixture, "hold-pid")}"; while ! test -f "${join(fixture, "release")}"; do sleep 0.05; done` }, { id: "merger_hold" })], { stopReason: "toolUse" });
+    // The hold publishes its own PID and procfs start time atomically, and records a cooperative exit.
+    const hold = `read -r stat < /proc/$$/stat; rest=\${stat##*") "}; set -- $rest; echo "$$ \${20}" > "${join(fixture, "hold-pid.tmp")}" && mv "${join(fixture, "hold-pid.tmp")}" "${join(fixture, "hold-pid")}"; ` +
+      `while ! test -f "${join(fixture, "release")}"; do sleep 0.05; done; echo released > "${join(fixture, "hold-exit")}"`;
+    return fauxAssistantMessage([fauxToolCall("bash", { command: hold }, { id: "merger_hold" })], { stopReason: "toolUse" });
   }
   if (scenario === "failure") throw new Error("faux merger provider failure after committing");
   const last = results.at(-1)!;

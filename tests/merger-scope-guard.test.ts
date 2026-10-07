@@ -36,7 +36,7 @@ registerHooks({ load(url, context, next) {
   return { dir, calls, shim, evaluated: () => JSON.parse(readFileSync(join(dir, "evaluated.json"), "utf8")) as string[] };
 }
 
-for (const file of ["tests/effort-merger-smoke.test.ts", "tests/effort-merger-recovery-smoke.test.ts"]) test(`M6a ${file} throws on an injected herdr scope before any repository module evaluates`, { timeout: 30000 }, async () => {
+for (const file of ["tests/effort-merger-smoke.test.ts", "tests/effort-merger-recovery-smoke.test.ts", "tests/helpers/merger-cleanup-fault.ts"]) test(`M6a ${file} throws on an injected herdr scope before any repository module evaluates`, { timeout: 30000 }, async () => {
   const s = sandbox();
   const socketPath = join(s.dir, "fake-herdr.sock");
   let connections = 0;

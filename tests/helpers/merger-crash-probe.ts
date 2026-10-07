@@ -9,6 +9,7 @@ import { createMergerLauncher } from "../../src/effort/merger.ts";
 import { RunRegistry, runDir } from "../../src/runs.ts";
 import { SpawnQueue } from "../../src/queue.ts";
 import { settleRun } from "../../src/run-pipeline.ts";
+import { readProcessStartTime } from "../../src/reconcile-startup.ts";
 import { emptyUsage, type Run } from "../../src/types.ts";
 import { gitTestEnv } from "./git-env.ts";
 
@@ -58,8 +59,16 @@ cp.execFileSync = ((command: string, args: string[], options: cp.ExecFileSyncOpt
   if (phase === "after-cas" && command === "git" && args[0] === "update-ref" && args[1] === effort.intRef && args[3]) barrier();
   return result;
 }) as typeof cp.execFileSync;
+const launch = cp.spawn;
+cp.spawn = ((command: string, args: readonly string[], options: cp.SpawnOptions) => {
+  const child = launch(command, args, options);
+  // Every merger launch reports its identity at once, from this process's own unreaped handle.
+  if (args?.[0] === process.env.PI_BIN && child.pid) process.send!({ launched: { pid: child.pid, startTime: readProcessStartTime(child.pid) } });
+  return child;
+}) as typeof cp.spawn;
 syncBuiltinESMExports();
 registry.onChange(r => { if (r.mergerFor) merger = r; });
+// Phase "no-barrier" never parks: the test side must classify a launched merger without a barrier.
 // The proposal is committed and the merger holds in a silent command, so its stdout stays quiet
 // after this lead dies; parking earlier would race the merger's own EPIPE on the closed pipe.
 if (phase === "after-proposal") {
