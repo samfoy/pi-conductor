@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import cp from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import fsp from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -15,9 +16,10 @@ import { git } from "./helpers/effort-integration.ts";
 import { land } from "./helpers/effort-merger.ts";
 import { herdrFixture } from "./helpers/herdr-pipeline.ts";
 import { sandboxPi, tmpDir } from "./helpers/tmp.ts";
-import { RunRegistry, forceTerminate, prepareSpawnEffort, runDir, sendToRun, spawnRun, writeFinal, writeRecord, type SpawnOptions } from "../src/runs.ts";
+import { RunRegistry, availableActions, forceTerminate, prepareSpawnEffort, runDir, sendToRun, spawnRun, writeFinal, writeRecord, type SpawnOptions } from "../src/runs.ts";
 import { SpawnQueue } from "../src/queue.ts";
-import { buildOnChainCallback } from "../src/tools.ts";
+import { buildOnChainCallback, registerTools } from "../src/tools.ts";
+import { pushCompletionCard, type NotificationMessage } from "../src/notifications.ts";
 import { dispatchHerdrSettlement, readoptHerdrRun } from "../src/run-pipeline.ts";
 import { HerdrRuntime } from "../src/herdr/runtime.ts";
 import { handleSessionShutdown } from "../src/shutdown.ts";
@@ -60,6 +62,8 @@ async function poll(cond: () => boolean, what: string, ms = 8000) {
   while (!cond()) { if (Date.now() > end) throw new Error(`not reached: ${what}`); await delay(10); }
 }
 const lines = (path: string) => existsSync(path) ? readFileSync(path, "utf8").trim().split("\n") : [];
+/** R4: a stale owner's waiter must end, not watch a settled run with no process forever. */
+const ended = <T>(done: Promise<T>, what = "the waiter ended") => Promise.race([done, delay(5000).then((): never => { throw new Error(`not reached: ${what}`); })]);
 
 type FakeProc = EventEmitter & { stdout: PassThrough; stderr: PassThrough; stdin: PassThrough; exitCode: number | null; signalCode: null; kill(): boolean; unref(): void };
 /** Hook commands whose shell cannot start: a synchronous spawn throw, or an `error` event from a child that never ran. */
@@ -383,8 +387,9 @@ for (const runtime of ["subprocess", "herdr"] as const) {
 for (const race of HERDR_RACES) {
   test(`M7 herdr reader view release refuses a ${race} race during the pane proof; the view stays`, { timeout: 20000 }, async t => {
     const { f, r, run, h: fake, state, outcomes } = raceRelease(t, "herdr", race), h = fake!;
-    if (race === "registry" || race === "owner") { await poll(() => state.raced, "release raced"); await delay(400); }
-    else await r.done;
+    // A replaced registry entry keeps the H10 fence's silent retirement; a stale effort owner's waiter ends (R4).
+    if (race === "registry") { await poll(() => state.raced, "release raced"); await delay(400); }
+    else await ended(r.done);
     const view = f.view(run);
     assert.equal(existsSync(view), true, "the view is never removed without the proofs"); assert.equal(git(view, "rev-parse", "HEAD"), f.landed);
     assert.equal(state.raced, true, "the release went through the pane proof");
@@ -397,6 +402,8 @@ for (const race of HERDR_RACES) {
       // Herdr's registry entry is part of the invocation fence (H10): a replaced entry retires the old pipeline silently.
       assert.deepEqual(f.cards, [], "a stale invocation or owner publishes no card"); assert.deepEqual(f.chains, []); assert.equal(outcomes(), 0);
       assert.equal(JSON.parse(readFileSync(run.recordPath, "utf8")).status, "running", "no stale terminal record");
+      assert.equal(existsSync(run.finalPath), false, "no final result published");
+      if (race === "owner") { assert.equal(run.status, "completed"); assert.match(run.worktreeKept ?? "", /reader view kept \(effort owner changed\)/); }
     } else {
       assert.deepEqual(f.cards, [`${run.id}:completed`], "the herdr owner claim authorizes publication of an unproven pane release");
       assert.match(run.worktreeKept ?? "", /reader view kept \(pane release unproven\)/);
@@ -448,11 +455,14 @@ for (const runtime of ["subprocess", "herdr"] as const) for (const event of ["ow
     if (event === "owner") takeOver(f);
     else { run.herdrPipeline?.suspend(); run.integrationSuspended = true; }
     writeFileSync(release, "go");
-    if (runtime === "subprocess") await r.done; else await delay(500);
+    if (runtime === "subprocess" || event === "owner") await ended(r.done); else await delay(500);
     assert.equal(run.effort?.reviewed, undefined); assert.equal(run.effort?.verdict, undefined);
     assert.equal(readEffort(f.root, "probe")!.finalizer, undefined, "no evidence under a changed owner or a shut-down pipeline");
     assert.equal(existsSync(f.view(run)), true); assert.deepEqual(f.chains, []);
-    if (runtime === "herdr") { assert.equal(paneCloses(r.h!), 0); assert.deepEqual(f.cards, []); assert.equal(JSON.parse(readFileSync(run.recordPath, "utf8")).status, "running"); }
+    if (runtime === "herdr") {
+      assert.equal(paneCloses(r.h!), 0); assert.deepEqual(f.cards, []); assert.equal(JSON.parse(readFileSync(run.recordPath, "utf8")).status, "running");
+      assert.equal(existsSync(run.finalPath), false, "no final result published");
+    }
     else if (event === "owner") { assert.deepEqual(f.cards, [], "no card for a stale owner"); assert.match(run.worktreeKept ?? "", /reader view kept \(effort owner changed\)/); }
     else assert.match(run.worktreeKept ?? "", /reader view kept \(owner runtime shut down\)/);
   });
@@ -502,7 +512,8 @@ test("M7 herdr blocked reader under a changed effort owner: no card, the questio
   const h = r.h!;
   let taken = false;
   h.onSleep(() => { if (!taken) { taken = true; takeOver(f); } h.exit(); });
-  await poll(() => r.run.status === "blocked", "blocked in memory"); await delay(300);
+  await ended(r.done);
+  assert.equal(r.run.status, "blocked"); assert.equal(r.run.errorMessage, "herdr settlement preserved: effort owned by another session or generation");
   assert.equal(r.run.pendingAsk?.question, "Choose?", "the question is retained"); assert.equal(existsSync(f.view(r.run)), true);
   assert.deepEqual(f.cards, [], "a stale owner dispatches no blocked card"); assert.equal(r.run.herdr?.settlement, undefined, "no ledger intent under a stale owner");
 });
@@ -595,3 +606,158 @@ test("M7 herdr reader settlement uses the ordinary nonce ledger; writers and int
   await assert.rejects(dispatchHerdrSettlement(stale, () => { calls++; }), /owned by another|generation|fenced/);
   assert.equal(calls, 1); assert.equal(stale.herdr?.settlement, undefined);
 });
+
+// ── R4: completion surfaces honor preservation and owner fencing ──────────────
+
+test("M7 R4 writeRecord reads settlementPreserved when the write runs, after its last await, not when it is queued", { timeout: 10000 }, async t => {
+  const dir = join(tmpDir("m7r-record-"), "run"), recordPath = join(dir, "record.json");
+  const run: Run = { id: "critic-m7r-fence", persona: "critic", task: "t", mode: "background", status: "running", startTime: 0, lastEventAt: 0, messages: [], usage: emptyUsage(), cwd: dir,
+    recordPath, transcriptPath: join(dir, "transcript.jsonl"), finalPath: join(dir, "final.md") };
+  // Hold the write's last await (its mkdir) open: the flag is set after both writes were queued and the first one started.
+  const real = fsp.mkdir.bind(fsp); let release!: () => void, entered = 0;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  t.mock.method(fsp, "mkdir", (async (path: string, options?: unknown) => {
+    if (path === dir) { entered++; await held; }
+    return real(path, options as never);
+  }) as never);
+  syncBuiltinESMExports(); t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const plain = writeRecord(run), fenced = writeRecord(run, () => {});
+  await poll(() => entered === 1, "the first write is running, held at its last await");
+  run.settlementPreserved = "reader view kept (probe)";
+  release();
+  await plain;
+  await assert.rejects(fenced, /settlement preserved; record write refused: reader view kept \(probe\)/);
+  assert.equal(entered, 2, "both writes ran");
+  assert.equal(existsSync(recordPath), false, "the plain write is dropped and the fenced one refused: nothing lands");
+});
+
+test("M7 R4 completion cards: a reader's card needs its current effort owner, a kill's included; writer and non-effort cards are unchanged", { timeout: 20000 }, async t => {
+  const f = repo(t), messages: NotificationMessage[] = [];
+  const card = (run: Run) => pushCompletionCard(run, { sendMessage: message => { messages.push(message); } }, false, "owner", f.registry);
+  const killedBefore = launch(f, "subprocess", critic, { onComplete: card }), killedAfter = launch(f, "subprocess", critic, { onComplete: card });
+  const record = readEffort(f.root, "probe")!;
+  const settled = (id: string, role?: "reader" | "writer"): Run => {
+    const dir = runDir(id); mkdirSync(dir, { recursive: true });
+    return { id, persona: role === "writer" ? "builder" : "critic", task: "t", mode: "background", status: "completed", startTime: 0, lastEventAt: 0, messages: [], usage: emptyUsage(), cwd: f.root,
+      recordPath: join(dir, "record.json"), transcriptPath: join(dir, "transcript.jsonl"), finalPath: join(dir, "final.md"),
+      parentSessionId: "owner", parentPid: record.owner.pid, parentStartTime: record.owner.startTime,
+      ...(role ? { effort: { owner: record.owner, name: "probe", gitRoot: f.root, role, ...(role === "reader" ? { spawnBase: f.landed } : {}) } } : {}) };
+  };
+  const reader = settled("critic-m7r-card", "reader"), writer = settled("builder-m7r-card", "writer"), plain = settled("scribe-m7r-card");
+  forceTerminate(killedBefore.run, "killed", f.registry, killedBefore.run.onComplete);
+  assert.equal(card(reader), true, "positive control: the current owner gets a reader card");
+  takeOver(f);
+  forceTerminate(killedAfter.run, "killed", f.registry, killedAfter.run.onComplete);
+  assert.equal(killedAfter.run.status, "killed");
+  assert.equal(card(reader), false, "a stale owner gets no reader card");
+  assert.equal(card(writer), true, "a writer's card is unchanged"); assert.equal(card(plain), true, "a non-effort card is unchanged");
+  assert.deepEqual(messages.map(m => (m.details as { id: string }).id), [killedBefore.run.id, reader.id, writer.id, plain.id], "the stale owner's kill and reader cards were never sent");
+  await Promise.all([killedBefore.done, killedAfter.done]);
+});
+
+/** A fake subprocess child ends its turn on an owner question, as Pi's ask_owner tool does. */
+function askProc(proc: FakeProc) {
+  const line = (event: unknown) => proc.stdout.write(JSON.stringify(event) + "\n");
+  line({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", name: "ask_owner", id: "ask-1" }] } });
+  line({ type: "tool_execution_start", toolCallId: "ask-1", toolName: "ask_owner", args: { question: "Choose?" } });
+  line({ type: "tool_execution_end", toolCallId: "ask-1", toolName: "ask_owner", isError: false, result: { terminate: true, details: { askId: "ask-1", question: "Choose?", evidence: "" } } });
+  line({ type: "agent_settled" });
+}
+/**
+ * The real ensemble_spawn and ensemble_send tools. Every card goes through pushCompletionCard, as index.ts sends it.
+ * `detach` resolves the foreground detach signal at once, so the post-detach listener owns a foreground card.
+ */
+function conductorTools(f: Fixture, runtime: "subprocess" | "herdr", opts: { detach?: boolean; queue?: SpawnQueue } = {}) {
+  const tools = new Map<string, { execute: (...args: unknown[]) => Promise<any> }>(), cards: NotificationMessage[] = [];
+  registerTools({ registerTool: (tool: { name: string; execute: (...args: unknown[]) => Promise<any> }) => { tools.set(tool.name, tool); } } as never, {
+    getCwd: () => join(f.root, "pkg"), getRegistry: () => f.registry, getQueue: () => opts.queue ?? new SpawnQueue(f.registry, 4, 1), getSessionId: () => "owner",
+    getParentMessages: () => parentMessages, openFocusedOverlay: () => {},
+    pushCompletionNotification: (run: Run) => { pushCompletionCard(run, { sendMessage: message => { cards.push(message); } }, false, "owner", f.registry); },
+    registerForegroundDetach: () => ({ detachSignal: opts.detach ? Promise.resolve() : new Promise<void>(() => {}), unregister: () => {} }),
+  } as never, runtime === "herdr" ? herdrEnv : {});
+  return { send: tools.get("ensemble_send")!, spawn: tools.get("ensemble_spawn")!, cards };
+}
+const blockingHook = (f: Fixture) => {
+  const dir = tmpDir("m7r-hook-"), started = join(dir, "started"), release = join(dir, "release");
+  f.hookConfig(`touch '${started}'; while [ ! -f '${release}' ]; do sleep 0.05; done`);
+  return { started: () => existsSync(started), release: () => writeFileSync(release, "go") };
+};
+/** Settlement has run its course: a herdr pipeline reached its preserved catch, a subprocess one its dispatch. */
+const settledFor = async (run: Run, status: string) => {
+  await poll(() => run.status === status && (run.runtime !== "herdr" || /settlement preserved/.test(run.errorMessage ?? "")), `settled ${status}`);
+  await delay(200);
+};
+
+for (const runtime of ["subprocess", "herdr"] as const) for (const race of ["record", "owner"] as const) for (const detach of [true, false]) {
+  const surface = detach ? "the detached answer's post-detach listener" : "the foreground answer's own waiter";
+  const outcome = race === "record" ? (detach ? "posts one failed card with no actions to the current owner" : "returns failed") : (detach ? "posts no card" : "ends with no card");
+  test(`M7 R4 ${runtime} reader, ${race === "record" ? "a durable record" : "an effort owner"} change during the answer's hook: ${surface} ${outcome}`, { timeout: 20000 }, async t => {
+    const f = repo(t), hook = blockingHook(f);
+    const r = launch(f, runtime, critic, {}, { mode: "ask" }), run = r.run, h = r.h;
+    if (h) h.onSleep(h.exit); else askProc(f.procs.at(-1)!);
+    await ended(r.done);
+    assert.equal(run.status, "blocked", run.errorMessage); assert.equal(hook.started(), false, "a question is not a completion: no hook");
+    if (h) { h.onSleep(() => {}); h.setMode("healthy"); }
+    const { send, cards } = conductorTools(f, runtime, { detach }), launched = f.procs.length;
+    const answer = send.execute("answer", { agent_id: run.id, message: "Yes" }, undefined, undefined, undefined);
+    if (!h) {
+      await poll(() => f.procs.length > launched, "answer launched");
+      const proc = f.procs.at(-1)!;
+      proc.stdout.write(JSON.stringify({ type: "agent_start" }) + "\n"); finishProc(proc, REVIEW);
+    }
+    if (detach) assert.match((await answer).content[0].text, /detach/i, "the foreground answer detached while running");
+    await poll(hook.started, "the answer's hook started");
+    const record = race === "record"
+      ? newerRecord(run, saved => { if (runtime === "herdr") saved.herdr.launchNonce = "another-invocation"; else saved.effort.spawnBase = f.base; }) : undefined;
+    if (race === "owner") takeOver(f);
+    hook.release();
+    if (detach) await settledFor(run, race === "record" ? "failed" : "completed");
+    else assert.equal((await ended(answer, "the foreground answer returned")).details.status, race === "record" ? "failed" : "completed");
+    assert.equal(run.effort?.reviewed, undefined); assert.deepEqual(f.chains, []);
+    assert.equal(existsSync(f.view(run)), true, "the view is kept");
+    if (race === "record") {
+      assert.deepEqual(readFileSync(run.recordPath), record, "the newer record stays byte for byte");
+      const hint = "reader view kept \\(durable record or registry changed before release\\)";
+      assert.match(run.errorMessage ?? "", new RegExp(`settlement preserved: ${hint}`));
+      if (!detach) return assert.deepEqual(cards, [], "the waiter is the tool result; no card");
+      assert.equal(cards.length, 1, "exactly one card, from the post-detach listener");
+      const details = cards[0]!.details as { kind: string; id: string; status: string; available_actions: string[]; notes: { slot: string; text: string }[] };
+      assert.deepEqual([details.kind, details.id, details.status], ["completed", run.id, "failed"]);
+      assert.deepEqual(details.available_actions, [], "no actions: a settled reader is never resumed");
+      assert.deepEqual(availableActions(run, true, "owner", f.registry), ["focus"], "a TUI adds only the read-only focus view");
+      assert.ok(details.notes.some(n => n.slot === "error" && new RegExp(`settlement preserved: ${hint}`).test(n.text)), "the card names the preservation");
+      assert.ok(details.notes.some(n => n.slot === "warning" && new RegExp(`^${hint}: ${f.view(run)}`).test(n.text)), "and the kept view");
+    } else {
+      assert.deepEqual(cards, [], "a stale effort owner gets no card from any surface");
+      assert.match(run.worktreeKept ?? "", /^reader view kept \(effort owner changed\)/);
+      assert.notEqual(JSON.parse(readFileSync(run.recordPath, "utf8")).status, "completed", "no terminal record under the stale owner");
+      if (runtime === "herdr") {
+        assert.equal(run.errorMessage, "herdr settlement preserved: effort owned by another session or generation");
+        assert.equal(existsSync(run.finalPath), false, "a herdr reader writes no final under a stale owner");
+      } else assert.equal(existsSync(run.finalPath), true, "documented limit: a subprocess reader still writes its own final.md");
+    }
+  });
+}
+
+for (const runtime of ["subprocess", "herdr"] as const) {
+  test(`M7 R4 ${runtime} reader from a foreground ensemble_spawn under a full cap queues as background with no downgrade listener; a stale owner gets no card`, { timeout: 20000 }, async t => {
+    const f = repo(t), hook = blockingHook(f), queue = new SpawnQueue(f.registry, 1, 1);
+    const blocker: Run = { id: "other-busy", persona: "scribe", task: "t", mode: "background", status: "running", cwd: f.root, startTime: 0, lastEventAt: 0, messages: [], usage: emptyUsage(),
+      recordPath: "/unused", transcriptPath: "/unused", finalPath: "/unused" };
+    f.registry.register(blocker);
+    autoFake = run => herdrFixture("healthy", { id: run.id, dir: dirname(run.recordPath), cwd: f.root, target: () => f.registry.get(run.id), finalText: REVIEW });
+    t.after(() => { autoFake = undefined; });
+    const { spawn, cards } = conductorTools(f, runtime, { queue }), launched = f.procs.length;
+    const out = await spawn.execute("spawn", { persona: "critic", task: "Review the effort tip.", effort: "probe", foreground: true, runtime, cwd: join(f.root, "pkg") }, undefined, undefined, undefined);
+    assert.equal(out.details.status, "queued", "an effort spawn is background: never queued-as-background, so no downgrade listener");
+    blocker.status = "completed"; f.registry.notify(blocker);
+    const run = f.registry.get(out.details.agent_id)!;
+    assert.equal(run.status, "running"); assert.equal(run.mode, "background"); assert.equal(run.runtime, runtime); assert.equal(run.effort?.role, "reader");
+    if (runtime === "subprocess") { await poll(() => f.procs.length > launched, "dequeued launch"); finishProc(f.procs.at(-1)!, REVIEW); }
+    await poll(hook.started, "hook started");
+    takeOver(f); hook.release();
+    await settledFor(run, "completed");
+    assert.deepEqual(cards, [], "neither settlement nor any listener posts a card to a stale effort owner");
+    assert.match(run.worktreeKept ?? "", /^reader view kept \(effort owner changed\)/); assert.equal(existsSync(f.view(run)), true);
+  });
+}

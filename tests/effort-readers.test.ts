@@ -120,6 +120,13 @@ async function integrateWriter(f: Fixture, procs: FakeProc[], files: Record<stri
   assert.equal(run.status, "completed", run.errorMessage); assert.ok(run.landedCommit);
   return run;
 }
+/** R4: the owner fence refused this reader's first record write, so the release guard finds none; the hint names the owner change. */
+function assertOwnerChangedHint(f: Fixture, run: Run) {
+  assert.equal(existsSync(run.recordPath), false, "the first record write was refused under the changed owner");
+  const hint = `reader view kept \\(effort owner changed\\): ${f.view(run)}`;
+  assert.match(run.worktreeKept ?? "", new RegExp(`^${hint}`)); assert.match(run.errorMessage ?? "", new RegExp(`settlement preserved: ${hint}`));
+  assert.doesNotMatch(run.worktreeKept ?? "", /durable record or registry changed/);
+}
 function tools(f: Fixture) {
   const map = new Map<string, any>();
   registerTools({ registerTool: (t: any) => map.set(t.name, t) } as any, { getCwd: () => f.root, getRegistry: () => f.registry, getQueue: () => f.queue, getSessionId: () => "owner",
@@ -340,6 +347,7 @@ test("M7 no finalizer evidence from a non-finalizer, a failed or malformed final
   assert.deepEqual(after.owner, successor.owner); assert.equal(after.finalizer, undefined, "no mark under a changed owner");
   assert.equal(fenced.effort?.verdict, undefined);
   assert.equal(existsSync(f.view(fenced)), true, "an unowned view is kept, never removed");
+  assertOwnerChangedHint(f, fenced);
   // Shutdown (quit or /reload) suspends this pipeline's effort authority before its child settles.
   const f2 = fixture(t); const suspended = spawned(reader(f2, finalizer));
   suspended.integrationSuspended = true;
@@ -436,6 +444,7 @@ test("M7 chain from a reader: the successor gets the reader template (nothing in
   assert.equal(procs.length, 3, "no successor process started");
   finish(procs[2]!); await settledRun(f.registry, late);
   assert.equal(f.registry.list().filter(r => r.persona === "finalizer" && r.effort).length, 1, "never a successor outside the effort");
+  assertOwnerChangedHint(f, late);
 });
 
 test("M7 the integration driver itself refuses a reader, even one forged into integrating", { timeout: 10000 }, t => {

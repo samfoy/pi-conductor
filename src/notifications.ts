@@ -21,6 +21,7 @@ import { availableActions, type RunAction, type RunRegistry, elapsedStr, formatU
 import { boundStallText, escapeStallEvidence, recentStallEvidence, STALL_GUIDANCE } from "./stall-evidence.ts";
 import { childrenOf, subtreeCost } from "./delegation.ts";
 import { isDelegatedLeaf, type Run, type RunStatus } from "./types.ts";
+import { readerOwned } from "./effort/reader.ts";
 
 /** Theme slot for an annotation row under a notification card. */
 export type NotificationNoteSlot = "error" | "warning" | "muted";
@@ -501,15 +502,16 @@ export function buildCompletionMessage(run: Run, canFocus = false, sessionId?: s
 }
 
 /**
- * Post a completion card to the lead, except for a delegated leaf: its parent's
- * broker alone consumes its result, live or after readopt. Returns whether it sent.
+ * Post a completion card to the lead, except for a delegated leaf (its parent's broker alone consumes its result,
+ * live or after readopt) or an effort reader whose owner is no longer current (M7 R4: settlement, kills and every
+ * status listener alike). Returns whether it sent.
  */
 export function pushCompletionCard(
   run: Run,
   host: { sendMessage(message: NotificationMessage, options: ReturnType<typeof buildCompletionSendMessageOptions>): void },
   canFocus = false, sessionId?: string, registry?: RunRegistry,
 ): boolean {
-  if (isDelegatedLeaf(run)) return false;
+  if (isDelegatedLeaf(run) || !readerOwned(run)) return false;
   host.sendMessage(buildCompletionMessage(run, canFocus, sessionId, registry), buildCompletionSendMessageOptions(run));
   return true;
 }

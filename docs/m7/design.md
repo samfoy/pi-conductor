@@ -1,6 +1,6 @@
 # M7 readers on both runtimes, with validation hooks — implemented flow
 
-Implements `requirements.md` (R1, R2, R3) on top of `b545d17`. It follows the read-only design pass
+Implements `requirements.md` R1, R2 and R3 on top of `b545d17`, and R4 on top of `1fab002`. It follows the read-only design pass
 (`~/.pi/agent/conductor/runs/redteam-sol-tzex/final.md`, status READY). README "Readers, owned chains
 and retries, finalizer verdicts (M7)" is the user-facing statement; tests are cited there.
 
@@ -22,14 +22,23 @@ and retries, finalizer verdicts (M7)" is the user-facing statement; tests are ci
      (`!live()`: resume, reload, readopt, or on herdr a replaced registry entry, which is part of the H10
      pipeline fence) is `retired`: it mutates nothing. A still-live invocation whose registry entry or
      durable record changed is `preserved`: the view stays with `reader view kept (durable record or
-     registry changed before|during release)`, `run.settlementPreserved` makes every later record and final
-     write a no-op or refusal, and settlement stops through the existing preserved path. That means no
-     record, final, card, chain, retry or memory outcome; the other writer's bytes stay intact. Its waiter
-     ends with the run `failed` in memory and `settlement preserved: …`. No evidence is recorded after the
-     guard fails; evidence recorded before a release-time failure stays.
+     registry changed before|during release)`, or `(effort owner changed)` when the owner is no longer
+     current (R4: for example, the owner fence refused this reader's first record write, so the guard found none).
+     `run.settlementPreserved` makes every later record and final write a no-op or refusal (read after
+     `writeRecord`'s last await), and settlement stops through the existing preserved path. That means
+     no record, final, settlement card, chain, retry, finalize event or memory outcome; the other
+     writer's bytes stay intact. Its waiter ends with the run `failed` in memory and `settlement
+     preserved: …`. A status listener sees that flip: a detached foreground `ensemble_send` answer gets
+     one `failed` card with that message and no actions, only for the current owner (step 6). No
+     evidence is recorded after the guard fails; evidence recorded before a release-time failure stays.
 6. Terminal persistence and dispatch. A herdr reader uses the ordinary nonce ledger
    (`dispatchHerdrSettlement`); a writer keeps the M5 WAL. Every reader card and record write is fenced
-   by the current effort owner.
+   by the current effort owner. Settlement callbacks pass `readerFence`. Every card, whoever posts it
+   (settlement, a kill or timeout, the post-detach or queued-spawn listener), passes `pushCompletionCard`,
+   which drops a reader card when `readerOwned` fails. Both use `assertRunEffortOwner`. Writer and
+   non-effort cards are unchanged. A stale owner's waiter still ends: its herdr pipeline, whose fenced
+   record write throws into the preserved catch, resolves with the run as settled in memory (R4).
+   Effort spawns, chains and retries are background, so the queued-spawn listener never sees a reader.
 
 ## Reader release guard
 
@@ -64,4 +73,7 @@ the `isCurrent` predicate passed through `releaseRunPane` to the herdr empty-pan
 - On herdr a replaced registry entry retires the old pipeline through the H10 fence, which, as before,
   does not resolve the old waiter. A preserved settlement's verdict, if recorded before the release,
   stays on the effort record.
+- Under a stale owner a subprocess reader still writes its own `final.md`; a herdr one writes none.
+  A dead-man-switch re-fire repeats a card first sent under the then-current owner without checking
+  the owner again.
 - Human TUI acceptance and rollout remain unverified.

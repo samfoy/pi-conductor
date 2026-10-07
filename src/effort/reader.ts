@@ -16,6 +16,10 @@ export function effortAssignment(effort: EffortRecord, opts: { persona: Pick<Per
     ...(role === "writer" ? { touches: opts.touches ? [...opts.touches] : undefined, ...(opts.retryOf?.length ? { retryOf: [...opts.retryOf] } : {}) } : {}) };
 }
 
+/** A reader's cards, callbacks and evidence belong to the effort's current owner; other runs are unaffected. */
+export function readerFence(run: Run): void { if (run.effort?.role === "reader") assertRunEffortOwner(run); }
+export function readerOwned(run: Run): boolean { try { readerFence(run); return true; } catch { return false; } }
+
 const viewPath = (gitRoot: string, runId: string) => join(gitRoot, ".worktrees", "conductor-view", runId);
 
 /** A detached checkout of exactly `tip` in the effort's own repository: never a branch or the shared cwd. */
@@ -75,15 +79,15 @@ export async function settleReaderView(run: Run, outcome: ReaderOutcome, deps: R
     run.worktreeKept = `reader view kept (${problem}): ${run.worktreePath ?? "unavailable"}, detached at ${e.spawnBase ?? "unknown"}; nothing integrated, reset or discarded`;
   };
   // R3: another writer's record or registry entry is not ours to overwrite; the view and the reason stay in memory only.
+  // R4: an owner change (which also refuses this reader's own record writes) is named as such.
   const stale = (when: string): ReaderSettlement => {
     if (!deps.live()) return "retired";
-    keep(`durable record or registry changed ${when} release`);
+    keep(readerOwned(run) ? `durable record or registry changed ${when} release` : "effort owner changed");
     run.settlementPreserved = run.worktreeKept;
     return "preserved";
   };
   if (!deps.isCurrent()) return stale("before");
-  const owned = () => { try { assertRunEffortOwner(run); return true; } catch { return false; } };
-  const blocker = () => run.integrationSuspended ? "owner runtime shut down" : !owned() ? "effort owner changed"
+  const blocker = () => run.integrationSuspended ? "owner runtime shut down" : !readerOwned(run) ? "effort owner changed"
     : childExitUnconfirmed(run) || run.herdrExitUnconfirmed ? "child exit unconfirmed"
     : isTerminal(run.status) ? `terminated (${run.status}) before its review settled` : readerViewProblem(run);
   let problem = blocker();

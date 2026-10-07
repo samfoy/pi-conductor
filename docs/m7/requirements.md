@@ -26,3 +26,12 @@ Run the normal configured or explicit validation hook in the reader's view. Hook
 ## Scope and verification
 
 First obtain a read-only design of the smallest implementation changes. Then implement and test in this M7 worktree; no master edits, merge, push or rollout. Fake-herdr and native faux-provider tests are in scope. Actual new real-herdr reader scenarios need execution-time authorization (planned for M10). Existing minimum/current-version and human-TUI acceptance limits remain explicit.
+
+## R4 — Completion surfaces honor preservation and owner fencing
+
+Decided by the user on 2026-10-07 after the second review accepted `1fab002`. User choices: **"Fix gaps, then merge (recommended)"** and **"Fence it in M7 (recommended)"**.
+
+- **Owner change during a reader's hook or release:** no completion surface posts a card to a stale effort owner. That covers the settlement path, the post-detach completion listener, the queued-spawn listener (`tools.ts`) and any other status listener. On herdr, the stale owner's waiter still ends, so nothing waits forever on a run that is `completed` in memory with no process. Behaviour must match design.md: "every reader card is fenced by the current effort owner."
+- **Correct reason:** a reader whose first record write was refused because the effort owner changed reports `effort owner changed`, not `durable record or registry changed`. The hint must not depend on timing.
+- **Preserved reader card:** detached and queued foreground spawns may get a `failed` card for a preserved reader, but only for the current owner, only with accurate content, and with no actions. The README must say exactly what is and isn't sent. "It sends no card" is overstated.
+- **Coverage:** a committed test pins the `writeRecord` refusal to after the last await: the flag is read when the write runs, not when it is queued. It must go red under that mutation. Another committed test covers the listener card paths above.

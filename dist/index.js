@@ -3243,6 +3243,17 @@ function effortAssignment(effort, opts) {
     ...role === "writer" ? { touches: opts.touches ? [...opts.touches] : void 0, ...opts.retryOf?.length ? { retryOf: [...opts.retryOf] } : {} } : {}
   };
 }
+function readerFence(run2) {
+  if (run2.effort?.role === "reader") assertRunEffortOwner(run2);
+}
+function readerOwned(run2) {
+  try {
+    readerFence(run2);
+    return true;
+  } catch {
+    return false;
+  }
+}
 var viewPath = (gitRoot2, runId) => join13(gitRoot2, ".worktrees", "conductor-view", runId);
 function createReaderView(gitRoot2, runId, tip) {
   const path2 = viewPath(gitRoot2, runId);
@@ -3276,20 +3287,12 @@ async function settleReaderView(run2, outcome, deps) {
   };
   const stale = (when) => {
     if (!deps.live()) return "retired";
-    keep(`durable record or registry changed ${when} release`);
+    keep(readerOwned(run2) ? `durable record or registry changed ${when} release` : "effort owner changed");
     run2.settlementPreserved = run2.worktreeKept;
     return "preserved";
   };
   if (!deps.isCurrent()) return stale("before");
-  const owned = () => {
-    try {
-      assertRunEffortOwner(run2);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  const blocker = () => run2.integrationSuspended ? "owner runtime shut down" : !owned() ? "effort owner changed" : childExitUnconfirmed(run2) || run2.herdrExitUnconfirmed ? "child exit unconfirmed" : isTerminal(run2.status) ? `terminated (${run2.status}) before its review settled` : readerViewProblem(run2);
+  const blocker = () => run2.integrationSuspended ? "owner runtime shut down" : !readerOwned(run2) ? "effort owner changed" : childExitUnconfirmed(run2) || run2.herdrExitUnconfirmed ? "child exit unconfirmed" : isTerminal(run2.status) ? `terminated (${run2.status}) before its review settled` : readerViewProblem(run2);
   let problem2 = blocker();
   if (!problem2 && outcome.succeeded && outcome.live) {
     e.reviewed = e.spawnBase;
@@ -4292,7 +4295,7 @@ Answer via ensemble_send; the original assignment remains unresolved.` : getComp
   };
 }
 function pushCompletionCard(run2, host, canFocus = false, sessionId, registry) {
-  if (isDelegatedLeaf(run2)) return false;
+  if (isDelegatedLeaf(run2) || !readerOwned(run2)) return false;
   host.sendMessage(buildCompletionMessage(run2, canFocus, sessionId, registry), buildCompletionSendMessageOptions(run2));
   return true;
 }
@@ -4614,7 +4617,7 @@ function createRunPipeline(run2, piArgs, opts) {
       if (run2.settlementPreserved) {
         if (!isTerminal(run2.status)) Object.assign(run2, { status: "failed", exitCode, finishedAt: Date.now() });
         donePromiseResolve(run2);
-      }
+      } else if (!readerOwned(run2)) donePromiseResolve(run2);
       opts.registry.notify(run2);
     });
   };
@@ -5209,17 +5212,6 @@ async function settleRunEffects(run2, terminal, exitCode, opts, transport = { st
 }
 function usesHerdrLedger(run2) {
   return run2.runtime === "herdr" && !run2.integration && (!run2.effort || run2.effort.role === "reader");
-}
-function readerFence(run2) {
-  if (run2.effort?.role === "reader") assertRunEffortOwner(run2);
-}
-function readerOwned(run2) {
-  try {
-    readerFence(run2);
-    return true;
-  } catch {
-    return false;
-  }
 }
 function dispatchHerdrSettlement(run2, dispatch) {
   if (!usesHerdrLedger(run2) || !run2.herdr) throw new Error("ordinary herdr settlement required");

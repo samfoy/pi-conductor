@@ -730,9 +730,18 @@ killed, recovered or shut-down-owner view, or an unproven pane, is kept with a
 `reader view kept (…)` hint; nothing is reset, discarded or deleted. A review proven
 before a failed release stays valid. A replaced invocation stops silently. One still live
 whose registry entry or durable record changed keeps the view with `reader view kept
-(durable record or registry changed before|during release)` and writes no record or final.
-It sends no card, chain, retry or outcome, so the other writer's record stays byte for byte.
-Its waiter ends with the run `failed` in memory and `settlement preserved: …`.
+(durable record or registry changed before|during release)`, or `reader view kept (effort
+owner changed)` when the owner fence refused its own record write, and writes no record or
+final, so the other writer's record stays byte for byte. Its settlement posts no card and
+fires no chain, retry, finalize event or memory outcome. Its waiter ends with the run
+`failed` in memory and `settlement preserved: …`. That status change is the only thing a
+status listener can see: a foreground `ensemble_send` answer that was detached gets one
+`failed` card from its post-detach listener, only while the effort owner is current. The
+card carries that message and the kept-view hint and offers no actions (a TUI adds only the
+read-only focus view). An answer that did not detach gets the `failed` tool result instead.
+A background reader gets no card. Every effort `ensemble_spawn`, chain and retry is
+background, so the queued-spawn listener, which serves only a downgraded foreground
+spawn, never sees a reader.
 A blocked A6 reader keeps its view; the owner's answer resumes in the same view cwd with
 the frozen prompt, tool policy and role. A view whose HEAD moved, or a session header
 whose cwd is not the frozen view, is refused before any effect, the question kept. A failed
@@ -778,8 +787,15 @@ launched outside the effort.
 **Delivery.** A herdr reader settles through the ordinary nonce-fenced herdr ledger
 (`intent` → `attempted`; an interrupted intent becomes `uncertain` and is never replayed),
 not the writer's M5 integration WAL. Every reader card, blocked or terminal, and every
-reader record write is fenced by the current effort owner: a stale owner's pipeline
-publishes nothing.
+reader record write is fenced by the current effort owner. Cards pass one check in
+`pushCompletionCard`, whatever posts them: settlement, a kill or timeout, the post-detach
+listener or the queued-spawn listener. A stale owner gets no card, record, chain, retry or
+outcome. Its waiter still ends: a foreground answer returns, and on herdr the run stays as
+settled in memory (`completed`, or `blocked` with its question kept) with `herdr settlement
+preserved: effort owned by another session or generation`. A subprocess reader under a
+stale owner still writes its own `final.md`; a herdr one writes none. A dead-man-switch
+re-fire repeats a card first sent under the then-current owner without checking the owner
+again.
 
 **Recovery and GC.** Only writers get the completed→`merge_conflict` conversion. A
 subprocess reader record recovered `running` with no live process becomes `killed` (`lost
@@ -796,7 +812,9 @@ Verified: `tests/effort-readers.test.ts` and `tests/effort-readers-runtimes.test
 (private Git; a fake Pi CLI for subprocess children and an in-process fake herdr CLI for
 herdr ones; hook precedence, failures including clean-view spawn errors, hook-made changes,
 exit barriers, pane, record, registry, transport and owner races, reload, blocked answers,
-readoption and the ledger).
+readoption and the ledger; R4: the cards that the real `ensemble_send` and `ensemble_spawn`
+tools and a kill post through `pushCompletionCard`, ended stale-owner waiters, the
+owner-change hint and the record fence read after `writeRecord`'s last await).
 `tests/effort-reader-smoke.test.ts` (subprocess) and `tests/effort-reader-herdr-smoke.test.ts`
 (executable fake herdr CLI) run Pi 0.87.1 from the explicit `CONDUCTOR_NATIVE_PI_ROOT`
 (pi-coding-agent, pi-ai, pi-agent-core and pi-tui all 0.87.1). Both use a fixed faux

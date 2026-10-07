@@ -4,7 +4,7 @@ import { measureEffortFootprint } from "./effort/admit.ts";
 import { effortGit } from "./effort/open.ts";
 import { assertRunEffortOwner, readEffort } from "./effort/store.ts";
 import { effortSummary, resolveEffortPolicy } from "./effort/policy.ts";
-import { settleReaderView } from "./effort/reader.ts";
+import { readerFence, readerOwned, settleReaderView } from "./effort/reader.ts";
 import { appendFile } from "node:fs/promises";
 import type { RunRuntime, RunTransport } from "./runtime.ts";
 import { runtimeFor } from "./runtime.ts";
@@ -126,7 +126,7 @@ export function createRunPipeline(
       if (run.settlementPreserved) {
         if (!isTerminal(run.status)) Object.assign(run, { status: "failed", exitCode, finishedAt: Date.now() });
         donePromiseResolve(run);
-      }
+      } else if (!readerOwned(run)) donePromiseResolve(run); // R4: a stale owner's reader waiter ends too, with nothing published
       opts.registry.notify(run);
     });
   };
@@ -682,9 +682,6 @@ async function settleRunEffects(
 export function usesHerdrLedger(run: Run): boolean {
   return run.runtime === "herdr" && !run.integration && (!run.effort || run.effort.role === "reader");
 }
-/** A reader's callbacks belong to the effort's current owner. */
-function readerFence(run: Run): void { if (run.effort?.role === "reader") assertRunEffortOwner(run); }
-function readerOwned(run: Run): boolean { try { readerFence(run); return true; } catch { return false; } }
 
 /** A local dispatch attempt, never a consumer acknowledgement. Ambiguous intents are not replayed. */
 export function dispatchHerdrSettlement(run: Run, dispatch: () => void): Promise<void> {
