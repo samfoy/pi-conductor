@@ -637,8 +637,11 @@ with **no** merger and the original card once; the card and `ensemble_status`
 (`human_resolution`) name the human command. Only the interactive
 `/conductor effort resolve <exact-run-id>` can start the one attempt. It needs a UI
 (`hasUI`), a lead that is not `CONDUCTOR_SUBAGENT=1`, and an explicit
-`ctx.ui.confirm`. There is no `ensemble_effort` resolve action, no other tool route
-and no script substitute; the model sees only the hint. `off` refuses, and so does
+`ctx.ui.confirm`. There is no `ensemble_effort` resolve action and no other model tool
+route; the model sees only the hint. The confirmation is a UI answer, not proof that
+a human is present: in Pi RPC mode `hasUI` is true, so a trusted RPC client running as
+the same user can answer the dialog. That is the lead's ordinary trusted-client,
+same-UID boundary, not an OS-level human-presence check. `off` refuses, and so does
 `auto` once its attempt is spent (`auto` with no attempt yet, for example a conflict
 while no launcher was configured, is also resolvable).
 
@@ -657,7 +660,9 @@ check has no effect.
 
 After the confirmation, the same checks run again synchronously, before and after the
 exclusive driver claim, and any change in state, source, tip, owner or lease while the
-dialog was open rejects with the merge_conflict preserved. The accepted transaction
+dialog was open rejects with the merge_conflict preserved. If the integration driver is
+busy (another entry is integrating), the confirmed resolve is refused with nothing
+written; it is not deferred or queued. Rerun it once the queue is idle. The accepted transaction
 adopts through the shared M5 claim, then durably writes (acknowledged before enqueue)
 a new `integration` generation: `previous` summarizes the replaced one (reason,
 delivery, OIDs, error) and `delivery` starts unset, with

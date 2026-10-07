@@ -9,12 +9,15 @@ import { preserveTmpDirs } from "./tmp.ts";
 
 export type Fixture = ReturnType<typeof mergerFixture>;
 
-/** The pipeline's own tail for a settled first generation: one card through the delivery ledger. */
-export async function conflicted(f: Fixture, a: Run, cards: string[]) {
+/**
+ * The pipeline's own tail for a settled first generation: one card through the delivery ledger.
+ * `during` runs inside that card's dispatch, while delivery is still "intent".
+ */
+export async function conflicted(f: Fixture, a: Run, cards: string[], during?: (r: Run) => void) {
   const outcome = await f.registry.integrations.enqueue(a, () => f.registry.notify(a));
   a.mergeResult = outcome.mergeResult; a.landedCommit = outcome.landedCommit;
   if (!outcome.mergeResult.success) a.errorMessage = `effort integration failed: ${outcome.mergeResult.reason ?? "error"}. ${outcome.mergeResult.errorMessage ?? "Work and evidence preserved."}`;
-  await settleRun(a, outcome.terminal, 0, { registry: f.registry, onComplete: r => cards.push(`${r.id}:${r.status}`) });
+  await settleRun(a, outcome.terminal, 0, { registry: f.registry, onComplete: r => { cards.push(`${r.id}:${r.status}`); during?.(r); } });
   return outcome;
 }
 
@@ -39,4 +42,3 @@ export async function preserving<T>(t: test.TestContext, body: () => Promise<T>)
   try { return await body(); }
   catch (error) { t.diagnostic(`preserved fixture roots: ${preserveTmpDirs().join(" ")}`); throw error; }
 }
-

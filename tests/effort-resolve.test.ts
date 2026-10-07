@@ -5,7 +5,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { git, until } from "./helpers/effort-integration.ts";
@@ -17,7 +18,7 @@ import { registerTools } from "../src/tools.ts";
 import { RunRegistry, runsRoot } from "../src/runs.ts";
 import { SpawnQueue } from "../src/queue.ts";
 import { FocusedStreamModel } from "../src/focused-stream-model.ts";
-import { acquireClaim, effortDir, readEffort, releaseClaim, writeEffort } from "../src/effort/store.ts";
+import { acquireClaim, effortDir, readClaim, readEffort, releaseClaim, writeEffort } from "../src/effort/store.ts";
 import { effortOwner } from "../src/effort/open.ts";
 import { recoverEffort } from "../src/effort/reconcile.ts";
 import { readProcessStartTime, reconcileOrphansAtStartup } from "../src/reconcile-startup.ts";
@@ -231,6 +232,100 @@ for (const [name, change, expected] of [
   assert.equal(readFileSync(x.a.recordPath, "utf8"), record, "prior failure, card ledger and record preserved");
   assert.equal(x.a.status, "merge_conflict"); assert.equal(x.a.integration!.resolveRequested, undefined); assert.deepEqual(x.cards, ["builder-a:merge_conflict"]);
   x.undo?.();
+});
+
+// The three guards below were only covered by private review probes (critic P1, P5, P2).
+
+test("M6b P1 a record.json-only change while the confirmation is awaited is refused: the newer durable generation is byte-identical, no claim, no merger", { timeout: 20000 }, async t => {
+  const { f, a, cards } = setup(t);
+  const m = fakeMergers(f.registry);
+  await conflicted(f, a, cards);
+  const c = command(f, cards);
+  const memory = JSON.stringify(toRunRecord(a));
+  let rewritten = "", expected = "";
+  await c.resolve("builder-a", c.ctx(() => {
+    // A newer, internally valid generation lands on disk only; this session's in-memory view is untouched.
+    const disk = JSON.parse(readFileSync(a.recordPath, "utf8"));
+    disk.integration = { ...disk.integration, enqueuedAt: disk.integration.enqueuedAt + 1000, resolveRequested: { at: Date.now(), sourceHead: disk.integration.sourceHead, tip: f.tip() } };
+    rewritten = JSON.stringify(disk, null, 2); writeFileSync(a.recordPath, rewritten);
+    expected = effects(f, a);
+    return true;
+  }));
+  await delay(SETTLE_MS);
+  assert.equal(m.calls.length, 0, "no merger spawned over the newer durable generation");
+  assert.equal(readFileSync(a.recordPath, "utf8"), rewritten, "the newer record.json is byte-identical, never overwritten");
+  assert.equal(c.prompts.length, 1);
+  assert.equal(c.notes.at(-1)!.level, "error", JSON.stringify(c.notes)); assert.match(c.notes.at(-1)!.message, /durable record differs from this session's view/);
+  assert.equal(effects(f, a), expected, "no driver claim, effort, ref, worktree or run effects");
+  assert.equal(JSON.stringify(toRunRecord(a)), memory, "in-memory view unchanged");
+  assert.deepEqual(cards, ["builder-a:merge_conflict"]);
+});
+
+test("M6b P5 a source move under the driver claim, after the post-confirm check, is refused by the under-claim revalidation; restored, resolve runs once", { timeout: 20000 }, async t => {
+  const { f, a, cards } = setup(t);
+  const m = fakeMergers(f.registry);
+  await conflicted(f, a, cards);
+  const c = command(f, cards);
+  const head = git(a.worktreePath!, "rev-parse", "HEAD"), lock = join(effortDir(f.root, "integration-driver"), "driver.lock");
+  const released = (gen: number) => existsSync(`${lock}${gen ? `.${gen}` : ""}.released`);
+  const before = effects(f, a), startGen = readClaim(lock)!.generation ?? 0;
+  // In-process instrumentation of the claim's own publication (no production seam): the source moves
+  // right after the driver claim is linked, i.e. between acquireClaim and the under-claim revalidate.
+  let armed = false, moved = 0, heldAtMove = false;
+  const link = fs.linkSync;
+  t.mock.method(fs, "linkSync", (src: fs.PathLike, dst: fs.PathLike) => {
+    link(src, dst);
+    if (!armed || !String(dst).startsWith(lock) || String(dst).endsWith(".released")) return;
+    armed = false; moved++;
+    const claim = readClaim(lock);
+    heldAtMove = !!claim && (claim.generation ?? 0) === startGen + 1 && !released(claim.generation ?? 0);
+    writeFileSync(join(a.worktreePath!, "extra"), "x\n"); git(a.worktreePath!, "add", "extra"); git(a.worktreePath!, "commit", "-q", "-m", "more");
+  }); syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  try { await c.resolve("builder-a", c.ctx(() => { armed = true; return true; })); }
+  finally { armed = false; git(a.worktreePath!, "reset", "-q", "--hard", head); }
+  await delay(SETTLE_MS);
+  assert.equal(moved, 1, "positive control: the source moved once, inside the claimed window");
+  assert.equal(heldAtMove, true, "the new driver claim generation was held when the source moved");
+  assert.equal(m.calls.length, 0, "no merger spawned for the moved source");
+  assert.equal(c.notes.at(-1)!.level, "error", JSON.stringify(c.notes)); assert.match(c.notes.at(-1)!.message, /source branch head changed/);
+  const outsideDriver = (text: string) => { const { driver: _driver, ...rest } = JSON.parse(text); return JSON.stringify(rest); };
+  assert.equal(outsideDriver(effects(f, a)), outsideDriver(before), "with the source restored: no record, memory, effort, ref, worktree or run effects");
+  assert.equal(readClaim(lock)!.generation, startGen + 1); assert.equal(released(startGen + 1), true, "the only driver effect is one claim generation, released");
+  await c.resolve("builder-a", c.ctx(() => true));
+  assert.match(c.notes.at(-1)!.message, /accepted/i, JSON.stringify(c.notes));
+  resolveBoth((await m.nth(0)).cwd); await settle(f.registry, m.launched[0]!, "Resolved.");
+  await until(f.registry, a, r => r.status === "completed");
+  await poll(() => cards.length === 2 && !a.integrationSettlement, "second card");
+  assert.deepEqual(cards, ["builder-a:merge_conflict", "builder-a:completed"]); assert.equal(m.calls.length, 1);
+});
+
+test("M6b P2 resolve inside the original card's dispatch (delivery intent) is refused before any prompt; once attempted is recorded it resolves once", { timeout: 20000 }, async t => {
+  const { f, a, cards } = setup(t);
+  const m = fakeMergers(f.registry);
+  const c = command(f, cards);
+  let inner: Promise<void> | undefined, seen: unknown;
+  await conflicted(f, a, cards, r => {
+    seen = { delivery: r.integration!.delivery, settling: !!r.integrationSettlement };
+    inner = c.resolve("builder-a", c.ctx(() => true));
+  });
+  await inner;
+  await poll(() => !a.integrationSettlement, "original settlement cleared");
+  await delay(SETTLE_MS);
+  assert.deepEqual(seen, { delivery: "intent", settling: true }, "positive control: called inside the original dispatch");
+  assert.equal(m.calls.length, 0, "no merger from the mid-dispatch resolve");
+  assert.equal(c.prompts.length, 0, "refused before any prompt");
+  assert.equal(c.notes.at(-1)!.level, "error", JSON.stringify(c.notes)); assert.match(c.notes.at(-1)!.message, /still settling/);
+  assert.equal(a.status, "merge_conflict"); assert.equal(a.integration!.resolveRequested, undefined);
+  assert.equal(a.integration!.delivery, "attempted"); assert.equal(JSON.parse(readFileSync(a.recordPath, "utf8")).integration.delivery, "attempted", "the ledger write landed on the original generation");
+  await c.resolve("builder-a", c.ctx(() => true));
+  assert.equal(c.prompts.length, 1); assert.match(c.notes.at(-1)!.message, /accepted/i, JSON.stringify(c.notes));
+  resolveBoth((await m.nth(0)).cwd); await settle(f.registry, m.launched[0]!, "Resolved.");
+  await until(f.registry, a, r => r.status === "completed");
+  await poll(() => cards.length === 2 && !a.integrationSettlement, "second card");
+  await delay(SETTLE_MS);
+  assert.deepEqual(cards, ["builder-a:merge_conflict", "builder-a:completed"]);
+  assert.equal(a.integration!.previous!.delivery, "attempted"); assert.equal(m.calls.length, 1);
 });
 
 test("M6b two concurrent confirmations launch one generation and one attempt", { timeout: 20000 }, async t => {
