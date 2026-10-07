@@ -37,7 +37,7 @@ registerHooks({ load(url, context, next) {
 }
 
 for (const file of ["tests/effort-merger-smoke.test.ts", "tests/effort-merger-recovery-smoke.test.ts", "tests/helpers/merger-cleanup-fault.ts", "tests/native-startup-race.test.ts", "tests/delegation-native-smoke.test.ts",
-  "tests/effort-reader-smoke.test.ts", "tests/effort-readers.test.ts"]) test(`M6a ${file} throws on an injected herdr scope before any repository module evaluates`, { timeout: 30000 }, async () => {
+  "tests/effort-reader-smoke.test.ts", "tests/effort-readers.test.ts", "tests/effort-readers-runtimes.test.ts", "tests/effort-reader-herdr-smoke.test.ts"]) test(`M6a ${file} throws on an injected herdr scope before any repository module evaluates`, { timeout: 30000 }, async () => {
   const s = sandbox();
   const socketPath = join(s.dir, "fake-herdr.sock");
   let connections = 0;

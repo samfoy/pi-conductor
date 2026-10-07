@@ -46,6 +46,8 @@ const response = (text: string) => (context: any) => {
 };
 faux.setResponses(mode === "ask" ? [fauxAssistantMessage([fauxToolCall("ask_owner", { question: "Choose the native route?" }, { id: "native-question" })], { stopReason: "toolUse" })]
   : mode === "failure" ? [fauxAssistantMessage("", { stopReason: "error", errorMessage: "Offline later failure" })]
+  // M7: a finalizer reader's answered review.
+  : mode === "verdict" ? [response("## Verdict: complete\n\n## End-to-end verification I ran\n- Native herdr reader answered inside its detached view.")]
   : mode === "live" ? [async () => { writeFileSync(`${manifest}.streaming`, "streaming"); while (!existsSync(`${manifest}.release`)) await delay(10); return fauxAssistantMessage("Held native response complete."); }, response("Native follow-up final evidence 漢🙂 with exact input acceptance.")]
   : [response("Native resumed final evidence 漢🙂 with exact input acceptance.")]);
 writeFileSync(`${manifest}.ready`, JSON.stringify({ version: VERSION, nonce: binding.launchNonce }));

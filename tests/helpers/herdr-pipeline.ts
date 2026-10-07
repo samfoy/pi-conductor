@@ -8,26 +8,31 @@ import { emptyUsage, type Run } from "../../src/types.ts";
 import { RunRegistry } from "../../src/runs.ts";
 import type { HerdrCli } from "../../src/herdr/cli.ts";
 
-/** `opts` (N5): a run id and directory (e.g. under the runs root) and extra run fields such as a delegation scope. */
-export function herdrFixture(mode = "healthy", opts: { id?: string; cwd?: string; dir?: string; run?: Partial<Run> } = {}) {
+/**
+ * `opts` (N5): a run id and directory (e.g. under the runs root) and extra run fields such as a delegation scope.
+ * `target` (M7): the Run object actually launched (e.g. by spawnRun with the same id and directory), when it is not the fixture's own;
+ * `finalText` replaces the assistant's final text.
+ */
+export function herdrFixture(mode = "healthy", opts: { id?: string; cwd?: string; dir?: string; run?: Partial<Run>; target?: () => Run | undefined; finalText?: string } = {}) {
   const id = opts.id ?? "oracle-h7", cwd = opts.cwd ?? tmpDir("h7-pipeline-"), dir = opts.dir ?? join(cwd, id); mkdirSync(dir, { recursive: true });
   const run: Run = { id, runtime: "herdr", persona: "oracle", task: "probe", mode: "background", status: "running", startTime: Date.now(), lastEventAt: Date.now(), cwd,
     messages: [], usage: emptyUsage(), recordPath: join(dir, "record.json"), transcriptPath: join(dir, "transcript.jsonl"), finalPath: join(dir, "final.md"), ...opts.run };
   const registry = new RunRegistry(); registry.register(run);
+  const live = () => opts.target?.() ?? run;
   const pane = { pane_id: "owned", terminal_id: "term", workspace_id: "workspace", tab_id: "tab", agent: null as string | null, agent_session: null as unknown };
   let time = 0, gone = false, unknown = false;
   const calls: string[] = [], signals: string[] = [];
   let onSleep = () => {}, react: (() => boolean) | undefined;
-  const emit = (event: object, nonce = run.herdr!.launchNonce) => appendFileSync(run.transcriptPath, JSON.stringify({ ...event, _c: { n: nonce } }) + "\n");
+  const emit = (event: object, nonce = live().herdr!.launchNonce) => appendFileSync(live().transcriptPath, JSON.stringify({ ...event, _c: { n: nonce } }) + "\n");
   const exit = () => { gone = true; pane.agent = null; pane.agent_session = null; };
   const cli: HerdrCli = { socketPath: join(cwd, "fake.socket"), async text() { return "fake"; }, async json(args) {
     calls.push(args.slice(0, 2).join(" "));
-    if (args[0] === "tab") return { type: "tab_created", root_pane: { ...pane }, tab: { tab_id: "tab", workspace_id: "workspace", label: run.id, pane_count: 1 } };
+    if (args[0] === "tab") return { type: "tab_created", root_pane: { ...pane }, tab: { tab_id: "tab", workspace_id: "workspace", label: live().id, pane_count: 1 } };
     if (args[1] === "get") return { type: "pane_info", pane: { ...pane } };
     if (args[1] === "close") { assert.ok(gone, "pane never closes before child exit"); assert.equal(pane.agent, null); return { type: "ok" }; }
     assert.equal(args[1], "start");
     gone = false;
-    const binding = JSON.parse(readFileSync(run.recordPath, "utf8")).herdr;
+    const binding = JSON.parse(readFileSync(live().recordPath, "utf8")).herdr;
     // Real herdr registers only an idle child: no task may be visible to the pump yet.
     assert.equal(readInbox(dir, binding.launchNonce).length, 0, "task published before herdr registered an idle child");
     pane.agent = "pi"; pane.agent_session = { kind: "path", value: binding.sessionFile, agent: "pi", source: "integration" };
@@ -42,7 +47,7 @@ export function herdrFixture(mode = "healthy", opts: { id?: string; cwd?: string
     react = undefined;
     if (mode !== "preaccept-death") {
       if (!["no-start", "busy-ack", "stale-ack", "no-ack"].includes(mode)) emit({ type: "agent_start", initialRequestId: request.requestId });
-      if (mode !== "accepted-no-output") emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Final verified evidence 漢🙂 with sufficient substance." }], stopReason: "stop", usage: { input: 12, output: 7, cost: { total: 0.01 } } } });
+      if (mode !== "accepted-no-output") emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: opts.finalText ?? "Final verified evidence 漢🙂 with sufficient substance." }], stopReason: "stop", usage: { input: 12, output: 7, cost: { total: 0.01 } } } });
       emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "FOREIGN" }] } }, "foreign");
       if (mode === "ask") {
         emit({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", id: "question", name: "ask_owner", arguments: { question: "Choose?" } }], stopReason: "toolUse" } });

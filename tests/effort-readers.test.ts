@@ -164,21 +164,23 @@ test("M7 a reader views the CURRENT tip in a detached .worktrees/conductor-view 
   assert.deepEqual(JSON.parse(readFileSync(run.recordPath, "utf8")).effort, run.effort, "role and frozen view facts are durable");
 });
 
-test("M7 a configured on_complete hook never runs for a reader, on its first invocation or after an answer", { timeout: 20000 }, async t => {
+test("M7 R2: the configured on_complete hook runs for a reader in its view, on its first invocation and after an answer", { timeout: 20000 }, async t => {
   const f = fixture(t); const { procs } = fakePi(t);
   const marker = join(tmpDir("m7-hook-marker-"), "ran");
-  // Project config for the requested cwd (gitignored .pi/): the writer gate a reader must never run.
+  // Project config for the requested cwd (gitignored .pi/): the normal validation hook, in the reader's view.
   mkdirSync(join(f.root, "pkg", ".pi"), { recursive: true });
-  writeFileSync(join(f.root, "pkg", ".pi", "conductor.json"), JSON.stringify({ personaOverrides: { critic: { onCompleteHook: `echo ran >> '${marker}'` } } }));
+  writeFileSync(join(f.root, "pkg", ".pi", "conductor.json"), JSON.stringify({ personaOverrides: { critic: { onCompleteHook: `printf '%s\\n' "$(pwd)" >> '${marker}'` } } }));
   const first = spawned(reader(f));
   finish(procs[0]!); await settledRun(f.registry, first);
-  assert.equal(first.status, "completed", first.errorMessage); assert.equal(first.hookResult, undefined); assert.equal(first.effort?.gate, undefined);
+  assert.equal(first.status, "completed", first.errorMessage); assert.equal(first.hookResult?.passed, true); assert.match(first.effort?.gate?.command ?? "", /printf/);
+  assert.equal(first.effort?.reviewed, f.landed);
   const asked = spawned(reader(f));
   ask(procs[1]!, "Which file?"); await poll(() => asked.status === "blocked", "blocked");
+  assert.deepEqual(readFileSync(marker, "utf8").trim().split("\n"), [join(f.view(first), "pkg")], "a blocked question is not a completion: no hook yet");
   assert.equal(sendToRun(asked, "pkg/landed", { registry: f.registry, timeoutMs: 5000, sessionId: "owner", persona: critic }).kind, "started");
   emit(procs[2]!, { type: "agent_start" }); finish(procs[2]!); await settledRun(f.registry, asked);
-  assert.equal(asked.status, "completed", asked.errorMessage); assert.equal(asked.hookResult, undefined);
-  assert.equal(existsSync(marker), false, "no reader ran the configured hook");
+  assert.equal(asked.status, "completed", asked.errorMessage); assert.equal(asked.hookResult?.passed, true);
+  assert.deepEqual(readFileSync(marker, "utf8").trim().split("\n"), [join(f.view(first), "pkg"), join(f.view(asked), "pkg")], "once per completion, each in its own view");
 });
 
 test("M7 a queued reader resolves the NEW tip at dequeue; its placeholder already carries the reader role", { timeout: 20000 }, async t => {
@@ -225,24 +227,19 @@ test("M7 admission: a reader holds no footprint and no maxParallel charge; the g
   await Promise.all(f.registry.list().filter(x => x.status === "running").map(x => settledRun(f.registry, x)));
 });
 
-test("M7 reader refusals happen before any effect: touches, herdr runtime, an explicit on_complete hook, a foreign owner", { timeout: 20000 }, async t => {
+test("M7 reader refusals happen before any effect: touches and a foreign owner (herdr and hooks are admitted, R1/R2)", { timeout: 20000 }, async t => {
   const f = fixture(t);
   const members = () => readEffort(f.root, "probe")!.members;
   const views = () => existsSync(join(f.root, ".worktrees", "conductor-view"));
   const cases: [Record<string, unknown>, RegExp][] = [
     [{ touches: ["pkg/**"] }, /readers? .*touches|touches.*reader/i],
-    [{ runtime: "herdr" }, /reader.*subprocess/i],
-    [{ onCompleteHook: "touch marker" }, /reader.*hook/i],
     [{ parentSessionId: "intruder" }, /owned by another|generation|owner/i],
   ];
-  // A private, never-contacted socket path: the refusal precedes any herdr effect.
-  const fakeHerdr = { HERDR_ENV: "1", HERDR_SOCKET_PATH: join(tmpDir("m7-no-herdr-"), "absent.sock"), HERDR_PANE_ID: "fake-pane" };
   for (const [extra, refusal] of cases) {
     assert.throws(() => prepareSpawnEffort({ persona: critic, cwd: f.root, effort: "probe", parentSessionId: "owner", ...extra } as never), refusal);
-    assert.throws(() => reader(f, critic, extra.runtime ? { ...extra, runtimeEnv: fakeHerdr } : extra), refusal);
+    assert.throws(() => reader(f, critic, extra), refusal);
   }
   assert.deepEqual(members(), []); assert.equal(f.registry.list().length, 0); assert.equal(views(), false);
-  assert.doesNotThrow(() => prepareSpawnEffort({ persona: critic, cwd: f.root, effort: "probe", parentSessionId: "owner", onCompleteHook: "" } as never), "the explicit disable sentinel is not a hook");
 });
 
 const MUTATIONS: [string, (view: string, f: Fixture) => void, RegExp][] = [

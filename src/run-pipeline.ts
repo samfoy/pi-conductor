@@ -25,6 +25,7 @@ import {
   discoverSessionPathIfMissing, discoverContextRetirement, applyHookToTerminal,
   applyCloseHandlerTerminal, emitFinalizeEvent, applyRetryIfNeeded, applySubstanceCheck,
   failEffortLaunch, settleWorktree, writeRecord, writeFinal, getFinalText, applyChainIfPresent, applyCompactionLine, checkTurnLimit,
+  readerReleaseGuard, releaseRunPane,
 } from "./runs.ts";
 
 export interface RunPipelineOpts {
@@ -80,7 +81,8 @@ export function createRunPipeline(
   const rpc = piArgs[1] === "rpc";
   run.onComplete = opts.onComplete;
   const recoveredAnswer = !!opts.answer && !!run.reconciledAtStartup && !!run.effort && run.effort.gate !== undefined;
-  if (!opts.reattach && run.effort?.role === "writer" && (!run.reconciledAtStartup || run.effort.gate !== undefined)) run.effort.gate = opts.resolvedHook ?? null;
+  // Writers and readers alike: the resolved hook, or null for a known absent one; undefined stays an unknown legacy gate.
+  if (!opts.reattach && run.effort && (!run.reconciledAtStartup || run.effort.gate !== undefined)) run.effort.gate = opts.resolvedHook ?? null;
 
   let awaitingAnswer = opts.answer !== undefined;
   let answerRecord = Promise.resolve();
@@ -205,8 +207,8 @@ export function createRunPipeline(
         await writeRecord(run);
         check();
         opts.registry.notify(run);
-        if (run.runtime === "herdr" && !run.effort) await dispatchHerdrSettlement(run, () => opts.onComplete?.(run));
-        else if (!opts.reattach) { try { opts.onComplete?.(run); } catch { /* listener errors cannot wedge settlement */ } }
+        if (usesHerdrLedger(run)) await dispatchHerdrSettlement(run, () => opts.onComplete?.(run));
+        else if (!opts.reattach && readerOwned(run)) { try { opts.onComplete?.(run); } catch { /* listener errors cannot wedge settlement */ } }
         donePromiseResolve(run);
         return;
       }
@@ -256,9 +258,14 @@ export function createRunPipeline(
     }
     check();
     if (run.effort?.role === "reader") {
-      // M7: never the writer gate, integration or legacy merge; the closed process left only its view.
+      // M7: after the proven exit and the validation hook; never integration or legacy merge.
       run.proc = undefined;
-      settleReaderView(run, { completed: terminal === "completed" && !isTerminal(run.status), live: !opts.reattach && !run.reconciledAtStartup, finalText: getFinalText(run.messages) });
+      const isCurrent = readerReleaseGuard(run, () => opts.registry.get(run.id), () => current() && !replaced());
+      await settleReaderView(run, {
+        succeeded: terminal === "completed" && exitCode === 0 && !isTerminal(run.status) && run.effort.gate !== undefined,
+        live: !opts.reattach && !run.reconciledAtStartup, finalText: getFinalText(run.messages),
+      }, { isCurrent, releasePane: () => releaseRunPane(run, isCurrent) });
+      check();
     } else if (run.effort && terminal === "completed" && !isTerminal(run.status)) {
       run.proc = undefined;
       run.pid = undefined;
@@ -447,8 +454,8 @@ export function createRunPipeline(
   } else {
     run.proc = undefined; run.pid = undefined; run.streamingMode = undefined;
     const launch = transport;
-    if (isDelegatedLeaf(run)) {
-      // N3 on herdr: a leaf has no process handle, so its slot is held until its pane child's exit is proven.
+    if (isDelegatedLeaf(run) || run.effort?.role === "reader") {
+      // N3 on herdr: a leaf or effort reader has no process handle, so its slot is held until its pane child's exit is proven.
       run.processOpen = true;
       const exited = () => { if (run.transport !== launch || !launch.childExited) return; run.processOpen = undefined; opts.registry.notify(run); };
       void launch.closed.then(exited);
@@ -585,13 +592,13 @@ async function settleRunEffects(
       // v0.16-S3: emit lifecycle event for force-terminated runs (run.status
       // already set by forceTerminate; emit before resolving done).
       const dispatch = () => {
-        fence();
+        fence(); readerFence(run);
         emitFinalizeEvent(run, opts.events);
         if (!run.reconciledAtStartup) applyRetryIfNeeded(run, opts.onRetry);
         fence(); recordRunOutcome(run);
       };
-      if (run.runtime === "herdr" && !run.effort) await dispatchHerdrSettlement(run, dispatch);
-      else dispatch();
+      if (usesHerdrLedger(run)) await dispatchHerdrSettlement(run, dispatch);
+      else { try { dispatch(); } catch { /* a stale reader owner gets no callbacks */ } }
       donePromiseResolve(run);
       return;
     }
@@ -626,8 +633,8 @@ async function settleRunEffects(
       // already dead
     }
     const dispatch = () => {
-      fence();
-      if (run.effort && run.reconciledAtStartup && !run.integration) return;
+      fence(); readerFence(run);
+      if (run.effort?.role === "writer" && run.reconciledAtStartup && !run.integration) return;
       try { opts.onComplete?.(run); } catch { /* local dispatch attempted, not receiver acknowledgement */ }
       if (!run.reconciledAtStartup) {
         applyChainIfPresent(run, run.status as RunStatus, opts.onChain);
@@ -656,15 +663,25 @@ async function settleRunEffects(
       donePromiseResolve(run);
     } else {
       await Promise.all([writeRecord(run), writeFinal(run)]).catch(() => {}).finally(() => {
-        dispatch(); donePromiseResolve(run);
+        try { dispatch(); } catch { /* a stale reader owner gets no callbacks */ }
+        donePromiseResolve(run);
       });
     }
 }
 
+/** M7: the nonce-fenced ordinary ledger serves non-effort herdr runs and herdr effort readers; writers keep the M5 WAL. */
+export function usesHerdrLedger(run: Run): boolean {
+  return run.runtime === "herdr" && !run.integration && (!run.effort || run.effort.role === "reader");
+}
+/** A reader's callbacks belong to the effort's current owner. */
+function readerFence(run: Run): void { if (run.effort?.role === "reader") assertRunEffortOwner(run); }
+function readerOwned(run: Run): boolean { try { readerFence(run); return true; } catch { return false; } }
+
 /** A local dispatch attempt, never a consumer acknowledgement. Ambiguous intents are not replayed. */
 export function dispatchHerdrSettlement(run: Run, dispatch: () => void): Promise<void> {
-  if (run.effort || !run.herdr) throw new Error("ordinary herdr settlement required");
-  const binding = run.herdr, fence = herdrEffectFence(run);
+  if (!usesHerdrLedger(run) || !run.herdr) throw new Error("ordinary herdr settlement required");
+  const binding = run.herdr, herdrFence = herdrEffectFence(run);
+  const fence = () => { herdrFence(); readerFence(run); };
   return run.herdrDelivery ??= Promise.resolve().then(async () => {
     fence();
     const persist = () => writeRecord(run, () => { fence(); if (run.herdr !== binding) throw new Error("herdr invocation replaced"); });

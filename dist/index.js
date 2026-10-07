@@ -108,7 +108,7 @@ function processIdentityState(owner, deps = {}) {
 
 // src/effort/policy.ts
 import { matchesGlob } from "node:path";
-var EFFORT_NOTICE = 'M7: disjoint effort writers run in independent worktrees within global/effort limits; integration remains serial after optional generated artifact regeneration, baseline/candidate verification and repository hooks. Under efforts.merger "auto", a textual conflict or twice-red verify parks that writer while one driver-owned merger proposes a hooked commit in a detached candidate; the proposal is re-gated by the same queue against the current tip, once per writer. Under "ask" that writer settles merge_conflict with no merger until a human runs the interactive /conductor effort resolve <run-id> and confirms one attempt; there is no agent-callable resolve. "off" refuses resolution. A read_only persona joins as a reader: a detached view of the tip at its launch, no touches, no reserved paths, no on_complete hook and never integrated; a clean view is removed, anything else is kept. Chains and classified retries stay in the owned effort: a writer chains only after its work landed, a reader only after a proven clean review; integration failures never retry. A finalizer verdict is recorded only for the exact commit it viewed and is stale once the tip moves. Legacy work remains UNINTEGRATED. Crash recovery uses owner fencing and reachable Git proof; uncertain work pauses for human effort resume/requeue. Delivery-uncertain callbacks are never replayed automatically. Landing and auto plans remain unavailable.';
+var EFFORT_NOTICE = 'M7: disjoint effort writers run in independent worktrees within global/effort limits; integration remains serial after optional generated artifact regeneration, baseline/candidate verification and repository hooks. Under efforts.merger "auto", a textual conflict or twice-red verify parks that writer while one driver-owned merger proposes a hooked commit in a detached candidate; the proposal is re-gated by the same queue against the current tip, once per writer. Under "ask" that writer settles merge_conflict with no merger until a human runs the interactive /conductor effort resolve <run-id> and confirms one attempt; there is no agent-callable resolve. "off" refuses resolution. A read_only persona joins as a reader on either runtime: a detached view of the tip at its launch, no touches or reserved paths, never integrated; its normal on_complete hook runs in the view after the child exits, and only a passed hook and a clean, owned view count as a review and allow removal; anything else is kept. Chains and classified retries stay in the owned effort: a writer chains only after its work landed, a reader only after a proven clean review; integration failures never retry. A finalizer verdict is recorded only for the exact commit it viewed and is stale once the tip moves. Legacy work remains UNINTEGRATED. Crash recovery uses owner fencing and reachable Git proof; uncertain work pauses for human effort resume/requeue. Delivery-uncertain callbacks are never replayed automatically. Landing and auto plans remain unavailable.';
 function effortSummary(run2) {
   if (!run2.effort) return "";
   if (run2.effort.role === "reader") {
@@ -3269,17 +3269,32 @@ function readerViewProblem(run2) {
     return `state unknown: ${error.message}`;
   }
 }
-function settleReaderView(run2, outcome) {
-  const e = run2.effort;
-  let problem2 = run2.integrationSuspended ? "owner runtime shut down" : childExitUnconfirmed(run2) ? "delegated child exit unconfirmed" : readerViewProblem(run2);
-  if (!problem2 && outcome.completed && outcome.live) {
+async function settleReaderView(run2, outcome, deps) {
+  const e = run2.effort, path2 = run2.worktreePath;
+  if (!deps.isCurrent()) return;
+  const owned = () => {
+    try {
+      assertRunEffortOwner(run2);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const blocker = () => run2.integrationSuspended ? "owner runtime shut down" : !owned() ? "effort owner changed" : childExitUnconfirmed(run2) || run2.herdrExitUnconfirmed ? "child exit unconfirmed" : isTerminal(run2.status) ? `terminated (${run2.status}) before its review settled` : readerViewProblem(run2);
+  let problem2 = blocker();
+  if (!problem2 && outcome.succeeded && outcome.live) {
     e.reviewed = e.spawnBase;
     if (run2.persona === "finalizer") recordFinalizerVerdict(run2, outcome.finalText);
   }
+  if (!problem2 && !outcome.live) problem2 = "recovered settlement; review unproven";
+  if (!problem2) {
+    const released2 = await deps.releasePane();
+    if (!deps.isCurrent()) return;
+    problem2 = !released2 ? "pane release unproven" : run2.worktreePath !== path2 ? "view path changed" : blocker();
+  }
   if (!problem2) {
     try {
-      assertRunEffortOwner(run2);
-      effortGit(e.gitRoot, "worktree", "remove", run2.worktreePath);
+      effortGit(e.gitRoot, "worktree", "remove", path2);
       run2.worktreePath = void 0;
       run2.worktreeKept = void 0;
       return;
@@ -4540,7 +4555,7 @@ function createRunPipeline(run2, piArgs, opts) {
   const rpc = piArgs[1] === "rpc";
   run2.onComplete = opts.onComplete;
   const recoveredAnswer = !!opts.answer && !!run2.reconciledAtStartup && !!run2.effort && run2.effort.gate !== void 0;
-  if (!opts.reattach && run2.effort?.role === "writer" && (!run2.reconciledAtStartup || run2.effort.gate !== void 0)) run2.effort.gate = opts.resolvedHook ?? null;
+  if (!opts.reattach && run2.effort && (!run2.reconciledAtStartup || run2.effort.gate !== void 0)) run2.effort.gate = opts.resolvedHook ?? null;
   let awaitingAnswer = opts.answer !== void 0;
   let answerRecord = Promise.resolve();
   const restoreAnswer = async (reason) => {
@@ -4684,8 +4699,8 @@ function createRunPipeline(run2, piArgs, opts) {
         await writeRecord(run2);
         check();
         opts.registry.notify(run2);
-        if (run2.runtime === "herdr" && !run2.effort) await dispatchHerdrSettlement(run2, () => opts.onComplete?.(run2));
-        else if (!opts.reattach) {
+        if (usesHerdrLedger(run2)) await dispatchHerdrSettlement(run2, () => opts.onComplete?.(run2));
+        else if (!opts.reattach && readerOwned(run2)) {
           try {
             opts.onComplete?.(run2);
           } catch {
@@ -4740,7 +4755,13 @@ function createRunPipeline(run2, piArgs, opts) {
     check();
     if (run2.effort?.role === "reader") {
       run2.proc = void 0;
-      settleReaderView(run2, { completed: terminal === "completed" && !isTerminal(run2.status), live: !opts.reattach && !run2.reconciledAtStartup, finalText: getFinalText(run2.messages) });
+      const isCurrent = readerReleaseGuard(run2, () => opts.registry.get(run2.id), () => current() && !replaced());
+      await settleReaderView(run2, {
+        succeeded: terminal === "completed" && exitCode === 0 && !isTerminal(run2.status) && run2.effort.gate !== void 0,
+        live: !opts.reattach && !run2.reconciledAtStartup,
+        finalText: getFinalText(run2.messages)
+      }, { isCurrent, releasePane: () => releaseRunPane(run2, isCurrent) });
+      check();
     } else if (run2.effort && terminal === "completed" && !isTerminal(run2.status)) {
       run2.proc = void 0;
       run2.pid = void 0;
@@ -4927,7 +4948,7 @@ function createRunPipeline(run2, piArgs, opts) {
     run2.pid = void 0;
     run2.streamingMode = void 0;
     const launch = transport;
-    if (isDelegatedLeaf(run2)) {
+    if (isDelegatedLeaf(run2) || run2.effort?.role === "reader") {
       run2.processOpen = true;
       const exited = () => {
         if (run2.transport !== launch || !launch.childExited) return;
@@ -5079,13 +5100,19 @@ async function settleRunEffects(run2, terminal, exitCode, opts, transport = { st
     }
     const dispatch2 = () => {
       fence();
+      readerFence(run2);
       emitFinalizeEvent(run2, opts.events);
       if (!run2.reconciledAtStartup) applyRetryIfNeeded(run2, opts.onRetry);
       fence();
       recordRunOutcome(run2);
     };
-    if (run2.runtime === "herdr" && !run2.effort) await dispatchHerdrSettlement(run2, dispatch2);
-    else dispatch2();
+    if (usesHerdrLedger(run2)) await dispatchHerdrSettlement(run2, dispatch2);
+    else {
+      try {
+        dispatch2();
+      } catch {
+      }
+    }
     donePromiseResolve(run2);
     return;
   }
@@ -5116,7 +5143,8 @@ async function settleRunEffects(run2, terminal, exitCode, opts, transport = { st
   }
   const dispatch = () => {
     fence();
-    if (run2.effort && run2.reconciledAtStartup && !run2.integration) return;
+    readerFence(run2);
+    if (run2.effort?.role === "writer" && run2.reconciledAtStartup && !run2.integration) return;
     try {
       opts.onComplete?.(run2);
     } catch {
@@ -5151,14 +5179,35 @@ async function settleRunEffects(run2, terminal, exitCode, opts, transport = { st
   } else {
     await Promise.all([writeRecord(run2), writeFinal(run2)]).catch(() => {
     }).finally(() => {
-      dispatch();
+      try {
+        dispatch();
+      } catch {
+      }
       donePromiseResolve(run2);
     });
   }
 }
+function usesHerdrLedger(run2) {
+  return run2.runtime === "herdr" && !run2.integration && (!run2.effort || run2.effort.role === "reader");
+}
+function readerFence(run2) {
+  if (run2.effort?.role === "reader") assertRunEffortOwner(run2);
+}
+function readerOwned(run2) {
+  try {
+    readerFence(run2);
+    return true;
+  } catch {
+    return false;
+  }
+}
 function dispatchHerdrSettlement(run2, dispatch) {
-  if (run2.effort || !run2.herdr) throw new Error("ordinary herdr settlement required");
-  const binding = run2.herdr, fence = herdrEffectFence(run2);
+  if (!usesHerdrLedger(run2) || !run2.herdr) throw new Error("ordinary herdr settlement required");
+  const binding = run2.herdr, herdrFence = herdrEffectFence(run2);
+  const fence = () => {
+    herdrFence();
+    readerFence(run2);
+  };
   return run2.herdrDelivery ??= Promise.resolve().then(async () => {
     fence();
     const persist = () => writeRecord(run2, () => {
@@ -7158,8 +7207,6 @@ function prepareSpawnEffort(opts) {
   switch (effortRole(opts.persona)) {
     case "reader":
       if (opts.touches !== void 0) throw new Error(`effort readers take no touches: ${opts.persona.name} is read_only and reserves no paths`);
-      if (opts.runtime === "herdr") throw new Error(`effort readers run on the subprocess runtime only; pass runtime: "subprocess" for ${opts.persona.name}`);
-      if (opts.onCompleteHook) throw new Error(`effort readers run no on_complete hook; ${opts.persona.name} integrates nothing to gate`);
       break;
     case "writer":
       if (opts.touches !== void 0 && (!Array.isArray(opts.touches) || opts.touches.length > 0)) validateTouches(opts.touches);
@@ -7425,7 +7472,7 @@ function spawnRun(opts) {
       // current config layers + persona frontmatter. Per-call args land
       // in slice 3; for slice 2 the per-call layer is always undefined.
       // Tests inject `resolvedHook` directly via the spawn-options surface.
-      resolvedHook: opts.delegation || run2.effort?.role === "reader" ? void 0 : resolveCloseHook(
+      resolvedHook: opts.delegation ? void 0 : resolveCloseHook(
         opts.cwd,
         opts.persona.name,
         hookSpecFromOpts(opts.onCompleteHook, opts.onCompleteHookTimeoutSeconds),
@@ -7814,6 +7861,12 @@ function sendToRun(run2, message4, opts) {
   if (run2.effort?.role === "reader") {
     const view = !run2.effort.cwd || !existsSync13(run2.effort.cwd) ? "view cwd missing" : readerViewProblem(run2);
     if (view && view !== DIRTY_VIEW) return { kind: "rejected", reason: `effort reader view unusable (${view}); the question stays outstanding. Kill it and spawn a fresh reader at the current tip` };
+    let header;
+    try {
+      header = sessionHeaderCwd(readFileSync15(sessionPath, "utf8"));
+    } catch {
+    }
+    if (header !== run2.effort.cwd) return { kind: "rejected", reason: `effort reader session header cwd ${header ?? "unreadable"} is not its frozen view ${run2.effort.cwd}; the question stays outstanding` };
   }
   if (run2.effort) {
     const reason = effortAnswerWaitReason(run2, opts.registry);
@@ -7877,7 +7930,7 @@ function sendToRun(run2, message4, opts) {
     // honored (§4.6: each terminal is a fresh gate). Per-call layer
     // (slice 3) reads from `Run.onCompleteHook` — stamped at spawn time
     // by `spawnRun` and replaceable by per-send overrides above.
-    resolvedHook: run2.effort?.role === "reader" ? void 0 : run2.reconciledAtStartup && run2.effort ? run2.effort.gate ?? void 0 : resolveCloseHook(
+    resolvedHook: run2.reconciledAtStartup && run2.effort ? run2.effort.gate ?? void 0 : resolveCloseHook(
       run2.cwd,
       run2.persona,
       hookSpecFromOpts(run2.onCompleteHook, run2.onCompleteHookTimeoutSeconds),
@@ -8002,6 +8055,17 @@ function keptBranchHint(gitRoot2, branch) {
 function keptWorktreeHint(worktreePath, branch) {
   const gitRoot2 = dirname15(dirname15(dirname15(worktreePath)));
   return `worktree kept with any partial work: ${worktreePath} (branch ${branch}); keep it with cd ${gitRoot2} && git merge ${branch}, or discard it (with every other kept worktree) via /conductor worktree clean`;
+}
+function readerReleaseGuard(run2, currentRun, live = () => true) {
+  const e = run2.effort, path2 = run2.worktreePath, binding = run2.herdr && { ...run2.herdr };
+  const same2 = (value) => isRecord(value) && value.id === run2.id && value.runtime === run2.runtime && value.recordPath === run2.recordPath && value.worktreePath === path2 && isRecord(value.effort) && ["name", "gitRoot", "role", "spawnBase", "cwd"].every((key) => value.effort[key] === e?.[key]) && (run2.runtime !== "herdr" || isRecord(value.herdr) && sameHerdrBinding(binding, value.herdr));
+  return () => {
+    try {
+      return e?.role === "reader" && !!path2 && live() && currentRun() === run2 && ownsHerdrRun(run2) && same2(run2) && same2(read(run2.recordPath));
+    } catch {
+      return false;
+    }
+  };
 }
 function worktreeCleanupGuard(run2, currentRun) {
   if (run2.runtime !== "herdr") return () => run2.runtime === void 0 || run2.runtime === "subprocess";
@@ -8286,7 +8350,7 @@ function forceTerminate(run2, reason, registry, onComplete, killGroup = defaultK
   registry.notify(run2);
   void writeRecord(run2);
   void writeFinal(run2);
-  if (run2.runtime === "herdr" && !run2.effort && run2.herdr) {
+  if (usesHerdrLedger(run2) && run2.herdr) {
     if (onComplete) void dispatchHerdrSettlement(run2, () => onComplete(run2)).catch(() => {
     });
   } else if (onComplete) {
@@ -15518,7 +15582,7 @@ ${params.foreground !== false ? "Foreground effort spawn downgraded to backgroun
         return errorResult(e.message);
       }
       try {
-        prepareSpawnEffort({ persona, cwd, effort: params.effort, touches: params.touches, parentSessionId: opts.getSessionId?.(), runtime, onCompleteHook: params.on_complete_hook });
+        prepareSpawnEffort({ persona, cwd, effort: params.effort, touches: params.touches, parentSessionId: opts.getSessionId?.() });
       } catch (e) {
         return errorResult(`${e.message}. ${EFFORT_NOTICE}`);
       }
@@ -16456,6 +16520,8 @@ function buildOnChainCallback(args) {
       onComplete: (run2) => args.pushNotification(run2),
       // no onChain: depth-1 cap (chain-spawned runs do not chain further)
       events: args.events,
+      // M7: the successor's runtime was resolved in this environment; its launch must route through the same one.
+      runtimeEnv: args.runtimeEnv,
       ...effort ? { effort: effort.name } : {}
     };
     const refusal = chainPersona.name === MERGER_PERSONA ? `chain: the ${MERGER_PERSONA} persona is driver-owned and never a chain successor of ${parentRun.id}` : WRITE_CAPABLE_PERSONAS.has(chainPersona.name) ? keptParentRefusal(parentRun, chainPersona.name) : void 0;

@@ -535,7 +535,7 @@ export type FinalizerVerdict = "complete" | "continue" | "failed";
 
 export interface RunEffort {
   owner?: import("./effort/store.ts").EffortOwner;
-  /** undefined is an unreconstructable legacy gate; null proves no configured hook. Writers only. */
+  /** undefined is an unreconstructable legacy gate; null proves no configured hook. Writers and (M7) readers. */
   gate?: ResolvedHook | null;
   name: string;
   gitRoot: string;

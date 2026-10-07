@@ -789,7 +789,7 @@ function registerSpawnTool(pi: ExtensionAPI, opts: RegisterToolsOpts, env: Runti
       try { task = appendFileEvidence(params.task, params.files, { cwd, registry, limit: cfg.inlineAttachmentLimitBytes }); }
       catch (e) { return errorResult((e as Error).message); }
 
-      try { prepareSpawnEffort({ persona, cwd, effort: params.effort, touches: params.touches, parentSessionId: opts.getSessionId?.(), runtime, onCompleteHook: params.on_complete_hook }); }
+      try { prepareSpawnEffort({ persona, cwd, effort: params.effort, touches: params.touches, parentSessionId: opts.getSessionId?.() }); }
       catch (e) { return errorResult(`${(e as Error).message}. ${EFFORT_NOTICE}`); }
 
       // Per-call `timeout_minutes` arg wins over persona override, which wins
@@ -1968,6 +1968,8 @@ export function buildOnChainCallback(
       onComplete: (run: Run) => args.pushNotification(run),
       // no onChain: depth-1 cap (chain-spawned runs do not chain further)
       events: args.events,
+      // M7: the successor's runtime was resolved in this environment; its launch must route through the same one.
+      runtimeEnv: args.runtimeEnv,
       ...(effort ? { effort: effort.name } : {}),
     };
     const refusal = chainPersona.name === MERGER_PERSONA ? `chain: the ${MERGER_PERSONA} persona is driver-owned and never a chain successor of ${parentRun.id}`

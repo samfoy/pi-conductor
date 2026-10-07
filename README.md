@@ -691,9 +691,10 @@ recovered herdr merger record, which has no PID and so counts as exited. See `do
 **Role.** Every effort assignment carries `effort.role`, `"writer"` or `"reader"`,
 decided once from the persona's `read_only` flag and frozen with the run; no persona
 name or other flag turns a read-only persona into a writer, and a later persona override
-changes nothing for that run, its answers or its retries. A reader refuses `touches`, an
-explicit `on_complete_hook` and the herdr runtime (pass `runtime:"subprocess"` inside a
-herdr pane) before any registry, queue, effort-member or Git effect.
+changes nothing for that run, its answers or its retries. A reader refuses `touches`
+before any registry, queue, effort-member or Git effect. It runs on whichever runtime the
+ordinary cascade selects, subprocess or herdr, with no downgrade (user decision R1,
+`docs/m7/requirements.md`), and chained read-only successors keep the parent's routing.
 
 **View.** At its actual launch (immediately, or when dequeued) a reader gets a detached
 `git worktree add --detach <gitRoot>/.worktrees/conductor-view/<run> <tip>` of the
@@ -701,31 +702,47 @@ integration tip, never a branch, a writer worktree (even with persona `worktree:
 or the shared checkout. `effort.spawnBase` freezes that OID; `effort.cwd`, the seeded
 session header and the child prompt use the repo-subdirectory mapping, and the prompt
 names the exact commit. Readers reserve no paths and take no `efforts.maxParallel`
-slot; `maxConcurrent`, including the N3 closing reservation, still applies. A reader
-never runs a close hook and never enters the writer gate, integration driver (which
-refuses non-writers) or legacy merge; it never moves the tip. The main checkout's HEAD,
-index and files stay identical (`tests/effort-readers.test.ts`).
+slot; `maxConcurrent`, including the N3 closing reservation, still applies; a herdr
+reader keeps its reservation until its pane child's exit is proven. A reader never enters
+the integration driver (which refuses non-writers) or legacy merge, and never moves the
+tip. The main checkout's HEAD, index and files stay identical (`tests/effort-readers.test.ts`).
 
-**Settlement.** After the reader's process (and any delegated leaf) has closed, the view
-is checked: this run's own registered path, detached at `spawnBase`, no unsafe index
-flags, and an empty `status --porcelain --ignored --untracked-files=all`. Only then is
-it removed with a plain `git worktree remove` under the current effort owner, and, if the
-live run completed, `effort.reviewed` records the OID it reviewed. A dirty, ignored-file,
-moved, flagged, unowned, uncertain or shut-down-owner view is kept with a
-`reader view kept (…)` hint; nothing is reset, discarded or deleted. A blocked A6 reader
-keeps its view; the owner's answer resumes in the same view cwd with the frozen prompt,
-tool policy and role (a view whose HEAD moved is refused, the question kept). A settled
+**Validation hook (user decision R2).** The normal `on_complete_hook` cascade applies:
+per-call, then project and user `personaOverrides`, then persona frontmatter; `""`
+disables. The resolved hook (or `null` for none) is frozen on `effort.gate`. It runs in
+the reader's mapped view cwd only after the child, and any delegated leaf, has exited:
+the subprocess has closed, or the herdr pane child's exit is proven. A failed or timed-out
+hook means `hook_failed`: no review, verdict or chain. A hook does not
+make the reader a writer.
+
+**Settlement.** After the exit and the hook, `effort.reviewed` records the viewed OID only
+when all of these hold: a natural exit with code 0, a passed or known-absent hook, this
+lead's own live invocation (not readopted or recovered), the current effort owner, no
+forced termination, and a view that is still this run's own registered path, detached at
+`spawnBase`, with no unsafe index flags and an empty
+`status --porcelain --ignored --untracked-files=all` (so hook output counts). Removal
+then needs more: a herdr reader's own pane must first be proven empty and ours and
+closed through the H9 identity checks. The registry entry, durable record (assignment,
+view and herdr invocation) and the live invocation must still match a snapshot taken
+before any await. Then the owner, invocation and view checks run once more before a plain
+`git worktree remove`. A dirty, ignored-file, moved, flagged, unowned, uncertain,
+killed, recovered or shut-down-owner view, or an unproven pane, is kept with a
+`reader view kept (…)` hint; nothing is reset, discarded or deleted. A review proven
+before a failed release stays valid. A blocked A6 reader keeps its view; the owner's
+answer resumes in the same view cwd with the frozen prompt, tool policy and role. A view
+whose HEAD moved, or a session header whose cwd is not the frozen view, is refused before
+any effect, the question kept. A failed answer acceptance keeps the question too. A settled
 reader is never resumed or rematerialized: spawn a fresh reader, which views the current
 tip. Status and cards say `reader at <oid>, integrates nothing`, then `clean review of
 <oid>` and `view removed`, or the kept view.
 
-**Finalizer verdict.** Only a live, completed reader whose frozen persona is `finalizer`
-and whose view was proven clean records `finalizer {runId, tip, verdict, at}` on the
+**Finalizer verdict.** Only a reader that meets every review condition above and whose
+frozen persona is `finalizer` records `finalizer {runId, tip, verdict, at}` on the
 effort, under the current owner's fence, with `tip` = the OID it viewed (not the tip at
 settlement). Its final text must start with exactly one `## Verdict: complete|continue|failed`
 line; a quoted, interior, repeated, contradictory or fenced lookalike records nothing. A
-failed, non-finalizer, recovered, readopted, malformed, dirty or moved run, or a changed
-owner, writes no mark (cards say `finalizer verdict NOT recorded`). `ensemble_effort`
+failed, hook-failed, non-finalizer, recovered, readopted, malformed, dirty or moved run, or
+a changed owner, writes no mark (cards say `finalizer verdict NOT recorded`). `ensemble_effort`
 status and `/conductor effort status` report the verdict as current only while the tip
 equals that OID and as **STALE** once any later integration lands. There is still no
 land action; the verdict grants nothing yet.
@@ -753,21 +770,38 @@ attempts' preserved universal reservations (which still block every other writer
 failed attempts' branches and worktrees are kept. A refused effort retry is logged, never
 launched outside the effort.
 
+**Delivery.** A herdr reader settles through the ordinary nonce-fenced herdr ledger
+(`intent` → `attempted`; an interrupted intent becomes `uncertain` and is never replayed),
+not the writer's M5 integration WAL. Every reader card, blocked or terminal, and every
+reader record write is fenced by the current effort owner: a stale owner's pipeline
+publishes nothing.
+
 **Recovery and GC.** Only writers get the completed→`merge_conflict` conversion. A
-reader record recovered `running` with no live process becomes `killed` (`lost reader;
-view … kept`), with no gate or requeue assumption; an unresolved identity pauses with no
-signal. Recovery never writes finalizer evidence. `requeue` and `resolve` refuse readers
+subprocess reader record recovered `running` with no live process becomes `killed` (`lost
+reader; view … kept`), with no gate or requeue assumption; an unresolved identity pauses
+with no signal. A herdr reader is not converted for lacking a process handle: run-stream
+ownership is not effort ownership. An unattached one is skipped. A readopted (H10) one
+waits for M5 effort recovery to authorize its settlement, keeps the same registered
+object, and settles once with no review and its view kept. Recovery never writes
+finalizer evidence. `requeue` and `resolve` refuse readers
 before any adoption or driver claim. GC keeps every effort record, so reader views and
 records stay while the effort is open or blocked (destructive policy is M9).
 
-Verified: `tests/effort-readers.test.ts` (private Git, fake Pi CLI only for child
-launches), and `tests/effort-reader-smoke.test.ts` on Pi 0.87.1 from the explicit
-`CONDUCTOR_NATIVE_PI_ROOT` (pi-coding-agent, pi-ai, pi-agent-core and pi-tui all 0.87.1)
-with a fixed faux model, real `ask_owner` and `bash` in the view, no hook markers, and
-`stepCost` 0.02 counted once across the ask and the answer. Not covered: herdr readers,
+Verified: `tests/effort-readers.test.ts` and `tests/effort-readers-runtimes.test.ts`
+(private Git; a fake Pi CLI for subprocess children and an in-process fake herdr CLI for
+herdr ones; hook precedence, failures, hook-made changes, exit barriers, pane, record,
+registry and owner races, reload, blocked answers, readoption and the ledger).
+`tests/effort-reader-smoke.test.ts` (subprocess) and `tests/effort-reader-herdr-smoke.test.ts`
+(executable fake herdr CLI) run Pi 0.87.1 from the explicit `CONDUCTOR_NATIVE_PI_ROOT`
+(pi-coding-agent, pi-ai, pi-agent-core and pi-tui all 0.87.1). Both use a fixed faux
+model and a real `ask_owner`, with the validation hook marker written once in the view
+at the viewed OID and the main checkout unchanged. The subprocess smoke also runs real
+`bash` in the view and counts `stepCost` 0.02 once across the ask and the answer. Not
+covered: a real herdr reader (needs fresh execution-time authorization, planned for M10),
 `ensemble_auto` waves (M8), landing and destructive GC (M9), human TUI acceptance and
-rollout; a crash after the verdict write but before the reader's own record leaves the
-evidence with a reader recovered as lost.
+rollout. A reader restored at startup and then answered never records a review. A
+crash after the verdict write but before the reader's own record leaves the evidence
+with a reader recovered as lost.
 
 Spawn with `effort:"feature"` and optional `touches:["src/**"]`. The first spawn
 can open the effort using config. Every effort writer gets its own worktree,

@@ -1,7 +1,7 @@
 // M7 effort readers: a detached view of the integration tip, proven untouched before it counts as a review.
 import { existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { childExitUnconfirmed, type EffortRole, type FinalizerVerdict, type Persona, type Run, type RunEffort } from "../types.ts";
+import { childExitUnconfirmed, isTerminal, type EffortRole, type FinalizerVerdict, type Persona, type Run, type RunEffort } from "../types.ts";
 import { effortGit } from "./open.ts";
 import { assertCandidateIndexFlags } from "./git.ts";
 import { assertRunEffortOwner, readEffort, writeEffort, type EffortRecord } from "./store.ts";
@@ -43,22 +43,47 @@ export function readerViewProblem(run: Run): string | undefined {
   } catch (error) { return `state unknown: ${(error as Error).message}`; }
 }
 
+export interface ReaderOutcome {
+  /** A natural exit with code 0 whose validation hook passed or is known absent. */
+  succeeded: boolean;
+  /** This lead's own invocation, not a readopted or recovered one. */
+  live: boolean;
+  finalText: string;
+}
+export interface ReaderReleaseDeps {
+  /** The live invocation, registry entry and durable record still name exactly this assignment and view. */
+  isCurrent(): boolean;
+  /** Prove and close this run's own empty herdr pane; true when there is none (subprocess). */
+  releasePane(): Promise<boolean>;
+}
+
 /**
- * After the reader's process closed: a proven view becomes the reviewed OID (and, for a live finalizer,
- * its verdict for that OID); then only a proven, owned view is removed. Anything else is kept as is.
+ * After the child and its delegated leaves exited and the validation hook ran. Evidence needs a successful live
+ * invocation, the current effort owner and a clean view detached at `spawnBase`. Removal additionally needs the
+ * run's own pane proven empty and closed, then every check again; anything uncertain keeps the view as it is.
  */
-export function settleReaderView(run: Run, outcome: { completed: boolean; live: boolean; finalText: string }): void {
-  const e = run.effort!;
-  // A shut-down owner's pipeline is no longer the effort's observer: it proves and removes nothing.
-  let problem = run.integrationSuspended ? "owner runtime shut down" : childExitUnconfirmed(run) ? "delegated child exit unconfirmed" : readerViewProblem(run);
-  if (!problem && outcome.completed && outcome.live) {
+export async function settleReaderView(run: Run, outcome: ReaderOutcome, deps: ReaderReleaseDeps): Promise<void> {
+  const e = run.effort!, path = run.worktreePath;
+  // A replaced invocation no longer owns this run: it mutates nothing.
+  if (!deps.isCurrent()) return;
+  const owned = () => { try { assertRunEffortOwner(run); return true; } catch { return false; } };
+  const blocker = () => run.integrationSuspended ? "owner runtime shut down" : !owned() ? "effort owner changed"
+    : childExitUnconfirmed(run) || run.herdrExitUnconfirmed ? "child exit unconfirmed"
+    : isTerminal(run.status) ? `terminated (${run.status}) before its review settled` : readerViewProblem(run);
+  let problem = blocker();
+  if (!problem && outcome.succeeded && outcome.live) {
     e.reviewed = e.spawnBase;
     if (run.persona === "finalizer") recordFinalizerVerdict(run, outcome.finalText);
   }
+  if (!problem && !outcome.live) problem = "recovered settlement; review unproven";
+  if (!problem) {
+    const released = await deps.releasePane();
+    if (!deps.isCurrent()) return;
+    problem = !released ? "pane release unproven" : run.worktreePath !== path ? "view path changed" : blocker();
+  }
   if (!problem) {
     try {
-      assertRunEffortOwner(run);
-      effortGit(e.gitRoot, "worktree", "remove", run.worktreePath!);
+      effortGit(e.gitRoot, "worktree", "remove", path!);
       run.worktreePath = undefined; run.worktreeKept = undefined;
       return;
     } catch (error) { problem = `removal refused: ${(error as Error).message}`; }

@@ -25,7 +25,7 @@ import { formatOwnerAnswer } from "./ask-owner.ts";
  */
 
 import type { ChildProcess } from "node:child_process";
-import { createRunPipeline, dispatchHerdrSettlement } from "./run-pipeline.ts";
+import { createRunPipeline, dispatchHerdrSettlement, usesHerdrLedger } from "./run-pipeline.ts";
 import { capabilitiesFor, subprocessRuntime } from "./subprocess-runtime.ts";
 import { ownedEffort, effortOwner, effortRepository, effortTip } from "./effort/open.ts";
 import { effortEnv } from "./effort/git.ts";
@@ -1332,17 +1332,15 @@ export function prepareSpawnRuntime<T extends Pick<SpawnOptions, "runtime" | "ru
 }
 
 /** Validate before registry/queue/process effects, shared by immediate and queued spawns. */
-export function prepareSpawnEffort(opts: Pick<SpawnOptions, "effort" | "touches" | "persona" | "cwd" | "parentSessionId" | "runtime" | "onCompleteHook">): EffortRecord | undefined {
+export function prepareSpawnEffort(opts: Pick<SpawnOptions, "effort" | "touches" | "persona" | "cwd" | "parentSessionId">): EffortRecord | undefined {
   if (opts.effort === undefined) {
     if (opts.touches !== undefined) throw new Error("touches requires an effort");
     return undefined;
   }
   switch (effortRole(opts.persona)) {
     case "reader":
-      // M7: a reader writes nothing integrated, so it has no scope, no gate and no herdr settlement path.
+      // M7: a reader writes nothing integrated, so it has no scope. Runtime and hooks follow the ordinary cascades.
       if (opts.touches !== undefined) throw new Error(`effort readers take no touches: ${opts.persona.name} is read_only and reserves no paths`);
-      if (opts.runtime === "herdr") throw new Error(`effort readers run on the subprocess runtime only; pass runtime: "subprocess" for ${opts.persona.name}`);
-      if (opts.onCompleteHook) throw new Error(`effort readers run no on_complete hook; ${opts.persona.name} integrates nothing to gate`);
       break;
     case "writer":
       if (opts.touches !== undefined && (!Array.isArray(opts.touches) || opts.touches.length > 0)) validateTouches(opts.touches);
@@ -1662,7 +1660,7 @@ export function spawnRun(opts: SpawnOptions): { run: Run; done: Promise<Run> } {
       // current config layers + persona frontmatter. Per-call args land
       // in slice 3; for slice 2 the per-call layer is always undefined.
       // Tests inject `resolvedHook` directly via the spawn-options surface.
-      resolvedHook: opts.delegation || run.effort?.role === "reader" ? undefined : resolveCloseHook(
+      resolvedHook: opts.delegation ? undefined : resolveCloseHook(
         opts.cwd,
         opts.persona.name,
         hookSpecFromOpts(opts.onCompleteHook, opts.onCompleteHookTimeoutSeconds), // per-call (slice 3)
@@ -2362,6 +2360,10 @@ export function sendToRun(
     // The answer continues the same review: the frozen view, still detached at its spawn commit.
     const view = !run.effort.cwd || !existsSync(run.effort.cwd) ? "view cwd missing" : readerViewProblem(run);
     if (view && view !== DIRTY_VIEW) return { kind: "rejected", reason: `effort reader view unusable (${view}); the question stays outstanding. Kill it and spawn a fresh reader at the current tip` };
+    // Pi (and a herdr pane) resumes in the session header's cwd: it must be the frozen view, never elsewhere.
+    let header: string | undefined;
+    try { header = sessionHeaderCwd(readFileSync(sessionPath, "utf8")); } catch { /* unreadable: refused below */ }
+    if (header !== run.effort.cwd) return { kind: "rejected", reason: `effort reader session header cwd ${header ?? "unreadable"} is not its frozen view ${run.effort.cwd}; the question stays outstanding` };
   }
   if (run.effort) {
     const reason = effortAnswerWaitReason(run, opts.registry);
@@ -2441,7 +2443,7 @@ export function sendToRun(
     // honored (§4.6: each terminal is a fresh gate). Per-call layer
     // (slice 3) reads from `Run.onCompleteHook` — stamped at spawn time
     // by `spawnRun` and replaceable by per-send overrides above.
-    resolvedHook: run.effort?.role === "reader" ? undefined : run.reconciledAtStartup && run.effort
+    resolvedHook: run.reconciledAtStartup && run.effort
       ? run.effort.gate ?? undefined
       : resolveCloseHook(
         run.cwd,
@@ -2721,6 +2723,21 @@ function keptWorktreeHint(worktreePath: string, branch: string): string {
     `keep it with cd ${gitRoot} && git merge ${branch}, or discard it (with every other kept ` +
     `worktree) via /conductor worktree clean`
   );
+}
+
+/**
+ * M7: a reader view's release fence, beside the H9 guard but preterminal and branchless. The live run, its
+ * registry entry and its durable record must all still name this exact assignment, detached view and herdr invocation.
+ */
+export function readerReleaseGuard(run: Run, currentRun: () => Run | undefined, live: () => boolean = () => true): () => boolean {
+  const e = run.effort, path = run.worktreePath, binding = run.herdr && { ...run.herdr };
+  const same = (value: unknown) => isRecord(value) && value.id === run.id && value.runtime === run.runtime && value.recordPath === run.recordPath &&
+    value.worktreePath === path && isRecord(value.effort) && (["name", "gitRoot", "role", "spawnBase", "cwd"] as const).every(key => (value.effort as Record<string, unknown>)[key] === e?.[key]) &&
+    (run.runtime !== "herdr" || (isRecord(value.herdr) && sameHerdrBinding(binding, value.herdr as unknown as NonNullable<Run["herdr"]>)));
+  return () => {
+    try { return e?.role === "reader" && !!path && live() && currentRun() === run && ownsHerdrRun(run) && same(run) && same(readControlRecord(run.recordPath)); }
+    catch { return false; }
+  };
 }
 
 /** Manual commands fence their immutable ownership snapshot against both live and durable state. */
@@ -3170,7 +3187,7 @@ export function forceTerminate(
   registry.notify(run);
   void writeRecord(run);
   void writeFinal(run);
-  if (run.runtime === "herdr" && !run.effort && run.herdr) {
+  if (usesHerdrLedger(run) && run.herdr) {
     if (onComplete) void dispatchHerdrSettlement(run, () => onComplete(run)).catch(() => {});
   } else if (onComplete) {
     try { onComplete(run); } catch { /* ignore */ }

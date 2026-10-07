@@ -16,7 +16,7 @@ import { bundleNativeMerger } from "./helpers/native-merger-bundle.ts";
 import { git } from "./helpers/effort-integration.ts";
 import { land, mergerFixture } from "./helpers/effort-merger.ts";
 import { sandboxPi, tmpDir } from "./helpers/tmp.ts";
-import { readEffort } from "../src/effort/store.ts";
+import { effortDir, readEffort } from "../src/effort/store.ts";
 import { stepCost } from "../src/delegation.ts";
 import { SpawnQueue } from "../src/queue.ts";
 import { sendToRun } from "../src/runs.ts";
@@ -40,17 +40,20 @@ const settled = (registry: import("../src/runs.ts").RunRegistry, run: Run, ms = 
   const off = registry.onChange(r => { if (r === run && isSettled(r.status) && !r.processOpen) { clearTimeout(timer); off(); resolve(); } });
 });
 
-test("M7 native 0.87.1 reader: ask and answer inside its detached view, no writer hook or integration, verdict pinned to the viewed OID, cost once", { timeout: 90000 }, async t => {
+test("M7 native 0.87.1 reader: ask and answer inside its detached view, its validation hook in the view, no commit or integration, verdict pinned to the viewed OID, cost once", { timeout: 90000 }, async t => {
   process.env.PI_BIN = await bundleNativeMerger(root, line => t.diagnostic(line));
   const fixture = tmpDir("m7-native-fixture-");
   process.env.M6A_FIXTURE = fixture; process.env.M6A_MERGER_SCENARIO = "reader";
   const f = mergerFixture(t, { verify: "true" });
   const landed = land(f.root, f.record.intRef, { base: "landed\n" });
-  // Markers for every writer-path effect: a repository commit hook and a configured on_complete hook.
+  // A repository commit hook marks any writer-path commit; the configured validation hook (R2) must run in the
+  // view after the child exits and before the verdict is written, so it refuses if the effort already holds one.
   const commitMarker = join(fixture, "commit-hook"), closeMarker = join(fixture, "close-hook");
   f.hook(`echo "$(git rev-parse --show-toplevel)" >> "${commitMarker}"`);
+  const effortJson = join(effortDir(f.root, "probe"), "effort.json");
   mkdirSync(join(home, ".pi", "agent", "extensions", "conductor"), { recursive: true });
-  writeFileSync(join(home, ".pi", "agent", "extensions", "conductor", "config.json"), JSON.stringify({ personaOverrides: { finalizer: { onCompleteHook: `echo ran >> '${closeMarker}'` } } }));
+  writeFileSync(join(home, ".pi", "agent", "extensions", "conductor", "config.json"), JSON.stringify({ personaOverrides: { finalizer: {
+    onCompleteHook: `if grep -q '"finalizer"' '${effortJson}'; then exit 3; fi; printf '%s %s\\n' "$(pwd)" "$(git rev-parse HEAD)" >> '${closeMarker}'` } } }));
   const queue = new SpawnQueue(f.registry, 4, 1);
   const cards: string[] = [];
   t.after(() => { for (const r of f.registry.list()) if (alive(r.pid)) process.kill(r.pid!, "SIGKILL"); });
@@ -84,8 +87,8 @@ test("M7 native 0.87.1 reader: ask and answer inside its detached view, no write
   const evidence = readEffort(f.root, "probe")!.finalizer;
   assert.deepEqual(evidence && { runId: evidence.runId, tip: evidence.tip, verdict: evidence.verdict }, { runId: run.id, tip: landed, verdict: "complete" });
   assert.equal(existsSync(view), false, "the clean view is removed"); assert.equal(run.effort?.reviewed, landed);
-  assert.equal(run.integration, undefined); assert.equal(run.mergeResult, undefined); assert.equal(run.hookResult, undefined);
-  assert.equal(existsSync(closeMarker), false, "no on_complete hook ran for a reader");
+  assert.equal(run.integration, undefined); assert.equal(run.mergeResult, undefined); assert.equal(run.hookResult?.passed, true, run.hookResult?.tailText);
+  assert.deepEqual(readFileSync(closeMarker, "utf8").trim().split("\n"), [`${view} ${landed}`], "the validation hook ran once, in the view at the viewed OID, on the answered completion");
   assert.equal(existsSync(commitMarker), false, "no commit (writer path) ran");
   assert.equal(f.tip(), landed, "the integration tip did not move");
   assert.equal(existsSync(join(f.root, ".worktrees", "conductor-cand")), false, "no candidate");
