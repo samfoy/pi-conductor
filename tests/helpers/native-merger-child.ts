@@ -1,6 +1,8 @@
 // M6a native merger child: the real Pi CLI `main()` from one explicit installed root (bundled
 // with an esbuild alias by tests/effort-merger-smoke.test.ts), the real conductor extension
 // (child ask_owner) and an offline faux model that drives Pi's real bash tool in the candidate.
+// Fixture model: faux/faux-1 is named on the command line whenever the conductor passed no
+// --model (see main() below), and only a registered faux model may serve a response.
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
@@ -54,7 +56,11 @@ function respond(messages: Message[]) {
 
 function harness(pi: ExtensionAPI) {
   const faux = fauxProvider({ tokensPerSecond: Infinity, models: [{ id: "faux-1" }] });
-  const next = async (context: { messages: Message[] }) => { faux.appendResponses([next]); return respond(context.messages); };
+  const next = async (context: { messages: Message[] }, _options?: unknown, _state?: unknown, model?: { provider: string; id: string }) => {
+    // Pi falls back to a made-up model for an unknown --model; only a registered faux model may serve.
+    if (!model || faux.getModel(model.id)?.provider !== model.provider) throw new Error(`unregistered model served: ${model?.provider}/${model?.id}`);
+    faux.appendResponses([next]); return respond(context.messages);
+  };
   faux.setResponses([next]);
   pi.registerProvider(faux.provider as never);
   // The faux provider reports zero cost; the final answer carries the fixture's 0.02.
@@ -67,7 +73,12 @@ function harness(pi: ExtensionAPI) {
 
 if (existsSync(join(fixture, "merger-launch-forbidden"))) throw new Error("a merger launched where none may start");
 process.env.PI_CODING_AGENT = "true";
-await main(process.argv.slice(2), { extensionFactories: [
+// Pi 0.87.1 resolves a settings-default model only after an availability pass that a provider
+// registration's own background refresh can supersede (agent falls back to an "unknown" placeholder).
+// A named --model resolves from the registration and checks auth live. Explicit caller models stay.
+const argv = process.argv.slice(2), callerModel = argv.includes("--model") ? argv[argv.indexOf("--model") + 1]! : null;
+writeFileSync(join(fixture, `caller-model-${process.pid}.json`), JSON.stringify({ callerModel }));
+await main(callerModel === null ? [...argv, "--model", "faux/faux-1"] : argv, { extensionFactories: [
   { name: "conductor", factory: conductor },
   { name: "m6a-faux", factory: harness },
 ] as never });

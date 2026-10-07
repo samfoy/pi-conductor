@@ -77,7 +77,11 @@ if (phase === "after-proposal") {
 // The merger asked its owner, exited and recorded itself blocked; the answer never arrives here.
 if (phase === "blocked") {
   const asking = setInterval(() => {
-    if (merger?.status !== "blocked" || merger.processOpen || !fs.existsSync(merger.recordPath) || JSON.parse(fs.readFileSync(merger.recordPath, "utf8")).status !== "blocked") return;
+    if (merger?.status !== "blocked" || merger.processOpen || !fs.existsSync(merger.recordPath)) return;
+    // A merger has no effort, so its record is a plain truncate-then-write: a read can see it torn. Retry next tick.
+    let saved: { status?: string };
+    try { saved = JSON.parse(fs.readFileSync(merger.recordPath, "utf8")); } catch { return; }
+    if (saved.status !== "blocked") return;
     clearInterval(asking); barrier();
   }, 20);
 }

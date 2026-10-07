@@ -79,6 +79,8 @@ test("M6a native 0.87.1 merger resolves a conflict with real bash; the post-hook
   const m = n.merger()!;
   assert.equal(outcome.terminal, "completed", `${n.a.errorMessage} ${JSON.stringify(n.a.integration)}`);
   assert.equal(m.status, "completed"); assert.equal(m.cwd, n.a.integration!.merger!.candidatePath);
+  const callers = readdirSync(n.fixture).filter(x => x.startsWith("caller-model-")).map(x => JSON.parse(readFileSync(join(n.fixture, x), "utf8")));
+  assert.deepEqual(callers, [{ callerModel: null }], "the launcher passes no --model; the fixture names faux/faux-1 (helpers/native-merger-child.ts)");
   const turns = readdirSync(n.fixture).filter(x => x.startsWith("merger-turn-"));
   assert.ok(turns.length >= 2); assert.match(readFileSync(join(n.fixture, turns[0]!), "utf8"), /^0\.87\.1\n\n/, "the merger ran on Pi 0.87.1 with no inherited GIT_* scope");
   assert.ok(turns.every(x => readFileSync(join(n.fixture, x), "utf8").endsWith(m.cwd)), "the merger worked in its candidate");

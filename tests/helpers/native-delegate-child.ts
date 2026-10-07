@@ -1,6 +1,9 @@
 // N2/N3 native child: the real Pi CLI `main()` from one explicit installed root
 // (bundled with an esbuild alias), loading the real conductor extension plus an
 // offline faux model. Plays the depth-1 delegator or the depth-2 leaf by its env.
+// Fixture model: faux/faux-1 is named on the command line whenever the conductor passed no
+// --model (an inheriting lead); leaves keep their persona's explicit --model and --thinking.
+// Only a registered faux model may serve a response.
 import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Type, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
@@ -104,7 +107,9 @@ async function leaf(messages: Message[], served: Served) {
 function harness(pi: ExtensionAPI) {
   // faux-1 is the agent default; the leaf models exist only so a persona's configured model can be proven served.
   const faux = fauxProvider({ tokensPerSecond: Infinity, models: [{ id: "faux-1" }, { id: "faux-scout", reasoning: true }, { id: "faux-auditor", reasoning: true }] });
-  const next = async (context: { messages: Message[] }, options?: { reasoning?: string }, _state?: unknown, model?: { id: string }) => {
+  const next = async (context: { messages: Message[] }, options?: { reasoning?: string }, _state?: unknown, model?: { provider: string; id: string }) => {
+    // Pi falls back to a made-up model for an unknown --model; only a registered faux model may serve.
+    if (!model || faux.getModel(model.id)?.provider !== model.provider) throw new Error(`unregistered model served: ${model?.provider}/${model?.id}`);
     faux.appendResponses([next]);
     const served = { model: model?.id ?? "unknown", reasoning: options?.reasoning ?? "off" };
     return depth === "2" ? leaf(context.messages, served) : parent(context.messages, served);
@@ -138,7 +143,14 @@ const foreign = (pi: ExtensionAPI) => pi.registerTool({ name: "delegate", label:
   async execute() { return { content: [{ type: "text" as const, text: "foreign delegate executed" }], details: {} }; } } as never);
 
 process.env.PI_CODING_AGENT = "true";
-await main(process.argv.slice(2), { extensionFactories: [
+// Pi 0.87.1 resolves a settings-default model only after an availability pass that a provider
+// registration's own background refresh can supersede (agent falls back to an "unknown" placeholder).
+// A named --model resolves from the registration and checks auth live. Explicit caller models stay.
+const argv = process.argv.slice(2), callerModel = argv.includes("--model") ? argv[argv.indexOf("--model") + 1]! : null;
+// Safe argv summary for failure diagnostics: flag names only, plus the caller's model and thinking.
+writeFileSync(join(fixture, `caller-model-${process.pid}.json`), JSON.stringify({ callerModel }));
+writeFileSync(join(fixture, `caller-argv-${process.pid}.json`), JSON.stringify({ callerModel, thinking: argv.includes("--thinking") ? argv[argv.indexOf("--thinking") + 1] : null, flags: argv.filter(a => a.startsWith("--")) }));
+await main(callerModel === null ? [...argv, "--model", "faux/faux-1"] : argv, { extensionFactories: [
   { name: "conductor", factory: conductor },
   { name: "n2-faux", factory: harness },
   ...(process.env.N2_FOREIGN_DELEGATE === "1" ? [{ name: "foreign-delegate", factory: foreign }] : []),

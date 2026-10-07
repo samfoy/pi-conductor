@@ -132,11 +132,24 @@ for (const fault of ["none", "leader", "no-barrier"] as const) test(fault === "n
   let output = ""; child.stdout!.on("data", d => { output += d; }); child.stderr!.on("data", d => { output += d; });
   const [code] = await exited;
   const retained = existsSync(fixture);
-  // Cooperative safety net before any assertion: any hold of this fixture ends on its own release file.
+  let childRelease: string | undefined;
+  try { childRelease = readFileSync(join(fixture, "release"), "utf8").trim(); } catch { /* Capture missing evidence without skipping safety cleanup. */ }
+  let childReleasedHold = false;
+  if (fault !== "none") {
+    const end = Date.now() + 3000;
+    while (Date.now() < end) {
+      try { childReleasedHold = readFileSync(join(fixture, "hold-exit"), "utf8").trim() === "released"; } catch { /* The hold may still be exiting. */ }
+      if (childReleasedHold) break;
+      await delay(25);
+    }
+  }
+  // Run the safety net before assertions, but never count it as the child's cleanup evidence.
   mkdirSync(fixture, { recursive: true }); writeFileSync(join(fixture, "release"), "parent");
   if (fault !== "none") { const end = Date.now() + 15000; while (!existsSync(join(fixture, "hold-exit")) && Date.now() < end) await delay(25); }
   if (fault !== "none") {
     assert.equal(retained, true, "the fixture root was retained after the child process exited");
+    assert.equal(childRelease, "cleanup: unproven state", "the child's own cleanup wrote the release");
+    assert.equal(childReleasedHold, true, "the hold exited cooperatively before the parent's safety release");
     assert.equal(readFileSync(join(fixture, "hold-exit"), "utf8").trim(), "released", "the hold ended cooperatively on its release file, never by a signal");
   }
   const report = JSON.parse(readFileSync(`${fixture}.cleanup.json`, "utf8")) as { problems: string[]; unknown: string[]; pi: Identity[]; hold?: Identity; signals: { target: number; signal: string }[] };

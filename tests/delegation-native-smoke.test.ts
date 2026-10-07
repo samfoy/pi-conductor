@@ -3,8 +3,11 @@
  * CONDUCTOR_H11_PI_ROOTS such as 0.99.1) runs as a real subprocess through
  * spawnRun -> createRunPipeline -> DelegationBroker -> SpawnQueue -> spawnRun.
  * The child loads the real conductor extension and an offline faux model.
- * Missing 0.87.1 is a failure, never a skip.
+ * Missing 0.87.1 is a failure, never a skip. The child names faux/faux-1 only when the conductor
+ * passed no --model (helpers/native-delegate-child.ts); the caller's own argv is asserted below.
  */
+// First import: throws on an inherited herdr scope before any repository module evaluates.
+import "./helpers/no-live-scope.ts";
 import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, type ChildProcess } from "node:child_process";
@@ -86,8 +89,12 @@ async function scenario(t: test.TestContext, bin: string, name: string) {
 
 async function witness(t: test.TestContext, bin: string, version: string) {
   const nested = version !== "0.87.1";
-  const { run, leaves, cards } = await scenario(t, bin, "fanout");
+  const { run, leaves, cards, fixture } = await scenario(t, bin, "fanout");
   assert.equal(run.status, "completed", run.errorMessage);
+  // The conductor itself omits --model for the inheriting lead and passes each leaf persona's own.
+  const caller = (r: Run) => JSON.parse(readFileSync(join(fixture, `caller-model-${r.pid}.json`), "utf8")).callerModel;
+  assert.equal(caller(run), null, "the lead's argv has no --model: it inherits, and the fixture names faux/faux-1");
+  for (const leaf of leaves) assert.equal(caller(leaf), leaf.persona === "scout" ? "faux/faux-scout" : "faux/faux-auditor", `${leaf.id} keeps its persona's explicit --model`);
   // A start alone proves nothing: schema-rejected, blocked and nested calls leave no claim, response or leaf.
   const files = readdirSync(join(dirname(run.recordPath), "delegate")).sort();
   assert.deepEqual(files, ["d_auditor.claim.json", "d_auditor.json", "d_denied.claim.json", "d_denied.json", "d_scout.claim.json", "d_scout.json"],
@@ -270,7 +277,14 @@ async function lentSlots(t: test.TestContext, bin: string, version: string) {
     for (const l of held.filter(r => r.depth === 2 && answered(r))) violations.push(`${l.id} answered while its process was alive`);
   };
   registry.onChange(sample);
-  const wait = async (cond: () => boolean, what: string) => until(() => { sample(); return cond(); }, what, 90000);
+  // Diagnostic only, never a pass condition: on a timeout, report each child's model, error and safe argv summary.
+  const argvOf = (r: Run) => { const path = join(fixture, `caller-argv-${r.pid}.json`); return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : undefined; };
+  const report = () => registry.list().map(r => ({ id: r.id, persona: r.persona, depth: r.depth, status: r.status, model: r.model,
+    error: r.errorMessage?.slice(0, 300), stderr: r.transport?.stderr.slice(-300), argv: argvOf(r) }));
+  const wait = async (cond: () => boolean, what: string) => {
+    try { await until(() => { sample(); return cond(); }, what, 90000); }
+    catch (error) { t.diagnostic(`N3 ${what} not reached; children: ${JSON.stringify(report())}`); throw error; }
+  };
   const personas = (await resolvePersonas({ cwd })).personas;
   const spawn = (task: string, persona: string) => {
     const r = queue.enqueueOrSpawn({ persona: personas.get(persona)!, task, cwd, mode: "background", timeoutMs: 120000, runtimeEnv: {} });
@@ -289,9 +303,14 @@ async function lentSlots(t: test.TestContext, bin: string, version: string) {
   assert.match(registry.get(plain)!.waitReason ?? "", /maxConcurrent \(4\)/);
   writeFileSync(join(fixture, "n3-release"), "go");
   await wait(() => peak.heldLeaves > 0, "a leaf settled while its process still held its exit");
+  // Release only after a held process recorded its settlement SIGTERM: a SIGTERM that lands while a
+  // released child is already exiting kills it in teardown without running the recording listener.
+  const recorded = (role: string) => files("n3-sigterm-").some(f => { try { return readFileSync(join(fixture, f), "utf8") === role; } catch { return false; } });
+  await wait(() => recorded("n3-exit-leaf"), "a held leaf recorded the conductor's settlement SIGTERM");
   writeFileSync(join(fixture, "n3-exit-leaf"), "go");
   await wait(() => peak.heldParents > 0 && leaves().every(l => isTerminal(l.status) && !live(l)), "every leaf exited and a parent settled with its process held");
   assert.equal(registry.get(plain)!.status, "queued", "settled parents whose processes live still hold their slots");
+  await wait(() => recorded("n3-exit-parent"), "a held parent recorded the conductor's settlement SIGTERM");
   writeFileSync(join(fixture, "n3-exit-parent"), "go");
   await wait(() => registry.list().every(r => isTerminal(r.status) && !live(r)), "every own run settled and exited");
   for (const id of [...parents, plain]) assert.equal(registry.get(id)!.status, "completed", registry.get(id)!.errorMessage);
