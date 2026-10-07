@@ -43,6 +43,7 @@ import type { LeadAsks } from "./supervision/ask.ts";
 import { registerDelegate } from "./delegate-tool.ts";
 import { awaitingChildren, childrenOf, stepCost, subtreeCost } from "./delegation.ts";
 import { MERGER_PERSONA } from "./effort/merger.ts";
+import { humanResolution } from "./effort/reconcile.ts";
 import { isSettled, isTerminal } from "./types.ts";
 import { SpawnQueue } from "./queue.ts";
 import { resolveMergeStrategy, resolveWorktreeSpec } from "./worktree.ts";
@@ -1661,8 +1662,11 @@ function toStatusSummary(r: Run, canFocus: boolean, sessionId?: string, registry
   const runs = registry?.list() ?? [];
   const awaiting = awaitingChildren(r, runs);
   const children = childrenOf(r, runs);
+  const resolution = humanResolution(r);
   return {
     id: r.id,
+    // M6b: a hint for the human, never an agent action; the slash command revalidates and confirms.
+    ...(resolution ? { human_resolution: `${resolution} (interactive human confirmation only; not an agent action)` } : {}),
     ...(awaiting > 0 ? { awaiting_children: awaiting } : {}),
     depth: r.depth,
     ...(r.parentRunId !== undefined ? { parent_run_id: r.parentRunId } : {}),
@@ -1729,9 +1733,9 @@ function formatStatusForLLM(g: StatusGroups, queueSize: number, summaries: Map<s
       const tokenPart = formatUsage({ turns: 0, input: r.usage.input, output: r.usage.output, cost: r.usage.cost });
       const usageStr = [turnPart, tokenPart].filter(Boolean).join(" ");
       const usagePart = usageStr ? `[${usageStr}]` : "";
-      const { wait_reason: waitReason, awaiting_children: awaiting, parent_run_id: parent, children, subtree_cost: subtree } = summaries.get(r.id)!;
+      const { wait_reason: waitReason, awaiting_children: awaiting, parent_run_id: parent, children, subtree_cost: subtree, human_resolution: resolution } = summaries.get(r.id)!;
       const hint = (waitReason ? ` ${waitReason}` : "") + (awaiting ? ` ⇣${awaiting} waiting` : "")
-        + (parent ? ` parent=${parent}` : "") + (children ? ` children=${children.length} subtree=$${subtree!.toFixed(3)}` : "") + (r.lastToolCall ? ` → ${r.lastToolCall}` : "") + (r.effort ? ` effort=${effortSummary(r)}` : "");
+        + (parent ? ` parent=${parent}` : "") + (children ? ` children=${children.length} subtree=$${subtree!.toFixed(3)}` : "") + (r.lastToolCall ? ` → ${r.lastToolCall}` : "") + (r.effort ? ` effort=${effortSummary(r)}` : "") + (resolution ? ` human_resolution=${resolution}` : "");
       lines.push(
         `  ${r.id.padEnd(20)} ${r.persona.padEnd(14)} ${elapsedStr(r.startTime, r.finishedAt).padEnd(6)} ${usagePart}${hint} runtime=${r.runtime === undefined ? "subprocess" : r.runtime} available_actions=${summaries.get(r.id)!.available_actions.join(",") || "(none)"}`,
       );

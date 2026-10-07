@@ -13,6 +13,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const made: string[] = [];
+let preserved = false;
+
+/** A failing test keeps every fixture root of its process for inspection; returns them. */
+export function preserveTmpDirs(): string[] {
+  preserved = true;
+  return [...made];
+}
 
 export function tmpDir(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -21,6 +28,7 @@ export function tmpDir(prefix: string): string {
 }
 
 function removeAll(): void {
+  if (preserved) return;
   for (const dir of made) {
     try {
       rmSync(dir, { recursive: true, force: true, maxRetries: 3 });

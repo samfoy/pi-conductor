@@ -582,10 +582,27 @@ export interface MergerFor {
   owner: import("./effort/store.ts").EffortOwner;
 }
 
+/** M6b: the settled generation a human resolve replaced. Its card was dispatched (or is uncertain) and is never resent. */
+export interface IntegrationPrevious {
+  reason: MergerWal["kind"];
+  delivery?: RunIntegration["delivery"];
+  sourceHead: string;
+  expectedTip?: string;
+  candidateOid?: string;
+  candidatePath?: string;
+  conflicts?: string[];
+  enqueuedAt: number;
+  finishedAt?: number;
+  errorMessage?: string;
+}
+
 export interface RunIntegration {
   /** The writer's original branch head; `branchHead` may later name an accepted merger proposal. */
   sourceHead?: string;
   merger?: MergerWal;
+  /** M6b: an interactive human confirmed one merger attempt for exactly this source; never cleared. */
+  resolveRequested?: { at: number; sourceHead: string; tip: string };
+  previous?: IntegrationPrevious;
   resultText?: string;
   verifiedOid?: string;
   noopTip?: string;

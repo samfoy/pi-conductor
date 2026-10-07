@@ -505,7 +505,7 @@ settlement. Prompt rejection is a failed run, not completion. As with explicit
 RPC, extension dialogs are auto-cancelled; provider extensions remain enabled.
 This does not address independently oversized persona/system-prompt argv.
 
-## Named efforts (M5 — fenced crash recovery, verified integration; M6a — automatic merger)
+## Named efforts (M5 — fenced crash recovery, verified integration; M6a — automatic merger; M6b — human-confirmed resolve)
 
 `ensemble_effort({action:"open", effort:"feature", verify:"npm test"})` captures
 an attached base branch and commit from the conductor's requested checkout and
@@ -580,8 +580,8 @@ preallocated merger id, kind, immutable setup OID, source head, expected tip,
 candidate path), and only then prepares a fresh detached candidate, resolves the
 `merger` persona from the main checkout's roster and enqueues it. The attempt never
 decrements: one merger per writer, at most one live merger per effort (a second
-conflict waits, then is recomputed against the tip). `ask`/`off` keep the M5
-`merge_conflict` outcome; there is no `resolve` action yet (M6b).
+conflict waits, then is recomputed against the tip). `ask` and `off` launch no
+automatic merger; under `ask` only a confirmed human resolve can (M6b, below).
 
 The candidate starts at the expected tip with a real `git merge --no-ff --no-commit`
 of the writer head (its unmerged paths must equal `merge-tree`'s, else the effort
@@ -630,7 +630,52 @@ names that merger. The merger's cost is persisted once on the writer and reporte
 `step_cost` (`subtreeCost` plus that cost). Status and cards show `resolving: merger
 <id> …`, the outcome and the cost; merger output is never treated as proof.
 
-Not covered: `ask` resolve (M6b), more attempts, real herdr merger panes, human TUI
+### Human-confirmed resolve (M6b)
+
+Under `efforts.merger:"ask"` a conflict or twice-red verify settles `merge_conflict`
+with **no** merger and the original card once; the card and `ensemble_status`
+(`human_resolution`) name the human command. Only the interactive
+`/conductor effort resolve <exact-run-id>` can start the one attempt. It needs a UI
+(`hasUI`), a lead that is not `CONDUCTOR_SUBAGENT=1`, and an explicit
+`ctx.ui.confirm`. There is no `ensemble_effort` resolve action, no other tool route
+and no script substitute; the model sees only the hint. `off` refuses, and so does
+`auto` once its attempt is spent (`auto` with no attempt yet, for example a conflict
+while no launcher was configured, is also resolvable).
+
+Before the prompt, a read-only check requires an effort writer settled
+`merge_conflict` by `conflict`, `verify_failed` or `verify_timeout`; no merger WAL and
+no earlier resolve; a settled original card; the frozen verification policy; the
+original gate's proof (the hook-passed driver WAL for this exact `sourceHead`, plus a
+recorded pass of the frozen gate command; an unknown legacy gate fails closed and
+points to `requeue --hook`, as requeue does); a clean source worktree still at that
+OID; an on-disk record equal to the session's view; and the current owner, or M5
+adoption of a provably dead one (a live or unknown owner is refused, never taken over
+by age). The dialog shows the actual plan: source OID and branch, the current
+integration tip, base, policy, verify command, what is preserved and the ownership
+change. Declining, missing UI, a child, a foreign or unrelated caller, or any failed
+check has no effect.
+
+After the confirmation, the same checks run again synchronously, before and after the
+exclusive driver claim, and any change in state, source, tip, owner or lease while the
+dialog was open rejects with the merge_conflict preserved. The accepted transaction
+adopts through the shared M5 claim, then durably writes (acknowledged before enqueue)
+a new `integration` generation: `previous` summarizes the replaced one (reason,
+delivery, OIDs, error) and `delivery` starts unset, with
+`resolveRequested {sourceHead, tip}`. The prior failure and record are cleared only in
+that write. The command returns once the generation is queued and does not wait for
+the model, so the owner can still answer a blocked merger with `send`. The unchanged
+M6a queue re-merges against the current tip; only if it still conflicts or verify is
+red twice does `ask` launch, and only for the confirmed source. The proposal goes
+through the same acceptance table, hooked squash, verify and CAS; a re-entry failure
+exhausts the writer. Resolve adds at most one card, the new outcome's; the original
+is never resent.
+A crash between the generation write and enqueue is recovered once by ordinary M5
+recovery; a crash after the merger claim spends the attempt. Repeating resolve, or
+resolving after the attempt is spent, is refused. A later human `requeue` starts its
+own generation: it keeps the merger WAL, so a spent attempt never returns, but it does
+not carry the resolve request, so `ask` then needs a fresh confirmation.
+
+Not covered: more attempts, real herdr merger panes, human TUI
 acceptance and rollout; attribute-based marker evasion; `stepCost` under `ensemble_auto`
 (effort auto is still refused, so it is exercised only by status); and exit proof for a
 recovered herdr merger record, which has no PID and so counts as exited. See `docs/backlog.md`. This repository's own pre-commit hook needs a local
@@ -659,7 +704,7 @@ the weaker guarantee. Verify and candidate hooks have bounded output and a timeo
 and use private temporary directories. Candidate hooks may stage changes, but the
 resulting post-hook tree must be clean and pass verification. There is no automatic
 dependency installation or base `node_modules` modification: hooks needing a local
-installation pause when it is missing. `land` remains captured-only; `merger` drives M6a (below). Names match
+installation pause when it is missing. `land` remains captured-only; `merger` drives M6a and M6b (below). Names match
 `^[a-z][a-z0-9-]{0,39}$`. Scope/generated paths are nonempty repo-relative
 literal (including Unicode letters/numbers), `*` or `**` globs; traversal, absolute
 paths and other glob syntax are rejected. Omitted or empty `touches` means universal
@@ -1181,7 +1226,7 @@ receipt, SIGSTOP refusing takeover, SIGKILL takeover only after the proven exit,
 real herdr 0.9.1 session through the H11 fixture: claim, peer, ask, transcript, reply, `/reload`
 reclaim and a SIGKILL crash takeover, proving the socket before every control and signal, with
 an exact-identity teardown. It passes on 0.87.1 and 1.0.4. Not covered: human TUI acceptance,
-off Linux, paid models. M6a (automatic merger) is implemented with automated evidence only; M6b–M10 (resolve, readers, waves, landing) are not done.
+off Linux, paid models. M6a (automatic merger) and M6b (human-confirmed resolve) are implemented with automated evidence only; M7–M10 (readers, waves, landing) are not done.
 
 ## Configuration
 

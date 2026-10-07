@@ -7,12 +7,12 @@ import { RunRegistry, runsRoot, writeRecord, getFinalText } from "../runs.ts";
 import { settleRun } from "../run-pipeline.ts";
 import { runHook } from "../hook-runner.ts";
 import { measureEffortFootprint } from "./admit.ts";
-import { isTerminal, type Run, type RunRecord, type ResolvedHook } from "../types.ts";
+import { isTerminal, type IntegrationPrevious, type Run, type RunRecord, type ResolvedHook } from "../types.ts";
 import type { ConductorEventEmitter } from "../conductor-events.ts";
 import { effortGit, effortOwner, effortTip } from "./open.ts";
-import { acquireClaim, adoptEffort, assertRunEffortOwner, effortDir, readEffort, releaseClaim, writeEffort, writeDurableFile, type EffortRecord } from "./store.ts";
+import { acquireClaim, adoptEffort, assertClaim, assertEffortOwner, assertRunEffortOwner, effortDir, readClaim, readEffort, releaseClaim, sameOwner, writeEffort, writeDurableFile, type EffortOwner, type EffortRecord } from "./store.ts";
 import { assertCandidate, assertCandidateIndexFlags, integratedCandidate, mergeTree, effortEnv } from "./git.ts";
-import { stopOwnedProcessGroup } from "./process-group.ts";
+import { processIdentityState, stopOwnedProcessGroup } from "./process-group.ts";
 
 export interface RecoveryOptions {
   registry: RunRegistry;
@@ -199,12 +199,7 @@ export async function recoverEffort(original: EffortRecord, opts: RecoveryOption
       opts.registry.notify(run);
     }
   } finally { releaseClaim(lock, claim); }
-  const done = Promise.all(runnable.map(async run => {
-    const outcome = await opts.registry.integrations.enqueue(run, () => opts.registry.notify(run), true);
-    run.mergeResult = outcome.mergeResult; run.landedCommit = outcome.landedCommit;
-    await settleRun(run, outcome.terminal, run.exitCode, opts);
-    await cleanupCandidates(readEffort(run.effort!.gitRoot, run.effort!.name)!, run);
-  })).then(() => {});
+  const done = Promise.all(runnable.map(run => reenter(run, opts))).then(() => {});
   void done.catch(() => {});
   return { runs: restored, done };
 }
@@ -303,11 +298,123 @@ export async function requeueEffortRun(run: Run, opts: RecoveryOptions, replacem
     record = readEffort(record.gitRoot, record.name)!;
     writeEffort({ ...record, status: "open", pausedReason: undefined, pausedRun: undefined, gatedTip: undefined, members: [...new Set([...record.members, run.id])], queue: [...new Set([...(record.queue ?? []), run.id])] });
   } finally { releaseClaim(lock, claim); }
-  const done = opts.registry.integrations.enqueue(run, () => opts.registry.notify(run), true).then(async outcome => {
-    run.mergeResult = outcome.mergeResult; run.landedCommit = outcome.landedCommit;
-    await settleRun(run, outcome.terminal, run.exitCode, opts);
-    await cleanupCandidates(readEffort(run.effort!.gitRoot, run.effort!.name)!, run);
-  });
+  const done = reenter(run, opts);
   void done.catch(() => {});
   return { done };
+}
+
+/** Recovery, requeue and resolve share one tail: the driver outcome, one settlement, proven cleanup. */
+async function reenter(run: Run, opts: RecoveryOptions): Promise<void> {
+  const outcome = await opts.registry.integrations.enqueue(run, () => opts.registry.notify(run), true);
+  run.mergeResult = outcome.mergeResult; run.landedCommit = outcome.landedCommit;
+  await settleRun(run, outcome.terminal, run.exitCode, opts);
+  await cleanupCandidates(readEffort(run.effort!.gitRoot, run.effort!.name)!, run);
+}
+
+const RESOLVABLE: readonly string[] = ["conflict", "verify_failed", "verify_timeout"];
+
+/** M6b advisory hint, never an action token or authority: the interactive command revalidates everything. */
+export function humanResolution(run: Run): string | undefined {
+  const e = run.integration;
+  if (!run.effort || run.mergerFor || run.status !== "merge_conflict" || e?.state !== "paused" || !RESOLVABLE.includes(e.reason ?? "") || e.merger || e.previous || e.resolveRequested) return undefined;
+  try { if (readEffort(run.effort.gitRoot, run.effort.name)?.policy.merger === "off") return undefined; }
+  catch { return undefined; }
+  return `/conductor effort resolve ${run.id}`;
+}
+
+export interface ResolvePlan { text: string; record: EffortRecord; head: string; tip: string; fingerprint: string }
+
+/**
+ * M6b, read-only: every resolve precondition observed now; throws the refusal. The original gate's
+ * proof is this source's hook-passed driver WAL (`deliveryProtocol` 1, `sourceHead`) plus the frozen
+ * gate and its recorded pass; an unknown legacy gate fails closed, as requeue does.
+ */
+function resolvePlan(run: Run, sessionId: string): ResolvePlan {
+  if (process.env.CONDUCTOR_SUBAGENT === "1") throw new Error("effort resolve requires an interactive human command, never a child");
+  assertSupportedRuntime(run.runtime);
+  const e = run.integration;
+  if (!run.effort || run.mergerFor) throw new Error(`${run.id} is not an effort writer`);
+  if (run.status !== "merge_conflict" || e?.state !== "paused" || !RESOLVABLE.includes(e.reason ?? "") || run.mergeResult?.reason !== e.reason)
+    throw new Error(`resolve requires an effort writer settled merge_conflict by conflict, verify_failed or verify_timeout; ${run.id} is ${run.status}${e?.reason ? ` (${e.reason})` : ""}`);
+  if (e.merger) throw new Error(`merger attempt already spent (${e.merger.runId}: ${e.merger.outcome ?? "unsettled"}); no second attempt`);
+  if (e.previous || e.resolveRequested) throw new Error("this writer was already resolved once; no second attempt");
+  if (run.integrationControl || run.integrationSettlement || e.delivery === "intent") throw new Error("the original outcome is still settling; retry once its card is delivered");
+  if (e.deliveryProtocol !== 1 || !e.sourceHead || e.branchHead !== e.sourceHead) throw new Error("no hook-passed driver integration proof for this source; use human effort requeue");
+  const gate = run.effort.gate;
+  if (gate === undefined) throw new Error("original hook is unknown/unreconstructable; resolve never assumes a gate. Use /conductor effort requeue <run-id> --hook <command> to re-gate");
+  if (gate && !(run.hookResult?.passed && run.hookResult.command === gate.command)) throw new Error("original hook pass is not recorded for this source; use human effort requeue");
+  const record = readEffort(run.effort.gitRoot, run.effort.name);
+  if (!record) throw new Error("effort record missing; ownership unresolved");
+  if (record.policy.merger === "off") throw new Error('efforts.merger is "off": resolution refused');
+  if (e.verifyIdentity.command !== record.policy.verify || e.verifyIdentity.timeoutSeconds !== record.policy.verifyTimeoutSeconds || e.verifyIdentity.retries !== record.policy.verifyRetries) throw new Error("frozen verification policy mismatch; preserve for inspection");
+  if (record.status === "paused") throw new Error(`effort paused: ${record.pausedReason}; use human effort resume first`);
+  if ((record.queue ?? []).includes(run.id)) throw new Error("writer is still queued for integration");
+  // The current owner, or M5 adoption of a proven-dead one. Live or unknown owners are never taken over.
+  const runOwner: EffortOwner = run.effort.owner ?? { sessionId: run.parentSessionId!, pid: run.parentPid!, startTime: run.parentStartTime! };
+  if (!sameOwner(runOwner, record.owner)) throw new Error("run and effort owner generations differ; reconcile first");
+  const adopt = !sameOwner({ ...effortOwner(sessionId), generation: record.owner.generation }, record.owner);
+  if (adopt) {
+    const state = processIdentityState(record.owner);
+    if (state !== "dead") throw new Error(`effort owner ${record.owner.sessionId} is ${state}; resolve refused, no takeover`);
+  } else assertEffortOwner(record, record.owner);
+  const saved = JSON.parse(readFileSync(run.recordPath, "utf8")) as RunRecord;
+  if (saved.id !== run.id || saved.status !== run.status || JSON.stringify(saved.integration) !== JSON.stringify(e)) throw new Error("durable record differs from this session's view; reconcile first");
+  const head = validateSource(run);
+  if (head !== e.sourceHead) throw new Error(`source branch head changed (${head}, integrated ${e.sourceHead}); preserve and use human effort requeue`);
+  const tip = effortTip(record);
+  const lease = readClaim(join(effortDir(record.gitRoot, record.name), "effort.lock"));
+  const fingerprint = JSON.stringify([run.status, e, run.effort.owner, gate, record.owner, record.status, record.policy.merger, lease, head, tip]);
+  const short = (oid: string) => oid.slice(0, 12);
+  const text = [
+    `Resolve ${run.id} (${run.persona}) in effort ${record.name}: preserved merge_conflict (${e.reason}${e.conflicts?.length ? `: ${e.conflicts.join(", ")}` : ""}).`,
+    `Plan: one merger generation. The queue re-merges source ${head} (branch ${run.worktreeBranch}) onto the current integration tip ${tip} (${record.intRef}; base ${record.baseBranch}@${short(record.baseOid)}).`,
+    `If it still conflicts, or verify fails twice, ONE driver-owned merger (efforts.merger "${record.policy.merger}") proposes a hooked commit in a fresh detached candidate; Git acceptance, repository hooks, efforts.verify (${record.policy.verify ? `\`${record.policy.verify}\`` : "disabled"}) and a checked CAS gate it. No second attempt.`,
+    `Preserved: source branch ${run.worktreeBranch}, worktree ${run.worktreePath}, candidates and evidence. The main checkout is not touched.`,
+    `Ownership: ${adopt ? `adopt the effort from dead owner ${record.owner.sessionId} (pid ${record.owner.pid}) through the M5 claim` : "this session"}.`,
+    "Delivery: the original merge_conflict card is not resent; the new outcome gets one card.",
+  ].join("\n");
+  return { text, record, head, tip, fingerprint };
+}
+
+/**
+ * M6b, interactive slash command only: `confirm` is the explicit human confirmation. Starts one
+ * integration generation and returns once it is durably queued, not when the merger settles.
+ */
+export async function resolveEffortRun(run: Run, opts: RecoveryOptions, confirm: (plan: ResolvePlan) => Promise<boolean>): Promise<{ started: false } | { started: true; done: Promise<void> }> {
+  const before = resolvePlan(run, opts.sessionId);
+  if (!(await confirm(before))) return { started: false };
+  // Synchronous from here to the acknowledged write: a reentrant command sees the old state or our claim.
+  const revalidate = () => {
+    const now = resolvePlan(run, opts.sessionId);
+    if (now.fingerprint !== before.fingerprint) throw new Error("resolve target changed while confirmation was pending (state, source, tip, owner or lease); nothing started, work preserved. Rerun resolve to review the current plan");
+    return now;
+  };
+  revalidate();
+  const lock = join(effortDir(before.record.gitRoot, "integration-driver"), "driver.lock");
+  mkdirSync(dirname(lock), { recursive: true });
+  let claim: EffortOwner;
+  try { claim = acquireClaim(lock, effortOwner(randomUUID())); }
+  catch (error) { throw new Error(`integration driver busy or unresolved (${(error as Error).message}); nothing started`); }
+  try {
+    const plan = revalidate();
+    const record = adoptEffort(plan.record, effortOwner(opts.sessionId));
+    const prior = run.integration!;
+    const restore: Partial<Run> = { status: run.status, integration: prior, mergeResult: run.mergeResult, errorMessage: run.errorMessage, effort: run.effort, integrationSuspended: run.integrationSuspended,
+      parentPid: run.parentPid, parentSessionId: run.parentSessionId, parentStartTime: run.parentStartTime };
+    run.effort = { ...run.effort!, owner: record.owner };
+    run.parentPid = record.owner.pid; run.parentSessionId = record.owner.sessionId; run.parentStartTime = record.owner.startTime;
+    run.integration = { state: "queued", branchHead: plan.head, sourceHead: plan.head, enqueuedAt: Date.now(), attempts: 0, verifyIdentity: { ...prior.verifyIdentity },
+      resultText: prior.resultText, changedPaths: prior.changedPaths, touchViolations: prior.touchViolations, candidates: prior.candidates,
+      resolveRequested: { at: Date.now(), sourceHead: plan.head, tip: plan.tip },
+      previous: { reason: prior.reason as IntegrationPrevious["reason"], delivery: prior.delivery, sourceHead: prior.sourceHead!,
+        expectedTip: prior.expectedTip, candidateOid: prior.candidateOid, candidatePath: prior.candidatePath, conflicts: prior.conflicts, enqueuedAt: prior.enqueuedAt, finishedAt: run.finishedAt, errorMessage: run.errorMessage } };
+    run.status = "integrating"; run.integrationSuspended = false; run.mergeResult = undefined; run.errorMessage = undefined;
+    try { await writeRecord(run, () => { assertRunEffortOwner(run); assertClaim(lock, claim); }); }
+    catch (error) { Object.assign(run, restore); throw new Error(`resolve not recorded (${(error as Error).message}); merge_conflict and work preserved`); }
+    const current = readEffort(record.gitRoot, record.name)!;
+    writeEffort({ ...current, members: [...new Set([...current.members, run.id])], queue: [...new Set([...(current.queue ?? []), run.id])], updatedAt: Date.now() });
+  } finally { releaseClaim(lock, claim); }
+  const done = reenter(run, opts);
+  void done.catch(() => {});
+  return { started: true, done };
 }

@@ -22,7 +22,7 @@ import { describeDelivery } from "./runtime.ts";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { effortRepository, effortGit } from "./effort/open.ts";
 import { readEffort, listEfforts } from "./effort/store.ts";
-import { recoverEffort, requeueEffortRun } from "./effort/reconcile.ts";
+import { humanResolution, recoverEffort, requeueEffortRun, resolveEffortRun } from "./effort/reconcile.ts";
 import { EFFORT_NOTICE } from "./effort/policy.ts";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -1314,11 +1314,20 @@ export async function runEffortCmd(opts: Pick<RegisterCommandsOpts, "getCwd" | "
     const fields = /^(\S+)(?:\s+(\S+))?(?:\s+([\s\S]*))?$/.exec(args.trim());
     const action = fields?.[1] ?? "list", name = fields?.[2], tail = fields?.[3] ?? "";
     const { gitRoot } = effortRepository(opts.getCwd());
-    if (action === "resume" || action === "requeue") {
+    if (action === "resume" || action === "requeue" || action === "resolve") {
       if (!ctx.hasUI || process.env.CONDUCTOR_SUBAGENT === "1") throw new Error("effort recovery requires an interactive human command");
       const sessionId = opts.getSessionId?.();
       if (!sessionId) throw new Error("current effort owner session is unknown");
       const recovery = { registry: opts.getRegistry(), sessionId, onComplete: opts.pushCompletionNotification, events: opts.getEvents?.() };
+      if (action === "resolve") {
+        if (!name || tail) throw new Error("usage: effort resolve <exact-run-id>");
+        const run = opts.getRegistry().get(name);
+        if (!run?.effort || run.effort.gitRoot !== gitRoot) throw new Error("effort writer not found in this repository; reconcile first");
+        // Returns once the generation is queued, so the owner can still answer a blocked merger.
+        const result = await resolveEffortRun(run, recovery, plan => ctx.ui.confirm("Resolve with one merger attempt?", plan.text));
+        ctx.ui.notify(result.started ? `Resolve accepted for ${run.id}: one merger generation queued. Answer a blocked merger with send; inspect effort status for the outcome.` : "Resolve declined; nothing changed.", "info");
+        return;
+      }
       if (action === "resume") {
         const record = readEffort(gitRoot, name!);
         if (!record || record.status !== "paused") throw new Error("resume requires a paused effort");
@@ -1335,10 +1344,10 @@ export async function runEffortCmd(opts: Pick<RegisterCommandsOpts, "getCwd" | "
       ctx.ui.notify("Recovery checked; inspect effort status for queue, pause cause and delivery uncertainty.", "info");
       return;
     }
-    if (action !== "list" && action !== "status") throw new Error("Use effort list/status/resume/requeue");
+    if (action !== "list" && action !== "status") throw new Error("Use effort list/status/resume/requeue/resolve");
     const records = action === "list" ? listEfforts(gitRoot) : [readEffort(gitRoot, name!)];
     if (records.some(r => !r)) throw new Error("effort not found");
-    ctx.ui.notify(`${EFFORT_NOTICE}\n${JSON.stringify(records.map(effort => ({ effort, tip: effortGit(effort!.gitRoot, "rev-parse", "--verify", `${effort!.intRef}^{commit}`), members: opts.getRegistry().list().filter(r => r.effort?.gitRoot === gitRoot && r.effort.name === effort!.name).map(r => ({ id: r.id, status: r.status, integration: r.integration, error: r.errorMessage })) })), null, 2)}`, "info");
+    ctx.ui.notify(`${EFFORT_NOTICE}\n${JSON.stringify(records.map(effort => ({ effort, tip: effortGit(effort!.gitRoot, "rev-parse", "--verify", `${effort!.intRef}^{commit}`), members: opts.getRegistry().list().filter(r => r.effort?.gitRoot === gitRoot && r.effort.name === effort!.name).map(r => ({ id: r.id, status: r.status, integration: r.integration, error: r.errorMessage, human_resolution: humanResolution(r) })) })), null, 2)}`, "info");
   } catch (error) { ctx.ui.notify((error as Error).message, "error"); }
 }
 

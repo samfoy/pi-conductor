@@ -328,7 +328,7 @@ export class EffortDriver {
     }
     if (merged.kind === "conflict" && (!generated || !merged.conflicts.every(path => isGeneratedPath(path, generated)))) {
       if (await this.park(job, record, "conflict", { conflicts: merged.conflicts })) return;
-      await this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: "conflict", conflicts: merged.conflicts, ...this.exhausted(entry) } }); return;
+      await this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: "conflict", conflicts: merged.conflicts, ...this.exhausted(entry, record, run.id) } }); return;
     }
     if (merged.kind === "clean" && merged.tree === effortGit(root, "rev-parse", `${expected}^{tree}`)) {
       this.fence(job);
@@ -385,7 +385,7 @@ export class EffortDriver {
         if (action === "retry") continue;
         if (action === "pause") { this.pause(job, `verify cannot run: ${entry.verify.logPath}: ${entry.verify.tailText}`); return; }
         if (await this.park(job, record, action, { verifyLog: entry.verify.tailText })) return;
-        await this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: action, verify: entry.verify, ...this.exhausted(entry) } }); return;
+        await this.finish(job, { terminal: "merge_conflict", mergeResult: { success: false, reason: action, verify: entry.verify, ...this.exhausted(entry, record, run.id) } }); return;
       }
     }
     entry.state = "verified"; entry.verifiedOid = entry.candidateOid;
@@ -400,9 +400,11 @@ export class EffortDriver {
     await this.finish(job, { terminal: "completed", landedCommit: entry.candidateOid, mergeResult: { success: true, verify: entry.verify, flakyVerify: entry.attempts > 1, verifyDisabled: !entry.verifyIdentity.command } });
   }
 
-  private exhausted(entry: NonNullable<Run["integration"]>): Partial<MergeResult> {
+  private exhausted(entry: NonNullable<Run["integration"]>, record?: EffortRecord, id?: string): Partial<MergeResult> {
     const m = entry.merger;
-    if (!m) return {};
+    // A hint for the human, never an action: only the interactive command can start this attempt.
+    if (!m) return record && id && record.policy.merger !== "off" && !entry.resolveRequested
+      ? { errorMessage: `No merger ran (efforts.merger "${record.policy.merger}"). A human may start one confirmed merger attempt with /conductor effort resolve ${id}; source and candidates preserved.` } : {};
     return { errorMessage: m.outcome === "accepted" ? `merger ${m.runId} proposal ${m.outputOid?.slice(0, 12)} did not re-gate on the current tip; its one attempt is spent and no second merger runs. Candidate ${m.candidatePath} and source preserved.`
       : `merger ${m.runId} ${m.reason ?? "attempt spent"}; candidate ${m.candidatePath} and source preserved.` };
   }
@@ -413,7 +415,9 @@ export class EffortDriver {
    */
   private async park(job: Job, record: EffortRecord, kind: MergerWal["kind"], extra: { conflicts?: string[]; verifyLog?: string }): Promise<boolean> {
     const run = job.run, entry = run.integration!;
-    if (!this.launch || record.policy.merger !== "auto" || entry.merger) return false;
+    // M6b: `ask` launches only for the source an interactive human confirmed; `off` never does.
+    const confirmed = !!entry.resolveRequested && entry.resolveRequested.sourceHead === entry.sourceHead;
+    if (!this.launch || entry.merger || !(record.policy.merger === "auto" || (record.policy.merger === "ask" && confirmed))) return false;
     if (this.mergerBusy(job)) {
       job.deferred = true; entry.state = "queued"; entry.reason = "waiting for this effort's merger; recomputed against the tip when it frees";
       await this.persist(job); return true;
