@@ -121,7 +121,12 @@ export function createRunPipeline(
     finalizing = finalizeEffects(terminal, exitCode).catch(error => {
       if (!current()) return;
       if (replaced()) { donePromiseResolve(run); return; }
-      run.errorMessage = `herdr settlement preserved: ${(error as Error).message}`;
+      run.errorMessage = `${run.runtime === "herdr" ? "herdr " : ""}settlement preserved: ${(error as Error).message}`;
+      // M7 R3: nothing durable is written for it, but its waiter ends rather than watching a running run with no process.
+      if (run.settlementPreserved) {
+        if (!isTerminal(run.status)) Object.assign(run, { status: "failed", exitCode, finishedAt: Date.now() });
+        donePromiseResolve(run);
+      }
       opts.registry.notify(run);
     });
   };
@@ -260,12 +265,16 @@ export function createRunPipeline(
     if (run.effort?.role === "reader") {
       // M7: after the proven exit and the validation hook; never integration or legacy merge.
       run.proc = undefined;
-      const isCurrent = readerReleaseGuard(run, () => opts.registry.get(run.id), () => current() && !replaced());
-      await settleReaderView(run, {
+      const live = () => current() && !replaced();
+      const isCurrent = readerReleaseGuard(run, () => opts.registry.get(run.id), live);
+      const view = await settleReaderView(run, {
         succeeded: terminal === "completed" && exitCode === 0 && !isTerminal(run.status) && run.effort.gate !== undefined,
         live: !opts.reattach && !run.reconciledAtStartup, finalText: getFinalText(run.messages),
-      }, { isCurrent, releasePane: () => releaseRunPane(run, isCurrent) });
+      }, { isCurrent, live, releasePane: () => releaseRunPane(run, isCurrent) });
       check();
+      // A replaced invocation's run is its replacement's; a preserved one gets no record, final, card, chain, retry or outcome.
+      if (view === "retired") { donePromiseResolve(run); return; }
+      if (view === "preserved") throw new Error(run.settlementPreserved);
     } else if (run.effort && terminal === "completed" && !isTerminal(run.status)) {
       run.proc = undefined;
       run.pid = undefined;

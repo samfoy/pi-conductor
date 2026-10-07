@@ -15,7 +15,7 @@ import { git } from "./helpers/effort-integration.ts";
 import { land } from "./helpers/effort-merger.ts";
 import { herdrFixture } from "./helpers/herdr-pipeline.ts";
 import { sandboxPi, tmpDir } from "./helpers/tmp.ts";
-import { RunRegistry, forceTerminate, prepareSpawnEffort, runDir, sendToRun, spawnRun, type SpawnOptions } from "../src/runs.ts";
+import { RunRegistry, forceTerminate, prepareSpawnEffort, runDir, sendToRun, spawnRun, writeFinal, writeRecord, type SpawnOptions } from "../src/runs.ts";
 import { SpawnQueue } from "../src/queue.ts";
 import { buildOnChainCallback } from "../src/tools.ts";
 import { dispatchHerdrSettlement, readoptHerdrRun } from "../src/run-pipeline.ts";
@@ -62,10 +62,18 @@ async function poll(cond: () => boolean, what: string, ms = 8000) {
 const lines = (path: string) => existsSync(path) ? readFileSync(path, "utf8").trim().split("\n") : [];
 
 type FakeProc = EventEmitter & { stdout: PassThrough; stderr: PassThrough; stdin: PassThrough; exitCode: number | null; signalCode: null; kill(): boolean; unref(): void };
-/** Only pi launches (PI_BIN) are doubled; git, hooks and verify run for real against the private repo. */
+/** Hook commands whose shell cannot start: a synchronous spawn throw, or an `error` event from a child that never ran. */
+const SPAWN_THROWS = "m7-hook-spawn-throws", SPAWN_ERRORS = "m7-hook-spawn-error-event";
+/** Only pi launches (PI_BIN) and the two unstartable hooks are doubled; git, hooks and verify run for real against the private repo. */
 function fakePi(t: test.TestContext) {
   const real = cp.spawn; const procs: FakeProc[] = [];
   t.mock.method(cp, "spawn", ((command: string, args?: unknown, options?: cp.SpawnOptions) => {
+    if (command === SPAWN_THROWS) throw Object.assign(new Error("spawn /bin/sh EACCES"), { code: "EACCES" });
+    if (command === SPAWN_ERRORS) {
+      const child = new EventEmitter();
+      setImmediate(() => child.emit("error", Object.assign(new Error("spawn /bin/sh ENOENT"), { code: "ENOENT" })));
+      return child;
+    }
     if (!Array.isArray(args) || args[0] !== process.env.PI_BIN) return (real as (...a: unknown[]) => cp.ChildProcess)(command, args, options);
     const proc = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough(), exitCode: null, signalCode: null,
       unref() {}, kill() { queueMicrotask(() => proc.emit("close", 143)); return true; } }) as FakeProc;
@@ -190,6 +198,23 @@ test("M7 herdr finalizer: the proven exit precedes the hook, the hook precedes e
   assert.equal(existsSync(f.view(run)), false); assert.equal(paneCloses(h), 1); assert.deepEqual(f.cards, [`${run.id}:completed`]);
 });
 
+for (const runtime of ["subprocess", "herdr"] as const) for (const failure of ["sync", "async"] as const) {
+  test(`M7 ${runtime} finalizer hook spawn_error (${failure === "sync" ? "spawn throws" : "async error event"}): hook_failed with a clean view; no review, verdict or chain`, { timeout: 20000 }, async t => {
+    const f = repo(t), command = failure === "sync" ? SPAWN_THROWS : SPAWN_ERRORS;
+    f.hookConfig(command);
+    const r = launch(f, runtime, finalizer, {}, { text: VERDICT });
+    r.finish(); await r.done;
+    const run = r.run;
+    assert.equal(run.status, "hook_failed", run.errorMessage);
+    assert.equal(run.hookResult?.passed, false); assert.equal(run.hookResult?.failureKind, "spawn_error"); assert.equal(run.hookResult?.command, command);
+    assert.equal(run.effort?.reviewed, undefined); assert.equal(run.effort?.verdict, undefined);
+    assert.equal(readEffort(f.root, "probe")!.finalizer, undefined, "a clean view does not turn a failed hook into a verdict");
+    assert.deepEqual(f.chains, []); assert.deepEqual(f.cards, [`${run.id}:hook_failed`]);
+    assert.equal(existsSync(f.view(run)), false, "the view was clean: nothing to keep"); assert.equal(run.integration, undefined);
+    if (r.h) assert.equal(paneCloses(r.h), 1);
+  });
+}
+
 for (const [runtime, kind] of [["subprocess", "fail"], ["subprocess", "timeout"], ["herdr", "fail"]] as const) {
   test(`M7 ${runtime} finalizer hook ${kind}: no review, verdict or chain; diagnostics and hook output retained`, { timeout: 20000 }, async t => {
     const f = repo(t);
@@ -272,39 +297,143 @@ test("M7 subprocess reader killed while its hook runs: nothing recorded, view ke
   assert.deepEqual(f.chains, []);
 });
 
-for (const race of ["busy", "replaced", "registry", "record", "owner"] as const) {
-  test(`M7 herdr reader view release refuses a ${race} race during the pane proof; the view stays`, { timeout: 20000 }, async t => {
-    const f = repo(t);
-    const r = launch(f, "herdr", finalizer, {}, { text: VERDICT });
-    const run = r.run, h = r.h!, json = h.cli.json.bind(h.cli);
-    let raced = false;
+/** Per test: the memory outcome log, so "no outcome" is observable. */
+function outcomeLog(t: test.TestContext): () => number {
+  const path = join(tmpDir("m7r-memory-"), "outcomes.jsonl"), before = process.env.CONDUCTOR_MEMORY_PATH;
+  process.env.CONDUCTOR_MEMORY_PATH = path;
+  t.after(() => { if (before === undefined) delete process.env.CONDUCTOR_MEMORY_PATH; else process.env.CONDUCTOR_MEMORY_PATH = before; });
+  return () => lines(path).length;
+}
+/** Another writer's record for this run id: a marker, a newer status and the caller's identity change. */
+function newerRecord(run: Run, change: (saved: Record<string, any>) => void): Buffer {
+  const saved = JSON.parse(readFileSync(run.recordPath, "utf8"));
+  saved.status = "running"; saved.marker = "newer-writer"; change(saved);
+  writeFileSync(run.recordPath, JSON.stringify(saved));
+  return readFileSync(run.recordPath);
+}
+/** R3: a live invocation whose record or registry entry changed keeps the view and a diagnostic, and publishes nothing. */
+async function assertPreserved(f: Fixture, run: Run, record: Buffer, outcomes: () => number, when: "before" | "during") {
+  const hint = `reader view kept \\(durable record or registry changed ${when} release\\)`;
+  assert.deepEqual(f.cards, [], "no card"); assert.deepEqual(f.chains, [], "no chain"); assert.equal(outcomes(), 0, "no memory outcome");
+  assert.deepEqual(readFileSync(run.recordPath), record, "the newer record's marker, nonce and status are byte-identical");
+  assert.equal(existsSync(run.finalPath), false, "no final result published");
+  assert.equal(existsSync(f.view(run)), true, "the view is kept"); assert.equal(git(f.view(run), "rev-parse", "HEAD"), f.landed);
+  assert.match(run.worktreeKept ?? "", new RegExp(`^${hint}: ${f.view(run)}, detached at ${f.landed}`));
+  assert.match(run.errorMessage ?? "", new RegExp(`settlement preserved: ${hint}`));
+  assert.equal(run.status, "failed", "the waiter completed: no running run without a process");
+  // Later writes honor the preservation: a plain write is dropped, a fenced one is refused, no final appears.
+  await writeRecord(run); await assert.rejects(writeRecord(run, () => {}), /settlement preserved/); await writeFinal(run, true);
+  assert.deepEqual(readFileSync(run.recordPath), record); assert.equal(existsSync(run.finalPath), false);
+}
+
+const HERDR_RACES = ["busy", "replaced", "registry", "record", "owner"] as const;
+const SUBPROCESS_RACES = ["record", "registry", "transport"] as const;
+type Race = "none" | (typeof HERDR_RACES)[number] | (typeof SUBPROCESS_RACES)[number];
+/**
+ * The race fires inside the release, after the review evidence was decided: herdr at its empty-pane proof,
+ * a subprocess reader inside `releaseRunPane`'s current-registry lookup. A passing hook ran first.
+ */
+function raceRelease(t: test.TestContext, runtime: "subprocess" | "herdr", race: Race) {
+  const f = repo(t), outcomes = outcomeLog(t);
+  f.hookConfig("true");
+  const r = launch(f, runtime, finalizer, {}, { text: VERDICT });
+  const run = r.run, h = r.h;
+  const state = { raced: false, record: undefined as Buffer | undefined, effort: undefined as Buffer | undefined, transport: run.transport };
+  const inject = () => {
+    state.raced = true;
+    if (race === "busy") h!.pane.agent = "manual";
+    if (race === "replaced") h!.pane.terminal_id = "another-terminal";
+    if (race === "registry") f.registry.register({ ...run });
+    if (race === "owner") takeOver(f);
+    if (race === "transport") { state.transport = run.transport; run.transport = { ...run.transport! }; }
+    if (race === "record") state.record = newerRecord(run, saved => { if (runtime === "herdr") saved.herdr.launchNonce = "another-invocation"; else saved.effort.spawnBase = f.base; });
+    else state.record = readFileSync(run.recordPath);
+    state.effort = readFileSync(join(effortDir(f.root, "probe"), "effort.json"));
+  };
+  if (h) {
+    const json = h.cli.json.bind(h.cli);
     h.cli.json = async (args, limits) => {
-      if (!raced && args[0] === "pane" && args[1] === "get" && run.effort?.reviewed) {
-        raced = true;
-        if (race === "busy") h.pane.agent = "manual";
-        if (race === "replaced") h.pane.terminal_id = "another-terminal";
-        if (race === "registry") f.registry.register({ ...run });
-        if (race === "record") { const saved = JSON.parse(readFileSync(run.recordPath, "utf8")); saved.herdr.launchNonce = "another-invocation"; writeFileSync(run.recordPath, JSON.stringify(saved)); }
-        if (race === "owner") takeOver(f);
-      }
+      if (!state.raced && race !== "none" && args[0] === "pane" && args[1] === "get" && run.effort?.reviewed) inject();
       return json(args, limits);
     };
-    if (race === "busy" || race === "replaced" || race === "record") await r.done;
-    else { await poll(() => raced, "release raced"); await delay(400); }
+  } else {
+    const get = f.registry.get.bind(f.registry);
+    f.registry.get = (id: string) => {
+      if (!state.raced && race !== "none" && id === run.id && run.effort?.reviewed) inject();
+      return get(id);
+    };
+  }
+  r.finish();
+  return { f, r, run, h, state, outcomes };
+}
+
+for (const runtime of ["subprocess", "herdr"] as const) {
+  test(`M7 ${runtime} reader control: a normal release after a passing hook reviews, records the verdict, chains and records an outcome`, { timeout: 20000 }, async t => {
+    const { f, r, run, h, outcomes } = raceRelease(t, runtime, "none");
+    await r.done;
+    assert.equal(run.status, "completed", run.errorMessage); assert.equal(run.hookResult?.passed, true);
+    assert.equal(run.effort?.reviewed, f.landed); assert.equal(readEffort(f.root, "probe")!.finalizer?.verdict, "complete");
+    assert.deepEqual(f.cards, [`${run.id}:completed`]); assert.deepEqual(f.chains, [run.id]); assert.equal(outcomes(), 1);
+    assert.equal(existsSync(f.view(run)), false); assert.equal(run.worktreeKept, undefined); assert.equal(run.errorMessage, undefined);
+    assert.equal(JSON.parse(readFileSync(run.recordPath, "utf8")).status, "completed");
+    if (h) assert.equal(paneCloses(h), 1);
+  });
+}
+
+for (const race of HERDR_RACES) {
+  test(`M7 herdr reader view release refuses a ${race} race during the pane proof; the view stays`, { timeout: 20000 }, async t => {
+    const { f, r, run, h: fake, state, outcomes } = raceRelease(t, "herdr", race), h = fake!;
+    if (race === "registry" || race === "owner") { await poll(() => state.raced, "release raced"); await delay(400); }
+    else await r.done;
     const view = f.view(run);
     assert.equal(existsSync(view), true, "the view is never removed without the proofs"); assert.equal(git(view, "rev-parse", "HEAD"), f.landed);
-    assert.equal(raced, true, "the release went through the pane proof");
+    assert.equal(state.raced, true, "the release went through the pane proof");
     assert.equal(run.effort?.reviewed, f.landed, "review evidence decided before the release stays valid");
+    assert.deepEqual(readFileSync(join(effortDir(f.root, "probe"), "effort.json")), state.effort, "no evidence is published after the race");
     if (race === "owner") assert.equal(paneCloses(h), 1, "an empty owned pane may close; the view waits for the current owner");
     else assert.equal(paneCloses(h), 0);
-    if (race === "registry" || race === "owner") {
-      assert.deepEqual(f.cards, [], "a stale invocation or owner publishes no card");
+    if (race === "record") await assertPreserved(f, run, state.record!, outcomes, "during");
+    else if (race === "registry" || race === "owner") {
+      // Herdr's registry entry is part of the invocation fence (H10): a replaced entry retires the old pipeline silently.
+      assert.deepEqual(f.cards, [], "a stale invocation or owner publishes no card"); assert.deepEqual(f.chains, []); assert.equal(outcomes(), 0);
       assert.equal(JSON.parse(readFileSync(run.recordPath, "utf8")).status, "running", "no stale terminal record");
     } else {
-      assert.deepEqual(f.cards, [`${run.id}:completed`], "the herdr owner claim, not record contents, authorizes publication");
-      // A changed durable record means another writer touched this run: the release stops without mutating it further.
-      if (race !== "record") assert.match(run.worktreeKept ?? "", /reader view kept \(pane release unproven\)/);
+      assert.deepEqual(f.cards, [`${run.id}:completed`], "the herdr owner claim authorizes publication of an unproven pane release");
+      assert.match(run.worktreeKept ?? "", /reader view kept \(pane release unproven\)/);
     }
+  });
+}
+
+for (const race of SUBPROCESS_RACES) {
+  test(`M7 subprocess reader view release under a ${race} race: ${race === "transport" ? "a replaced invocation retires silently" : "the current invocation preserves everything"}`, { timeout: 20000 }, async t => {
+    const { f, r, run, state, outcomes } = raceRelease(t, "subprocess", race);
+    t.after(() => { run.transport = state.transport; });
+    await r.done;
+    assert.equal(state.raced, true, "the race fired inside the release");
+    assert.equal(run.effort?.reviewed, f.landed, "review evidence decided before the release stays valid");
+    assert.deepEqual(readFileSync(join(effortDir(f.root, "probe"), "effort.json")), state.effort, "no evidence is published after the race");
+    if (race !== "transport") return assertPreserved(f, run, state.record!, outcomes, "during");
+    assert.deepEqual(f.cards, []); assert.deepEqual(f.chains, []); assert.equal(outcomes(), 0);
+    assert.deepEqual(readFileSync(run.recordPath), state.record, "nothing written for the replaced invocation");
+    assert.equal(existsSync(f.view(run)), true); assert.equal(run.worktreeKept, undefined, "silent: no diagnostic on the replacement's run");
+    assert.equal(run.status, "running", "the replacement owns the run");
+  });
+}
+
+for (const runtime of ["subprocess", "herdr"] as const) {
+  test(`M7 ${runtime} reader whose durable record changes during the hook: no evidence, card, chain or outcome; the newer record and view stay`, { timeout: 20000 }, async t => {
+    const f = repo(t), outcomes = outcomeLog(t), fixture = tmpDir("m7r-hook-"), started = join(fixture, "started"), release = join(fixture, "release");
+    f.hookConfig(`touch '${started}'; while [ ! -f '${release}' ]; do sleep 0.05; done`);
+    const r = launch(f, runtime, finalizer, {}, { text: VERDICT });
+    r.finish();
+    await poll(() => existsSync(started), "hook started");
+    const record = newerRecord(r.run, saved => { if (runtime === "herdr") saved.herdr.launchNonce = "another-invocation"; else saved.effort.spawnBase = f.base; });
+    writeFileSync(release, "go");
+    await r.done;
+    assert.equal(r.run.hookResult?.passed, true);
+    assert.equal(r.run.effort?.reviewed, undefined, "no review evidence under the uncertain state"); assert.equal(readEffort(f.root, "probe")!.finalizer, undefined);
+    await assertPreserved(f, r.run, record, outcomes, "before");
+    if (r.h) assert.equal(paneCloses(r.h), 0);
   });
 }
 

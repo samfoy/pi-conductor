@@ -53,19 +53,35 @@ export interface ReaderOutcome {
 export interface ReaderReleaseDeps {
   /** The live invocation, registry entry and durable record still name exactly this assignment and view. */
   isCurrent(): boolean;
+  /** This pipeline still owns the invocation: false once it was replaced (resume, reload, readopt). */
+  live(): boolean;
   /** Prove and close this run's own empty herdr pane; true when there is none (subprocess). */
   releasePane(): Promise<boolean>;
 }
+/**
+ * `retired`: the invocation was replaced and mutates nothing more. `preserved`: still this invocation, but its
+ * registry entry or durable record no longer matches; nothing more may be written or published for it.
+ */
+export type ReaderSettlement = "settled" | "retired" | "preserved";
 
 /**
  * After the child and its delegated leaves exited and the validation hook ran. Evidence needs a successful live
  * invocation, the current effort owner and a clean view detached at `spawnBase`. Removal additionally needs the
  * run's own pane proven empty and closed, then every check again; anything uncertain keeps the view as it is.
  */
-export async function settleReaderView(run: Run, outcome: ReaderOutcome, deps: ReaderReleaseDeps): Promise<void> {
+export async function settleReaderView(run: Run, outcome: ReaderOutcome, deps: ReaderReleaseDeps): Promise<ReaderSettlement> {
   const e = run.effort!, path = run.worktreePath;
-  // A replaced invocation no longer owns this run: it mutates nothing.
-  if (!deps.isCurrent()) return;
+  const keep = (problem: string) => {
+    run.worktreeKept = `reader view kept (${problem}): ${run.worktreePath ?? "unavailable"}, detached at ${e.spawnBase ?? "unknown"}; nothing integrated, reset or discarded`;
+  };
+  // R3: another writer's record or registry entry is not ours to overwrite; the view and the reason stay in memory only.
+  const stale = (when: string): ReaderSettlement => {
+    if (!deps.live()) return "retired";
+    keep(`durable record or registry changed ${when} release`);
+    run.settlementPreserved = run.worktreeKept;
+    return "preserved";
+  };
+  if (!deps.isCurrent()) return stale("before");
   const owned = () => { try { assertRunEffortOwner(run); return true; } catch { return false; } };
   const blocker = () => run.integrationSuspended ? "owner runtime shut down" : !owned() ? "effort owner changed"
     : childExitUnconfirmed(run) || run.herdrExitUnconfirmed ? "child exit unconfirmed"
@@ -78,17 +94,18 @@ export async function settleReaderView(run: Run, outcome: ReaderOutcome, deps: R
   if (!problem && !outcome.live) problem = "recovered settlement; review unproven";
   if (!problem) {
     const released = await deps.releasePane();
-    if (!deps.isCurrent()) return;
+    if (!deps.isCurrent()) return stale("during");
     problem = !released ? "pane release unproven" : run.worktreePath !== path ? "view path changed" : blocker();
   }
   if (!problem) {
     try {
       effortGit(e.gitRoot, "worktree", "remove", path!);
       run.worktreePath = undefined; run.worktreeKept = undefined;
-      return;
+      return "settled";
     } catch (error) { problem = `removal refused: ${(error as Error).message}`; }
   }
-  run.worktreeKept = `reader view kept (${problem}): ${run.worktreePath ?? "unavailable"}, detached at ${e.spawnBase ?? "unknown"}; nothing integrated, reset or discarded`;
+  keep(problem);
+  return "settled";
 }
 
 /** One leading `## Verdict: <v>` line, exactly as personas/finalizer.md emits it; any other verdict heading is ambiguous. */

@@ -873,6 +873,11 @@ export interface Run {
    */
   worktreeKept?: string;
   /**
+   * M7 R3: this live invocation found its registry entry or durable record changed under it. Its record
+   * and final files are no longer its to write; the reason stays in memory only. Never persisted.
+   */
+  settlementPreserved?: string;
+  /**
    * Set when startup reconcile rebuilt this Run from record.json rather
    * than this runtime spawning it. Its spawn-time hook gate can't be
    * rebuilt, so `applyMergeToTerminal` refuses to auto-merge it.

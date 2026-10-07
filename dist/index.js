@@ -3271,7 +3271,16 @@ function readerViewProblem(run2) {
 }
 async function settleReaderView(run2, outcome, deps) {
   const e = run2.effort, path2 = run2.worktreePath;
-  if (!deps.isCurrent()) return;
+  const keep = (problem3) => {
+    run2.worktreeKept = `reader view kept (${problem3}): ${run2.worktreePath ?? "unavailable"}, detached at ${e.spawnBase ?? "unknown"}; nothing integrated, reset or discarded`;
+  };
+  const stale = (when) => {
+    if (!deps.live()) return "retired";
+    keep(`durable record or registry changed ${when} release`);
+    run2.settlementPreserved = run2.worktreeKept;
+    return "preserved";
+  };
+  if (!deps.isCurrent()) return stale("before");
   const owned = () => {
     try {
       assertRunEffortOwner(run2);
@@ -3289,7 +3298,7 @@ async function settleReaderView(run2, outcome, deps) {
   if (!problem2 && !outcome.live) problem2 = "recovered settlement; review unproven";
   if (!problem2) {
     const released2 = await deps.releasePane();
-    if (!deps.isCurrent()) return;
+    if (!deps.isCurrent()) return stale("during");
     problem2 = !released2 ? "pane release unproven" : run2.worktreePath !== path2 ? "view path changed" : blocker();
   }
   if (!problem2) {
@@ -3297,12 +3306,13 @@ async function settleReaderView(run2, outcome, deps) {
       effortGit(e.gitRoot, "worktree", "remove", path2);
       run2.worktreePath = void 0;
       run2.worktreeKept = void 0;
-      return;
+      return "settled";
     } catch (error) {
       problem2 = `removal refused: ${error.message}`;
     }
   }
-  run2.worktreeKept = `reader view kept (${problem2}): ${run2.worktreePath ?? "unavailable"}, detached at ${e.spawnBase ?? "unknown"}; nothing integrated, reset or discarded`;
+  keep(problem2);
+  return "settled";
 }
 function parseFinalizerVerdict(text5) {
   const lines = text5.split(/\r?\n/);
@@ -4600,7 +4610,11 @@ function createRunPipeline(run2, piArgs, opts) {
         donePromiseResolve(run2);
         return;
       }
-      run2.errorMessage = `herdr settlement preserved: ${error.message}`;
+      run2.errorMessage = `${run2.runtime === "herdr" ? "herdr " : ""}settlement preserved: ${error.message}`;
+      if (run2.settlementPreserved) {
+        if (!isTerminal(run2.status)) Object.assign(run2, { status: "failed", exitCode, finishedAt: Date.now() });
+        donePromiseResolve(run2);
+      }
       opts.registry.notify(run2);
     });
   };
@@ -4755,13 +4769,19 @@ function createRunPipeline(run2, piArgs, opts) {
     check();
     if (run2.effort?.role === "reader") {
       run2.proc = void 0;
-      const isCurrent = readerReleaseGuard(run2, () => opts.registry.get(run2.id), () => current() && !replaced());
-      await settleReaderView(run2, {
+      const live = () => current() && !replaced();
+      const isCurrent = readerReleaseGuard(run2, () => opts.registry.get(run2.id), live);
+      const view = await settleReaderView(run2, {
         succeeded: terminal === "completed" && exitCode === 0 && !isTerminal(run2.status) && run2.effort.gate !== void 0,
         live: !opts.reattach && !run2.reconciledAtStartup,
         finalText: getFinalText(run2.messages)
-      }, { isCurrent, releasePane: () => releaseRunPane(run2, isCurrent) });
+      }, { isCurrent, live, releasePane: () => releaseRunPane(run2, isCurrent) });
       check();
+      if (view === "retired") {
+        donePromiseResolve(run2);
+        return;
+      }
+      if (view === "preserved") throw new Error(run2.settlementPreserved);
     } else if (run2.effort && terminal === "completed" && !isTerminal(run2.status)) {
       run2.proc = void 0;
       run2.pid = void 0;
@@ -8414,6 +8434,7 @@ function writeRecord(run2, durableFence) {
   const writing = (run2.recordWrite ?? Promise.resolve()).catch(() => {
   }).then(async () => {
     await mkdir(dirname15(run2.recordPath), { recursive: true });
+    if (run2.settlementPreserved) throw new Error(`settlement preserved; record write refused: ${run2.settlementPreserved}`);
     if (durableFence || snapshot2.effort || snapshot2.runtime === "herdr") writeDurableJson(run2.recordPath, snapshot2, () => {
       assertRunEffortOwner(snapshot2);
       fence();
@@ -8432,7 +8453,7 @@ async function writeFinal(run2, durable = false) {
     assertHerdrOwner(run2);
     if (run2.herdr !== binding) throw new Error("herdr invocation changed before final write");
   };
-  if (run2.herdrExitUnconfirmed || run2.herdrResultUnavailable || childExitUnconfirmed(run2)) return;
+  if (run2.herdrExitUnconfirmed || run2.herdrResultUnavailable || childExitUnconfirmed(run2) || run2.settlementPreserved) return;
   if (durable || run2.runtime === "herdr") {
     if (!ownsHerdrRun(run2)) return;
     await mkdir(dirname15(run2.finalPath), { recursive: true });

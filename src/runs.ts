@@ -3275,6 +3275,7 @@ export function writeRecord(run: Run, durableFence?: () => void): Promise<void> 
   const snapshot = structuredClone(toRunRecord(run));
   const writing = (run.recordWrite ?? Promise.resolve()).catch(() => {}).then(async () => {
     await mkdir(dirname(run.recordPath), { recursive: true });
+    if (run.settlementPreserved) throw new Error(`settlement preserved; record write refused: ${run.settlementPreserved}`);
     if (durableFence || snapshot.effort || snapshot.runtime === "herdr") writeDurableJson(run.recordPath, snapshot, () => {
       assertRunEffortOwner(snapshot);
       fence();
@@ -3290,7 +3291,7 @@ export async function writeFinal(run: Run, durable = false): Promise<void> {
   const text = getFinalText(run.messages) || run.integration?.resultText || "(no output)";
   const fence = () => { ownership?.assert(); assertHerdrOwner(run); if (run.herdr !== binding) throw new Error("herdr invocation changed before final write"); };
   // Keep any prior invocation's artifact intact; it is not this invocation's result.
-  if (run.herdrExitUnconfirmed || run.herdrResultUnavailable || childExitUnconfirmed(run)) return;
+  if (run.herdrExitUnconfirmed || run.herdrResultUnavailable || childExitUnconfirmed(run) || run.settlementPreserved) return;
   if (durable || run.runtime === "herdr") {
     if (!ownsHerdrRun(run)) return;
     await mkdir(dirname(run.finalPath), { recursive: true });

@@ -728,13 +728,18 @@ before any await. Then the owner, invocation and view checks run once more befor
 `git worktree remove`. A dirty, ignored-file, moved, flagged, unowned, uncertain,
 killed, recovered or shut-down-owner view, or an unproven pane, is kept with a
 `reader view kept (…)` hint; nothing is reset, discarded or deleted. A review proven
-before a failed release stays valid. A blocked A6 reader keeps its view; the owner's
-answer resumes in the same view cwd with the frozen prompt, tool policy and role. A view
-whose HEAD moved, or a session header whose cwd is not the frozen view, is refused before
-any effect, the question kept. A failed answer acceptance keeps the question too. A settled
-reader is never resumed or rematerialized: spawn a fresh reader, which views the current
-tip. Status and cards say `reader at <oid>, integrates nothing`, then `clean review of
-<oid>` and `view removed`, or the kept view.
+before a failed release stays valid. A replaced invocation stops silently. One still live
+whose registry entry or durable record changed keeps the view with `reader view kept
+(durable record or registry changed before|during release)` and writes no record or final.
+It sends no card, chain, retry or outcome, so the other writer's record stays byte for byte.
+Its waiter ends with the run `failed` in memory and `settlement preserved: …`.
+A blocked A6 reader keeps its view; the owner's answer resumes in the same view cwd with
+the frozen prompt, tool policy and role. A view whose HEAD moved, or a session header
+whose cwd is not the frozen view, is refused before any effect, the question kept. A failed
+answer acceptance keeps the question too. A settled reader is never resumed or
+rematerialized: spawn a fresh reader, which views the current tip. Status and cards say
+`reader at <oid>, integrates nothing`, then `clean review of <oid>` and `view removed`, or
+the kept view.
 
 **Finalizer verdict.** Only a reader that meets every review condition above and whose
 frozen persona is `finalizer` records `finalizer {runId, tip, verdict, at}` on the
@@ -789,8 +794,9 @@ records stay while the effort is open or blocked (destructive policy is M9).
 
 Verified: `tests/effort-readers.test.ts` and `tests/effort-readers-runtimes.test.ts`
 (private Git; a fake Pi CLI for subprocess children and an in-process fake herdr CLI for
-herdr ones; hook precedence, failures, hook-made changes, exit barriers, pane, record,
-registry and owner races, reload, blocked answers, readoption and the ledger).
+herdr ones; hook precedence, failures including clean-view spawn errors, hook-made changes,
+exit barriers, pane, record, registry, transport and owner races, reload, blocked answers,
+readoption and the ledger).
 `tests/effort-reader-smoke.test.ts` (subprocess) and `tests/effort-reader-herdr-smoke.test.ts`
 (executable fake herdr CLI) run Pi 0.87.1 from the explicit `CONDUCTOR_NATIVE_PI_ROOT`
 (pi-coding-agent, pi-ai, pi-agent-core and pi-tui all 0.87.1). Both use a fixed faux

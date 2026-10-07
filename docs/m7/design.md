@@ -17,8 +17,16 @@ and retries, finalizer verdicts (M7)" is the user-facing statement; tests are ci
      reattached or reconciled); the current effort owner; no forced terminal or shutdown; a clean view
      detached at `spawnBase`.
    - Release: the run's own pane is proven empty and closed through `releaseRunPane`. Then the reader
-     guard and the owner and view checks run again before a plain `git worktree remove`. An invocation
-     changed during an await mutates nothing.
+     guard and the owner and view checks run again before a plain `git worktree remove`.
+   - A failed reader guard, before or after the release await, is one of two cases. A replaced invocation
+     (`!live()`: resume, reload, readopt, or on herdr a replaced registry entry, which is part of the H10
+     pipeline fence) is `retired`: it mutates nothing. A still-live invocation whose registry entry or
+     durable record changed is `preserved`: the view stays with `reader view kept (durable record or
+     registry changed before|during release)`, `run.settlementPreserved` makes every later record and final
+     write a no-op or refusal, and settlement stops through the existing preserved path. That means no
+     record, final, card, chain, retry or memory outcome; the other writer's bytes stay intact. Its waiter
+     ends with the run `failed` in memory and `settlement preserved: …`. No evidence is recorded after the
+     guard fails; evidence recorded before a release-time failure stays.
 6. Terminal persistence and dispatch. A herdr reader uses the ordinary nonce ledger
    (`dispatchHerdrSettlement`); a writer keeps the M5 WAL. Every reader card and record write is fenced
    by the current effort owner.
@@ -53,4 +61,7 @@ the `isCurrent` predicate passed through `releaseRunPane` to the herdr empty-pan
 - A reader restored at startup and then answered records no review.
 - A crash between the verdict write and the reader's record leaves the verdict next to a reader recovered
   as lost.
+- On herdr a replaced registry entry retires the old pipeline through the H10 fence, which, as before,
+  does not resolve the old waiter. A preserved settlement's verdict, if recorded before the release,
+  stays on the effort record.
 - Human TUI acceptance and rollout remain unverified.
