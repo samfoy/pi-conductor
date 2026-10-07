@@ -19924,6 +19924,10 @@ function index_default(pi) {
           completionWakeTracker.drop(runId);
           continue;
         }
+        if (!readerOwned(run2)) {
+          completionWakeTracker.drop(runId);
+          continue;
+        }
         pi.sendMessage(buildCompletionMessage(run2, supportsFocus(ctxRef), opts.getSessionId(), opts.getRegistry()), buildCompletionSendMessageOptions(run2));
       }
       for (const runId of result.expired) {

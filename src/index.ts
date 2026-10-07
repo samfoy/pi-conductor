@@ -6,6 +6,7 @@ import { recoverEffort } from "./effort/reconcile.ts";
 import { createMergerLauncher } from "./effort/merger.ts";
 import { listEfforts } from "./effort/store.ts";
 import { effortRepository } from "./effort/open.ts";
+import { readerOwned } from "./effort/reader.ts";
 /**
  * pi-conductor — Extension entry point.
  *
@@ -684,6 +685,8 @@ export default function (pi: ExtensionAPI): void {
           completionWakeTracker.drop(runId);
           continue;
         }
+        // M7 R4: a repeat is a reader card too, so a stale effort owner gets none and stops tracking it.
+        if (!readerOwned(run)) { completionWakeTracker.drop(runId); continue; }
         // Re-fire the same wake notification with the same options.
         // PRD line 257 contract is binary — fire a turn or don't —
         // so a second attempt is appropriate even if the first was a

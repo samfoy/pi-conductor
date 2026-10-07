@@ -7,7 +7,7 @@ import test, { after, mock } from "node:test";
 import assert from "node:assert/strict";
 import cp from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import fsp from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { dirname, join } from "node:path";
@@ -25,6 +25,9 @@ import { HerdrRuntime } from "../src/herdr/runtime.ts";
 import { handleSessionShutdown } from "../src/shutdown.ts";
 import { effortOwner, openEffort } from "../src/effort/open.ts";
 import { adoptEffort, effortDir, readEffort, releaseClaim } from "../src/effort/store.ts";
+import { readerOwned } from "../src/effort/reader.ts";
+import conductor from "../src/index.ts";
+import { stubCtx } from "./helpers/stub-pi.ts";
 import { recoverEffort } from "../src/effort/reconcile.ts";
 import { holdsSlot } from "../src/effort/admit.ts";
 import { DEFAULT_CONFIG, emptyUsage, isSettled, type Persona, type Run } from "../src/types.ts";
@@ -761,3 +764,66 @@ for (const runtime of ["subprocess", "herdr"] as const) {
     assert.match(run.worktreeKept ?? "", /^reader view kept \(effort owner changed\)/); assert.equal(existsSync(f.view(run)), true);
   });
 }
+
+/**
+ * The real extension: session_start, its dead-man-switch tick (15 s, driven by hand with a shifted Date.now) and real
+ * effort runs. A re-fire repeats an unanswered completion card, so a reader's repeat passes the same owner fence.
+ */
+test("M7 R4 dead-man-switch re-fire: a reader's repeat card needs its current effort owner; a stale owner's reader leaves the tracker; writer and non-effort re-fires are unchanged", { timeout: 30000 }, async t => {
+  const f = repo(t), messages: NotificationMessage[] = [], warnings: string[] = [];
+  const handlers = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>(), tools = new Map<string, { execute: (...args: unknown[]) => Promise<any> }>();
+  conductor({ on: (ev: string, h: (event: unknown, ctx: unknown) => unknown) => void handlers.set(ev, [...(handlers.get(ev) ?? []), h]), registerFlag() {}, getFlag() {},
+    registerTool: (tool: { name: string; execute: (...args: unknown[]) => Promise<any> }) => void tools.set(tool.name, tool), registerCommand() {}, registerMessageRenderer() {}, registerShortcut() {},
+    sendMessage: (message: NotificationMessage) => void messages.push(message), appendEntry() {} } as never);
+  const fire = async (ev: string, event: unknown, ctx: unknown) => { for (const h of handlers.get(ev) ?? []) await h(event, ctx); };
+  const base = stubCtx(join(f.root, "pkg"));
+  const ctx = { ...base, ui: { ...base.ui, notify: (text: string) => void warnings.push(text) }, sessionManager: { ...base.sessionManager, getSessionId: () => "owner" } };
+  const conf = join(process.env.HOME!, ".pi", "agent", "extensions", "conductor"); mkdirSync(conf, { recursive: true });
+  writeFileSync(join(conf, "config.json"), JSON.stringify({ gc: { enabled: false }, watchdog: { enabled: false } }));
+  const real = { now: Date.now, setInterval: globalThis.setInterval }, wake: Array<() => void> = [];
+  let offset = 0;
+  globalThis.setInterval = ((fn: () => void, ms?: number) => { if (ms === 15_000) wake.push(fn); return real.setInterval(fn, ms); }) as typeof setInterval;
+  try { await fire("session_start", {}, ctx); } finally { globalThis.setInterval = real.setInterval; }
+  t.after(async () => { Date.now = real.now; await fire("session_shutdown", { reason: "quit" }, ctx); });
+  assert.equal(wake.length, 1, "captured the dead-man-switch tick");
+  Date.now = () => real.now() + offset;
+  const cards = (id: string) => messages.filter(m => { const d = m.details as { id?: string; kind?: string } | undefined; return d?.id === id && d.kind === "completed"; }).length;
+  const settle = async (params: Record<string, unknown>) => {
+    const at = f.procs.length;
+    const out = await tools.get("ensemble_spawn")!.execute(`spawn-${params.persona}`, { task: "Review the effort tip.", foreground: false, chain: false, ...params }, undefined, undefined, ctx);
+    assert.ok(!out.isError, JSON.stringify(out.content));
+    const id: string = out.details.agent_id;
+    await poll(() => f.procs.length > at, `${params.persona} launched`); finishProc(f.procs.at(-1)!, REVIEW);
+    await poll(() => cards(id) === 1, `${params.persona}'s first card, under the current owner`);
+    return id;
+  };
+  const ids = [await settle({ persona: "critic", effort: "probe" }), await settle({ persona: "builder", effort: "probe", touches: ["pkg/**"] }), await settle({ persona: "oracle" })];
+  const owned = (id: string) => readerOwned(JSON.parse(readFileSync(join(runDir(id), "record.json"), "utf8")));
+  assert.equal(JSON.parse(readFileSync(join(runDir(ids[0]!), "record.json"), "utf8")).effort.role, "reader");
+  assert.equal(JSON.parse(readFileSync(join(runDir(ids[1]!), "record.json"), "utf8")).effort.role, "writer");
+  offset = 31_000; wake[0]!();
+  assert.deepEqual(ids.map(cards), [2, 2, 2], "control: under the current owner every unanswered card re-fires, the reader's included");
+  assert.equal(owned(ids[0]!), true);
+  takeOver(f);
+  assert.equal(owned(ids[0]!), false, "the takeover leaves this session a stale owner of the reader");
+  offset = 62_000; wake[0]!();
+  assert.deepEqual(ids.map(cards), [2, 3, 3], "a stale owner's reader re-fires no card; writer and non-effort re-fires are unchanged");
+  offset = 93_000; wake[0]!();
+  const gaveUp = (id: string) => warnings.some(w => w.includes(`sub-agent ${id} completed but the conductor did not wake`));
+  assert.deepEqual(ids.map(gaveUp), [false, true, true], "the reader left the tracker; the others reached the re-fire cap");
+  assert.deepEqual(ids.map(cards), [2, 3, 3]);
+});
+
+test("M7 R4 herdr reader, owner current, record write fails (EACCES) during settlement: the waiter stays pending, as before R4; no card", { timeout: 20000 }, async t => {
+  const f = repo(t), hook = blockingHook(f);
+  const r = launch(f, "herdr", critic);
+  await poll(hook.started, "hook started");
+  const dir = dirname(r.run.recordPath);
+  chmodSync(dir, 0o500); t.after(() => chmodSync(dir, 0o700));
+  hook.release();
+  await poll(() => /settlement preserved/.test(r.run.errorMessage ?? ""), "the preserved catch reached");
+  assert.equal(readerOwned(r.run), true, "the owner is still current");
+  const state = await Promise.race([r.done.then(() => "resolved"), delay(1500).then(() => "pending")]);
+  assert.equal(state, "pending", "only a stale owner's waiter ends through the R4 branch");
+  assert.deepEqual(f.cards, []); assert.deepEqual(f.chains, []);
+});

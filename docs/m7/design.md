@@ -35,8 +35,9 @@ and retries, finalizer verdicts (M7)" is the user-facing statement; tests are ci
    (`dispatchHerdrSettlement`); a writer keeps the M5 WAL. Every reader card and record write is fenced
    by the current effort owner. Settlement callbacks pass `readerFence`. Every card, whoever posts it
    (settlement, a kill or timeout, the post-detach or queued-spawn listener), passes `pushCompletionCard`,
-   which drops a reader card when `readerOwned` fails. Both use `assertRunEffortOwner`. Writer and
-   non-effort cards are unchanged. A stale owner's waiter still ends: its herdr pipeline, whose fenced
+   which drops a reader card when `readerOwned` fails. Both use `assertRunEffortOwner`. A dead-man-switch
+   re-fire makes the same `readerOwned` check before it repeats a card and drops a stale owner's reader
+   from its tracker. Writer and non-effort cards are unchanged. A stale owner's waiter still ends: its herdr pipeline, whose fenced
    record write throws into the preserved catch, resolves with the run as settled in memory (R4).
    Effort spawns, chains and retries are background, so the queued-spawn listener never sees a reader.
 
@@ -74,6 +75,4 @@ the `isCurrent` predicate passed through `releaseRunPane` to the herdr empty-pan
   does not resolve the old waiter. A preserved settlement's verdict, if recorded before the release,
   stays on the effort record.
 - Under a stale owner a subprocess reader still writes its own `final.md`; a herdr one writes none.
-  A dead-man-switch re-fire repeats a card first sent under the then-current owner without checking
-  the owner again.
 - Human TUI acceptance and rollout remain unverified.

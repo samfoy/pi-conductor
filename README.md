@@ -789,13 +789,13 @@ launched outside the effort.
 not the writer's M5 integration WAL. Every reader card, blocked or terminal, and every
 reader record write is fenced by the current effort owner. Cards pass one check in
 `pushCompletionCard`, whatever posts them: settlement, a kill or timeout, the post-detach
-listener or the queued-spawn listener. A stale owner gets no card, record, chain, retry or
-outcome. Its waiter still ends: a foreground answer returns, and on herdr the run stays as
-settled in memory (`completed`, or `blocked` with its question kept) with `herdr settlement
-preserved: effort owned by another session or generation`. A subprocess reader under a
-stale owner still writes its own `final.md`; a herdr one writes none. A dead-man-switch
-re-fire repeats a card first sent under the then-current owner without checking the owner
-again.
+listener or the queued-spawn listener. A dead-man-switch re-fire makes the same owner check
+before it repeats a card, and stops re-firing a stale owner's reader. A stale owner gets no
+card, record, chain, retry or outcome. Its waiter still ends: a foreground answer returns,
+and on herdr the run stays as settled in memory (`completed`, or `blocked` with its question
+kept) with `herdr settlement preserved: effort owned by another session or generation`. A
+subprocess reader under a stale owner still writes its own `final.md`; a herdr one writes
+none.
 
 **Recovery and GC.** Only writers get the completed→`merge_conflict` conversion. A
 subprocess reader record recovered `running` with no live process becomes `killed` (`lost
