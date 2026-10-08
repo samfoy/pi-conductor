@@ -127,8 +127,8 @@ interface EventBus {
 
 /**
  * Thin typed adapter over `pi.events`. All methods are no-ops when `events`
- * is absent — conductor works identically; companion extensions simply
- * receive nothing.
+ * is absent or stale — conductor works identically; companion extensions
+ * simply receive nothing.
  */
 export class ConductorEventEmitter {
   private readonly events: EventBus | undefined;
@@ -137,39 +137,50 @@ export class ConductorEventEmitter {
     this.events = events;
   }
 
+  /** pi's bus already isolates handler errors, so a throw here means this
+   * instance's `pi.events` died with a /reload or session switch while a
+   * run was still in flight. Nobody is listening on it; drop the event. */
+  private emit(channel: string, payload: unknown): void {
+    try {
+      this.events?.emit(channel, payload);
+    } catch {
+      // stale extension API
+    }
+  }
+
   emitCreated(payload: AgentCreatedPayload): void {
-    this.events?.emit(CHANNEL.created, payload);
+    this.emit(CHANNEL.created, payload);
   }
 
   emitStarted(payload: AgentStartedPayload): void {
-    this.events?.emit(CHANNEL.started, payload);
+    this.emit(CHANNEL.started, payload);
   }
 
   emitCompleted(payload: AgentCompletedPayload): void {
-    this.events?.emit(CHANNEL.completed, payload);
+    this.emit(CHANNEL.completed, payload);
   }
 
   emitFailed(payload: AgentFailedPayload): void {
-    this.events?.emit(CHANNEL.failed, payload);
+    this.emit(CHANNEL.failed, payload);
   }
 
   emitSteered(payload: AgentSteeredPayload): void {
-    this.events?.emit(CHANNEL.steered, payload);
+    this.emit(CHANNEL.steered, payload);
   }
 
   emitCompacted(payload: AgentCompactedPayload): void {
-    this.events?.emit(CHANNEL.compacted, payload);
+    this.emit(CHANNEL.compacted, payload);
   }
 
   emitHookStarted(payload: HookStartedPayload): void {
-    this.events?.emit(CHANNEL.hookStarted, payload);
+    this.emit(CHANNEL.hookStarted, payload);
   }
 
   emitHookCompleted(payload: HookCompletedPayload): void {
-    this.events?.emit(CHANNEL.hookCompleted, payload);
+    this.emit(CHANNEL.hookCompleted, payload);
   }
 
   emitHookFailed(payload: HookFailedPayload): void {
-    this.events?.emit(CHANNEL.hookFailed, payload);
+    this.emit(CHANNEL.hookFailed, payload);
   }
 }

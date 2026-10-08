@@ -19352,32 +19352,41 @@ var ConductorEventEmitter = class {
   constructor(events) {
     this.events = events;
   }
+  /** pi's bus already isolates handler errors, so a throw here means this
+   * instance's `pi.events` died with a /reload or session switch while a
+   * run was still in flight. Nobody is listening on it; drop the event. */
+  emit(channel, payload) {
+    try {
+      this.events?.emit(channel, payload);
+    } catch {
+    }
+  }
   emitCreated(payload) {
-    this.events?.emit(CHANNEL.created, payload);
+    this.emit(CHANNEL.created, payload);
   }
   emitStarted(payload) {
-    this.events?.emit(CHANNEL.started, payload);
+    this.emit(CHANNEL.started, payload);
   }
   emitCompleted(payload) {
-    this.events?.emit(CHANNEL.completed, payload);
+    this.emit(CHANNEL.completed, payload);
   }
   emitFailed(payload) {
-    this.events?.emit(CHANNEL.failed, payload);
+    this.emit(CHANNEL.failed, payload);
   }
   emitSteered(payload) {
-    this.events?.emit(CHANNEL.steered, payload);
+    this.emit(CHANNEL.steered, payload);
   }
   emitCompacted(payload) {
-    this.events?.emit(CHANNEL.compacted, payload);
+    this.emit(CHANNEL.compacted, payload);
   }
   emitHookStarted(payload) {
-    this.events?.emit(CHANNEL.hookStarted, payload);
+    this.emit(CHANNEL.hookStarted, payload);
   }
   emitHookCompleted(payload) {
-    this.events?.emit(CHANNEL.hookCompleted, payload);
+    this.emit(CHANNEL.hookCompleted, payload);
   }
   emitHookFailed(payload) {
-    this.events?.emit(CHANNEL.hookFailed, payload);
+    this.emit(CHANNEL.hookFailed, payload);
   }
 };
 
