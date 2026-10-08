@@ -819,6 +819,7 @@ test("M7 R4 herdr reader, owner current, record write fails (EACCES) during sett
   const r = launch(f, "herdr", critic);
   await poll(hook.started, "hook started");
   const dir = dirname(r.run.recordPath);
+  await poll(() => existsSync(join(dir, "hook.log")), "hook log open");
   chmodSync(dir, 0o500); t.after(() => chmodSync(dir, 0o700));
   hook.release();
   await poll(() => /settlement preserved/.test(r.run.errorMessage ?? ""), "the preserved catch reached");
