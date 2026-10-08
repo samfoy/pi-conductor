@@ -61,7 +61,8 @@ export class SubprocessRuntime implements RunRuntime {
 
   stopProcess(run: Run): void {
     assertSupportedRuntime(run.runtime);
-    run.proc?.kill("SIGTERM");
+    if (run.proc) run.proc.kill("SIGTERM");
+    else run.reloadTerminate?.();
   }
 
   signal(run: Run, signal: NodeJS.Signals, signaler: Signaler = process.kill): void {
@@ -85,7 +86,7 @@ export class SubprocessRuntime implements RunRuntime {
           // already dead
         }
       }, 2000).unref();
-    }
+    } else run.reloadTerminate?.();
     terminateHook(run, killGroup);
   }
 }

@@ -884,6 +884,11 @@ export interface Run {
    * In-memory only: each reconcile sets it again.
    */
   reconciledAtStartup?: boolean;
+  /**
+   * A `/reload` survivor's kill, handed over by the instance that still holds
+   * its process (src/reload-handoff.ts). In-memory only.
+   */
+  reloadTerminate?: () => void;
 
   // ── v0.12 steering (slice 1 types) ───────────────────────────────────────
   // Slice 1 declares these optional fields; slice 2 wires the RPC

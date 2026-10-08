@@ -1209,6 +1209,16 @@ When reopened, mirror the `timeoutMinutes` cascade pattern (already
 established in v0.8.3). Reference:
 `docs/v0.10-watchdog-design.md` section 7 "Deferred from Slice 3".
 
+## Reload handoff follow-ups (2026-10-08, non-blocking)
+
+The subprocess `/reload` handoff (`src/reload-handoff.ts`, `docs/reload-handoff-design.md`) covers cards and kills for live ordinary runs. Still open, each needing its own test-first slice:
+
+- **Queued runs at reload.** The old instance's queue can still start a run queued before the reload. Its card is lost, and the successor's reconcile writes the queued record as `failed`.
+- **Retry and chain successors.** `applyRetryIfNeeded` and `applyChainIfPresent` run in the old instance when a survivor settles, so a successor they spawn is the old instance's and its card is lost.
+- **No steering of a survivor.** Its `rpcStdinQueue` belongs to the old instance; `ensemble_send` in the successor cannot steer or follow up.
+- **The spawn-time record omits `streamingMode`/`steerable`.** `attachSpawnedProc` snapshots the record before `stampSpawnStreamingMode`, so a live RPC run's record only says `rpc` after a mid-run write. A crash orphan of an unwritten RPC run is readopted as print mode instead of being reclassified (`orphaned: rpc-stream-detached`).
+- **A survivor whose record never settles is watched until the next shutdown.** That is a 1 s poll of one small file. There is no pid-dead fallback, because the old close handler may legitimately take minutes (`on_complete_hook`).
+
 ## N2 review follow-ups (2026-09-30, non-blocking)
 
 From the critic-opus-h11-gwm4 review of the N2 delegate broker. None blocks N2; each needs its own test-first slice.

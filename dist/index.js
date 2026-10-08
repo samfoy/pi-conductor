@@ -1098,7 +1098,8 @@ var SubprocessRuntime = class {
   }
   stopProcess(run2) {
     assertSupportedRuntime(run2.runtime);
-    run2.proc?.kill("SIGTERM");
+    if (run2.proc) run2.proc.kill("SIGTERM");
+    else run2.reloadTerminate?.();
   }
   signal(run2, signal, signaler = process.kill) {
     assertSupportedRuntime(run2.runtime);
@@ -1117,7 +1118,7 @@ var SubprocessRuntime = class {
         } catch {
         }
       }, 2e3).unref();
-    }
+    } else run2.reloadTerminate?.();
     terminateHook(run2, killGroup);
   }
 };
@@ -1394,7 +1395,7 @@ function runtimeFor(run2, env) {
 
 // src/reconcile-startup.ts
 var isRequestedTermination = (status) => status === "killed" || status === "timeout" || status === "aborted";
-function classifyRecord(record, isAlive, _now, selfPid = process.pid, isParentAlive = (pid, startTime) => defaultParentLivenessProbe(pid, startTime), selfSessionId = void 0, herdrProbe = "unknown") {
+function classifyRecord(record, isAlive, _now, selfPid = process.pid, isParentAlive = (pid, startTime) => defaultParentLivenessProbe(pid, startTime), selfSessionId = void 0, herdrProbe = "unknown", reloadSurvivors) {
   if (runScopeError(record)) return "skip-malformed-scope";
   if (record.runtime === "herdr") {
     if (isRequestedTermination(record.status)) return "skip-terminal";
@@ -1424,6 +1425,7 @@ function classifyRecord(record, isAlive, _now, selfPid = process.pid, isParentAl
   if (record.pid === void 0) {
     return "reclassify-pre-schema";
   }
+  if (reloadSurvivors?.has(record.id)) return "readopt";
   if (!isAlive(record.pid)) {
     return "reclassify-killed";
   }
@@ -1529,7 +1531,8 @@ async function reconcileOrphansAtStartup(deps) {
         deps.selfPid ?? process.pid,
         deps.isParentAlive ?? defaultParentLivenessProbe,
         deps.selfSessionId,
-        herdrProbe
+        herdrProbe,
+        deps.reloadSurvivors
       );
       const dryRun = deps.dryRun === true;
       switch (verdict) {
@@ -9372,9 +9375,78 @@ var HerdrRuntime = class {
   }
 };
 
+// src/reload-handoff.ts
+import { readFileSync as readFileSync16, statSync as statSync5 } from "node:fs";
+var SLOT = /* @__PURE__ */ Symbol.for("pi-conductor.reload-survivors.v1");
+function slot() {
+  const g = globalThis;
+  return g[SLOT] ??= /* @__PURE__ */ new Map();
+}
+function handOffCandidate(run2) {
+  return (run2.status === "running" || run2.status === "paused") && (run2.runtime ?? "subprocess") === "subprocess" && !run2.effort && !run2.integration && !run2.mergerFor && !isDelegatedLeaf(run2);
+}
+function publishReloadSurvivors(sessionId, survivors) {
+  if (survivors.size) slot().set(sessionId, new Map(survivors));
+  else slot().delete(sessionId);
+}
+function claimReloadSurvivors(sessionId) {
+  const survivors = slot().get(sessionId) ?? /* @__PURE__ */ new Map();
+  slot().delete(sessionId);
+  return survivors;
+}
+var POLL_MS = 1e3;
+var FINAL_WAIT_MS = 5e3;
+function watchSurvivor(id, recordPath, deps) {
+  const initialStatus = deps.registry.get(id)?.status;
+  let settledSeenAt;
+  let timer;
+  let stopped = false;
+  const stop = () => {
+    stopped = true;
+    if (timer) clearInterval(timer);
+  };
+  const check = () => {
+    if (stopped) return;
+    const existing = deps.registry.get(id);
+    if (existing && existing.status !== initialStatus) return stop();
+    let record;
+    try {
+      record = JSON.parse(readFileSync16(recordPath, "utf8"));
+    } catch {
+      return;
+    }
+    if (record.id !== id || !isSettled(record.status)) return;
+    settledSeenAt ??= Date.now();
+    const text5 = invocationFinal(record);
+    if (text5 === void 0 && Date.now() - settledSeenAt < FINAL_WAIT_MS) return;
+    stop();
+    const run2 = buildOrphanRun(record, record.status);
+    if (text5) run2.messages = [{ role: "assistant", content: [{ type: "text", text: text5 }] }];
+    if (existing) {
+      Object.assign(existing, run2);
+      deps.registry.notify(existing);
+    } else deps.registry.register(run2);
+    deps.deliver(existing ?? run2);
+  };
+  check();
+  if (!stopped) {
+    timer = setInterval(check, POLL_MS);
+    timer.unref?.();
+  }
+  return stop;
+}
+function invocationFinal(record) {
+  try {
+    if (statSync5(record.finalPath).mtimeMs < (record.thisInvocationStartedAt ?? record.startTime)) return void 0;
+    return readFileSync16(record.finalPath, "utf8");
+  } catch {
+    return void 0;
+  }
+}
+
 // src/effort/reconcile.ts
 import { randomUUID as randomUUID6 } from "node:crypto";
-import { existsSync as existsSync14, mkdirSync as mkdirSync12, readFileSync as readFileSync16, readdirSync as readdirSync7, realpathSync as realpathSync10 } from "node:fs";
+import { existsSync as existsSync14, mkdirSync as mkdirSync12, readFileSync as readFileSync17, readdirSync as readdirSync7, realpathSync as realpathSync10 } from "node:fs";
 import { dirname as dirname17, join as join21, relative as relative3 } from "node:path";
 function validateSource(run2) {
   if (!run2.effort || !run2.worktreeBranch) throw new Error("preserved source branch missing");
@@ -9390,7 +9462,7 @@ function records(record) {
   return readdirSync7(runsRoot()).sort().flatMap((id) => {
     const path2 = join21(runsRoot(), id, "record.json");
     if (!existsSync14(path2)) return [];
-    const r = JSON.parse(readFileSync16(path2, "utf8"));
+    const r = JSON.parse(readFileSync17(path2, "utf8"));
     if (r.effort?.gitRoot !== record.gitRoot || r.effort.name !== record.name) return [];
     if (r.id !== id || r.recordPath !== path2 || r.finalPath !== join21(runsRoot(), id, "final.md") || r.transcriptPath !== join21(runsRoot(), id, "transcript.jsonl")) throw new Error(`noncanonical effort run record: ${id}`);
     return [r];
@@ -9610,7 +9682,7 @@ async function restoreMerger(writer, opts) {
   let merger = opts.registry.get(wal.runId);
   const path2 = join21(runsRoot(), wal.runId, "record.json");
   if (!merger && existsSync14(path2)) {
-    const saved = JSON.parse(readFileSync16(path2, "utf8"));
+    const saved = JSON.parse(readFileSync17(path2, "utf8"));
     if (saved.id !== wal.runId || saved.recordPath !== path2 || saved.mergerFor?.writerId !== writer.id || saved.mergerFor.nonce !== wal.nonce) throw new Error(`noncanonical merger record ${wal.runId}; preserve for inspection`);
     merger = buildOrphanRun(saved, saved.status);
   }
@@ -9662,7 +9734,7 @@ async function requeueEffortRun(run2, opts, replacement, expectedOid) {
       attempts: 0,
       ...prior?.merger ? { merger: prior.merger } : {},
       verifyIdentity: { command: record.policy.verify, timeoutSeconds: record.policy.verifyTimeoutSeconds, retries: record.policy.verifyRetries },
-      resultText: prior?.resultText || getFinalText(run2.messages) || (existsSync14(run2.finalPath) ? readFileSync16(run2.finalPath, "utf8") : "(no saved result)"),
+      resultText: prior?.resultText || getFinalText(run2.messages) || (existsSync14(run2.finalPath) ? readFileSync17(run2.finalPath, "utf8") : "(no saved result)"),
       candidates: [...prior?.candidates ?? [], path2],
       candidatePath: path2,
       commandPending: !!gate
@@ -9785,7 +9857,7 @@ function resolvePlan(run2, sessionId) {
     const state = processIdentityState(record.owner);
     if (state !== "dead") throw new Error(`effort owner ${record.owner.sessionId} is ${state}; resolve refused, no takeover`);
   } else assertEffortOwner(record, record.owner);
-  const saved = JSON.parse(readFileSync16(run2.recordPath, "utf8"));
+  const saved = JSON.parse(readFileSync17(run2.recordPath, "utf8"));
   if (saved.id !== run2.id || saved.status !== run2.status || JSON.stringify(saved.integration) !== JSON.stringify(e)) throw new Error("durable record differs from this session's view; reconcile first");
   const head = validateSource(run2);
   if (head !== e.sourceHead) throw new Error(`source branch head changed (${head}, integrated ${e.sourceHead}); preserve and use human effort requeue`);
@@ -9893,7 +9965,7 @@ import { buildSessionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey as matchesKey2 } from "@earendil-works/pi-tui";
 
 // src/commands.ts
-import { existsSync as existsSync22, readdirSync as readdirSync12, readFileSync as readFileSync18, statSync as statSync6 } from "node:fs";
+import { existsSync as existsSync22, readdirSync as readdirSync12, readFileSync as readFileSync19, statSync as statSync7 } from "node:fs";
 import { join as join31, dirname as dirname20 } from "node:path";
 
 // src/status-glyph.ts
@@ -9920,7 +9992,7 @@ import { homedir as homedir8 } from "node:os";
 import { delimiter, join as join24 } from "node:path";
 
 // src/gc/last-gc.ts
-import { existsSync as existsSync15, statSync as statSync5, utimesSync, writeFileSync as writeFileSync7 } from "node:fs";
+import { existsSync as existsSync15, statSync as statSync6, utimesSync, writeFileSync as writeFileSync7 } from "node:fs";
 import { dirname as dirname18, join as join22 } from "node:path";
 function lastGcMarkerPath(runsRoot2) {
   return join22(dirname18(runsRoot2), ".last-gc");
@@ -9929,7 +10001,7 @@ function readLastGcMtime(runsRoot2) {
   const path2 = lastGcMarkerPath(runsRoot2);
   if (!existsSync15(path2)) return null;
   try {
-    return statSync5(path2).mtimeMs;
+    return statSync6(path2).mtimeMs;
   } catch {
     return null;
   }
@@ -10740,7 +10812,7 @@ async function reconcileOrphans(actions, runsRoot2, now) {
 // src/gc/executor.ts
 import { readFile as readFile5, rm, stat as stat5, unlink as unlink2, utimes, writeFile as writeFile5, readdir as readdir4 } from "node:fs/promises";
 import { join as join27 } from "node:path";
-import { readFileSync as readFileSync17 } from "node:fs";
+import { readFileSync as readFileSync18 } from "node:fs";
 async function executeReclaim(actions, runsRoot2, registryActive, now, options = {}) {
   const archived = [];
   const deleted = [];
@@ -10799,7 +10871,7 @@ async function executeReclaim(actions, runsRoot2, registryActive, now, options =
     }
     const assertCurrent = () => {
       if (active()) throw new Error("active during reclaim");
-      const latest = JSON.parse(readFileSync17(recordPath, "utf8"));
+      const latest = JSON.parse(readFileSync18(recordPath, "utf8"));
       if (!isTerminal(latest.status) || latest.effort || latest.mergerFor) throw new Error("status/effort changed during reclaim");
       if (record.runtime === "herdr" || latest.runtime === "herdr") {
         const live = options.currentRun?.(agentId);
@@ -11998,15 +12070,15 @@ function admitCoordination(record, fence) {
   if (entries + 2 > INBOX_SCAN_MAX) throw new Error(`recipient inbox holds ${entries} entries (cap ${INBOX_SCAN_MAX}); not queued`);
   const full = () => new Error(`recipient inbox is full (${INBOX_QUEUE_MAX} queued); not queued`);
   if (slots(dir) >= INBOX_QUEUE_MAX) throw full();
-  const base = recordBase(record), slot = inboxPath(dir, base, "slot"), path2 = inboxPath(dir, base, "json");
+  const base = recordBase(record), slot2 = inboxPath(dir, base, "slot"), path2 = inboxPath(dir, base, "json");
   fence();
-  closeSync6(openSync6(slot, "wx", 384));
+  closeSync6(openSync6(slot2, "wx", 384));
   try {
     if (slots(dir) > INBOX_QUEUE_MAX) throw full();
     publishJson(path2, record, fence, 384);
   } catch (e) {
     if (existsSync20(path2)) throw new Error(`${record.kind === "peer" ? "peer message" : record.kind.replace("_", " ")} ${record.id} may have been queued: ${e.message}`);
-    unlinkQuiet(slot);
+    unlinkQuiet(slot2);
     throw e;
   }
   return path2;
@@ -13430,7 +13502,7 @@ function runHistory(_opts, ctx, arg) {
       readRecord: (id) => {
         const p = join31(runDir(id), "record.json");
         try {
-          return JSON.parse(readFileSync18(p, "utf8"));
+          return JSON.parse(readFileSync19(p, "utf8"));
         } catch {
           return void 0;
         }
@@ -13438,17 +13510,17 @@ function runHistory(_opts, ctx, arg) {
       readFinalText: (id) => {
         const p = join31(runDir(id), "final.md");
         try {
-          return readFileSync18(p, "utf8");
+          return readFileSync19(p, "utf8");
         } catch {
           return void 0;
         }
       },
       statMtime: (id) => {
         try {
-          return statSync6(join31(runDir(id), "record.json")).mtimeMs;
+          return statSync7(join31(runDir(id), "record.json")).mtimeMs;
         } catch {
           try {
-            return statSync6(runDir(id)).mtimeMs;
+            return statSync7(runDir(id)).mtimeMs;
           } catch {
             return 0;
           }
@@ -13967,11 +14039,11 @@ Resolve manually in the worktree and run /conductor worktree merge ${runId} agai
 
 // src/tools.ts
 import { Type as Type4 } from "@sinclair/typebox";
-import { readFileSync as readFileSync21, existsSync as existsSync25 } from "node:fs";
+import { readFileSync as readFileSync22, existsSync as existsSync25 } from "node:fs";
 import { dirname as dirname22 } from "node:path";
 
 // src/chain.ts
-import { readFileSync as readFileSync19, existsSync as existsSync23 } from "node:fs";
+import { readFileSync as readFileSync20, existsSync as existsSync23 } from "node:fs";
 var DEFAULT_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nOriginal task:\n{task}\n\n---\nFinal output:\n{final}";
 var WORKTREE_CHAIN_TEMPLATE = "Review the preceding {persona} run ({runId}).\n\nThe work is on branch `{worktreeBranch}` (not yet merged to `{baseBranch}`).\nRun the following to inspect the changes:\n\n```bash\ngit diff {baseBranch}...{worktreeBranch}\n```\n\nOriginal task:\n{task}";
 var EFFORT_CHAIN_TEMPLATE = "Review the preceding {persona} run ({runId}) in effort {effort}.\n\nIts work was integrated into the effort tip as {landedCommit}. Your workspace starts from the effort tip at your own launch, named in your workspace notes; if that is not {landedCommit}, later integrations landed after it.\nInspect the integrated change with:\n\n```bash\ngit show {landedCommit}\n```\n\nOriginal task:\n{task}\n\n---\nFinal output:\n{final}";
@@ -13997,7 +14069,7 @@ function buildChainTask(taskTemplate, context) {
   let finalContent = FINAL_PLACEHOLDER;
   if (existsSync23(context.finalPath)) {
     try {
-      finalContent = readFileSync19(context.finalPath, "utf-8");
+      finalContent = readFileSync20(context.finalPath, "utf-8");
     } catch {
     }
   }
@@ -14445,11 +14517,11 @@ var LeadPresence = class {
 };
 
 // src/delegate-tool.ts
-import { existsSync as existsSync24, mkdirSync as mkdirSync14, readFileSync as readFileSync20, watch as watch3 } from "node:fs";
+import { existsSync as existsSync24, mkdirSync as mkdirSync14, readFileSync as readFileSync21, watch as watch3 } from "node:fs";
 import { dirname as dirname21 } from "node:path";
 import { Type as Type3 } from "@sinclair/typebox";
 var NAME = /^[A-Za-z0-9_.:-]+$/;
-var POLL_MS = 1e3;
+var POLL_MS2 = 1e3;
 function delegatorAllowlist(env) {
   if (env.CONDUCTOR_SUBAGENT !== "1" || env.CONDUCTOR_DEPTH !== "1" || !env.CONDUCTOR_RUN_DIR || !env.CONDUCTOR_RUN_ID) return void 0;
   const names = (env.CONDUCTOR_DELEGATE_ALLOW ?? "").split(",");
@@ -14523,7 +14595,7 @@ function waitForDelegateResponse(path2, expect, deadlineAt, signal) {
       if (settled || !existsSync24(path2)) return;
       let value;
       try {
-        value = JSON.parse(readFileSync20(path2, "utf8"));
+        value = JSON.parse(readFileSync21(path2, "utf8"));
       } catch {
         value = void 0;
       }
@@ -14541,7 +14613,7 @@ function waitForDelegateResponse(path2, expect, deadlineAt, signal) {
     watcher.on("error", () => {
     });
     cleanup.push(() => watcher.close());
-    const poll = setInterval(check, POLL_MS);
+    const poll = setInterval(check, POLL_MS2);
     cleanup.push(() => clearInterval(poll));
     const timer = setTimeout(() => finish(new Error("delegate outcome unconfirmed: no broker response before the deadline; a leaf may have run")), Math.max(0, deadlineAt - Date.now()));
     cleanup.push(() => clearTimeout(timer));
@@ -14842,8 +14914,8 @@ function statusColorSlot(status) {
 function applyTheme(line, classified, theme, opts = {}) {
   switch (classified.kind) {
     case "header": {
-      const slot = opts.status ? statusColorSlot(opts.status) : "accent";
-      return theme.fg(slot, line);
+      const slot2 = opts.status ? statusColorSlot(opts.status) : "accent";
+      return theme.fg(slot2, line);
     }
     case "ruler":
       return theme.fg("borderMuted", line);
@@ -16449,7 +16521,7 @@ function buildOnChainCallback(args) {
       let parentFinal = "";
       if (existsSync25(parentRun.finalPath)) {
         try {
-          parentFinal = readFileSync21(parentRun.finalPath, "utf-8");
+          parentFinal = readFileSync22(parentRun.finalPath, "utf-8");
         } catch {
         }
       }
@@ -16798,7 +16870,7 @@ function mapFromRegistry2(r) {
 }
 
 // src/delegation-broker.ts
-import { existsSync as existsSync26, readFileSync as readFileSync22, readdirSync as readdirSync13 } from "node:fs";
+import { existsSync as existsSync26, readFileSync as readFileSync23, readdirSync as readdirSync13 } from "node:fs";
 import { dirname as dirname23, join as join33 } from "node:path";
 var LEAF_OUTCOME_UNCERTAIN = "leaf outcome uncertain after lead restart; not replayed";
 var HERDR_RELOAD_CANCELLED = "lead /reload stopped a leaf it could not hand over (queued, launching or subprocess); delegate again";
@@ -17135,7 +17207,7 @@ function durableLeaves(lineage) {
   }
   return names.flatMap((name2) => {
     try {
-      const record = JSON.parse(readFileSync22(join33(root, name2, "record.json"), "utf8"));
+      const record = JSON.parse(readFileSync23(join33(root, name2, "record.json"), "utf8"));
       return record.id === name2 && lineage(record) ? [record] : [];
     } catch {
       return [];
@@ -17146,7 +17218,7 @@ function recordedLeaf(record) {
   const leaf = buildOrphanRun(record, record.status);
   let text5 = "";
   try {
-    if (!record.herdrExitUnconfirmed && !record.herdrResultUnavailable) text5 = readFileSync22(record.finalPath, "utf8");
+    if (!record.herdrExitUnconfirmed && !record.herdrResultUnavailable) text5 = readFileSync23(record.finalPath, "utf8");
   } catch {
   }
   if (text5) leaf.messages = [{ role: "assistant", content: [{ type: "text", text: text5 }] }];
@@ -17257,8 +17329,8 @@ function formatStallSegment(r, theme, nowMs, wdCfg, awaiting = false) {
   return theme.fg("warning", ` \xB7 STALLED ${c.silentSeconds}s`);
 }
 function statusGlyph(s, theme) {
-  const slot = statusColorSlot2(s);
-  return theme.fg(slot, STATUS_GLYPH[s]);
+  const slot2 = statusColorSlot2(s);
+  return theme.fg(slot2, STATUS_GLYPH[s]);
 }
 function statusColorSlot2(s) {
   switch (s) {
@@ -17329,10 +17401,10 @@ function renderNotificationCard(d, opts) {
 function headerLine2(d) {
   const stalled = d.kind === "stalled";
   const glyph = stalled ? d.severity === "hard" ? "\u26A0" : "\xB7" : STATUS_GLYPH[d.status];
-  const slot = stalled ? d.severity === "hard" ? "warning" : "muted" : statusColorSlot(d.status);
+  const slot2 = stalled ? d.severity === "hard" ? "warning" : "muted" : statusColorSlot(d.status);
   const verb = d.kind === "dialog" ? "waiting for human UI" : stalled ? `${d.severity}-stalled` : statusVerb(d.status);
   const line = [
-    { text: glyph, slot },
+    { text: glyph, slot: slot2 },
     { text: " " },
     { text: d.persona, bold: true },
     { text: ` ${verb}`, slot: "dim" }
@@ -17783,7 +17855,7 @@ If your reason isn't on this list, default back to the canonical chain. "I think
 }
 
 // src/child-bridge.ts
-import { closeSync as closeSync9, constants as constants7, fstatSync as fstatSync6, lstatSync as lstatSync8, mkdirSync as mkdirSync16, openSync as openSync8, readFileSync as readFileSync23, realpathSync as realpathSync11, writeSync as writeSync2 } from "node:fs";
+import { closeSync as closeSync9, constants as constants7, fstatSync as fstatSync6, lstatSync as lstatSync8, mkdirSync as mkdirSync16, openSync as openSync8, readFileSync as readFileSync24, realpathSync as realpathSync11, writeSync as writeSync2 } from "node:fs";
 import { basename as basename4, dirname as dirname24, isAbsolute as isAbsolute8, join as join34, resolve as resolve6 } from "node:path";
 
 // package.json
@@ -17875,7 +17947,7 @@ function readJson(file) {
   const fd = openSync8(file, constants7.O_RDONLY | constants7.O_NOFOLLOW);
   try {
     if (!fstatSync6(fd).isFile()) throw new Error("invalid identity file");
-    return JSON.parse(readFileSync23(fd, "utf8"));
+    return JSON.parse(readFileSync24(fd, "utf8"));
   } finally {
     closeSync9(fd);
   }
@@ -19090,6 +19162,9 @@ function installFocusedOverlayShortcut(ctx, options) {
   };
 }
 
+// src/index.ts
+import { join as join35 } from "node:path";
+
 // src/conductor-mode.ts
 var OFF_TOKENS = /* @__PURE__ */ new Set(["0", "false", "off", "no"]);
 var ON_TOKENS = /* @__PURE__ */ new Set(["1", "true", "on", "yes"]);
@@ -19513,6 +19588,10 @@ function index_default(pi) {
   registry.delegation = delegation;
   const focusModel = new FocusedStreamModel(registry);
   const conductorEvents = new ConductorEventEmitter(pi.events);
+  const handedOff = /* @__PURE__ */ new Set();
+  const owedSurvivors = /* @__PURE__ */ new Map();
+  const survivorWatches = /* @__PURE__ */ new Set();
+  let handoffSessionId;
   let overlayOpen = false;
   let tuiRef = null;
   let unsubFocusedShortcut = null;
@@ -19729,6 +19808,7 @@ function index_default(pi) {
       return { detachSignal, unregister };
     },
     pushCompletionNotification: (run2) => {
+      if (handedOff.has(run2.id)) return;
       if (!pushCompletionCard(run2, pi, supportsFocus(ctxRef), opts.getSessionId(), opts.getRegistry())) return;
       if (run2.status === "blocked") completionWakeTracker.drop(run2.id);
       else completionWakeTracker.track(run2.id, Date.now());
@@ -19799,6 +19879,9 @@ function index_default(pi) {
     });
     if (process.env.CONDUCTOR_SUBAGENT !== "1") {
       const selfSessionId = opts.getSessionId();
+      handoffSessionId = selfSessionId;
+      const survivors = event.reason === "reload" && selfSessionId ? claimReloadSurvivors(selfSessionId) : /* @__PURE__ */ new Map();
+      for (const [id, survivor] of survivors) owedSurvivors.set(id, survivor);
       const herdrRuntime = process.env.HERDR_SOCKET_PATH ? new HerdrRuntime({ cli: createHerdrCli({ env: process.env, socketPath: process.env.HERDR_SOCKET_PATH }), env: process.env }) : void 0;
       let reconciled;
       delegation.reconciling(new Promise((resolve7) => {
@@ -19814,6 +19897,7 @@ function index_default(pi) {
               registry,
               isAlive: defaultLivenessProbe,
               selfSessionId,
+              reloadSurvivors: new Set(survivors.keys()),
               admit: () => registry.herdrAdmissionOpen,
               herdrProbe: (record) => herdrRuntime?.probeRecord(buildOrphanRun(record, record.status)) ?? Promise.resolve("other-socket"),
               attachHerdr: (record) => {
@@ -19826,6 +19910,18 @@ function index_default(pi) {
             })
           ).then(async (result) => {
             lastReconcile = result;
+            for (const [id, survivor] of survivors) {
+              owedSurvivors.delete(id);
+              const readopted = registry.get(id);
+              if (readopted) readopted.reloadTerminate = survivor.terminate;
+              survivorWatches.add(watchSurvivor(id, readopted?.recordPath ?? join35(runsRoot(), id, "record.json"), {
+                registry,
+                deliver: (run2) => {
+                  opts.pushCompletionNotification(run2);
+                  if (isTerminal(run2.status)) emitFinalizeEvent(run2, conductorEvents);
+                }
+              }));
+            }
             if (!selfSessionId) return;
             const roots = new Set(registry.list().flatMap((run2) => run2.effort ? [run2.effort.gitRoot] : []));
             try {
@@ -19948,6 +20044,16 @@ function index_default(pi) {
     }, DEFAULT_TICK_INTERVAL_MS2);
   });
   pi.on("session_shutdown", async (event) => {
+    for (const stop of survivorWatches) stop();
+    survivorWatches.clear();
+    if (event.reason === "reload" && handoffSessionId) {
+      const survivors = new Map(owedSurvivors);
+      for (const run2 of registry.list().filter(handOffCandidate)) {
+        survivors.set(run2.id, { terminate: run2.proc ? () => forceTerminate(run2, "killed", registry) : run2.reloadTerminate });
+      }
+      for (const id of survivors.keys()) handedOff.add(id);
+      publishReloadSurvivors(handoffSessionId, survivors);
+    }
     delivery?.stop();
     chief?.stop();
     supervision.stop();

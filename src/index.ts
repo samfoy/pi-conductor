@@ -2,6 +2,7 @@ import { HerdrRuntime } from "./herdr/runtime.ts";
 import { createHerdrCli } from "./herdr/cli.ts";
 import { readoptHerdrRun } from "./run-pipeline.ts";
 import { buildOrphanRun } from "./reconcile-startup.ts";
+import { claimReloadSurvivors, handOffCandidate, publishReloadSurvivors, watchSurvivor, type Survivor } from "./reload-handoff.ts";
 import { recoverEffort } from "./effort/reconcile.ts";
 import { createMergerLauncher } from "./effort/merger.ts";
 import { listEfforts } from "./effort/store.ts";
@@ -56,14 +57,15 @@ import { installChildBridge } from "./child-bridge.ts";
 import { FocusedStreamModel } from "./focused-stream-model.ts";
 import { createFocusedOverlayComponent } from "./focused-overlay-factory.ts";
 import { installFocusedOverlayShortcut } from "./focused-overlay-shortcut.ts";
-import { forceTerminate, reconcileRecord, resolveTimeoutMs, runsRoot, sendToRun, validateSendable } from "./runs.ts";
+import { emitFinalizeEvent, forceTerminate, reconcileRecord, resolveTimeoutMs, runsRoot, sendToRun, validateSendable } from "./runs.ts";
 import { maybeAutoRunGc } from "./gc/index.ts";
 import {
   defaultLivenessProbe,
   reconcileOrphansAtStartup,
   type PostStartupReconcileResult,
 } from "./reconcile-startup.ts";
-import type { Run } from "./types.ts";
+import { isTerminal, type Run } from "./types.ts";
+import { join } from "node:path";
 import { resolveInitialConductorMode } from "./conductor-mode.ts";
 import { installCompactionHook } from "./compaction-hook.ts";
 import { installSanitizerHook } from "./sanitizer-hook.ts";
@@ -107,6 +109,13 @@ export default function (pi: ExtensionAPI): void {
   // shared cross-extension EventBus. The `?.` in each emit* method makes
   // this gracefully degrade on older pi versions.
   const conductorEvents = new ConductorEventEmitter(pi.events);
+  // /reload handoff (src/reload-handoff.ts). `handedOff`: ids whose card this
+  // instance gave its successor. `owedSurvivors`: survivors claimed from the
+  // predecessor that startup reconcile has not registered and watched yet.
+  const handedOff = new Set<string>();
+  const owedSurvivors = new Map<string, Survivor>();
+  const survivorWatches = new Set<() => void>();
+  let handoffSessionId: string | undefined;
 
   // Track whether an overlay is already open so multiple opens don't stack.
   let overlayOpen = false;
@@ -431,6 +440,7 @@ export default function (pi: ExtensionAPI): void {
       return { detachSignal, unregister };
     },
     pushCompletionNotification: (run: Run) => {
+      if (handedOff.has(run.id)) return;
       if (!pushCompletionCard(run, pi, supportsFocus(ctxRef), opts.getSessionId(), opts.getRegistry())) return;
       // Item 11 dead-man-switch: track this wake. clearOnTurnStart()
       // drops it when the conductor's next turn fires (the wake
@@ -523,6 +533,9 @@ export default function (pi: ExtensionAPI): void {
       // sibling slots sharing this pid aren't readopted here. Read it now:
       // by the next tick a reload or print-mode exit can make ctx stale.
       const selfSessionId = opts.getSessionId();
+      handoffSessionId = selfSessionId;
+      const survivors = event.reason === "reload" && selfSessionId ? claimReloadSurvivors(selfSessionId) : new Map<string, Survivor>();
+      for (const [id, survivor] of survivors) owedSurvivors.set(id, survivor);
       const herdrRuntime = process.env.HERDR_SOCKET_PATH ? new HerdrRuntime({ cli: createHerdrCli({ env: process.env, socketPath: process.env.HERDR_SOCKET_PATH }), env: process.env }) : undefined;
       // N5: a readopted delegator's claimed calls are decided only once readoption and effort recovery are done.
       let reconciled!: () => void;
@@ -537,6 +550,7 @@ export default function (pi: ExtensionAPI): void {
               registry,
               isAlive: defaultLivenessProbe,
               selfSessionId,
+              reloadSurvivors: new Set(survivors.keys()),
               admit: () => registry.herdrAdmissionOpen,
               herdrProbe: record => herdrRuntime?.probeRecord(buildOrphanRun(record, record.status)) ?? Promise.resolve("other-socket"),
               attachHerdr: record => {
@@ -550,6 +564,18 @@ export default function (pi: ExtensionAPI): void {
           )
           .then(async (result) => {
             lastReconcile = result;
+            for (const [id, survivor] of survivors) {
+              owedSurvivors.delete(id);
+              const readopted = registry.get(id);
+              if (readopted) readopted.reloadTerminate = survivor.terminate;
+              survivorWatches.add(watchSurvivor(id, readopted?.recordPath ?? join(runsRoot(), id, "record.json"), {
+                registry,
+                deliver: run => {
+                  opts.pushCompletionNotification(run);
+                  if (isTerminal(run.status)) emitFinalizeEvent(run, conductorEvents);
+                },
+              }));
+            }
             if (!selfSessionId) return;
             const roots = new Set(registry.list().flatMap(run => run.effort ? [run.effort.gitRoot] : []));
             try { roots.add(effortRepository(cwd()).gitRoot); } catch { /* non-git session */ }
@@ -708,6 +734,17 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("session_shutdown", async (event) => {
+    // Before any await: from here on the successor, not this instance, owns these cards.
+    for (const stop of survivorWatches) stop();
+    survivorWatches.clear();
+    if (event.reason === "reload" && handoffSessionId) {
+      const survivors = new Map(owedSurvivors);
+      for (const run of registry.list().filter(handOffCandidate)) {
+        survivors.set(run.id, { terminate: run.proc ? () => forceTerminate(run, "killed", registry) : run.reloadTerminate });
+      }
+      for (const id of survivors.keys()) handedOff.add(id);
+      publishReloadSurvivors(handoffSessionId, survivors);
+    }
     // S1-S3: every reason stops this instance's drain, releases only its own chief claim, then unpublishes only its own record, before anything can await.
     delivery?.stop();
     chief?.stop();

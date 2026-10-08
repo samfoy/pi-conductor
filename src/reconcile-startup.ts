@@ -143,6 +143,7 @@ export function classifyRecord(
   ) => defaultParentLivenessProbe(pid, startTime),
   selfSessionId: string | undefined = undefined,
   herdrProbe: "alive" | "settled" | "gone" | "unknown" | "other-socket" = "unknown",
+  reloadSurvivors?: ReadonlySet<string>,
 ): ClassifyResult {
   // Like an unsupported runtime: preserve the record untouched rather than adopt a guessed scope.
   if (runScopeError(record)) return "skip-malformed-scope";
@@ -203,6 +204,11 @@ export function classifyRecord(
   if (record.pid === undefined) {
     return "reclassify-pre-schema";
   }
+
+  // A /reload survivor (src/reload-handoff.ts) is not an orphan: the previous
+  // instance in this process still owns its close handler and RPC pipe, and
+  // writes its outcome even if the child has just exited.
+  if (reloadSurvivors?.has(record.id)) return "readopt";
 
   if (!isAlive(record.pid)) {
     return "reclassify-killed";
@@ -375,6 +381,8 @@ export interface PostStartupReconcileDeps {
    * Undefined falls back to the pid comparison.
    */
   selfSessionId?: string;
+  /** Run ids the previous instance of this session handed off on `/reload`; readopted, never reclassified. */
+  reloadSurvivors?: ReadonlySet<string>;
   /**
    * Epoch ms used for `finishedAt` on reclassified records. Injectable
    * for deterministic tests.
@@ -538,6 +546,7 @@ export async function reconcileOrphansAtStartup(
         deps.isParentAlive ?? defaultParentLivenessProbe,
         deps.selfSessionId,
         herdrProbe,
+        deps.reloadSurvivors,
       );
       const dryRun = deps.dryRun === true;
 
