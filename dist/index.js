@@ -7664,7 +7664,7 @@ function runActionError(run2, action, observed) {
   }
   if (action !== "kill" && isDelegatedLeaf(run2)) return `sub-agent ${run2.id} is owned by ${run2.parentRunId ?? "its delegating parent"}; only kill. Its parent consumes the result.`;
   if (run2.mergerFor && action !== "kill" && !(action === "send" && run2.status === "blocked")) return `merger ${run2.id} belongs to ${run2.mergerFor.writerId}'s effort integration: only answer its blocked question (send) or kill it.`;
-  if (run2.runtime === "herdr") {
+  if (run2.runtime === "herdr" && run2.status !== "queued") {
     if (!ownsHerdrRun(run2)) return "herdr owner generation fenced; action refused";
     if (run2.transport?.kind !== "herdr") return "herdr runtime unavailable here: stream is not attached";
     if (action === "pause" || action === "resume") return `${action} is subprocess-only; use send to relaunch a saved herdr session.`;
@@ -8341,7 +8341,7 @@ function forceTerminate(run2, reason, registry, onComplete, killGroup = defaultK
       }
     }
   }
-  if (run2.runtime === "herdr" && !(run2.transport?.kind === "herdr" && run2.transport.childExited)) run2.herdrExitUnconfirmed = true;
+  if (run2.runtime === "herdr" && run2.status !== "queued" && !(run2.transport?.kind === "herdr" && run2.transport.childExited)) run2.herdrExitUnconfirmed = true;
   void runtimeFor(run2).terminate(run2, killGroup);
   run2.pendingAsk = void 0;
   run2.askExecution = void 0;
@@ -16209,13 +16209,14 @@ function registerKillTool(pi, opts) {
         const r = errorResult(blocker);
         return r;
       }
-      if (run2.status === "queued") {
+      const queued = run2.status === "queued";
+      if (queued) {
         queue.removeQueued(run2.id);
       } else {
         forceTerminate(run2, "killed", registry);
       }
       return {
-        content: [{ type: "text", text: run2.runtime === "herdr" ? `termination requested: ${run2.id}; logical status=${run2.status}. Child exit requires proof; pane/worktree cleanup is not implied. Inspect conductor doctor for retained resources.` : `killed: ${run2.id}` }],
+        content: [{ type: "text", text: queued ? `killed: ${run2.id} (removed from the queue; it never started)` : run2.runtime === "herdr" ? `termination requested: ${run2.id}; logical status=${run2.status}. Child exit requires proof; pane/worktree cleanup is not implied. Inspect conductor doctor for retained resources.` : `killed: ${run2.id}` }],
         details: { status: "killed", agent_id: run2.id, persona: run2.persona }
       };
     }
@@ -16796,10 +16797,11 @@ var SpawnQueue = class {
   removeQueued(id) {
     const idx = this.pending.findIndex((p) => p.id === id);
     if (idx === -1) return false;
-    this.pending.splice(idx, 1);
+    const [entry] = this.pending.splice(idx, 1);
     const placeholder = this.registry.get(id);
     if (placeholder && placeholder.status === "queued") {
       forceTerminate(placeholder, "killed", this.registry);
+      if (isTerminal(placeholder.status)) emitFinalizeEvent(placeholder, entry.spawn.events);
     }
     return true;
   }

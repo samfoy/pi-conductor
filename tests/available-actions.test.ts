@@ -119,6 +119,7 @@ const cases: { name: string; status?: RunStatus; setup: (run: Run) => void; expe
   { name: "missing RPC queue", status: "running", setup: r => { r.streamingMode = "rpc"; }, expected: ["kill"], error: /stdin queue gone/ },
   { name: "paused without handle", status: "paused", setup: () => {}, expected: ["kill"], error: /paused/ },
   { name: "queued", status: "queued", setup: () => {}, expected: ["kill"], error: /queued/ },
+  { name: "queued herdr without a transport", status: "queued", setup: r => { Object.assign(r, { runtime: "herdr", sessionPath: undefined }); }, expected: ["kill"], error: /queued/ },
   { name: "foreign live RPC", status: "running", setup: r => { rpc(r); r.parentPid = process.pid + 1; }, expected: [], error: /foreign|owned/ },
 ];
 for (const c of cases) {

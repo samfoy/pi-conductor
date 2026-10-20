@@ -2001,7 +2001,8 @@ export function runActionError(run: Run, action: RunAction, observed: ActionObse
   if (action !== "kill" && isDelegatedLeaf(run)) return `sub-agent ${run.id} is owned by ${run.parentRunId ?? "its delegating parent"}; only kill. Its parent consumes the result.`;
   // M6a: the integration driver consumes a merger's result; the owner may only answer its question or kill it.
   if (run.mergerFor && action !== "kill" && !(action === "send" && run.status === "blocked")) return `merger ${run.id} belongs to ${run.mergerFor.writerId}'s effort integration: only answer its blocked question (send) or kill it.`;
-  if (run.runtime === "herdr") {
+  // A queued run has no transport yet: kill only dequeues it, and the status rules below refuse the rest.
+  if (run.runtime === "herdr" && run.status !== "queued") {
     if (!ownsHerdrRun(run)) return "herdr owner generation fenced; action refused";
     if (run.transport?.kind !== "herdr") return "herdr runtime unavailable here: stream is not attached";
     if (action === "pause" || action === "resume") return `${action} is subprocess-only; use send to relaunch a saved herdr session.`;
@@ -3151,7 +3152,8 @@ export function forceTerminate(
       }
     }
   }
-  if (run.runtime === "herdr" && !(run.transport?.kind === "herdr" && run.transport.childExited)) run.herdrExitUnconfirmed = true;
+  // A queued run never launched a child, so it has no exit to confirm.
+  if (run.runtime === "herdr" && run.status !== "queued" && !(run.transport?.kind === "herdr" && run.transport.childExited)) run.herdrExitUnconfirmed = true;
   void runtimeFor(run).terminate(run, killGroup);
   run.pendingAsk = undefined;
   run.askExecution = undefined;

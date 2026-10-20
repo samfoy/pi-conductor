@@ -1456,7 +1456,8 @@ function registerKillTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
       // Queued runs need to be removed from the pending list AND have their
       // placeholder Run flipped to terminal. SpawnQueue.removeQueued does both
       // (it splices pending and calls forceTerminate on the placeholder).
-      if (run.status === "queued") {
+      const queued = run.status === "queued";
+      if (queued) {
         queue.removeQueued(run.id);
       } else {
         // running / paused — forceTerminate handles SIGTERM/SIGKILL on the
@@ -1466,7 +1467,8 @@ function registerKillTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
         forceTerminate(run, "killed", registry);
       }
       return {
-        content: [{ type: "text" as const, text: run.runtime === "herdr"
+        content: [{ type: "text" as const, text: queued ? `killed: ${run.id} (removed from the queue; it never started)`
+          : run.runtime === "herdr"
           ? `termination requested: ${run.id}; logical status=${run.status}. Child exit requires proof; pane/worktree cleanup is not implied. Inspect conductor doctor for retained resources.`
           : `killed: ${run.id}` }],
         details: { status: "killed", agent_id: run.id, persona: run.persona } as KillDetails,

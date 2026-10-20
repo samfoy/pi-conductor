@@ -11,6 +11,7 @@
 
 import {
   leafSpawnOptions,
+  emitFinalizeEvent,
   forceTerminate,
   failEffortLaunch,
   RunRegistry,
@@ -27,7 +28,7 @@ import { admitEffortWriter } from "./effort/admit.ts";
 import { effortAssignment } from "./effort/reader.ts";
 import { awaitingChildren, delegationLoad } from "./delegation.ts";
 import type { Run, SpawnMode } from "./types.ts";
-import { emptyUsage } from "./types.ts";
+import { emptyUsage, isTerminal } from "./types.ts";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { runDir } from "./runs.ts";
@@ -180,11 +181,13 @@ export class SpawnQueue {
   removeQueued(id: string): boolean {
     const idx = this.pending.findIndex((p) => p.id === id);
     if (idx === -1) return false;
-    this.pending.splice(idx, 1);
+    const [entry] = this.pending.splice(idx, 1);
     const placeholder = this.registry.get(id);
     if (placeholder && placeholder.status === "queued") {
       // Force-terminate the placeholder so listeners see the cancellation.
       forceTerminate(placeholder, "killed", this.registry);
+      // A started run's pipeline emits this on kill; a queued run has no pipeline.
+      if (isTerminal(placeholder.status)) emitFinalizeEvent(placeholder, entry!.spawn.events);
     }
     return true;
   }
