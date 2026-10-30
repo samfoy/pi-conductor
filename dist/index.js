@@ -15175,9 +15175,20 @@ function resolveSpawnCwd(arg, base) {
   return arg === void 0 ? { ok: true, cwd: base } : resolveCwdArg(arg, base);
 }
 var runtimeSchema = Type4.Optional(Type4.Union([Type4.Literal("auto"), Type4.Literal("subprocess"), Type4.Literal("herdr")], { description: "Runtime selector: per-call > effective persona > project > user > auto. Herdr is unavailable in H2; use subprocess explicitly inside herdr." }));
-var SPAWN_CWD_DESCRIPTION = "Directory the sub-agent runs in; personas, config, and the git root for worktree isolation resolve from it. `~` and relative paths resolve against the conductor's cwd (see ensemble_cwd), which is also the default.";
+var SPAWN_CWD_DESCRIPTION = "Directory the sub-agent runs in; personas, config, and the git root for worktree isolation resolve from it. `~` and relative paths resolve against the conductor's cwd (set with ensemble_cwd from codemode), which is also the default.";
+var CONDUCTOR_CODEMODE = {
+  exposure: "codemode",
+  namespace: {
+    name: "conductor",
+    description: "Rarely used pi-conductor controls: pause, resume or focus a sub-agent, recommend a persona, run a persona plan autonomously, set the conductor cwd, open an effort. Call them from codemode as tools.ensemble_<name>(args)."
+  }
+};
+function registerCodemodeTool(pi, tool) {
+  const exposed = { ...tool, ...CONDUCTOR_CODEMODE };
+  pi.registerTool(exposed);
+}
 function registerEffortTool(pi, opts) {
-  pi.registerTool({
+  registerCodemodeTool(pi, {
     name: CONDUCTOR_LLM_TOOLS.effort,
     label: "Effort",
     description: `Open or inspect a named effort in the conductor cwd. ${EFFORT_NOTICE}`,
@@ -15210,7 +15221,7 @@ ${finalizer ? `${finalizer.summary}
   });
 }
 function registerCwdTool(pi, opts) {
-  pi.registerTool({
+  registerCodemodeTool(pi, {
     name: CONDUCTOR_LLM_TOOLS.cwd,
     label: "Conductor cwd",
     description: "Show or change the conductor's default cwd: where later ensemble_spawn / ensemble_auto sub-agents run and where worktree, personas, and config resolve. `path` sets an override (`~` and relative paths resolve against the current default); `reset: true` returns to the session's start cwd; no args reports the effective cwd and its source. The override survives /reload and resume. Existing runs and ensemble_send resumes keep their own cwd.",
@@ -15265,7 +15276,7 @@ function registerListTool(pi, opts) {
   });
 }
 function registerRecommendTool(pi, opts) {
-  pi.registerTool({
+  registerCodemodeTool(pi, {
     name: CONDUCTOR_LLM_TOOLS.recommend,
     label: "Recommend persona",
     description: "v0.18 cross-session memory: given a task description, return conductor personas ranked by their confidence-weighted, recency-decayed success rate on similar tasks (matched by normalized task shape). Advisory only \u2014 an empty result means no history for this shape yet; use your own judgment.",
@@ -15368,7 +15379,7 @@ function awaitTerminal(registry, runId) {
   return { promise, settle };
 }
 function registerAutoTool(pi, opts, env) {
-  pi.registerTool({
+  registerCodemodeTool(pi, {
     name: CONDUCTOR_LLM_TOOLS.auto,
     label: "Autonomous run",
     description: "v0.18 autonomous mode: run an ordered persona plan to a terminal outcome with bounded, self-correcting execution. YOU (the conductor) supply the plan as an ordered list of steps; the executor spawns each in turn, classifies failures, retries the transient ones with diagnostics, re-evaluates after each step, and HALTS + escalates on a non-retryable failure, a stop verdict, the step cap, or the USD budget. Outcomes feed cross-session memory. Permission-class failures always escalate \u2014 never auto-retried.",
@@ -16091,7 +16102,7 @@ persona=${result.run.persona} mode=background (resumed)
   });
 }
 function registerPauseTool(pi, opts) {
-  pi.registerTool({
+  registerCodemodeTool(pi, {
     name: CONDUCTOR_LLM_TOOLS.pause,
     label: "Pause sub-agent",
     description: "SIGSTOP a running sub-agent. The process is alive but not consuming tokens. Use ensemble_resume to continue. Useful for cost control while the user reviews partial output.",
@@ -16132,7 +16143,7 @@ function registerPauseTool(pi, opts) {
   });
 }
 function registerResumeTool(pi, opts) {
-  pi.registerTool({
+  registerCodemodeTool(pi, {
     name: CONDUCTOR_LLM_TOOLS.resume,
     label: "Resume sub-agent",
     description: "SIGCONT a paused sub-agent (available_actions token resume), not a new saved-session process. Use the latest available_actions; each call revalidates.",
@@ -16223,7 +16234,7 @@ function registerKillTool(pi, opts) {
   });
 }
 function registerFocusTool(pi, opts) {
-  pi.registerTool({
+  registerCodemodeTool(pi, {
     name: CONDUCTOR_LLM_TOOLS.focus,
     label: "Focus a sub-agent",
     description: "Request the focused-stream overlay open on a specific sub-agent. Use the latest available_actions; each call revalidates. When agent_id is omitted, opens the overlay on the currently-focused (most recently active) sub-agent. The user controls the overlay with Esc (close), Tab/Shift+Tab (cycle), arrows (scroll), c (collapse tool calls), t (thinking visibility), k (kill).",
@@ -17624,16 +17635,16 @@ Each persona has its own system prompt (run \`/conductor show <name>\` to read i
 **Use the latest available_actions; each call revalidates.** Status and completion/stall results report an advisory snapshot, not a lasting permission. Tokens map to:
 - \`send\`: \`ensemble_send\` with \`streaming_behavior: "resume"\` (new process continuing a saved session).
 - \`steer\` / \`follow_up\`: \`ensemble_send\` with that behavior (live RPC delivery).
-- \`pause\` / \`resume\`: \`ensemble_pause\` / \`ensemble_resume\` (SIGSTOP / SIGCONT). This \`resume\` is NOT saved-session send.
-- \`kill\` / \`focus\`: \`ensemble_kill\` / \`ensemble_focus\`. Terminal kill remains an idempotent no-op even when omitted.
+- \`pause\` / \`resume\`: \`ensemble_pause\` / \`ensemble_resume\` (SIGSTOP / SIGCONT), called from codemode. This \`resume\` is NOT saved-session send.
+- \`kill\` / \`focus\`: \`ensemble_kill\` / \`ensemble_focus\` (focus is called from codemode). Terminal kill remains an idempotent no-op even when omitted.
 If a session retired under context pressure, use a fresh child with its handoff, not another send. Retirement is not proof of task completion.
 
 - **\`ensemble_spawn\`** \u2014 start a sub-agent with a persona and a task.
   - \`foreground: true\` (default) \u2014 your tool call blocks; the sub-agent's transcript streams into the ensemble panel; the result is returned to you.
   - \`foreground: false\` \u2014 the sub-agent runs in the background; your turn ends immediately; the completion arrives later as a \`<sub-agent-completed>\` user-role message that wakes you.
-  - \`cwd\` \u2014 for repo work, pass the repo path so write-capable personas get a worktree of that repo and its personas/config apply. \`ensemble_cwd\` changes the default for every later spawn.
+  - \`cwd\` \u2014 for repo work, pass the repo path so write-capable personas get a worktree of that repo and its personas/config apply. \`ensemble_cwd\`, called from codemode, changes the default for every later spawn.
 - **\`ensemble_send\`** \u2014 continue an existing sub-agent's session with a new user message. Works on finished sub-agents too (resumes their saved session). Pass \`agent_id\` from a previous spawn or from \`ensemble_status\`. Reuse a sub-agent's loaded context instead of re-spawning when you want a follow-up.
-- **\`ensemble_pause\`** / **\`ensemble_resume\`** \u2014 SIGSTOP / SIGCONT a sub-agent. Useful for cost control while you read partial output. Paused sub-agents still count against the concurrency cap.
+- **\`ensemble_pause\`** / **\`ensemble_resume\`** \u2014 SIGSTOP / SIGCONT a sub-agent, called from codemode. Useful for cost control while you read partial output. Paused sub-agents still count against the concurrency cap.
 - **\`ensemble_list\`** \u2014 list available personas (most useful when introducing a new task).
 - **\`ensemble_status\`** \u2014 current state of running, queued, paused, and recently-finished sub-agents.
 

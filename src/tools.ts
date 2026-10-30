@@ -13,8 +13,8 @@ import { EFFORT_NOTICE, effortSummary } from "./effort/policy.ts";
 import { effortRole, finalizerStatus } from "./effort/reader.ts";
 import type { RuntimeKind, RuntimeEnvironment } from "./runtime.ts";
 import { describeDelivery, runtimeFor } from "./runtime.ts";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
+import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Type, type TSchema } from "@sinclair/typebox";
 import { readFileSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Persona, PersonaOverride, Run, RunStatus, ThinkingLevel, MergeStrategy } from "./types.ts";
@@ -194,10 +194,31 @@ const runtimeSchema = Type.Optional(Type.Union([Type.Literal("auto"), Type.Liter
 
 const SPAWN_CWD_DESCRIPTION =
   "Directory the sub-agent runs in; personas, config, and the git root for worktree isolation resolve from it. " +
-  "`~` and relative paths resolve against the conductor's cwd (see ensemble_cwd), which is also the default.";
+  "`~` and relative paths resolve against the conductor's cwd (set with ensemble_cwd from codemode), which is also the default.";
+
+// Pi's tool exposure fields postdate the repo's pinned dev declarations.
+interface CodemodeExposure {
+  exposure: "codemode";
+  namespace: { name: string; description: string };
+}
+
+const CONDUCTOR_CODEMODE: CodemodeExposure = {
+  exposure: "codemode",
+  namespace: {
+    name: "conductor",
+    description:
+      "Rarely used pi-conductor controls: pause, resume or focus a sub-agent, recommend a persona, run a persona plan " +
+      "autonomously, set the conductor cwd, open an effort. Call them from codemode as tools.ensemble_<name>(args).",
+  },
+};
+
+function registerCodemodeTool<TParams extends TSchema, TDetails>(pi: ExtensionAPI, tool: ToolDefinition<TParams, TDetails>): void {
+  const exposed: ToolDefinition<TParams, TDetails> & CodemodeExposure = { ...tool, ...CONDUCTOR_CODEMODE };
+  pi.registerTool(exposed);
+}
 
 function registerEffortTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
-  pi.registerTool({
+  registerCodemodeTool(pi, {
     name: CONDUCTOR_LLM_TOOLS.effort,
     label: "Effort",
     description: `Open or inspect a named effort in the conductor cwd. ${EFFORT_NOTICE}`,
@@ -230,7 +251,7 @@ function registerEffortTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 // ── ensemble_cwd ─────────────────────────────────────────────────────
 
 function registerCwdTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
-  pi.registerTool({
+  registerCodemodeTool(pi, {
     name: CONDUCTOR_LLM_TOOLS.cwd,
     label: "Conductor cwd",
     description:
@@ -300,7 +321,7 @@ function registerListTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 // ── ensemble_status ──────────────────────────────────────────────────
 
 function registerRecommendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
-  pi.registerTool({
+  registerCodemodeTool(pi, {
     name: CONDUCTOR_LLM_TOOLS.recommend,
     label: "Recommend persona",
     description:
@@ -439,7 +460,7 @@ export function awaitTerminal(
 }
 
 function registerAutoTool(pi: ExtensionAPI, opts: RegisterToolsOpts, env: RuntimeEnvironment): void {
-  pi.registerTool({
+  registerCodemodeTool(pi, {
     name: CONDUCTOR_LLM_TOOLS.auto,
     label: "Autonomous run",
     description:
@@ -1316,7 +1337,7 @@ function registerSendTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 // ── ensemble_pause / ensemble_resume ───────────────────────────────────────
 
 function registerPauseTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
-  pi.registerTool({
+  registerCodemodeTool(pi, {
     name: CONDUCTOR_LLM_TOOLS.pause,
     label: "Pause sub-agent",
     description:
@@ -1361,7 +1382,7 @@ function registerPauseTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 }
 
 function registerResumeTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
-  pi.registerTool({
+  registerCodemodeTool(pi, {
     name: CONDUCTOR_LLM_TOOLS.resume,
     label: "Resume sub-agent",
     description:
@@ -1480,7 +1501,7 @@ function registerKillTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
 // ── ensemble_focus ───────────────────────────────────────────────────
 
 function registerFocusTool(pi: ExtensionAPI, opts: RegisterToolsOpts): void {
-  pi.registerTool({
+  registerCodemodeTool(pi, {
     name: CONDUCTOR_LLM_TOOLS.focus,
     label: "Focus a sub-agent",
     description:

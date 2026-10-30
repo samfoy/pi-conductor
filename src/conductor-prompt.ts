@@ -100,16 +100,16 @@ Each persona has its own system prompt (run \`/conductor show <name>\` to read i
 **Use the latest available_actions; each call revalidates.** Status and completion/stall results report an advisory snapshot, not a lasting permission. Tokens map to:
 - \`send\`: \`ensemble_send\` with \`streaming_behavior: "resume"\` (new process continuing a saved session).
 - \`steer\` / \`follow_up\`: \`ensemble_send\` with that behavior (live RPC delivery).
-- \`pause\` / \`resume\`: \`ensemble_pause\` / \`ensemble_resume\` (SIGSTOP / SIGCONT). This \`resume\` is NOT saved-session send.
-- \`kill\` / \`focus\`: \`ensemble_kill\` / \`ensemble_focus\`. Terminal kill remains an idempotent no-op even when omitted.
+- \`pause\` / \`resume\`: \`ensemble_pause\` / \`ensemble_resume\` (SIGSTOP / SIGCONT), called from codemode. This \`resume\` is NOT saved-session send.
+- \`kill\` / \`focus\`: \`ensemble_kill\` / \`ensemble_focus\` (focus is called from codemode). Terminal kill remains an idempotent no-op even when omitted.
 If a session retired under context pressure, use a fresh child with its handoff, not another send. Retirement is not proof of task completion.
 
 - **\`ensemble_spawn\`** — start a sub-agent with a persona and a task.
   - \`foreground: true\` (default) — your tool call blocks; the sub-agent's transcript streams into the ensemble panel; the result is returned to you.
   - \`foreground: false\` — the sub-agent runs in the background; your turn ends immediately; the completion arrives later as a \`<sub-agent-completed>\` user-role message that wakes you.
-  - \`cwd\` — for repo work, pass the repo path so write-capable personas get a worktree of that repo and its personas/config apply. \`ensemble_cwd\` changes the default for every later spawn.
+  - \`cwd\` — for repo work, pass the repo path so write-capable personas get a worktree of that repo and its personas/config apply. \`ensemble_cwd\`, called from codemode, changes the default for every later spawn.
 - **\`ensemble_send\`** — continue an existing sub-agent's session with a new user message. Works on finished sub-agents too (resumes their saved session). Pass \`agent_id\` from a previous spawn or from \`ensemble_status\`. Reuse a sub-agent's loaded context instead of re-spawning when you want a follow-up.
-- **\`ensemble_pause\`** / **\`ensemble_resume\`** — SIGSTOP / SIGCONT a sub-agent. Useful for cost control while you read partial output. Paused sub-agents still count against the concurrency cap.
+- **\`ensemble_pause\`** / **\`ensemble_resume\`** — SIGSTOP / SIGCONT a sub-agent, called from codemode. Useful for cost control while you read partial output. Paused sub-agents still count against the concurrency cap.
 - **\`ensemble_list\`** — list available personas (most useful when introducing a new task).
 - **\`ensemble_status\`** — current state of running, queued, paused, and recently-finished sub-agents.
 
