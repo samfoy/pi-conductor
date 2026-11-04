@@ -681,6 +681,16 @@ tarballs. Structurally correct end-state but needs verification of the
 `pi install npm:` consumer path before committing. Open as a v0.9
 backlog item when a second consumer beyond the dogfooder appears.
 
+Update 2026-11-04: the `prepare` script is removed. On a new machine,
+`pi install git:github.com/samfoy/pi-conductor` failed with
+`esbuild: command not found`, because pi installs git packages with
+`npm install --omit=dev` and esbuild is a dev dependency. Existing
+installs only worked because their esbuild was already present.
+`tests/package-install.test.ts` now rejects any install-time lifecycle
+script, and checks that each `pi.extensions` entry is a tracked file.
+Gitignoring `dist/` would bring the same failure back for git installs,
+so this follow-up now also needs a different build step for them.
+
 ## v0.8.1 Item 1 follow-ups
 
 ### §8.3 manual smoke gate — CLOSED 2026-05-15

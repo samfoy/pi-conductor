@@ -17908,8 +17908,7 @@ var package_default = {
     typecheck: "tsc --noEmit",
     build: "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --sourcemap --packages=external --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-agent-core --external:@earendil-works/pi-tui --external:@sinclair/typebox",
     check: "tsc --noEmit",
-    dev: "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --sourcemap --watch --packages=external --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-agent-core --external:@earendil-works/pi-tui --external:@sinclair/typebox",
-    prepare: "npm run build"
+    dev: "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --sourcemap --watch --packages=external --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-agent-core --external:@earendil-works/pi-tui --external:@sinclair/typebox"
   },
   devDependencies: {
     "@earendil-works/pi-agent-core": "*",

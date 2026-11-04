@@ -341,6 +341,17 @@ pi -e /path/to/pi-conductor/dist/index.js
 >
 > The tools and slash commands stay registered either way; only the system-prompt addendum is gated.
 
+Or install from GitHub, without a clone of your own:
+
+```bash
+pi install git:github.com/samfoy/pi-conductor
+```
+
+`dist/` is tracked, so a git install loads it as is and builds nothing. pi installs git
+packages with `npm install --omit=dev`, and the build tools are dev dependencies, so the
+package has no `prepare` or other install-time script. The pre-commit hook keeps `dist/`
+matching `src/`.
+
 Once published:
 
 ```bash
