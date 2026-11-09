@@ -4,6 +4,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir, sandboxPi } from "./helpers/tmp.ts";
 import { claimHerdrOwner, readHerdrOwner } from "../src/herdr/ownership.ts";
+import type { RunRecord } from "../src/types.ts";
 sandboxPi();
 
 const identity = (epoch = "module-a") => ({ epoch, sessionId: "session", pid: 1234, startTime: 42, socketPath: "/private/fake.socket", runId: "oracle-h10", launchNonce: "launch", at: 100 });
@@ -74,6 +75,43 @@ test("H11 a requested herdr termination is never readopted as running on startup
   }
   const h = herdrFixture(); const running = toRunRecord(h.run);
   assert.equal(classifyRecord(running, never, 0, 1, never, "session", "gone"), "readopt-herdr", "an unfinished running record still recovers");
+});
+
+test("a terminal herdr record with a decided settlement is neither probed nor re-finalized on startup", async () => {
+  const { classifyRecord, reconcileOrphansAtStartup } = await import("../src/reconcile-startup.ts");
+  const { herdrFixture } = await import("./helpers/herdr-pipeline.ts");
+  const { toRunRecord } = await import("../src/types.ts");
+  const { RunRegistry } = await import("../src/runs.ts");
+  const never = () => { assert.fail("must not consult legacy PID probe for herdr"); };
+  const startup = async (over: Partial<RunRecord>) => {
+    const h = herdrFixture(); const base = toRunRecord(h.run);
+    const root = join(h.run.cwd, "runs"), dir = join(root, h.run.id); mkdirSync(dir, { recursive: true });
+    const record = { ...base, herdr: { launchNonce: "launch-1" } as RunRecord["herdr"], ...over,
+      recordPath: join(dir, "record.json"), transcriptPath: join(dir, "transcript.jsonl"), finalPath: join(dir, "final.md") } as RunRecord;
+    writeFileSync(record.recordPath, JSON.stringify(record));
+    let probes = 0, attaches = 0;
+    const result = await reconcileOrphansAtStartup({ runsRoot: root, registry: new RunRegistry(), isAlive: never, now: 0, selfSessionId: "session",
+      herdrProbe: async () => { probes++; return "gone"; }, attachHerdr: () => { attaches++; } });
+    return { verdict: classifyRecord(record, never, 0, 1, never, "session", "gone"), probes, attaches, readopted: result.readopted.length };
+  };
+  const settled = (delivery: "intent" | "attempted" | "uncertain", launchNonce = "launch-1") => ({ herdr: { launchNonce: "launch-1", settlement: { launchNonce, delivery } } as RunRecord["herdr"] });
+  for (const status of ["completed", "failed", "hook_failed", "merge_conflict"] as const) for (const delivery of ["attempted", "uncertain"] as const) {
+    assert.deepEqual(await startup({ status, ...settled(delivery) }), { verdict: "skip-terminal", probes: 0, attaches: 0, readopted: 0 }, `${status}/${delivery}`);
+  }
+  const recovers = { verdict: "readopt-herdr", probes: 1, attaches: 1, readopted: 1 };
+  assert.deepEqual(await startup({ status: "completed" }), recovers, "terminal record written before the settlement intent");
+  assert.deepEqual(await startup({ status: "completed", ...settled("intent") }), recovers, "an interrupted dispatch is still marked uncertain once");
+  assert.deepEqual(await startup({ status: "completed", ...settled("attempted", "older-launch") }), recovers, "another launch's settlement");
+  assert.deepEqual(await startup({ status: "completed", ...settled("attempted"), worktreePath: "/kept" }), recovers, "a kept worktree");
+  assert.deepEqual(await startup({ status: "failed", ...settled("attempted"), worktreeBranch: "kept" }), recovers, "a kept branch");
+  assert.deepEqual(await startup({ status: "failed", ...settled("attempted"), herdrExitUnconfirmed: true }), recovers, "an unconfirmed child exit");
+  assert.deepEqual(await startup({ status: "running", ...settled("attempted") }), recovers, "a running record");
+  const effort = { name: "e", gitRoot: "/repo", role: "reader", spawnBase: "base", touches: [] } as unknown as RunRecord["effort"];
+  assert.deepEqual(await startup({ status: "completed", ...settled("attempted"), effort }), recovers, "an effort member");
+  const integration = { state: "queued", branchHead: "head", enqueuedAt: 1, attempts: 0, verifyIdentity: { command: "true", timeoutSeconds: 1, retries: 0 } } as RunRecord["integration"];
+  assert.deepEqual(await startup({ status: "completed", ...settled("attempted"), integration }), recovers, "an integration entry");
+  const mergerFor = { writer: "w" } as unknown as RunRecord["mergerFor"];
+  assert.deepEqual(await startup({ status: "completed", ...settled("attempted"), mergerFor }), { verdict: "preserve-merger", probes: 1, attaches: 0, readopted: 0 }, "a merger");
 });
 
 test("H10 missing accepted native start after proven child death is an orphan failure, not successful recovery", { timeout: 10000 }, async () => {

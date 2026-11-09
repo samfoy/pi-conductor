@@ -132,6 +132,17 @@ export type ClassifyResult =
  */
 const isRequestedTermination = (status: RunRecord["status"]) => status === "killed" || status === "timeout" || status === "aborted";
 
+const settlementDecided = (record: RunRecord) => {
+  const settlement = record.herdr?.settlement;
+  return settlement?.launchNonce === record.herdr?.launchNonce && (settlement?.delivery === "attempted" || settlement?.delivery === "uncertain");
+};
+
+const holdsRecoverableState = (record: RunRecord) =>
+  !!(record.effort || record.integration || record.mergerFor || record.worktreePath || record.worktreeBranch || record.herdrExitUnconfirmed);
+
+const herdrRecoveryFinished = (record: RunRecord) =>
+  isRequestedTermination(record.status) || (isTerminal(record.status) && settlementDecided(record) && !holdsRecoverableState(record));
+
 export function classifyRecord(
   record: RunRecord,
   isAlive: (pid: number) => boolean,
@@ -148,8 +159,8 @@ export function classifyRecord(
   // Like an unsupported runtime: preserve the record untouched rather than adopt a guessed scope.
   if (runScopeError(record)) return "skip-malformed-scope";
   if (record.runtime === "herdr") {
-    // A user/conductor stop is final; never resurrect it as running, even if the child lives.
-    if (isRequestedTermination(record.status)) return "skip-terminal";
+    // A user/conductor stop, or a settled run with nothing left to recover, is final; never resurrect it as running.
+    if (herdrRecoveryFinished(record)) return "skip-terminal";
     if (herdrProbe === "other-socket" || herdrProbe === "unknown") return "skip-foreign";
     if (record.status === "integrating" || (record.effort && record.integration)) return "restore-integrating";
     if (record.mergerFor && record.status !== "blocked") return "preserve-merger";
@@ -536,7 +547,7 @@ export async function reconcileOrphansAtStartup(
       }
 
       if (record.runtime === "herdr" && deps.admit && !deps.admit()) continue;
-      const herdrProbe = record.runtime === "herdr" && !isRequestedTermination(record.status) && !runScopeError(record) ? await deps.herdrProbe?.(record) : undefined;
+      const herdrProbe = record.runtime === "herdr" && !herdrRecoveryFinished(record) && !runScopeError(record) ? await deps.herdrProbe?.(record) : undefined;
       if (record.runtime === "herdr" && deps.admit && !deps.admit()) continue;
       const verdict = classifyRecord(
         record,
