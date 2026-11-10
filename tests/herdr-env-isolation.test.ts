@@ -37,3 +37,22 @@ test("both test scripts unset every herdr variable", () => {
     }
   }
 });
+
+const HC_VARS = ["HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "HC_SCOPE", "HC_SOCKET", "HC_SESSION"];
+
+test("no herdr-core HC_* routing variable reaches the test process", () => {
+  assert.deepEqual(
+    Object.keys(process.env).filter((k) => HC_VARS.includes(k)),
+    [],
+    "run the suite through `npm test` / `npm run test:summary`",
+  );
+});
+
+test("both test scripts unset every herdr-core routing variable", () => {
+  const scripts = JSON.parse(readFileSync(join(import.meta.dirname, "..", "package.json"), "utf8")).scripts;
+  for (const name of ["test", "test:summary"]) {
+    for (const v of HC_VARS) {
+      assert.ok(scripts[name].includes(`-u ${v} `), `${name} script unsets ${v}`);
+    }
+  }
+});

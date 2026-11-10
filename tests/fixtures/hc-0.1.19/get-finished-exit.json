@@ -1,0 +1,44 @@
+{
+  "hc": "0.1.19",
+  "command": [
+    "get",
+    "exit3",
+    "--json"
+  ],
+  "note": "after sh -c 'exit 3' exited",
+  "exit": 0,
+  "stdout": {
+    "address": "t8",
+    "argv": [
+      "sh",
+      "-c",
+      "exit 3"
+    ],
+    "cols": 200,
+    "created_ms": 1794338475114,
+    "cwd": "/tmp",
+    "die_with_parent": false,
+    "exit_code": 3,
+    "finished_ms": 1794338475118,
+    "identity": "ghostty",
+    "keep": false,
+    "labels": {},
+    "name": "exit3",
+    "notify": false,
+    "parent": null,
+    "pid": 787711,
+    "reason": "exited",
+    "reported": false,
+    "rm": false,
+    "rows": 120,
+    "screen": "exact",
+    "signal": null,
+    "state": "finished",
+    "status": null,
+    "status_ms": null,
+    "template": null,
+    "title": "",
+    "turn": 0
+  },
+  "stderr": ""
+}

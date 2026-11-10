@@ -1,0 +1,18 @@
+{
+  "hc": "0.1.19",
+  "command": [
+    "get",
+    "t1",
+    "--json"
+  ],
+  "note": "HC_SOCKET names a path with no core while HC_SESSION's core listens elsewhere",
+  "exit": 5,
+  "stdout": "",
+  "stderr": {
+    "error": {
+      "hint": "XDG_RUNTIME_DIR or HC_SOCKET differs from where the core started; set HC_SOCKET to the first path",
+      "kind": "unavailable",
+      "message": "the core listens at /run/user/1000/herdr-core/conductor-probe-s0b-14122.sock, but this shell looks at /tmp/hcprobe-Y66NiB/x.sock"
+    }
+  }
+}

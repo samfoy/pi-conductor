@@ -1,0 +1,24 @@
+{
+  "hc": "0.1.19",
+  "command": [
+    "server",
+    "status",
+    "--json"
+  ],
+  "exit": 0,
+  "stdout": {
+    "core": {
+      "id": "3ec6adf9b1db50c60491c76abd2c0ff3",
+      "name": "host"
+    },
+    "finished": 0,
+    "holder": null,
+    "holders": [],
+    "installed_by": null,
+    "live": 0,
+    "pid": 787513,
+    "uptime_ms": 9,
+    "version": "0.1.19"
+  },
+  "stderr": ""
+}

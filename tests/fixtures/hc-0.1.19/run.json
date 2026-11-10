@@ -1,0 +1,35 @@
+{
+  "hc": "0.1.19",
+  "command": [
+    "run",
+    "--bg",
+    "--json",
+    "--outlive-parent",
+    "--no-notify",
+    "--name",
+    "live1",
+    "--cwd",
+    "/tmp",
+    "--parent",
+    "lead",
+    "--label",
+    "conductor.run=r1",
+    "--label",
+    "herdr.tab=tb1",
+    "--",
+    "sh",
+    "-c",
+    "printf \"line1\\nline2\\n\"; exec sleep 300"
+  ],
+  "exit": 0,
+  "stdout": {
+    "address": "t2",
+    "agent": "sh",
+    "cwd": "/tmp",
+    "name": "live1",
+    "parent": "t1",
+    "state": "live",
+    "turn": 0
+  },
+  "stderr": ""
+}

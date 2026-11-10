@@ -1,0 +1,13 @@
+{
+  "hc": "0.1.19",
+  "command": [
+    "rm",
+    "exit3",
+    "--json"
+  ],
+  "exit": 0,
+  "stdout": {
+    "removed": "t8"
+  },
+  "stderr": ""
+}

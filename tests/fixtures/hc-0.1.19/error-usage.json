@@ -1,0 +1,28 @@
+{
+  "hc": "0.1.19",
+  "command": [
+    "run",
+    "--bg",
+    "--json",
+    "--outlive-parent",
+    "--no-notify",
+    "--name",
+    "kid6",
+    "--cwd",
+    "/tmp",
+    "--label",
+    "novalue",
+    "--",
+    "sleep",
+    "300"
+  ],
+  "exit": 2,
+  "stdout": "",
+  "stderr": {
+    "error": {
+      "hint": "see `hc --help`",
+      "kind": "usage",
+      "message": "invalid value 'novalue' for '--label <K=V>': expected key=value, got \"novalue\""
+    }
+  }
+}

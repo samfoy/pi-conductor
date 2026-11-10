@@ -1,0 +1,17 @@
+{
+  "hc": "0.1.19",
+  "command": [
+    "get",
+    "t999",
+    "--json"
+  ],
+  "exit": 3,
+  "stdout": "",
+  "stderr": {
+    "error": {
+      "hint": "see `hc ls --all`",
+      "kind": "not_found",
+      "message": "no terminal \"t999\""
+    }
+  }
+}

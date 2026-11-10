@@ -1,0 +1,26 @@
+{
+  "hc": "0.1.19",
+  "command": [
+    "run",
+    "--bg",
+    "--json",
+    "--outlive-parent",
+    "--no-notify",
+    "--name",
+    "live1",
+    "--cwd",
+    "/tmp",
+    "--",
+    "sleep",
+    "300"
+  ],
+  "exit": 1,
+  "stdout": "",
+  "stderr": {
+    "error": {
+      "hint": "pick another name, or kill the one holding it",
+      "kind": "name_taken",
+      "message": "a live terminal is already named \"live1\""
+    }
+  }
+}

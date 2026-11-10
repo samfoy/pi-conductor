@@ -1,0 +1,26 @@
+{
+  "hc": "0.1.19",
+  "command": [
+    "run",
+    "--bg",
+    "--json",
+    "--outlive-parent",
+    "--no-notify",
+    "--name",
+    "Bad Name",
+    "--cwd",
+    "/tmp",
+    "--",
+    "sleep",
+    "300"
+  ],
+  "exit": 6,
+  "stdout": "",
+  "stderr": {
+    "error": {
+      "hint": "see `hc schema`",
+      "kind": "invalid_params",
+      "message": "bad name \"Bad Name\": use 1-32 of a-z 0-9 - _ . starting with a letter or digit, not shaped like an id (t7)"
+    }
+  }
+}

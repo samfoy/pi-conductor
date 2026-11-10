@@ -1,0 +1,25 @@
+{
+  "hc": "0.1.19",
+  "command": [
+    "run",
+    "--bg",
+    "--json",
+    "--outlive-parent",
+    "--no-notify",
+    "--name",
+    "kid4",
+    "--cwd",
+    "/tmp",
+    "--",
+    "/nonexistent/prog"
+  ],
+  "exit": 1,
+  "stdout": "",
+  "stderr": {
+    "error": {
+      "hint": "check the program name and cwd",
+      "kind": "spawn_failed",
+      "message": "cannot start \"/nonexistent/prog\": No such file or directory (os error 2)"
+    }
+  }
+}

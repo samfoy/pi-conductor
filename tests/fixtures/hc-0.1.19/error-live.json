@@ -1,0 +1,17 @@
+{
+  "hc": "0.1.19",
+  "command": [
+    "rm",
+    "live1",
+    "--json"
+  ],
+  "exit": 1,
+  "stdout": "",
+  "stderr": {
+    "error": {
+      "hint": "kill it first: hc kill t2",
+      "kind": "live",
+      "message": "t2 is still running"
+    }
+  }
+}

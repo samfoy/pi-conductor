@@ -1,0 +1,12 @@
+{
+  "hc": "0.1.19",
+  "command": [
+    "read",
+    "live1",
+    "--lines",
+    "40"
+  ],
+  "exit": 0,
+  "stdout": "line1\nline2\n",
+  "stderr": ""
+}

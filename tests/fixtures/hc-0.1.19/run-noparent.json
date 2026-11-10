@@ -1,0 +1,27 @@
+{
+  "hc": "0.1.19",
+  "command": [
+    "run",
+    "--bg",
+    "--json",
+    "--outlive-parent",
+    "--no-notify",
+    "--name",
+    "orphan",
+    "--cwd",
+    "/tmp",
+    "--",
+    "sleep",
+    "300"
+  ],
+  "exit": 0,
+  "stdout": {
+    "address": "t3",
+    "agent": "sleep",
+    "cwd": "/tmp",
+    "name": "orphan",
+    "state": "live",
+    "turn": 0
+  },
+  "stderr": ""
+}
