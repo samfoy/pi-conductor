@@ -1,5 +1,5 @@
 import { HerdrCliError, isRecord, type CliLimits, type HerdrCli } from "./cli.ts";
-import { proveChildProcess, provePaneOurs, type HerdrBinding, type HerdrInvocation } from "./identity.ts";
+import { isTuiBinding, proveChildProcess, provePaneOurs, type HerdrBinding, type HerdrInvocation, type TuiBinding } from "./identity.ts";
 import { closeEmptyPane, createRunTab, createSplitPane, leafPlacement } from "./placement.ts";
 
 export const herdrFailure = (message: string) => new Error(`herdr: ${message}`);
@@ -21,6 +21,7 @@ export interface ChildEvidence {
 export interface TerminalIdentity {
   proveChild(evidence: ChildEvidence): ChildProof;
   recorded(binding: HerdrBinding): unknown;
+  helloFields(binding: HerdrBinding, hello: unknown): Partial<HerdrBinding>;
 }
 export interface PlaceSpec { cwd: string; invocation: HerdrInvocation; env: Record<string, string> }
 export interface LeafSpec extends PlaceSpec {
@@ -52,9 +53,15 @@ export interface TerminalHost {
 
 export const tuiIdentity: TerminalIdentity = {
   proveChild: ({ observation, ...evidence }) => proveChildProcess({ ...evidence, pane: observation }),
-  recorded: binding => ({ pane_id: binding.paneId, terminal_id: binding.terminalId, tab_id: binding.tabId, workspace_id: binding.workspaceId,
-    agent: "pi", agent_session: { kind: "path", value: binding.sessionFile, agent: "pi", source: "launch" } }),
+  recorded: binding => isTuiBinding(binding) ? { pane_id: binding.paneId, terminal_id: binding.terminalId, tab_id: binding.tabId, workspace_id: binding.workspaceId,
+    agent: "pi", agent_session: { kind: "path", value: binding.sessionFile, agent: "pi", source: "launch" } } : undefined,
+  helloFields: () => ({}),
 };
+const refusal = (reason: string): Refusal => ({ ok: false, state: "unknown", reason });
+function tuiOnly(binding: HerdrBinding): TuiBinding {
+  if (!isTuiBinding(binding)) throw herdrFailure("not a herdr TUI binding");
+  return binding;
+}
 
 export class HerdrTuiHost implements TerminalHost {
   readonly identity = tuiIdentity;
@@ -62,6 +69,7 @@ export class HerdrTuiHost implements TerminalHost {
   get socketPath() { return this.options.cli.socketPath; }
 
   async reuse(previous: HerdrBinding, invocation: HerdrInvocation, signal?: AbortSignal): Promise<HerdrBinding | undefined> {
+    if (!isTuiBinding(previous)) return undefined;
     try {
       const observed = await this.options.cli.json(["pane", "get", previous.paneId], { timeoutMs: 2000, signal });
       return provePaneOurs({ binding: previous, current: previous, socketPath: this.socketPath, pane: observed.pane, requireNoAgent: true }).ok
@@ -69,11 +77,12 @@ export class HerdrTuiHost implements TerminalHost {
     } catch { return undefined; }
   }
 
-  async placeLeaf({ cwd, invocation, env, known, ...leaf }: LeafSpec, fence: LaunchFence, signal?: AbortSignal) {
-    const placement = await leafPlacement(this.options.cli, leaf, { timeoutMs: 2000, signal });
+  async placeLeaf({ cwd, invocation, env, known, parent, previous, ...leaf }: LeafSpec, fence: LaunchFence, signal?: AbortSignal) {
+    if (parent && !isTuiBinding(parent)) return { warning: `parent ${leaf.parentId} is a Herdr 2 terminal; leaf placed in its own tab` };
+    const placement = await leafPlacement(this.options.cli, { ...leaf, parent, previous: isTuiBinding(previous) ? previous : undefined }, { timeoutMs: 2000, signal });
     fence.check();
     if (!("anchor" in placement)) return placement;
-    return { binding: await createSplitPane(this.options.cli, { ...placement, cwd, invocation, env, known }, { timeoutMs: 5000, signal }) };
+    return { binding: await createSplitPane(this.options.cli, { ...placement, cwd, invocation, env, known: known.filter(isTuiBinding) }, { timeoutMs: 5000, signal }) };
   }
 
   async placeRun(spec: PlaceSpec, fence: LaunchFence, signal?: AbortSignal): Promise<HerdrBinding> {
@@ -85,8 +94,8 @@ export class HerdrTuiHost implements TerminalHost {
     return createRunTab(cli, { workspaceId: targetWorkspace, ...spec }, { timeoutMs: 5000, signal });
   }
 
-  async start(binding: HerdrBinding, launch: LaunchSpec, limits: CliLimits, fence: LaunchFence): Promise<unknown> {
-    const { cli } = this.options;
+  async start(target: HerdrBinding, launch: LaunchSpec, limits: CliLimits, fence: LaunchFence): Promise<unknown> {
+    const { cli } = this.options, binding = tuiOnly(target);
     const args = ["agent", "start", launch.alias, "--kind", "pi", "--pane", binding.paneId, "--timeout", "60000", "--", ...launch.args];
     let started: Record<string, unknown>;
     try { started = await cli.json(args, limits); }
@@ -104,14 +113,14 @@ export class HerdrTuiHost implements TerminalHost {
   }
 
   async observe(binding: HerdrBinding, limits?: CliLimits): Promise<unknown> {
-    return (await this.options.cli.json(["pane", "get", binding.paneId], limits)).pane;
+    return (await this.options.cli.json(["pane", "get", tuiOnly(binding).paneId], limits)).pane;
   }
 
-  readScreen(binding: HerdrBinding, lines: number, limits?: CliLimits): Promise<string> {
-    return this.options.cli.text(["agent", "read", binding.agentName!, "--source", "recent-unwrapped", "--lines", String(lines)], limits);
+  async readScreen(binding: HerdrBinding, lines: number, limits?: CliLimits): Promise<string> {
+    return this.options.cli.text(["agent", "read", tuiOnly(binding).agentName!, "--source", "recent-unwrapped", "--lines", String(lines)], limits);
   }
 
-  release(binding: HerdrBinding, current: () => HerdrInvocation | undefined, limits?: CliLimits): Promise<ReleaseResult> {
-    return closeEmptyPane(this.options.cli, binding, current, limits);
+  async release(binding: HerdrBinding, current: () => HerdrInvocation | undefined, limits?: CliLimits): Promise<ReleaseResult> {
+    return isTuiBinding(binding) ? closeEmptyPane(this.options.cli, binding, current, limits) : refusal("not a herdr TUI binding");
   }
 }

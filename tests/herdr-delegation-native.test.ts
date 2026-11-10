@@ -17,6 +17,7 @@ import { delegationHarness } from "./helpers/herdr-delegation.ts";
 import { getFinalText } from "../src/runs.ts";
 import { delegatePaths } from "../src/delegation.ts";
 import type { Run } from "../src/types.ts";
+import type { TuiBinding } from "../src/herdr/identity.ts";
 
 sandboxPi();
 process.env.PI_OFFLINE = "1"; process.env.PI_SKIP_VERSION_CHECK = "1"; process.env.PI_TELEMETRY = "0";
@@ -69,7 +70,7 @@ async function witness(t: test.TestContext, piRoot: string, expected: string) {
   const leaves = h.leaves(parent);
   assert.deepEqual(leaves.map(l => [l.persona, l.runtime, l.status, l.herdr?.createdTab]).sort(), [["auditor", "herdr", "completed", false], ["scout", "herdr", "completed", false]]);
   const splits = h.splits();
-  assert.deepEqual(splits.map(a => [a[a.indexOf("--pane") + 1], a[a.indexOf("--direction") + 1]]), [[parent.herdr!.paneId, "right"], [leaves[0]!.herdr!.paneId, "down"]]);
+  assert.deepEqual(splits.map(a => [a[a.indexOf("--pane") + 1], a[a.indexOf("--direction") + 1]]), [[(parent.herdr as TuiBinding).paneId, "right"], [(leaves[0]!.herdr as TuiBinding).paneId, "down"]]);
   assert.equal(h.cards(), 1, "no leaf card");
 
   // Tool surfaces of the real sessions, built from the lead's pane env and argv.

@@ -6,14 +6,10 @@ export interface HerdrInvocation {
   sessionId: string;
   sessionFile: string;
 }
-export interface HerdrBinding extends HerdrInvocation {
+interface BindingFields extends HerdrInvocation {
   ownerGeneration?: number;
   settlement?: { launchNonce: string; delivery: "intent" | "attempted" | "uncertain" };
   socketPath: string;
-  workspaceId: string;
-  tabId: string;
-  paneId: string;
-  terminalId: string;
   createdTab: boolean;
   /** Physical herdr agent name for this launch only; herdr retains names after exit. */
   agentName?: string;
@@ -23,6 +19,32 @@ export interface HerdrBinding extends HerdrInvocation {
   placementWarning?: string;
   childPid?: number;
   childStartTime?: number;
+}
+export interface TuiBinding extends BindingFields {
+  host?: undefined;
+  workspaceId: string;
+  tabId: string;
+  paneId: string;
+  terminalId: string;
+}
+export interface HcBinding extends BindingFields {
+  host: "hc";
+  coreId: string;
+  address?: string;
+  parentAddress?: string;
+  space?: string;
+  tab: string;
+}
+export type HerdrBinding = TuiBinding | HcBinding;
+export const isTuiBinding = (b: HerdrBinding | undefined): b is TuiBinding => !!b && b.host === undefined;
+export const isHcBinding = (b: HerdrBinding | undefined): b is HcBinding => !!b && b.host === "hc";
+export function terminalRef(b: HerdrBinding | undefined): ["pane" | "terminal", string] {
+  return isHcBinding(b) ? ["terminal", b.address ?? "unknown"] : ["pane", b?.paneId ?? "unknown"];
+}
+const SHARED_IDENTITY = ["runId", "launchNonce", "sessionId", "sessionFile", "socketPath"] as const;
+const HOST_IDENTITY = { tui: ["workspaceId", "tabId", "paneId", "terminalId"], hc: ["coreId", "address", "tab"] } as const;
+export function bindingIdentityKeys(b: HerdrBinding): readonly string[] {
+  return [...SHARED_IDENTITY, ...HOST_IDENTITY[isHcBinding(b) ? "hc" : "tui"]];
 }
 export interface LaunchHello extends HerdrInvocation {
   v: 1;
@@ -64,12 +86,15 @@ type Refusal = {ok: false; state: "unknown" | "gone"; reason: string};
 const unknown = (reason: string): Refusal => ({ok: false, state: "unknown", reason});
 
 export function sameHerdrBinding(a: HerdrBinding | undefined, b: HerdrBinding | undefined): boolean {
-  return !!a && !!b && (["runId", "launchNonce", "sessionId", "sessionFile", "socketPath", "workspaceId", "tabId", "paneId", "terminalId", "agentName", "childPid", "childStartTime", "ownerGeneration"] as const).every(key => a[key] === b[key]);
+  if (!a || !b || a.host !== b.host) return false;
+  const keys = [...bindingIdentityKeys(a), ...(isHcBinding(a) ? ["parentAddress", "space"] : []), "agentName", "childPid", "childStartTime", "ownerGeneration"];
+  return keys.every(key => (a as unknown as Record<string, unknown>)[key] === (b as unknown as Record<string, unknown>)[key]);
 }
 
 export function provePaneOurs(ev: PaneEvidence): {ok: true} | Refusal {
   const {binding: b, current, pane} = ev;
   if (!isRecord(b) || !isRecord(current) || !isHerdrPane(pane)) return unknown("missing pane evidence");
+  if (b.host !== undefined) return unknown("not a herdr TUI binding");
   for (const key of ["runId", "launchNonce", "sessionId", "sessionFile"] as const) {
     if (!text(b[key]) || b[key] !== current[key]) return unknown("invocation mismatch");
   }

@@ -21,6 +21,7 @@ const identity: TerminalIdentity = {
       ? { ok: true, pid: process.pid as number } : { ok: false, state: "unknown", reason: "stub refusal" };
   },
   recorded: binding => ({ owner: binding.runId }),
+  helloFields: () => ({}),
 };
 
 function fixture(mode: "healthy" | "no-ack" | "cancel-in-place" = "healthy") {

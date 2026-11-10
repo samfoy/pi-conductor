@@ -22,6 +22,7 @@ import type { PersonaResolution } from "./types.ts";
 import { lastGcMarkerPath, readLastGcMtime } from "./gc/last-gc.ts";
 import { walkInventory } from "./gc/inventory.ts";
 import { planReclaim } from "./gc/policy.ts";
+import { terminalRef } from "./herdr/identity.ts";
 import type { PostStartupReconcileResult } from "./reconcile-startup.ts";
 import type { DeliveryStatus } from "./supervision/delivery.ts";
 import type { ChiefStatus } from "./supervision/lease.ts";
@@ -425,7 +426,7 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
   for (const r of opts.registry.list()) {
     lines.push(`  ${r.id}: saved=${r.runtime === undefined ? "subprocess (legacy)" : r.runtime}`);
     if (r.runtime === "herdr") {
-      lines.push(`    pane=${r.herdr?.paneId ?? "unknown"} nonce=${r.herdr?.launchNonce ?? "unknown"} cleanup=${r.transport?.kind === "herdr" && r.transport.paneReleased ? "released" : "retained/unconfirmed"}`);
+      lines.push(`    ${terminalRef(r.herdr).join("=")} nonce=${r.herdr?.launchNonce ?? "unknown"} cleanup=${r.transport?.kind === "herdr" && r.transport.paneReleased ? "released" : "retained/unconfirmed"}`);
       if (r.worktreeKept || r.herdrExitUnconfirmed) lines.push(`    ${r.worktreeKept ?? "child exit unconfirmed; resources preserved"}`);
       if (r.transport?.stderr && r.transport.stderr !== r.worktreeKept) lines.push(`    ${r.transport.stderr}`);
     }

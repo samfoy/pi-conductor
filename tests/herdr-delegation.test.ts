@@ -19,7 +19,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { emptyUsage } from "../src/types.ts";
 import { createSplitPane } from "../src/herdr/placement.ts";
 import type { HerdrCli } from "../src/herdr/cli.ts";
-import type { HerdrBinding } from "../src/herdr/identity.ts";
+import type { HerdrBinding, TuiBinding } from "../src/herdr/identity.ts";
 
 sandboxPi();
 const response = (run: Run, id: string) => JSON.parse(readFileSync(delegatePaths(dirname(run.recordPath), id).response, "utf8"));
@@ -44,14 +44,14 @@ test("N5 herdr parent fan-out: tee -> broker -> split leaves right then down; fo
   const leaves = h.leaves(parent);
   assert.deepEqual(leaves.map(l => l.delegateToolCallId).sort(), ["d_auditor", "d_scout"], "the repeat update spawned nothing");
   const [first, second] = leaves;
-  const pb = parent.herdr!;
+  const pb = parent.herdr as TuiBinding;
   const splits = h.splits();
   assert.equal(splits.length, 2);
   assert.deepEqual([flag(splits[0]!, "--pane"), flag(splits[0]!, "--direction")], [pb.paneId, "right"], "first leaf splits right from the parent");
-  assert.deepEqual([flag(splits[1]!, "--pane"), flag(splits[1]!, "--direction")], [first!.herdr!.paneId, "down"], "later leaf splits down from the previous leaf");
+  assert.deepEqual([flag(splits[1]!, "--pane"), flag(splits[1]!, "--direction")], [(first!.herdr as TuiBinding).paneId, "down"], "later leaf splits down from the previous leaf");
   for (const [i, leaf] of [first!, second!].entries()) {
     assert.equal(leaf.runtime, "herdr"); assert.equal(leaf.status, "completed", leaf.errorMessage);
-    const b = leaf.herdr!;
+    const b = leaf.herdr as TuiBinding;
     assert.deepEqual([b.createdTab, b.tabId, b.workspaceId, b.placementWarning], [false, pb.tabId, pb.workspaceId, undefined]);
     assert.notEqual(b.terminalId, pb.terminalId); assert.notEqual(b.paneId, pb.paneId);
     const env = envFlags(splits[i]!);
@@ -72,14 +72,14 @@ test("N5 herdr parent fan-out: tee -> broker -> split leaves right then down; fo
 
   // A leaf's release closes its own pane, never the parent's, a sibling's or the tab.
   assert.equal(await releaseRunPane(first!), true);
-  assert.deepEqual(h.state().closed, [first!.herdr!.paneId]);
-  assert.ok(h.state().panes[pb.paneId] && h.state().panes[second!.herdr!.paneId]);
+  assert.deepEqual(h.state().closed, [(first!.herdr as TuiBinding).paneId]);
+  assert.ok(h.state().panes[pb.paneId] && h.state().panes[(second!.herdr as TuiBinding).paneId]);
   assert.equal(h.state().tabs[pb.tabId]!.pane_count, 2);
 
   // Quit closes each remaining own pane once; herdr drops the emptied tab itself; the lead's pane stays.
   await handleSessionShutdown({ reason: "quit" }, { runs: h.registry.list(), resetSanitizer() {}, terminateHerdr: r => forceTerminate(r, "killed", h.registry) });
   const s = h.state();
-  assert.deepEqual([...s.closed!].sort(), [first!.herdr!.paneId, second!.herdr!.paneId, pb.paneId].sort());
+  assert.deepEqual([...s.closed!].sort(), [(first!.herdr as TuiBinding).paneId, (second!.herdr as TuiBinding).paneId, pb.paneId].sort());
   assert.deepEqual(s.removedTabs, [pb.tabId]);
   assert.ok(s.panes["w1:p1"], "the lead's own pane is never closed");
   assert.ok(!s.calls.some(c => c.args[0] === "tab" && c.args[1] !== "create"), "no tab close; nothing but own panes");
@@ -92,7 +92,7 @@ test("N5 placement: a previous leaf splits down only while proven; any single pa
   const { run: parent, done } = await h.spawnParent(`N5-PARENT gate${steps}`);
   assert.ok(parent.transport?.kind === "herdr"); await parent.transport.ready;
   const manifest = h.manifestOf(parent)!;
-  const pb = parent.herdr!;
+  const pb = parent.herdr as TuiBinding;
   const go = async (i: number) => {
     const before = h.state().calls.length;
     h.release(`${manifest.split("/").pop()}.go-${i}`);
@@ -105,9 +105,9 @@ test("N5 placement: a previous leaf splits down only while proven; any single pa
   const s0 = await go(0);
   assert.deepEqual(placed(s0.calls), [`${pb.paneId} right`]);
   const s1 = await go(1);
-  assert.deepEqual(placed(s1.calls), [`${s0.leaf.herdr!.paneId} down`]);
+  assert.deepEqual(placed(s1.calls), [`${(s0.leaf.herdr as TuiBinding).paneId} down`]);
   // The previous leaf's pane no longer proves its identity: start a fresh column from the parent.
-  h.edit(s => { s.report = { [s1.leaf.herdr!.paneId]: { terminal_id: "replaced" } }; });
+  h.edit(s => { s.report = { [(s1.leaf.herdr as TuiBinding).paneId]: { terminal_id: "replaced" } }; });
   const s2 = await go(2);
   assert.deepEqual(placed(s2.calls), [`${pb.paneId} right`]);
   h.edit(s => { s.report = {}; });
@@ -116,7 +116,7 @@ test("N5 placement: a previous leaf splits down only while proven; any single pa
     const step = await go(3 + i);
     h.edit(s => { s.report = {}; });
     assert.deepEqual(placed(step.calls), ["tab"], `${field} mismatch: zero splits`);
-    const b = step.leaf.herdr!;
+    const b = step.leaf.herdr as TuiBinding;
     assert.equal(b.createdTab, true);
     assert.match(b.placementWarning ?? "", /parent pane unproven \(pane identity mismatch\); leaf placed in its own tab/);
     assert.equal(envFlags(step.calls.find(a => a[0] === "tab")!).CONDUCTOR_DEPTH, "2");
@@ -140,7 +140,7 @@ test("N5 a subprocess parent's herdr leaf gets its own tab plus a diagnostic; it
   await done;
   assert.equal(leaf.status, "completed", leaf.errorMessage);
   assert.equal(h.splits().length, 0);
-  const b = leaf.herdr!;
+  const b = leaf.herdr as TuiBinding;
   assert.equal(b.createdTab, true);
   assert.match(b.placementWarning ?? "", /parent lead-subprocess has no herdr pane \(subprocess runtime\); leaf placed in its own tab/);
   const created = h.tabCreates()[0]!;

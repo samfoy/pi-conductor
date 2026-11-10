@@ -17,7 +17,7 @@ import { readProcessStartTime } from "../reconcile-startup.ts";
 import { createLineDecoder, terminateHook } from "../subprocess-runtime.ts";
 import { boundStallText, redactPaneEvidence } from "../stall-evidence.ts";
 import { createHerdrCli, isRecord } from "./cli.ts";
-import { sameHerdrBinding, type HerdrBinding, type HerdrInvocation, type LaunchHello } from "./identity.ts";
+import { sameHerdrBinding, terminalRef, type HerdrBinding, type HerdrInvocation, type LaunchHello } from "./identity.ts";
 import { buildHerdrEnv } from "./placement.ts";
 import { herdrFailure as failure, HerdrTuiHost, tuiIdentity, type LaunchFence, type TerminalHost } from "./host.ts";
 import { hasPreparedInboxRequest, prepareInboxRequest, publishPreparedInboxRequest, readControlRecord, readInboxAck, writeInboxRequest, type InboxRequest } from "./inbox.ts";
@@ -107,6 +107,7 @@ export class HerdrRuntime implements RunRuntime {
     if (!isRecord(claim)) throw failure("reattach missing child hello");
     const hello = claim as unknown as LaunchHello;
     binding.childPid ??= hello.pid; binding.childStartTime ??= hello.pidStartTime;
+    Object.assign(binding, host.identity.helloFields(binding, hello));
     const pane = await host.observe(binding, { timeoutMs: 2000 });
     const proof = (observation: unknown) => host.identity.proveChild({ binding, current: binding, socketPath: host.socketPath, observation, hello, platform: this.options?.platform ?? process.platform, bridgeProtocol: 1, process: probe(hello.pid) });
     const recordedPane = host.identity.recorded(binding);
@@ -211,7 +212,7 @@ export class HerdrRuntime implements RunRuntime {
       tail?.drain();
       const wasObserving = observing;
       finishObservation();
-      if (wasObserving && !nativeSettled) sink.gone?.(`herdr: pi exited before settling (pane ${binding?.paneId})`);
+      if (wasObserving && !nativeSettled) sink.gone?.(`herdr: pi exited before settling (${terminalRef(binding).join(" ")})`);
     };
     const readHello = () => {
       try { return readControlRecord(join(dir, "launch", `${nonce}.json`)); }

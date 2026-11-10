@@ -6,14 +6,14 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { hostPiVersion, PI_LIBRARY_VERSION } from "./pi-host.ts";
 import packageInfo from "../package.json" with { type: "json" };
 import { isRecord } from "./herdr/cli.ts";
-import type { HerdrBinding, LaunchHello } from "./herdr/identity.ts";
+import type { LaunchHello } from "./herdr/identity.ts";
 import { readProcessStartTime } from "./reconcile-startup.ts";
 
 const PROTOCOL = 1;
 const token = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value);
 const text = (value: unknown): value is string => typeof value === "string" && !!value.trim() && !/[\0\r\n]/.test(value);
 const path = (value: unknown): value is string => text(value) && isAbsolute(value) && resolve(value) === value;
-type Hello = LaunchHello & Pick<HerdrBinding, "terminalId">;
+type Hello = LaunchHello & { terminalId: string };
 interface BridgeOptions { env?: NodeJS.ProcessEnv; now?: () => number }
 
 // A full disk cannot reliably store a failure marker. Keep faults for this process's
@@ -25,6 +25,19 @@ interface TurnPhase { identity: string; owner: object; signal?: AbortSignal; act
 const turnKey = Symbol.for("pi-conductor.child-bridge.turn-phases.v2");
 const processState = globalThis as typeof globalThis & { [faultKey]?: Set<string>; [turnKey]?: Map<string, TurnPhase> };
 const faultIdentity = (h: Hello): string => JSON.stringify([h.runId, h.launchNonce, h.sessionId, h.sessionFile, h.pid, h.pidStartTime]);
+
+function bindingTerminal(b: Record<string, unknown>, env: NodeJS.ProcessEnv): { paneId: string; terminalId: string } {
+  if (b.host === "hc") {
+    const id = env.HC_TERMINAL_ID;
+    if (!path(b.socketPath) || b.socketPath !== env.HC_TERMINAL_SOCKET || !token(id) || !text(b.coreId) || !text(b.tab) ||
+        (b.address !== undefined && b.address !== id)) throw new Error("run binding mismatch");
+    return { paneId: id, terminalId: id };
+  }
+  if (b.host !== undefined || env.HERDR_ENV !== "1" || !path(b.socketPath) || b.socketPath !== env.HERDR_SOCKET_PATH ||
+      !text(b.paneId) || b.paneId !== env.HERDR_PANE_ID || !text(b.tabId) || b.tabId !== env.HERDR_TAB_ID ||
+      !text(b.workspaceId) || b.workspaceId !== env.HERDR_WORKSPACE_ID || !text(b.terminalId)) throw new Error("run binding mismatch");
+  return { paneId: b.paneId, terminalId: b.terminalId };
+}
 
 function writeAll(fd: number, buffer: Buffer): void {
   for (let offset = 0; offset < buffer.length;) {
@@ -196,10 +209,8 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
       const b = isRecord(record) && record.herdr;
       if (!isRecord(record) || record.id !== runId || record.runtime !== "herdr" || !isRecord(b) ||
           b.runId !== runId || b.launchNonce !== nonce || b.sessionId !== sessionId || b.sessionFile !== sessionFile ||
-          env.HERDR_ENV !== "1" || !path(b.socketPath) || b.socketPath !== env.HERDR_SOCKET_PATH ||
-          !text(b.paneId) || b.paneId !== env.HERDR_PANE_ID || !text(b.tabId) || b.tabId !== env.HERDR_TAB_ID ||
-          !text(b.workspaceId) || b.workspaceId !== env.HERDR_WORKSPACE_ID || !text(b.terminalId) ||
           typeof b.createdTab !== "boolean") throw new Error("run binding mismatch");
+      const terminal = bindingTerminal(b, env);
       try {
         const stat = lstatSync(sessionFile);
         if (!stat.isFile() || stat.nlink !== 1) throw new Error("invalid session file");
@@ -208,7 +219,7 @@ export function installChildBridge(pi: ExtensionAPI, options: BridgeOptions = {}
       if ((b.childPid !== undefined && b.childPid !== process.pid) || (b.childStartTime !== undefined && b.childStartTime !== pidStartTime)) throw new Error("recorded process mismatch");
       if (process.pid <= 1 || (process.platform === "linux" && !pidStartTime)) throw new Error("missing process identity");
       const expected: Hello = { v: 1, bridgeProtocol: PROTOCOL, runId, launchNonce: nonce, pid: process.pid, pidStartTime,
-        paneId: b.paneId, terminalId: b.terminalId, sessionId, sessionFile, piVersion: hostPiVersion({ sessionManager: ctx.sessionManager }),
+        ...terminal, sessionId, sessionFile, piVersion: hostPiVersion({ sessionManager: ctx.sessionManager }),
         piLibraryVersion: PI_LIBRARY_VERSION, conductorVersion: packageInfo.version, at: Date.now() };
       if (processState[faultKey]?.has(faultIdentity(expected))) throw new Error("invocation tee previously failed; reload cannot resume it; preserve evidence for the parent");
       const launchDir = join(runDir, "launch");

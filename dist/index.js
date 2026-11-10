@@ -1350,6 +1350,16 @@ function createHerdrCli(opts) {
 }
 
 // src/herdr/identity.ts
+var isTuiBinding = (b) => !!b && b.host === void 0;
+var isHcBinding = (b) => !!b && b.host === "hc";
+function terminalRef(b) {
+  return isHcBinding(b) ? ["terminal", b.address ?? "unknown"] : ["pane", b?.paneId ?? "unknown"];
+}
+var SHARED_IDENTITY = ["runId", "launchNonce", "sessionId", "sessionFile", "socketPath"];
+var HOST_IDENTITY = { tui: ["workspaceId", "tabId", "paneId", "terminalId"], hc: ["coreId", "address", "tab"] };
+function bindingIdentityKeys(b) {
+  return [...SHARED_IDENTITY, ...HOST_IDENTITY[isHcBinding(b) ? "hc" : "tui"]];
+}
 var text = (v) => typeof v === "string" && v.length > 0 && !v.includes("\0");
 var positiveInteger = (v) => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
 function isHerdrPane(value) {
@@ -1359,11 +1369,14 @@ function isHerdrPane(value) {
 }
 var unknown = (reason) => ({ ok: false, state: "unknown", reason });
 function sameHerdrBinding(a, b) {
-  return !!a && !!b && ["runId", "launchNonce", "sessionId", "sessionFile", "socketPath", "workspaceId", "tabId", "paneId", "terminalId", "agentName", "childPid", "childStartTime", "ownerGeneration"].every((key) => a[key] === b[key]);
+  if (!a || !b || a.host !== b.host) return false;
+  const keys = [...bindingIdentityKeys(a), ...isHcBinding(a) ? ["parentAddress", "space"] : [], "agentName", "childPid", "childStartTime", "ownerGeneration"];
+  return keys.every((key) => a[key] === b[key]);
 }
 function provePaneOurs(ev) {
   const { binding: b, current, pane } = ev;
   if (!isRecord(b) || !isRecord(current) || !isHerdrPane(pane)) return unknown("missing pane evidence");
+  if (b.host !== void 0) return unknown("not a herdr TUI binding");
   for (const key of ["runId", "launchNonce", "sessionId", "sessionFile"]) {
     if (!text(b[key]) || b[key] !== current[key]) return unknown("invocation mismatch");
   }
@@ -1515,15 +1528,21 @@ async function closeEmptyPane(cli, binding, current, limits) {
 var herdrFailure = (message4) => new Error(`herdr: ${message4}`);
 var tuiIdentity = {
   proveChild: ({ observation, ...evidence }) => proveChildProcess({ ...evidence, pane: observation }),
-  recorded: (binding) => ({
+  recorded: (binding) => isTuiBinding(binding) ? {
     pane_id: binding.paneId,
     terminal_id: binding.terminalId,
     tab_id: binding.tabId,
     workspace_id: binding.workspaceId,
     agent: "pi",
     agent_session: { kind: "path", value: binding.sessionFile, agent: "pi", source: "launch" }
-  })
+  } : void 0,
+  helloFields: () => ({})
 };
+var refusal = (reason) => ({ ok: false, state: "unknown", reason });
+function tuiOnly(binding) {
+  if (!isTuiBinding(binding)) throw herdrFailure("not a herdr TUI binding");
+  return binding;
+}
 var HerdrTuiHost = class {
   constructor(options) {
     this.options = options;
@@ -1534,6 +1553,7 @@ var HerdrTuiHost = class {
     return this.options.cli.socketPath;
   }
   async reuse(previous, invocation, signal) {
+    if (!isTuiBinding(previous)) return void 0;
     try {
       const observed = await this.options.cli.json(["pane", "get", previous.paneId], { timeoutMs: 2e3, signal });
       return provePaneOurs({ binding: previous, current: previous, socketPath: this.socketPath, pane: observed.pane, requireNoAgent: true }).ok ? { ...previous, ...invocation, createdTab: false, childPid: void 0, childStartTime: void 0 } : void 0;
@@ -1541,11 +1561,12 @@ var HerdrTuiHost = class {
       return void 0;
     }
   }
-  async placeLeaf({ cwd, invocation, env, known, ...leaf }, fence, signal) {
-    const placement = await leafPlacement(this.options.cli, leaf, { timeoutMs: 2e3, signal });
+  async placeLeaf({ cwd, invocation, env, known, parent, previous, ...leaf }, fence, signal) {
+    if (parent && !isTuiBinding(parent)) return { warning: `parent ${leaf.parentId} is a Herdr 2 terminal; leaf placed in its own tab` };
+    const placement = await leafPlacement(this.options.cli, { ...leaf, parent, previous: isTuiBinding(previous) ? previous : void 0 }, { timeoutMs: 2e3, signal });
     fence.check();
     if (!("anchor" in placement)) return placement;
-    return { binding: await createSplitPane(this.options.cli, { ...placement, cwd, invocation, env, known }, { timeoutMs: 5e3, signal }) };
+    return { binding: await createSplitPane(this.options.cli, { ...placement, cwd, invocation, env, known: known.filter(isTuiBinding) }, { timeoutMs: 5e3, signal }) };
   }
   async placeRun(spec, fence, signal) {
     const { cli, workspaceId, leadPaneId } = this.options;
@@ -1555,8 +1576,8 @@ var HerdrTuiHost = class {
     fence.check();
     return createRunTab(cli, { workspaceId: targetWorkspace, ...spec }, { timeoutMs: 5e3, signal });
   }
-  async start(binding, launch, limits, fence) {
-    const { cli } = this.options;
+  async start(target, launch, limits, fence) {
+    const { cli } = this.options, binding = tuiOnly(target);
     const args = ["agent", "start", launch.alias, "--kind", "pi", "--pane", binding.paneId, "--timeout", "60000", "--", ...launch.args];
     let started;
     try {
@@ -1576,13 +1597,13 @@ var HerdrTuiHost = class {
     return started.agent;
   }
   async observe(binding, limits) {
-    return (await this.options.cli.json(["pane", "get", binding.paneId], limits)).pane;
+    return (await this.options.cli.json(["pane", "get", tuiOnly(binding).paneId], limits)).pane;
   }
-  readScreen(binding, lines, limits) {
-    return this.options.cli.text(["agent", "read", binding.agentName, "--source", "recent-unwrapped", "--lines", String(lines)], limits);
+  async readScreen(binding, lines, limits) {
+    return this.options.cli.text(["agent", "read", tuiOnly(binding).agentName, "--source", "recent-unwrapped", "--lines", String(lines)], limits);
   }
-  release(binding, current, limits) {
-    return closeEmptyPane(this.options.cli, binding, current, limits);
+  async release(binding, current, limits) {
+    return isTuiBinding(binding) ? closeEmptyPane(this.options.cli, binding, current, limits) : refusal("not a herdr TUI binding");
   }
 };
 
@@ -8305,7 +8326,7 @@ function worktreeCleanupGuard(run2, currentRun) {
   const expected = Object.fromEntries(keys.map((key) => [key, run2[key]]));
   const binding = run2.herdr && { ...run2.herdr };
   const recordPath = run2.recordPath;
-  const valid = ["id", "recordPath", "cwd", "worktreePath", "worktreeBranch"].every((key) => typeof expected[key] === "string" && expected[key].length > 0 && !expected[key].includes("\0")) && ["worktreeBaseBranch", "sessionPath"].every((key) => expected[key] === void 0 || typeof expected[key] === "string" && expected[key].length > 0 && !expected[key].includes("\0")) && (expected.mergeStrategy === void 0 || typeof expected.mergeStrategy === "string" && ["none", "squash", "merge"].includes(expected.mergeStrategy)) && isTerminal(run2.status) && binding?.runId === run2.id && Number.isSafeInteger(binding.childPid) && Number(binding.childPid) > 1 && (binding.childStartTime === void 0 || Number.isSafeInteger(binding.childStartTime) && binding.childStartTime > 0) && typeof binding.createdTab === "boolean" && ["runId", "launchNonce", "sessionId", "sessionFile", "socketPath", "workspaceId", "tabId", "paneId", "terminalId"].every((key) => {
+  const valid = ["id", "recordPath", "cwd", "worktreePath", "worktreeBranch"].every((key) => typeof expected[key] === "string" && expected[key].length > 0 && !expected[key].includes("\0")) && ["worktreeBaseBranch", "sessionPath"].every((key) => expected[key] === void 0 || typeof expected[key] === "string" && expected[key].length > 0 && !expected[key].includes("\0")) && (expected.mergeStrategy === void 0 || typeof expected.mergeStrategy === "string" && ["none", "squash", "merge"].includes(expected.mergeStrategy)) && isTerminal(run2.status) && binding?.runId === run2.id && Number.isSafeInteger(binding.childPid) && Number(binding.childPid) > 1 && (binding.childStartTime === void 0 || Number.isSafeInteger(binding.childStartTime) && binding.childStartTime > 0) && typeof binding.createdTab === "boolean" && bindingIdentityKeys(binding).every((key) => {
     const value = binding[key];
     return typeof value === "string" && value.length > 0 && !value.includes("\0");
   });
@@ -8343,7 +8364,7 @@ async function releaseWorktree(run2, opts) {
   }
   const binding = run2.herdr, status = run2.status;
   if (run2.runtime === "herdr" && (!await releaseRunPane(run2, opts.isCurrent) || run2.herdr !== binding || run2.status !== status || run2.worktreePath !== wtSpec.worktreePath || run2.worktreeBranch !== wtSpec.branch)) {
-    run2.worktreeKept = `worktree kept: pane ${run2.herdr?.paneId ?? "unknown"} not proven ours and empty`;
+    run2.worktreeKept = `worktree kept: ${terminalRef(run2.herdr).join(" ")} not proven ours and empty`;
     return false;
   }
   if (opts.isCurrent && !opts.isCurrent()) {
@@ -8800,6 +8821,7 @@ var HerdrRuntime = class {
     const hello = claim;
     binding.childPid ??= hello.pid;
     binding.childStartTime ??= hello.pidStartTime;
+    Object.assign(binding, host.identity.helloFields(binding, hello));
     const pane = await host.observe(binding, { timeoutMs: 2e3 });
     const proof = (observation) => host.identity.proveChild({ binding, current: binding, socketPath: host.socketPath, observation, hello, platform: this.options?.platform ?? process.platform, bridgeProtocol: 1, process: probe(hello.pid) });
     const recordedPane = host.identity.recorded(binding);
@@ -8949,7 +8971,7 @@ var HerdrRuntime = class {
       tail?.drain();
       const wasObserving = observing;
       finishObservation();
-      if (wasObserving && !nativeSettled) sink.gone?.(`herdr: pi exited before settling (pane ${binding?.paneId})`);
+      if (wasObserving && !nativeSettled) sink.gone?.(`herdr: pi exited before settling (${terminalRef(binding).join(" ")})`);
     };
     const readHello = () => {
       try {
@@ -10622,7 +10644,7 @@ async function buildDoctorReport(opts) {
   for (const r of opts.registry.list()) {
     lines.push(`  ${r.id}: saved=${r.runtime === void 0 ? "subprocess (legacy)" : r.runtime}`);
     if (r.runtime === "herdr") {
-      lines.push(`    pane=${r.herdr?.paneId ?? "unknown"} nonce=${r.herdr?.launchNonce ?? "unknown"} cleanup=${r.transport?.kind === "herdr" && r.transport.paneReleased ? "released" : "retained/unconfirmed"}`);
+      lines.push(`    ${terminalRef(r.herdr).join("=")} nonce=${r.herdr?.launchNonce ?? "unknown"} cleanup=${r.transport?.kind === "herdr" && r.transport.paneReleased ? "released" : "retained/unconfirmed"}`);
       if (r.worktreeKept || r.herdrExitUnconfirmed) lines.push(`    ${r.worktreeKept ?? "child exit unconfirmed; resources preserved"}`);
       if (r.transport?.stderr && r.transport.stderr !== r.worktreeKept) lines.push(`    ${r.transport.stderr}`);
     }
@@ -16670,9 +16692,9 @@ function buildOnChainCallback(args) {
       runtimeEnv: args.runtimeEnv,
       ...effort ? { effort: effort.name } : {}
     };
-    const refusal = chainPersona.name === MERGER_PERSONA ? `chain: the ${MERGER_PERSONA} persona is driver-owned and never a chain successor of ${parentRun.id}` : WRITE_CAPABLE_PERSONAS.has(chainPersona.name) ? keptParentRefusal(parentRun, chainPersona.name) : void 0;
-    if (refusal) {
-      failBeforeSpawn({ ...spawn2, registry: args.registry }, refusal);
+    const refusal2 = chainPersona.name === MERGER_PERSONA ? `chain: the ${MERGER_PERSONA} persona is driver-owned and never a chain successor of ${parentRun.id}` : WRITE_CAPABLE_PERSONAS.has(chainPersona.name) ? keptParentRefusal(parentRun, chainPersona.name) : void 0;
+    if (refusal2) {
+      failBeforeSpawn({ ...spawn2, registry: args.registry }, refusal2);
       return;
     }
     try {
@@ -17997,6 +18019,15 @@ var faultKey = /* @__PURE__ */ Symbol.for("pi-conductor.child-bridge.tee-faults.
 var turnKey = /* @__PURE__ */ Symbol.for("pi-conductor.child-bridge.turn-phases.v2");
 var processState = globalThis;
 var faultIdentity = (h) => JSON.stringify([h.runId, h.launchNonce, h.sessionId, h.sessionFile, h.pid, h.pidStartTime]);
+function bindingTerminal(b, env) {
+  if (b.host === "hc") {
+    const id = env.HC_TERMINAL_ID;
+    if (!path(b.socketPath) || b.socketPath !== env.HC_TERMINAL_SOCKET || !token2(id) || !text4(b.coreId) || !text4(b.tab) || b.address !== void 0 && b.address !== id) throw new Error("run binding mismatch");
+    return { paneId: id, terminalId: id };
+  }
+  if (b.host !== void 0 || env.HERDR_ENV !== "1" || !path(b.socketPath) || b.socketPath !== env.HERDR_SOCKET_PATH || !text4(b.paneId) || b.paneId !== env.HERDR_PANE_ID || !text4(b.tabId) || b.tabId !== env.HERDR_TAB_ID || !text4(b.workspaceId) || b.workspaceId !== env.HERDR_WORKSPACE_ID || !text4(b.terminalId)) throw new Error("run binding mismatch");
+  return { paneId: b.paneId, terminalId: b.terminalId };
+}
 function writeAll(fd, buffer) {
   for (let offset = 0; offset < buffer.length; ) {
     const count3 = writeSync2(fd, buffer, offset, buffer.length - offset);
@@ -18228,7 +18259,8 @@ function installChildBridge(pi, options = {}) {
       if (!token2(nonce) || !token2(runId) || !path(runDir3) || basename4(runDir3) !== runId || realpathSync11(runDir3) !== runDir3 || !token2(sessionId) || !path(sessionFile) || dirname24(sessionFile) !== join34(runDir3, "session") || realpathSync11(dirname24(sessionFile)) !== dirname24(sessionFile)) throw new Error("invalid invocation paths or identity");
       const record = readJson(join34(runDir3, "record.json"));
       const b = isRecord(record) && record.herdr;
-      if (!isRecord(record) || record.id !== runId || record.runtime !== "herdr" || !isRecord(b) || b.runId !== runId || b.launchNonce !== nonce || b.sessionId !== sessionId || b.sessionFile !== sessionFile || env.HERDR_ENV !== "1" || !path(b.socketPath) || b.socketPath !== env.HERDR_SOCKET_PATH || !text4(b.paneId) || b.paneId !== env.HERDR_PANE_ID || !text4(b.tabId) || b.tabId !== env.HERDR_TAB_ID || !text4(b.workspaceId) || b.workspaceId !== env.HERDR_WORKSPACE_ID || !text4(b.terminalId) || typeof b.createdTab !== "boolean") throw new Error("run binding mismatch");
+      if (!isRecord(record) || record.id !== runId || record.runtime !== "herdr" || !isRecord(b) || b.runId !== runId || b.launchNonce !== nonce || b.sessionId !== sessionId || b.sessionFile !== sessionFile || typeof b.createdTab !== "boolean") throw new Error("run binding mismatch");
+      const terminal = bindingTerminal(b, env);
       try {
         const stat6 = lstatSync8(sessionFile);
         if (!stat6.isFile() || stat6.nlink !== 1) throw new Error("invalid session file");
@@ -18245,8 +18277,7 @@ function installChildBridge(pi, options = {}) {
         launchNonce: nonce,
         pid: process.pid,
         pidStartTime,
-        paneId: b.paneId,
-        terminalId: b.terminalId,
+        ...terminal,
         sessionId,
         sessionFile,
         piVersion: hostPiVersion({ sessionManager: ctx.sessionManager }),

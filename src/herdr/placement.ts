@@ -1,5 +1,5 @@
 import { HerdrCliError, isRecord, type HerdrCli, type CliLimits } from "./cli.js";
-import { isHerdrPane, provePaneOurs, type HerdrBinding, type HerdrInvocation } from "./identity.js";
+import { isHerdrPane, provePaneOurs, type TuiBinding, type HerdrInvocation } from "./identity.js";
 import { CHILD_SCOPE_ENV, childScopeEnv, type ChildToolScope } from "../types.js";
 
 export const HERDR_FORWARD_ENV = [
@@ -39,14 +39,14 @@ export function paneSplitArgs(opts: {paneId: string; direction: "right" | "down"
 
 export async function createRunTab(cli: HerdrCli, opts: {
   workspaceId: string; cwd: string; invocation: HerdrInvocation; env: Record<string, string>;
-}, limits?: CliLimits): Promise<HerdrBinding> {
+}, limits?: CliLimits): Promise<TuiBinding> {
   const created = await cli.json(tabCreateArgs({...opts, runId: opts.invocation.runId}), limits);
   const root = created.root_pane;
   const tab = created.tab;
   if (!isHerdrPane(root) || !isRecord(tab) || root.workspace_id !== opts.workspaceId ||
       root.tab_id !== tab.tab_id || root.workspace_id !== tab.workspace_id || tab.pane_count !== 1 ||
       tab.label !== opts.invocation.runId) throw new HerdrCliError("protocol");
-  const binding: HerdrBinding = {...opts.invocation, socketPath: cli.socketPath,
+  const binding: TuiBinding = {...opts.invocation, socketPath: cli.socketPath,
     workspaceId: root.workspace_id, tabId: root.tab_id, paneId: root.pane_id, terminalId: root.terminal_id, createdTab: true};
   const observed = await cli.json(["pane", "get", binding.paneId], limits);
   if (!provePaneOurs({binding, current: opts.invocation, socketPath: cli.socketPath, pane: observed.pane, requireNoAgent: true}).ok) {
@@ -57,13 +57,13 @@ export async function createRunTab(cli: HerdrCli, opts: {
 
 /** N5: a fresh pane in the anchor's tab, proven empty before anything runs in it. Never a tab. */
 export async function createSplitPane(cli: HerdrCli, opts: {
-  anchor: HerdrBinding; direction: "right" | "down"; cwd: string; invocation: HerdrInvocation; env: Record<string, string>; known: readonly (HerdrBinding | undefined)[];
-}, limits?: CliLimits): Promise<HerdrBinding> {
+  anchor: TuiBinding; direction: "right" | "down"; cwd: string; invocation: HerdrInvocation; env: Record<string, string>; known: readonly (TuiBinding | undefined)[];
+}, limits?: CliLimits): Promise<TuiBinding> {
   const created = (await cli.json(paneSplitArgs({paneId: opts.anchor.paneId, direction: opts.direction, cwd: opts.cwd, env: opts.env}), limits)).pane;
-  const known = [opts.anchor, ...opts.known].filter((b): b is HerdrBinding => !!b);
+  const known = [opts.anchor, ...opts.known].filter((b): b is TuiBinding => !!b);
   if (!isHerdrPane(created) || created.workspace_id !== opts.anchor.workspaceId || created.tab_id !== opts.anchor.tabId ||
       known.some(b => b.paneId === created.pane_id || b.terminalId === created.terminal_id)) throw new HerdrCliError("protocol");
-  const binding: HerdrBinding = {...opts.invocation, socketPath: cli.socketPath,
+  const binding: TuiBinding = {...opts.invocation, socketPath: cli.socketPath,
     workspaceId: created.workspace_id, tabId: created.tab_id, paneId: created.pane_id, terminalId: created.terminal_id, createdTab: false};
   const observed = await cli.json(["pane", "get", binding.paneId], limits);
   if (!provePaneOurs({binding, current: opts.invocation, socketPath: cli.socketPath, pane: observed.pane, requireNoAgent: true}).ok) {
@@ -72,7 +72,7 @@ export async function createSplitPane(cli: HerdrCli, opts: {
   return binding;
 }
 
-export type LeafPlacement = {anchor: HerdrBinding; direction: "right" | "down"} | {warning: string};
+export type LeafPlacement = {anchor: TuiBinding; direction: "right" | "down"} | {warning: string};
 /**
  * N5: split only from a pane whose pane, terminal, workspace and tab match its binding
  * right now. The parent first (right); a later leaf splits down from the previous
@@ -80,13 +80,13 @@ export type LeafPlacement = {anchor: HerdrBinding; direction: "right" | "down"} 
  * own tab: a split target is never guessed. `current` fences the parent after each await.
  */
 export async function leafPlacement(cli: HerdrCli, opts: {
-  parentId: string; parentRuntime: string; parent?: HerdrBinding; previous?: HerdrBinding; current: () => boolean;
+  parentId: string; parentRuntime: string; parent?: TuiBinding; previous?: TuiBinding; current: () => boolean;
 }, limits?: CliLimits): Promise<LeafPlacement> {
   const own = (why: string) => ({warning: `${why}; leaf placed in its own tab`});
   const parent = opts.parent;
   if (opts.parentRuntime !== "herdr" || !parent) return own(`parent ${opts.parentId} has no herdr pane (${opts.parentRuntime} runtime)`);
   if (parent.socketPath !== cli.socketPath) return own(`parent ${opts.parentId} pane is on another herdr socket`);
-  const prove = async (binding: HerdrBinding) => {
+  const prove = async (binding: TuiBinding) => {
     try {
       const pane = (await cli.json(["pane", "get", binding.paneId], limits)).pane;
       return provePaneOurs({binding, current: binding, socketPath: cli.socketPath, pane, requireNoAgent: false});
@@ -106,7 +106,7 @@ export async function leafPlacement(cli: HerdrCli, opts: {
   return {anchor: parent, direction: "right"};
 }
 
-export async function closeEmptyPane(cli: HerdrCli, binding: HerdrBinding,
+export async function closeEmptyPane(cli: HerdrCli, binding: TuiBinding,
   current: () => HerdrInvocation | undefined, limits?: CliLimits) {
   try {
     const observed = await cli.json(["pane", "get", binding.paneId], limits);

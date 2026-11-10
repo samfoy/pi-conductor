@@ -8,6 +8,7 @@ import { createRunPipeline } from "../src/run-pipeline.ts";
 import { availableActions, sendToRun, checkTurnLimit, GRACE_MESSAGE } from "../src/runs.ts";
 import { readInbox, writeInboxAck } from "../src/herdr/inbox.ts";
 import { herdrAgentName } from "../src/herdr/runtime.ts";
+import type { TuiBinding } from "../src/herdr/identity.ts";
 
 sandboxPi();
 test("H8 accepted relaunch that exits without new output cannot reuse the prior final", { timeout: 5000 }, async () => {
@@ -183,13 +184,13 @@ test("H8 grace uses nonce inbox steer kind without opting in to RPC", { timeout:
 
 test("H8 saved-session send relaunches exact session with a fresh nonce", { timeout: 5000 }, async () => {
   const h = herdrFixture(); await createRunPipeline(h.run, [], h.opts);
-  const previous = { ...h.run.herdr! }, session = h.run.sessionPath;
+  const previous = { ...h.run.herdr as TuiBinding }, session = h.run.sessionPath;
   const sent = sendToRun(h.run, "Resume evidence", { registry: h.registry, timeoutMs: 4000, maxTurns: 99, graceTurns: 4 });
   assert.equal(sent.kind, "started"); if (sent.kind !== "started") return;
   await sent.done;
   assert.equal(h.run.status, "completed", h.run.errorMessage);
   assert.notEqual(h.run.herdr!.launchNonce, previous.launchNonce);
-  assert.equal(h.run.herdr!.paneId, previous.paneId); assert.equal(h.run.sessionPath, session);
+  assert.equal((h.run.herdr as TuiBinding).paneId, previous.paneId); assert.equal(h.run.sessionPath, session);
   assert.equal(h.run.resumeCount, 1); assert.equal(h.run.usage.turns, 2);
   assert.equal(h.run.maxTurns, 99); assert.equal(h.run.graceTurns, 4);
   assert.equal(h.calls.filter(c => c === "tab create").length, 1);

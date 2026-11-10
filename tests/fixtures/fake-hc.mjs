@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import {readFileSync, writeFileSync} from "node:fs";
+import {spawn} from "node:child_process";
+import {closeSync, openSync, readFileSync, writeFileSync} from "node:fs";
 import {basename, isAbsolute} from "node:path";
 const statePath = process.env.FAKE_HC_STATE;
 if (!statePath) process.exit(90);
@@ -10,7 +11,16 @@ state.calls.push({args, socket: process.env.HC_SOCKET,
   routingNames: Object.keys(process.env).filter(k => k.startsWith("HC_") || k.startsWith("HERDR_")).sort()});
 state.terminals ??= {};
 state.next ??= 1;
+state.spawned ??= {};
 const save = () => writeFileSync(statePath, JSON.stringify(state));
+const running = pid => {
+  try { process.kill(pid, 0); } catch (e) { return e.code !== "ESRCH"; }
+  try { return readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]?.[0] !== "Z"; } catch { return true; }
+};
+for (const address of Object.keys(state.spawned)) {
+  const t = state.terminals[address];
+  if (t?.state === "live" && !running(t.pid)) Object.assign(t, {state: "finished", reason: "exited", finished_ms: Date.now()});
+}
 save();
 const print = value => console.log(JSON.stringify(value));
 const fail = (exit, kind, message, hint) => {
@@ -22,10 +32,11 @@ const find = target => state.terminals[target] ??
   Object.values(state.terminals).find(t => t.name === target && t.state === "live") ??
   Object.values(state.terminals).find(t => t.name === target);
 const view = t => {
-  const record = {...t};
+  const record = {...t, ...(state.report?.[t.address] ?? {})};
   if (record.state !== "live") delete record.foreground;
   return record;
 };
+const hang = () => setInterval(() => {}, 1000);
 const target = () => args.find((a, i) => i > 0 && !a.startsWith("--") && args[i - 1] !== "--lines");
 
 if (state.fault === "hang") setInterval(() => {}, 1000);
@@ -41,7 +52,12 @@ else if (args[0] === "server" && args[1] === "status") {
   const live = Object.values(state.terminals).filter(t => t.state === "live").length;
   print({core: {id: state.coreId ?? "fakecore0000000000000000000000000", name: "fake-host"}, finished: Object.keys(state.terminals).length - live,
     holder: null, holders: [], installed_by: null, live, pid: process.pid, uptime_ms: 1, version: state.version ?? "0.1.19"});
-} else if (args[0] === "run") {
+} else if (args[0] === "run" && state.runFault === "timeout") hang();
+else if (args[0] === "run" && state.runFault === "name_taken") fail(1, "name_taken", "a live terminal is already named", "pick another name");
+else if (args[0] === "run" && state.runFault === "spawn_failed") fail(1, "spawn_failed", "cannot start: No such file or directory (os error 2)", "check the program name and cwd");
+else if (args[0] === "get" && state.getFault === "timeout") hang();
+else if (args[0] === "get" && state.getFault === "not_found") notFound(target());
+else if (args[0] === "run") {
   const sep = args.indexOf("--");
   const flags = args.slice(1, sep), argv = args.slice(sep + 1);
   const value = name => { const i = flags.indexOf(name); return i < 0 ? undefined : flags[i + 1]; };
@@ -55,7 +71,17 @@ else if (args[0] === "server" && args[1] === "status") {
     fail(1, "spawn_failed", `cannot start "${argv[0]}": No such file or directory (os error 2)`, "check the program name and cwd");
   }
   const address = `t${state.next++}`;
-  const pid = state.pids?.[name] ?? 40000 + state.next;
+  let pid = state.pids?.[name] ?? 40000 + state.next;
+  if (state.spawn) {
+    const {HC_SOCKET: _socket, FAKE_HC_STATE: _state, ...core} = process.env;
+    const stderr = openSync(`${statePath}.${address}.stderr`, "a");
+    const child = spawn(argv[0], argv.slice(1), {cwd, detached: true, stdio: ["ignore", "ignore", stderr],
+      env: {...core, ...(state.coreEnv ?? {}), HC_TERMINAL_ID: address, HC_TERMINAL_SOCKET: state.socket, HC_SCOPE: "fake-scope", HC_SESSION: "fake-session"}});
+    closeSync(stderr);
+    child.unref();
+    pid = child.pid;
+    state.spawned[address] = true;
+  }
   state.terminals[address] = {address, argv, cols: 200, created_ms: Date.now(), cwd, die_with_parent: parent !== undefined && !flags.includes("--outlive-parent"),
     exit_code: null, finished_ms: null, foreground: {argv, cwd, name: basename(argv[0]), pid}, identity: "ghostty", keep: false, labels,
     name, notify: !flags.includes("--no-notify"), parent: parent === undefined ? null : find(parent).address, pid, reason: null,
@@ -63,6 +89,7 @@ else if (args[0] === "server" && args[1] === "status") {
     template: null, title: "", turn: 0};
   save();
   print({address, agent: basename(argv[0]), cwd, name, ...(parent === undefined ? {} : {parent: find(parent).address}), state: "live", turn: 0});
+  if (state.runFault === "timeout-after-start") hang();
 } else if (args[0] === "get") {
   const t = find(target()) ?? notFound(target());
   print(view(t));

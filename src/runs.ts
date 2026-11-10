@@ -1,7 +1,7 @@
 import { assertHerdrOwner, ownsHerdrRun, herdrEffectFence } from "./herdr/ownership.ts";
 import { runtimeFor } from "./runtime.ts";
 import { herdrChildAbsent, releaseRecordedPane } from "./herdr/runtime.ts";
-import { sameHerdrBinding } from "./herdr/identity.ts";
+import { bindingIdentityKeys, sameHerdrBinding, terminalRef } from "./herdr/identity.ts";
 import { isRecord } from "./herdr/cli.ts";
 import { readControlRecord } from "./herdr/inbox.ts";
 import { formatOwnerAnswer } from "./ask-owner.ts";
@@ -2758,8 +2758,8 @@ export function worktreeCleanupGuard(run: Run, currentRun: () => Run | undefined
     Number.isSafeInteger(binding.childPid) && Number(binding.childPid) > 1 &&
     (binding.childStartTime === undefined || (Number.isSafeInteger(binding.childStartTime) && binding.childStartTime > 0)) &&
     typeof binding.createdTab === "boolean" &&
-    (["runId", "launchNonce", "sessionId", "sessionFile", "socketPath", "workspaceId", "tabId", "paneId", "terminalId"] as const).every(key => {
-      const value = binding[key];
+    bindingIdentityKeys(binding).every(key => {
+      const value = (binding as unknown as Record<string, unknown>)[key];
       return typeof value === "string" && value.length > 0 && !value.includes("\0");
     });
   const matches = (value: unknown, allowRemoved = false) => valid && isRecord(value) && value.effort === undefined &&
@@ -2803,7 +2803,7 @@ export async function releaseWorktree(run: Run, opts: { keepBranch: boolean; isC
   const binding = run.herdr, status = run.status;
   if (run.runtime === "herdr" && (!await releaseRunPane(run, opts.isCurrent) || run.herdr !== binding || run.status !== status ||
       run.worktreePath !== wtSpec.worktreePath || run.worktreeBranch !== wtSpec.branch)) {
-    run.worktreeKept = `worktree kept: pane ${run.herdr?.paneId ?? "unknown"} not proven ours and empty`;
+    run.worktreeKept = `worktree kept: ${terminalRef(run.herdr).join(" ")} not proven ours and empty`;
     return false;
   }
   if (opts.isCurrent && !opts.isCurrent()) { run.worktreeKept = "worktree kept: current ownership unconfirmed"; return false; }

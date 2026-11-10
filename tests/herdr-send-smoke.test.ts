@@ -14,6 +14,7 @@ import { runtimeFor } from "../src/runtime.ts";
 import { emptyUsage, type Run } from "../src/types.ts";
 import { readInbox, readInboxAck } from "../src/herdr/inbox.ts";
 import { resultRef } from "../src/file-evidence.ts";
+import type { TuiBinding } from "../src/herdr/identity.ts";
 sandboxPi();
 const wait = async (condition: () => boolean) => { const end = Date.now() + 10000; while (!condition()) { assert.ok(Date.now() < end, "fixture barrier timed out"); await delay(10); } };
 
@@ -137,7 +138,7 @@ test("H8 fake CLI with native 0.87.1 child: live controls, ask/reply acceptance 
   assert.equal(state.calls.filter((c: any) => c.args[0] === "tab").length, 2, "busy prior pane preserved and replaced by a new subtree tab");
   assert.equal(state.retainedPanes[0].agent, "manually-started");
   assert.equal(state.retainedPanes[0].pane_id, "pane");
-  assert.equal(run.herdr!.paneId, "pane-2");
+  assert.equal((run.herdr as TuiBinding).paneId, "pane-2");
   assert.equal(state.calls.filter((c: any) => c.args[1] === "close").length, 0);
   const nonces = state.calls.filter((c: any) => c.args[1] === "start").map((c: any) => c.args[c.args.indexOf("--conductor-launch") + 1]);
   assert.equal(new Set(nonces).size, 9);
