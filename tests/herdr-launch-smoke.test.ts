@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { sandboxPi, tmpDir } from "./helpers/tmp.ts";
 import { emptyUsage, type Run } from "../src/types.ts";
 import { HerdrRuntime } from "../src/herdr/runtime.ts";
+import { HerdrTuiHost } from "../src/herdr/host.ts";
 import { createHerdrCli } from "../src/herdr/cli.ts";
 import { readInbox } from "../src/herdr/inbox.ts";
 sandboxPi();
@@ -25,7 +26,7 @@ for (const starts of [true, false]) test(`H6 real fake CLI/child: fast exit ${st
   t.after(async () => {
     if (child && !exited) { child.kill("SIGKILL"); await new Promise<void>(resolve => child!.once("close", () => resolve())); }
   });
-  const runtime = new HerdrRuntime({ env, workspaceId: pane.workspace_id, trustArgs: () => [], piVersion: "fake-child", cli: { ...base, async json(args, limits) {
+  const runtime = new HerdrRuntime({ env, trustArgs: () => [], piVersion: "fake-child", host: new HerdrTuiHost({ workspaceId: pane.workspace_id, cli: { ...base, async json(args, limits) {
     if (args[1] !== "start") return base.json(args, limits);
     const binding = JSON.parse(readFileSync(run.recordPath, "utf8")).herdr;
     patch({ sessionFile: binding.sessionFile });
@@ -41,7 +42,7 @@ for (const starts of [true, false]) test(`H6 real fake CLI/child: fast exit ${st
     const hello = join(dir, "launch", `${binding.launchNonce}.json`);
     for (const end = Date.now() + 10000; !existsSync(hello);) { if (Date.now() > end || exited) throw new Error(`fake child never registered: ${stderr}`); await new Promise(r => setTimeout(r, 10)); }
     return result;
-  } } });
+  } } }) });
   const transport = runtime.launch(run, [], root, { line() { assert.fail("no H6 streaming"); }, close() { assert.fail("CLI close cannot settle a child"); }, error() {}, initialDeliveryFailed() {} }, run.task, { kind: "fresh", sessionDir: join(dir, "session"), systemPrompt: "private" });
   if (starts) await transport.ready; else await assert.rejects(transport.ready, /native agent_start: child gone/);
   await transport.closed;

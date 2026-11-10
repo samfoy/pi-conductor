@@ -13,6 +13,7 @@ import type { Run } from "../../src/types.ts";
 
 export async function herdrLaunchArgv(run: Run, core: PiCoreArgsOptions, env: NodeJS.ProcessEnv): Promise<{ paneEnv: Record<string, string>; argv: string[] }> {
   const { HerdrRuntime } = await import("../../src/herdr/runtime.ts");
+  const { HerdrTuiHost } = await import("../../src/herdr/host.ts");
   const pane = { pane_id: "pane-n1", terminal_id: "term-n1", workspace_id: "ws-n1", tab_id: "tab-n1", agent: null, agent_session: null };
   const calls: string[][] = [];
   const cli: HerdrCli = { socketPath: join(run.cwd, "fake.sock"), async text() { return ""; }, async json(args) {
@@ -21,7 +22,7 @@ export async function herdrLaunchArgv(run: Run, core: PiCoreArgsOptions, env: No
     if (args[1] === "get") return { type: "pane_info", pane: { ...pane } };
     throw new HerdrCliError("remote", undefined, "n1_stop_before_start");
   } };
-  const runtime = new HerdrRuntime({ cli, workspaceId: pane.workspace_id, env, trustArgs: () => [], piVersion: "0.87.1", platform: "linux",
+  const runtime = new HerdrRuntime({ host: new HerdrTuiHost({ cli, workspaceId: pane.workspace_id }), env, trustArgs: () => [], piVersion: "0.87.1", platform: "linux",
     now: () => 0, sleep: async () => {}, probe: (pid) => ({ pid, state: "alive", startTime: 1 }), signal: () => {} });
   const sink: RunSink = { line() {}, close() {}, error() {}, initialDeliveryFailed() {} };
   const transport = runtime.launch(run, [], run.cwd, sink, "task", core);

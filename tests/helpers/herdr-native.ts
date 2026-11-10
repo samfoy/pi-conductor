@@ -8,6 +8,7 @@ import { VERSION, createAgentSession, DefaultResourceLoader, ModelRuntime, Sessi
 import { installChildBridge } from "../../src/child-bridge.ts";
 import { registerTools } from "../../src/tools.ts";
 import { HerdrRuntime } from "../../src/herdr/runtime.ts";
+import { HerdrTuiHost } from "../../src/herdr/host.ts";
 import { createRunPipeline } from "../../src/run-pipeline.ts";
 import { RunRegistry } from "../../src/runs.ts";
 import { emptyUsage, type Run } from "../../src/types.ts";
@@ -48,7 +49,7 @@ export async function nativePipeline(root: string, ask: boolean, t: TestContext)
     assert.equal(session.isStreaming, false);
     return { type: "agent_started", agent: { ...pane, name: args[2] } };
   } };
-  const runtime = new HerdrRuntime({ cli, workspaceId: "workspace", env: {}, trustArgs: () => [], piVersion: VERSION,
+  const runtime = new HerdrRuntime({ host: new HerdrTuiHost({ cli, workspaceId: "workspace" }), env: {}, trustArgs: () => [], piVersion: VERSION,
     sleep: async () => { t.mock.timers.tick(250); await new Promise(resolve => setImmediate(resolve)); },
     probe: pid => ({ pid, state: gone ? "gone" : "alive", startTime: readProcessStartTime(pid) }), signal: () => assert.fail("native fixture must settle without signals") });
   const prior = process.env.CONDUCTOR_SUBAGENT; process.env.CONDUCTOR_SUBAGENT = "1";

@@ -13,6 +13,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { build, stop } from "esbuild";
 import { sandboxPi, tmpDir } from "./helpers/tmp.ts";
 import { HerdrRuntime } from "../src/herdr/runtime.ts";
+import { HerdrTuiHost } from "../src/herdr/host.ts";
 import { createHerdrCli } from "../src/herdr/cli.ts";
 import { createRunPipeline } from "../src/run-pipeline.ts";
 import { git } from "./helpers/effort-integration.ts";
@@ -63,7 +64,7 @@ test("H10 real native child plus executable fake herdr: live reload, settled whi
       pane: { pane_id: "pane-owned", terminal_id: "terminal-owned", workspace_id: "workspace-owned", tab_id: "tab-owned", agent: null, agent_session: null } }));
     const env = { HOME: home, PATH: process.env.PATH, FAKE_HERDR_STATE: statePath, CONDUCTOR_HERDR_BIN: fileURLToPath(new URL("./fixtures/fake-herdr.mjs", import.meta.url)) };
     const signals: NodeJS.Signals[] = [];
-    const runtime = new HerdrRuntime({ cli: createHerdrCli({ env, socketPath }), env, workspaceId: "workspace-owned", trustArgs: () => [], piVersion: "0.87.1", signal: (pid, signal) => { signals.push(signal); process.kill(pid, signal); } });
+    const runtime = new HerdrRuntime({ host: new HerdrTuiHost({ cli: createHerdrCli({ env, socketPath }), workspaceId: "workspace-owned" }), env, trustArgs: () => [], piVersion: "0.87.1", signal: (pid, signal) => { signals.push(signal); process.kill(pid, signal); } });
     const run: Run = { id: `oracle-${phase}`, runtime: "herdr", persona: "oracle", task: "offline native recovery", mode: "background", status: "running", cwd: dir,
       startTime: Date.now(), lastEventAt: Date.now(), messages: [], usage: emptyUsage(), recordPath: join(dir, "record.json"), transcriptPath: join(dir, "transcript.jsonl"), finalPath: join(dir, "final.md") };
     let effort: ReturnType<typeof openEffort> | undefined;

@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { sandboxPi, tmpDir } from "./helpers/tmp.ts";
 import { readProcessStartTime } from "../src/reconcile-startup.ts";
 import { HerdrRuntime } from "../src/herdr/runtime.ts";
+import { HerdrTuiHost } from "../src/herdr/host.ts";
 import { createHerdrCli } from "../src/herdr/cli.ts";
 import { emptyUsage, type Run } from "../src/types.ts";
 import { RunRegistry, forceTerminate } from "../src/runs.ts";
@@ -27,7 +28,7 @@ for (const mode of ["running", "stubborn", "unproven", "diagnostic-timeout", "di
   const cli = createHerdrCli({ env: { ...env, FAKE_HERDR_STATE: statePath, CONDUCTOR_HERDR_BIN: new URL("fixtures/fake-herdr.mjs", import.meta.url).pathname }, socketPath: `${statePath}.socket` });
   const dir = join(root, "oracle-h9"); mkdirSync(dir);
   const run: Run = { id: "oracle-h9", runtime: "herdr", persona: "oracle", task: "probe", cwd: root, status: "running", mode: "background", messages: [], usage: emptyUsage(), startTime: Date.now(), lastEventAt: Date.now(), recordPath: join(dir, "record.json"), transcriptPath: join(dir, "transcript.jsonl"), finalPath: join(dir, "final.md") };
-  const runtime = new HerdrRuntime({ cli, env, workspaceId: "workspace", trustArgs: () => [] });
+  const runtime = new HerdrRuntime({ host: new HerdrTuiHost({ cli, workspaceId: "workspace" }), env, trustArgs: () => [] });
   const transport = runtime.launch(run, [], root, { line() {}, close() {}, error() {}, initialDeliveryFailed() {} }, "probe", { kind: "fresh", sessionDir: join(dir, "session"), systemPrompt: "probe" });
   run.transport = transport; await transport.ready; transport.observe();
   assert.equal(run.herdr!.childPid, child.pid); assert.equal(run.herdr!.childStartTime, start);

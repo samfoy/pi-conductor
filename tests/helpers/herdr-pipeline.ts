@@ -3,6 +3,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path";
 import { tmpDir } from "./tmp.ts";
 import { HerdrRuntime } from "../../src/herdr/runtime.ts";
+import { HerdrTuiHost } from "../../src/herdr/host.ts";
 import { readInbox, writeInboxAck } from "../../src/herdr/inbox.ts";
 import { emptyUsage, type Run } from "../../src/types.ts";
 import { RunRegistry } from "../../src/runs.ts";
@@ -63,7 +64,7 @@ export function herdrFixture(mode = "healthy", opts: { id?: string; cwd?: string
     };
     return { type: "agent_started", agent };
   } };
-  const runtime = new HerdrRuntime({ cli, workspaceId: "workspace", env: {}, trustArgs: () => [], piVersion: "0.87.1", platform: "linux", now: () => time,
+  const runtime = new HerdrRuntime({ host: new HerdrTuiHost({ cli, workspaceId: "workspace" }), env: {}, trustArgs: () => [], piVersion: "0.87.1", platform: "linux", now: () => time,
     // The idle child reacts once its task is published.
     sleep: async ms => { if (react?.()) return; time += ms; onSleep(); }, probe: pid => ({ pid, state: unknown ? "unknown" : gone ? "gone" : "alive", startTime: 77 }),
     signal: (_pid, signal) => { signals.push(signal); if (mode !== "stubborn") exit(); } });

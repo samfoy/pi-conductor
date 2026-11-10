@@ -1349,6 +1349,243 @@ function createHerdrCli(opts) {
   };
 }
 
+// src/herdr/identity.ts
+var text = (v) => typeof v === "string" && v.length > 0 && !v.includes("\0");
+var positiveInteger = (v) => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
+function isHerdrPane(value) {
+  if (!isRecord(value) || ![value.pane_id, value.terminal_id, value.workspace_id, value.tab_id].every(text)) return false;
+  const session = value.agent_session;
+  return (value.agent == null || text(value.agent)) && (session == null || isRecord(session) && (session.kind === "path" || session.kind === "id") && [session.value, session.agent, session.source].every(text));
+}
+var unknown = (reason) => ({ ok: false, state: "unknown", reason });
+function sameHerdrBinding(a, b) {
+  return !!a && !!b && ["runId", "launchNonce", "sessionId", "sessionFile", "socketPath", "workspaceId", "tabId", "paneId", "terminalId", "agentName", "childPid", "childStartTime", "ownerGeneration"].every((key) => a[key] === b[key]);
+}
+function provePaneOurs(ev) {
+  const { binding: b, current, pane } = ev;
+  if (!isRecord(b) || !isRecord(current) || !isHerdrPane(pane)) return unknown("missing pane evidence");
+  for (const key of ["runId", "launchNonce", "sessionId", "sessionFile"]) {
+    if (!text(b[key]) || b[key] !== current[key]) return unknown("invocation mismatch");
+  }
+  if (!text(b.socketPath) || b.socketPath !== ev.socketPath) return unknown("socket mismatch");
+  if (pane.pane_id !== b.paneId || pane.terminal_id !== b.terminalId || pane.workspace_id !== b.workspaceId || pane.tab_id !== b.tabId) return unknown("pane identity mismatch");
+  if (ev.requireNoAgent && (pane.agent != null || pane.agent_session != null)) return unknown("pane not empty");
+  return { ok: true };
+}
+function proveChildProcess(ev) {
+  const paneProof = provePaneOurs({ ...ev, requireNoAgent: false });
+  if (!paneProof.ok) return paneProof;
+  const { binding: b, hello: h, pane, process: proc } = ev;
+  if (!isRecord(b) || !isRecord(h) || !isHerdrPane(pane) || !isRecord(proc)) return unknown("missing child evidence");
+  if (h.v !== 1 || !positiveInteger(ev.bridgeProtocol) || h.bridgeProtocol !== ev.bridgeProtocol || !text(h.piVersion) || !text(h.conductorVersion) || typeof h.at !== "number" || !Number.isFinite(h.at) || h.at < 0) return unknown("malformed hello");
+  for (const key of ["runId", "launchNonce", "sessionId", "sessionFile"]) {
+    if (h[key] !== b[key]) return unknown("hello invocation mismatch");
+  }
+  if (h.paneId !== b.paneId || !positiveInteger(h.pid) || h.pid <= 1 || h.pid !== b.childPid || proc.pid !== h.pid) return unknown("child pid mismatch");
+  if (pane.agent !== "pi" || pane.agent_session?.kind !== "path" || pane.agent_session.agent !== "pi" || pane.agent_session.value !== h.sessionFile) return unknown("Pi session mismatch");
+  if (!text(ev.platform) || h.pidStartTime !== void 0 && !positiveInteger(h.pidStartTime) || h.pidStartTime !== b.childStartTime) return unknown("malformed start identity");
+  if (ev.platform === "linux" && !positiveInteger(h.pidStartTime)) return unknown("missing start identity");
+  if (proc.state === "gone") return { ok: false, state: "gone", reason: "child absent" };
+  if (proc.state !== "alive") return unknown("child liveness unknown");
+  if (ev.platform === "linux" && proc.startTime !== h.pidStartTime) return unknown("child start mismatch");
+  return { ok: true, pid: h.pid };
+}
+
+// src/herdr/placement.ts
+var HERDR_FORWARD_ENV = [
+  "AWS_PROFILE",
+  "AWS_REGION",
+  "AWS_DEFAULT_REGION",
+  "AWS_CONFIG_FILE",
+  "AWS_SHARED_CREDENTIALS_FILE",
+  "PI_BEDROCK_PROFILE",
+  "PI_CODING_AGENT_DIR",
+  "HTTPS_PROXY",
+  "HTTP_PROXY",
+  "NO_PROXY"
+];
+var ownedNames = ["CONDUCTOR_SUBAGENT", "CONDUCTOR_RUNTIME", "CONDUCTOR_RUN_ID", "CONDUCTOR_CONFIG_CWD", ...CHILD_SCOPE_ENV, "TMPDIR"];
+function buildHerdrEnv(source, owned) {
+  return {
+    ...Object.fromEntries(HERDR_FORWARD_ENV.flatMap((key) => source[key] === void 0 ? [] : [[key, source[key]]])),
+    CONDUCTOR_SUBAGENT: "1",
+    CONDUCTOR_RUNTIME: "herdr",
+    CONDUCTOR_RUN_ID: owned.runId,
+    CONDUCTOR_CONFIG_CWD: owned.configCwd,
+    ...childScopeEnv(owned.runDir, owned.scope),
+    ...owned.tmpDir === void 0 ? {} : { TMPDIR: owned.tmpDir }
+  };
+}
+var validText = (value) => typeof value === "string" && value.trim() !== "" && !value.includes("\0");
+function paneEnvArgs(env) {
+  return Object.entries(env).flatMap(([key, value]) => {
+    if (![...HERDR_FORWARD_ENV, ...ownedNames].includes(key) || typeof value !== "string" || value.includes("\0")) {
+      throw new Error("herdr: invalid pane environment");
+    }
+    return ["--env", `${key}=${value}`];
+  });
+}
+function tabCreateArgs(opts) {
+  if (![opts.workspaceId, opts.cwd, opts.runId].every(validText)) throw new HerdrCliError("configuration");
+  return ["tab", "create", "--workspace", opts.workspaceId, "--cwd", opts.cwd, "--label", opts.runId, ...paneEnvArgs(opts.env), "--no-focus"];
+}
+function paneSplitArgs(opts) {
+  if (![opts.paneId, opts.cwd].every(validText) || !["right", "down"].includes(opts.direction)) throw new HerdrCliError("configuration");
+  return ["pane", "split", "--pane", opts.paneId, "--direction", opts.direction, "--cwd", opts.cwd, ...paneEnvArgs(opts.env), "--no-focus"];
+}
+async function createRunTab(cli, opts, limits) {
+  const created = await cli.json(tabCreateArgs({ ...opts, runId: opts.invocation.runId }), limits);
+  const root = created.root_pane;
+  const tab = created.tab;
+  if (!isHerdrPane(root) || !isRecord(tab) || root.workspace_id !== opts.workspaceId || root.tab_id !== tab.tab_id || root.workspace_id !== tab.workspace_id || tab.pane_count !== 1 || tab.label !== opts.invocation.runId) throw new HerdrCliError("protocol");
+  const binding = {
+    ...opts.invocation,
+    socketPath: cli.socketPath,
+    workspaceId: root.workspace_id,
+    tabId: root.tab_id,
+    paneId: root.pane_id,
+    terminalId: root.terminal_id,
+    createdTab: true
+  };
+  const observed = await cli.json(["pane", "get", binding.paneId], limits);
+  if (!provePaneOurs({ binding, current: opts.invocation, socketPath: cli.socketPath, pane: observed.pane, requireNoAgent: true }).ok) {
+    throw new HerdrCliError("protocol");
+  }
+  return binding;
+}
+async function createSplitPane(cli, opts, limits) {
+  const created = (await cli.json(paneSplitArgs({ paneId: opts.anchor.paneId, direction: opts.direction, cwd: opts.cwd, env: opts.env }), limits)).pane;
+  const known = [opts.anchor, ...opts.known].filter((b) => !!b);
+  if (!isHerdrPane(created) || created.workspace_id !== opts.anchor.workspaceId || created.tab_id !== opts.anchor.tabId || known.some((b) => b.paneId === created.pane_id || b.terminalId === created.terminal_id)) throw new HerdrCliError("protocol");
+  const binding = {
+    ...opts.invocation,
+    socketPath: cli.socketPath,
+    workspaceId: created.workspace_id,
+    tabId: created.tab_id,
+    paneId: created.pane_id,
+    terminalId: created.terminal_id,
+    createdTab: false
+  };
+  const observed = await cli.json(["pane", "get", binding.paneId], limits);
+  if (!provePaneOurs({ binding, current: opts.invocation, socketPath: cli.socketPath, pane: observed.pane, requireNoAgent: true }).ok) {
+    throw new HerdrCliError("protocol");
+  }
+  return binding;
+}
+async function leafPlacement(cli, opts, limits) {
+  const own = (why2) => ({ warning: `${why2}; leaf placed in its own tab` });
+  const parent = opts.parent;
+  if (opts.parentRuntime !== "herdr" || !parent) return own(`parent ${opts.parentId} has no herdr pane (${opts.parentRuntime} runtime)`);
+  if (parent.socketPath !== cli.socketPath) return own(`parent ${opts.parentId} pane is on another herdr socket`);
+  const prove = async (binding) => {
+    try {
+      const pane = (await cli.json(["pane", "get", binding.paneId], limits)).pane;
+      return provePaneOurs({ binding, current: binding, socketPath: cli.socketPath, pane, requireNoAgent: false });
+    } catch {
+      return { ok: false, reason: "pane observation unavailable" };
+    }
+  };
+  const fenced = own(`parent ${opts.parentId} is no longer this lead's current owned run`);
+  if (!opts.current()) return fenced;
+  const proof = await prove(parent);
+  if (!opts.current()) return fenced;
+  if (!proof.ok) return own(`parent pane unproven (${proof.reason})`);
+  const previous = opts.previous;
+  if (previous && previous.socketPath === parent.socketPath && previous.workspaceId === parent.workspaceId && previous.tabId === parent.tabId) {
+    const ok = (await prove(previous)).ok;
+    if (!opts.current()) return fenced;
+    if (ok) return { anchor: previous, direction: "down" };
+  }
+  return { anchor: parent, direction: "right" };
+}
+async function closeEmptyPane(cli, binding, current, limits) {
+  try {
+    const observed = await cli.json(["pane", "get", binding.paneId], limits);
+    const proof = provePaneOurs({ binding, current: current(), socketPath: cli.socketPath, pane: observed.pane, requireNoAgent: true });
+    if (!proof.ok) return proof;
+    if (limits?.signal?.aborted) return { ok: false, state: "unknown", reason: "pane cleanup cancelled" };
+    await cli.json(["pane", "close", binding.paneId], limits);
+    return { ok: true };
+  } catch {
+    return { ok: false, state: "unknown", reason: "pane cleanup unconfirmed" };
+  }
+}
+
+// src/herdr/host.ts
+var herdrFailure = (message4) => new Error(`herdr: ${message4}`);
+var tuiIdentity = {
+  proveChild: ({ observation, ...evidence }) => proveChildProcess({ ...evidence, pane: observation }),
+  recorded: (binding) => ({
+    pane_id: binding.paneId,
+    terminal_id: binding.terminalId,
+    tab_id: binding.tabId,
+    workspace_id: binding.workspaceId,
+    agent: "pi",
+    agent_session: { kind: "path", value: binding.sessionFile, agent: "pi", source: "launch" }
+  })
+};
+var HerdrTuiHost = class {
+  constructor(options) {
+    this.options = options;
+  }
+  options;
+  identity = tuiIdentity;
+  get socketPath() {
+    return this.options.cli.socketPath;
+  }
+  async reuse(previous, invocation, signal) {
+    try {
+      const observed = await this.options.cli.json(["pane", "get", previous.paneId], { timeoutMs: 2e3, signal });
+      return provePaneOurs({ binding: previous, current: previous, socketPath: this.socketPath, pane: observed.pane, requireNoAgent: true }).ok ? { ...previous, ...invocation, createdTab: false, childPid: void 0, childStartTime: void 0 } : void 0;
+    } catch {
+      return void 0;
+    }
+  }
+  async placeLeaf({ cwd, invocation, env, known, ...leaf }, fence, signal) {
+    const placement = await leafPlacement(this.options.cli, leaf, { timeoutMs: 2e3, signal });
+    fence.check();
+    if (!("anchor" in placement)) return placement;
+    return { binding: await createSplitPane(this.options.cli, { ...placement, cwd, invocation, env, known }, { timeoutMs: 5e3, signal }) };
+  }
+  async placeRun(spec, fence, signal) {
+    const { cli, workspaceId, leadPaneId } = this.options;
+    const workspace = workspaceId ?? (await cli.json(["pane", "get", leadPaneId], { timeoutMs: 2e3, signal })).pane;
+    const targetWorkspace = typeof workspace === "string" ? workspace : isRecord(workspace) ? workspace.workspace_id : void 0;
+    if (typeof targetWorkspace !== "string") throw herdrFailure("parent workspace unavailable");
+    fence.check();
+    return createRunTab(cli, { workspaceId: targetWorkspace, ...spec }, { timeoutMs: 5e3, signal });
+  }
+  async start(binding, launch, limits, fence) {
+    const { cli } = this.options;
+    const args = ["agent", "start", launch.alias, "--kind", "pi", "--pane", binding.paneId, "--timeout", "60000", "--", ...launch.args];
+    let started;
+    try {
+      started = await cli.json(args, limits);
+    } catch (e) {
+      fence.check();
+      if (!(e instanceof HerdrCliError) || e.remoteCode !== "agent_pane_busy") throw herdrFailure("agent start outcome unconfirmed; no blind retry");
+      await fence.backoff();
+      fence.check();
+      const pane = await this.observe(binding, { timeoutMs: 2e3, signal: limits.signal });
+      fence.check();
+      if (!provePaneOurs({ binding, current: fence.current(), socketPath: this.socketPath, pane, requireNoAgent: true }).ok) throw herdrFailure("busy retry refused: pane no longer empty and owned");
+      started = await cli.json(args, limits);
+    }
+    fence.check();
+    if (!isRecord(started.agent) || started.agent.name !== launch.alias || started.agent.pane_id !== binding.paneId) throw herdrFailure("agent start registered a different agent or pane");
+    return started.agent;
+  }
+  async observe(binding, limits) {
+    return (await this.options.cli.json(["pane", "get", binding.paneId], limits)).pane;
+  }
+  readScreen(binding, lines, limits) {
+    return this.options.cli.text(["agent", "read", binding.agentName, "--source", "recent-unwrapped", "--lines", String(lines)], limits);
+  }
+  release(binding, current, limits) {
+    return closeEmptyPane(this.options.cli, binding, current, limits);
+  }
+};
+
 // src/runtime.ts
 function parseRuntimeChoice(value) {
   if (value === "auto" || value === "subprocess" || value === "herdr") return value;
@@ -1385,8 +1622,11 @@ function isObservableHere(run2) {
 function runtimeFor(run2, env) {
   if (run2.runtime === "herdr" && run2.transport?.kind === "herdr" && run2.transport.runtime) return run2.transport.runtime;
   if (run2.runtime === "herdr") return new HerdrRuntime(env ? {
-    cli: createHerdrCli({ env: { ...env }, socketPath: env.HERDR_SOCKET_PATH }),
-    workspaceId: env.HERDR_WORKSPACE_ID,
+    host: new HerdrTuiHost({
+      cli: createHerdrCli({ env: { ...env }, socketPath: env.HERDR_SOCKET_PATH }),
+      workspaceId: env.HERDR_WORKSPACE_ID,
+      leadPaneId: env.HERDR_PANE_ID
+    }),
     env: { ...env }
   } : void 0);
   assertSupportedRuntime(run2.runtime);
@@ -2223,48 +2463,6 @@ var HerdrMonitor = class {
     this.timer = void 0;
   }
 };
-
-// src/herdr/identity.ts
-var text = (v) => typeof v === "string" && v.length > 0 && !v.includes("\0");
-var positiveInteger = (v) => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
-function isHerdrPane(value) {
-  if (!isRecord(value) || ![value.pane_id, value.terminal_id, value.workspace_id, value.tab_id].every(text)) return false;
-  const session = value.agent_session;
-  return (value.agent == null || text(value.agent)) && (session == null || isRecord(session) && (session.kind === "path" || session.kind === "id") && [session.value, session.agent, session.source].every(text));
-}
-var unknown = (reason) => ({ ok: false, state: "unknown", reason });
-function sameHerdrBinding(a, b) {
-  return !!a && !!b && ["runId", "launchNonce", "sessionId", "sessionFile", "socketPath", "workspaceId", "tabId", "paneId", "terminalId", "agentName", "childPid", "childStartTime", "ownerGeneration"].every((key) => a[key] === b[key]);
-}
-function provePaneOurs(ev) {
-  const { binding: b, current, pane } = ev;
-  if (!isRecord(b) || !isRecord(current) || !isHerdrPane(pane)) return unknown("missing pane evidence");
-  for (const key of ["runId", "launchNonce", "sessionId", "sessionFile"]) {
-    if (!text(b[key]) || b[key] !== current[key]) return unknown("invocation mismatch");
-  }
-  if (!text(b.socketPath) || b.socketPath !== ev.socketPath) return unknown("socket mismatch");
-  if (pane.pane_id !== b.paneId || pane.terminal_id !== b.terminalId || pane.workspace_id !== b.workspaceId || pane.tab_id !== b.tabId) return unknown("pane identity mismatch");
-  if (ev.requireNoAgent && (pane.agent != null || pane.agent_session != null)) return unknown("pane not empty");
-  return { ok: true };
-}
-function proveChildProcess(ev) {
-  const paneProof = provePaneOurs({ ...ev, requireNoAgent: false });
-  if (!paneProof.ok) return paneProof;
-  const { binding: b, hello: h, pane, process: proc } = ev;
-  if (!isRecord(b) || !isRecord(h) || !isHerdrPane(pane) || !isRecord(proc)) return unknown("missing child evidence");
-  if (h.v !== 1 || !positiveInteger(ev.bridgeProtocol) || h.bridgeProtocol !== ev.bridgeProtocol || !text(h.piVersion) || !text(h.conductorVersion) || typeof h.at !== "number" || !Number.isFinite(h.at) || h.at < 0) return unknown("malformed hello");
-  for (const key of ["runId", "launchNonce", "sessionId", "sessionFile"]) {
-    if (h[key] !== b[key]) return unknown("hello invocation mismatch");
-  }
-  if (h.paneId !== b.paneId || !positiveInteger(h.pid) || h.pid <= 1 || h.pid !== b.childPid || proc.pid !== h.pid) return unknown("child pid mismatch");
-  if (pane.agent !== "pi" || pane.agent_session?.kind !== "path" || pane.agent_session.agent !== "pi" || pane.agent_session.value !== h.sessionFile) return unknown("Pi session mismatch");
-  if (!text(ev.platform) || h.pidStartTime !== void 0 && !positiveInteger(h.pidStartTime) || h.pidStartTime !== b.childStartTime) return unknown("malformed start identity");
-  if (ev.platform === "linux" && !positiveInteger(h.pidStartTime)) return unknown("missing start identity");
-  if (proc.state === "gone") return { ok: false, state: "gone", reason: "child absent" };
-  if (proc.state !== "alive") return unknown("child liveness unknown");
-  if (ev.platform === "linux" && proc.startTime !== h.pidStartTime) return unknown("child start mismatch");
-  return { ok: true, pid: h.pid };
-}
 
 // src/ask-owner.ts
 import { Type } from "@sinclair/typebox";
@@ -8510,126 +8708,6 @@ function elapsedStr(start, end) {
   return `${(m / 60).toFixed(1)}h`;
 }
 
-// src/herdr/placement.ts
-var HERDR_FORWARD_ENV = [
-  "AWS_PROFILE",
-  "AWS_REGION",
-  "AWS_DEFAULT_REGION",
-  "AWS_CONFIG_FILE",
-  "AWS_SHARED_CREDENTIALS_FILE",
-  "PI_BEDROCK_PROFILE",
-  "PI_CODING_AGENT_DIR",
-  "HTTPS_PROXY",
-  "HTTP_PROXY",
-  "NO_PROXY"
-];
-var ownedNames = ["CONDUCTOR_SUBAGENT", "CONDUCTOR_RUNTIME", "CONDUCTOR_RUN_ID", "CONDUCTOR_CONFIG_CWD", ...CHILD_SCOPE_ENV, "TMPDIR"];
-function buildHerdrEnv(source, owned) {
-  return {
-    ...Object.fromEntries(HERDR_FORWARD_ENV.flatMap((key) => source[key] === void 0 ? [] : [[key, source[key]]])),
-    CONDUCTOR_SUBAGENT: "1",
-    CONDUCTOR_RUNTIME: "herdr",
-    CONDUCTOR_RUN_ID: owned.runId,
-    CONDUCTOR_CONFIG_CWD: owned.configCwd,
-    ...childScopeEnv(owned.runDir, owned.scope),
-    ...owned.tmpDir === void 0 ? {} : { TMPDIR: owned.tmpDir }
-  };
-}
-var validText = (value) => typeof value === "string" && value.trim() !== "" && !value.includes("\0");
-function paneEnvArgs(env) {
-  return Object.entries(env).flatMap(([key, value]) => {
-    if (![...HERDR_FORWARD_ENV, ...ownedNames].includes(key) || typeof value !== "string" || value.includes("\0")) {
-      throw new Error("herdr: invalid pane environment");
-    }
-    return ["--env", `${key}=${value}`];
-  });
-}
-function tabCreateArgs(opts) {
-  if (![opts.workspaceId, opts.cwd, opts.runId].every(validText)) throw new HerdrCliError("configuration");
-  return ["tab", "create", "--workspace", opts.workspaceId, "--cwd", opts.cwd, "--label", opts.runId, ...paneEnvArgs(opts.env), "--no-focus"];
-}
-function paneSplitArgs(opts) {
-  if (![opts.paneId, opts.cwd].every(validText) || !["right", "down"].includes(opts.direction)) throw new HerdrCliError("configuration");
-  return ["pane", "split", "--pane", opts.paneId, "--direction", opts.direction, "--cwd", opts.cwd, ...paneEnvArgs(opts.env), "--no-focus"];
-}
-async function createRunTab(cli, opts, limits) {
-  const created = await cli.json(tabCreateArgs({ ...opts, runId: opts.invocation.runId }), limits);
-  const root = created.root_pane;
-  const tab = created.tab;
-  if (!isHerdrPane(root) || !isRecord(tab) || root.workspace_id !== opts.workspaceId || root.tab_id !== tab.tab_id || root.workspace_id !== tab.workspace_id || tab.pane_count !== 1 || tab.label !== opts.invocation.runId) throw new HerdrCliError("protocol");
-  const binding = {
-    ...opts.invocation,
-    socketPath: cli.socketPath,
-    workspaceId: root.workspace_id,
-    tabId: root.tab_id,
-    paneId: root.pane_id,
-    terminalId: root.terminal_id,
-    createdTab: true
-  };
-  const observed = await cli.json(["pane", "get", binding.paneId], limits);
-  if (!provePaneOurs({ binding, current: opts.invocation, socketPath: cli.socketPath, pane: observed.pane, requireNoAgent: true }).ok) {
-    throw new HerdrCliError("protocol");
-  }
-  return binding;
-}
-async function createSplitPane(cli, opts, limits) {
-  const created = (await cli.json(paneSplitArgs({ paneId: opts.anchor.paneId, direction: opts.direction, cwd: opts.cwd, env: opts.env }), limits)).pane;
-  const known = [opts.anchor, ...opts.known].filter((b) => !!b);
-  if (!isHerdrPane(created) || created.workspace_id !== opts.anchor.workspaceId || created.tab_id !== opts.anchor.tabId || known.some((b) => b.paneId === created.pane_id || b.terminalId === created.terminal_id)) throw new HerdrCliError("protocol");
-  const binding = {
-    ...opts.invocation,
-    socketPath: cli.socketPath,
-    workspaceId: created.workspace_id,
-    tabId: created.tab_id,
-    paneId: created.pane_id,
-    terminalId: created.terminal_id,
-    createdTab: false
-  };
-  const observed = await cli.json(["pane", "get", binding.paneId], limits);
-  if (!provePaneOurs({ binding, current: opts.invocation, socketPath: cli.socketPath, pane: observed.pane, requireNoAgent: true }).ok) {
-    throw new HerdrCliError("protocol");
-  }
-  return binding;
-}
-async function leafPlacement(cli, opts, limits) {
-  const own = (why2) => ({ warning: `${why2}; leaf placed in its own tab` });
-  const parent = opts.parent;
-  if (opts.parentRuntime !== "herdr" || !parent) return own(`parent ${opts.parentId} has no herdr pane (${opts.parentRuntime} runtime)`);
-  if (parent.socketPath !== cli.socketPath) return own(`parent ${opts.parentId} pane is on another herdr socket`);
-  const prove = async (binding) => {
-    try {
-      const pane = (await cli.json(["pane", "get", binding.paneId], limits)).pane;
-      return provePaneOurs({ binding, current: binding, socketPath: cli.socketPath, pane, requireNoAgent: false });
-    } catch {
-      return { ok: false, reason: "pane observation unavailable" };
-    }
-  };
-  const fenced = own(`parent ${opts.parentId} is no longer this lead's current owned run`);
-  if (!opts.current()) return fenced;
-  const proof = await prove(parent);
-  if (!opts.current()) return fenced;
-  if (!proof.ok) return own(`parent pane unproven (${proof.reason})`);
-  const previous = opts.previous;
-  if (previous && previous.socketPath === parent.socketPath && previous.workspaceId === parent.workspaceId && previous.tabId === parent.tabId) {
-    const ok = (await prove(previous)).ok;
-    if (!opts.current()) return fenced;
-    if (ok) return { anchor: previous, direction: "down" };
-  }
-  return { anchor: parent, direction: "right" };
-}
-async function closeEmptyPane(cli, binding, current, limits) {
-  try {
-    const observed = await cli.json(["pane", "get", binding.paneId], limits);
-    const proof = provePaneOurs({ binding, current: current(), socketPath: cli.socketPath, pane: observed.pane, requireNoAgent: true });
-    if (!proof.ok) return proof;
-    if (limits?.signal?.aborted) return { ok: false, state: "unknown", reason: "pane cleanup cancelled" };
-    await cli.json(["pane", "close", binding.paneId], limits);
-    return { ok: true };
-  } catch {
-    return { ok: false, state: "unknown", reason: "pane cleanup unconfirmed" };
-  }
-}
-
 // src/herdr/runtime.ts
 var HERDR_LAUNCH_BUDGET = { start: 65e3, hello: 15e3, ack: 3e4, agentStart: 3e4, busy: 2e3, diagnostic: 2e3 };
 function projectTrustArgs(cwd, agentDir = getAgentDir()) {
@@ -8644,7 +8722,6 @@ function probeProcess(pid) {
     return { pid, state: e.code === "ESRCH" ? "gone" : "unknown" };
   }
 }
-var failure = (message4) => new Error(`herdr: ${message4}`);
 function herdrAgentName(runId, launchNonce) {
   const base = /^[a-z][a-z0-9_-]{0,22}$/.test(runId) ? runId : `c${createHash4("sha256").update(runId).digest("hex").slice(0, 12)}`;
   return `${base}-${createHash4("sha256").update(launchNonce).digest("hex").slice(0, 8)}`;
@@ -8660,19 +8737,12 @@ function herdrChildAbsent(run2) {
     const owner = readHerdrOwner(dirname16(run2.recordPath));
     if (owner && (owner.generation !== b.ownerGeneration || owner.launchNonce !== b.launchNonce || owner.runId !== run2.id || owner.socketPath !== b.socketPath)) return false;
     const hello = read(join20(dirname16(run2.recordPath), "launch", `${b.launchNonce}.json`));
-    const proof = proveChildProcess({
+    const proof = tuiIdentity.proveChild({
       binding: b,
       current: b,
       socketPath: b.socketPath,
       hello,
-      pane: {
-        pane_id: b.paneId,
-        terminal_id: b.terminalId,
-        tab_id: b.tabId,
-        workspace_id: b.workspaceId,
-        agent: "pi",
-        agent_session: { kind: "path", value: b.sessionFile, agent: "pi", source: "launch" }
-      },
+      observation: tuiIdentity.recorded(b),
       platform: process.platform,
       bridgeProtocol: 1,
       process: probeProcess(b.childPid)
@@ -8686,8 +8756,8 @@ async function releaseRecordedPane(run2, current, env = process.env, signal) {
   const binding = run2.herdr && { ...run2.herdr };
   if (!binding || !sameHerdrBinding(binding, current()) || !herdrChildAbsent(run2) || signal?.aborted) return false;
   try {
-    const cli = createHerdrCli({ env, socketPath: binding.socketPath });
-    const result = await closeEmptyPane(cli, binding, () => !signal?.aborted && sameHerdrBinding(binding, current()) && herdrChildAbsent(run2) ? binding : void 0, { timeoutMs: 2e3, signal });
+    const host = new HerdrTuiHost({ cli: createHerdrCli({ env, socketPath: binding.socketPath }) });
+    const result = await host.release(binding, () => !signal?.aborted && sameHerdrBinding(binding, current()) && herdrChildAbsent(run2) ? binding : void 0, { timeoutMs: 2e3, signal });
     return result.ok;
   } catch {
     return false;
@@ -8705,7 +8775,7 @@ var HerdrRuntime = class {
     return run2.transport?.kind === "herdr" && run2.transport.deliver ? run2.transport.deliver(type, text5, sessionId) : { kind: "epipe", reason: "herdr child is not attached and ready" };
   }
   signal() {
-    throw failure("pause is subprocess-only");
+    throw herdrFailure("pause is subprocess-only");
   }
   stopProcess(run2) {
     return run2.transport?.kind === "herdr" ? run2.transport.stop() : void 0;
@@ -8721,49 +8791,42 @@ var HerdrRuntime = class {
     return this.connect(run2, run2.cwd, sink, true);
   }
   async inspect(run2) {
-    if (!this.options || !run2.herdr || run2.herdr.socketPath !== this.options.cli.socketPath) throw failure("other-socket");
-    const { cli } = this.options, probe = this.options.probe ?? probeProcess;
+    if (!this.options || !run2.herdr || run2.herdr.socketPath !== this.options.host.socketPath) throw herdrFailure("other-socket");
+    const { host } = this.options, probe = this.options.probe ?? probeProcess;
     const binding = { ...run2.herdr }, nonce = binding.launchNonce, dir = dirname16(run2.recordPath);
-    if (binding.runId !== run2.id || !/^[A-Za-z0-9_-]+$/.test(nonce) || dirname16(binding.sessionFile) !== join20(dir, "session")) throw failure("reattach binding mismatch");
+    if (binding.runId !== run2.id || !/^[A-Za-z0-9_-]+$/.test(nonce) || dirname16(binding.sessionFile) !== join20(dir, "session")) throw herdrFailure("reattach binding mismatch");
     const claim = read(join20(dir, "launch", `${nonce}.json`));
-    if (!isRecord(claim)) throw failure("reattach missing child hello");
+    if (!isRecord(claim)) throw herdrFailure("reattach missing child hello");
     const hello = claim;
     binding.childPid ??= hello.pid;
     binding.childStartTime ??= hello.pidStartTime;
-    const pane = (await cli.json(["pane", "get", binding.paneId], { timeoutMs: 2e3 })).pane;
-    const proof = (pane2) => proveChildProcess({ binding, current: binding, socketPath: cli.socketPath, pane: pane2, hello, platform: this.options?.platform ?? process.platform, bridgeProtocol: 1, process: probe(hello.pid) });
-    const recordedPane = {
-      pane_id: binding.paneId,
-      terminal_id: binding.terminalId,
-      tab_id: binding.tabId,
-      workspace_id: binding.workspaceId,
-      agent: "pi",
-      agent_session: { kind: "path", value: binding.sessionFile, agent: "pi", source: "launch" }
-    };
+    const pane = await host.observe(binding, { timeoutMs: 2e3 });
+    const proof = (observation) => host.identity.proveChild({ binding, current: binding, socketPath: host.socketPath, observation, hello, platform: this.options?.platform ?? process.platform, bridgeProtocol: 1, process: probe(hello.pid) });
+    const recordedPane = host.identity.recorded(binding);
     let state = proof(pane);
     if (!state.ok && probe(hello.pid).state === "gone") state = proof(recordedPane);
-    if (!state.ok && state.state !== "gone") throw failure(`reattach identity unknown: ${state.reason}`);
+    if (!state.ok && state.state !== "gone") throw herdrFailure(`reattach identity unknown: ${state.reason}`);
     const provenPane = state.ok ? pane : recordedPane;
     try {
       const requests = readInbox(dir, nonce).filter((entry) => entry.request.kind === "initial" || entry.request.kind === "reply");
-      if (!requests.length && hasPreparedInboxRequest(dir, nonce)) throw failure("reattach: initial request prepared but never published; the child never received its task; preserved, not replayed");
-      if (requests.length !== 1) throw failure("reattach initial request missing/ambiguous");
+      if (!requests.length && hasPreparedInboxRequest(dir, nonce)) throw herdrFailure("reattach: initial request prepared but never published; the child never received its task; preserved, not replayed");
+      if (requests.length !== 1) throw herdrFailure("reattach initial request missing/ambiguous");
       const request = requests[0].request;
-      if (!readInboxAck(dir, request)?.accepted) throw failure("reattach initial input acceptance unknown");
+      if (!readInboxAck(dir, request)?.accepted) throw herdrFailure("reattach initial input acceptance unknown");
       let launchOffset = -1, cursor = 0, boundary = false, nativeStart = false, settled = false;
       const fd = openSync5(run2.transcriptPath, constants4.O_RDONLY | constants4.O_NOFOLLOW | constants4.O_NONBLOCK);
       try {
         const stat6 = fstatSync4(fd);
-        if (!stat6.isFile() || stat6.nlink !== 1) throw failure("invalid recovery transcript");
+        if (!stat6.isFile() || stat6.nlink !== 1) throw herdrFailure("invalid recovery transcript");
         const start = Math.max(0, stat6.size - 32 * 1048576), buffer = Buffer.alloc(stat6.size - start);
         let bytes = 0;
         while (bytes < buffer.length) {
           const n = readSync4(fd, buffer, bytes, buffer.length - bytes, start + bytes);
-          if (!n) throw failure("recovery transcript changed");
+          if (!n) throw herdrFailure("recovery transcript changed");
           bytes += n;
         }
         cursor = start ? buffer.indexOf(10) + 1 : 0;
-        if (start && !cursor) throw failure("recovery transcript has no complete boundary");
+        if (start && !cursor) throw herdrFailure("recovery transcript has no complete boundary");
         for (; ; ) {
           const end = buffer.indexOf(10, cursor);
           if (end < 0) break;
@@ -8787,7 +8850,7 @@ var HerdrRuntime = class {
       } finally {
         closeSync5(fd);
       }
-      if (!nativeStart || launchOffset < 0) throw failure("reattach accepted native launch boundary unavailable");
+      if (!nativeStart || launchOffset < 0) throw herdrFailure("reattach accepted native launch boundary unavailable");
       return { binding, hello, provenPane, request, launchOffset, state: state.ok ? "alive" : "gone", settled };
     } catch (error) {
       if (!state.ok && state.state === "gone") throw new Error("herdr: pi exited before accepted native launch evidence was complete; resources preserved", { cause: "herdr-gone-before-start" });
@@ -8795,7 +8858,7 @@ var HerdrRuntime = class {
     }
   }
   async probeRecord(run2) {
-    if (!this.options || run2.herdr?.socketPath !== this.options.cli.socketPath) return "other-socket";
+    if (!this.options || run2.herdr?.socketPath !== this.options.host.socketPath) return "other-socket";
     try {
       const result = await this.inspect(run2);
       return result.settled ? "settled" : result.state;
@@ -8804,9 +8867,9 @@ var HerdrRuntime = class {
     }
   }
   connect(run2, cwd, sink, reattach, initialPrompt, core) {
-    if (!this.options) throw failure("launch requires an explicitly injected CLI");
+    if (!this.options) throw herdrFailure("launch requires an explicitly injected terminal host");
     const options = this.options;
-    const { cli, env, workspaceId } = options;
+    const { host, env } = options;
     const now = options.now ?? Date.now;
     const sleep = options.sleep ?? ((ms, signal2) => delay2(ms, void 0, { signal: signal2 }));
     const probe = options.probe ?? probeProcess;
@@ -8824,7 +8887,7 @@ var HerdrRuntime = class {
         sessionId: run2.parentSessionId ?? herdrModuleEpoch,
         pid: process.pid,
         startTime: readProcessStartTime(process.pid),
-        socketPath: cli.socketPath,
+        socketPath: host.socketPath,
         runId: run2.id,
         launchNonce: nonce,
         at: Date.now()
@@ -8857,21 +8920,21 @@ var HerdrRuntime = class {
     };
     const current = () => owned() && run2.herdr === binding ? run2.herdr : void 0;
     const check = () => {
-      if (!owned()) throw failure("owner fenced");
-      if (abort.signal.aborted) throw failure("launch cancelled");
-      if (binding && run2.herdr !== binding) throw failure("launch binding replaced; preserving resources");
+      if (!owned()) throw herdrFailure("owner fenced");
+      if (abort.signal.aborted) throw herdrFailure("launch cancelled");
+      if (binding && run2.herdr !== binding) throw herdrFailure("launch binding replaced; preserving resources");
     };
-    const proof = (pane) => !owned() || cleanupSignal?.aborted ? { ok: false, state: "unknown", reason: "current invocation changed or cleanup cancelled" } : proveChildProcess({
+    const proof = (observation2) => !owned() || cleanupSignal?.aborted ? { ok: false, state: "unknown", reason: "current invocation changed or cleanup cancelled" } : host.identity.proveChild({
       binding: binding && { ...binding, childPid: binding.childPid ?? hello?.pid, childStartTime: binding.childStartTime ?? hello?.pidStartTime },
       current: current(),
-      socketPath: cli.socketPath,
-      pane,
+      socketPath: host.socketPath,
+      observation: observation2,
       hello,
       platform: options.platform ?? process.platform,
       bridgeProtocol: 1,
       process: hello ? probe(hello.pid) : void 0
     });
-    const getPane = async (signal2) => (await cli.json(["pane", "get", binding.paneId], { timeoutMs: 2e3, signal: signal2 ?? cleanupSignal })).pane;
+    const getPane = (signal2) => host.observe(binding, { timeoutMs: 2e3, signal: signal2 ?? cleanupSignal });
     const finishObservation = () => {
       tail?.close();
       monitor?.close();
@@ -8893,7 +8956,7 @@ var HerdrRuntime = class {
         return read(join20(dir, "launch", `${nonce}.json`));
       } catch (e) {
         if (e.code === "ENOENT") return;
-        throw failure("invalid launch hello");
+        throw herdrFailure("invalid launch hello");
       }
     };
     const stopOwned = (rollback) => stopWork ??= (async () => {
@@ -8939,7 +9002,7 @@ var HerdrRuntime = class {
         }
         gone();
         if (rollback && fresh) {
-          const result = await closeEmptyPane(cli, binding, () => current(), { timeoutMs: 2e3, signal: cleanupSignal });
+          const result = await host.release(binding, () => current(), { timeoutMs: 2e3, signal: cleanupSignal });
           if (!result.ok) diagnostic(`pane/worktree preserved: ${result.reason}`);
         }
       } catch {
@@ -8949,17 +9012,14 @@ var HerdrRuntime = class {
     const readStallEvidence = async () => {
       if (!owned() || !binding?.agentName || run2.herdr !== binding || cleanupSignal?.aborted) return "Live pane diagnostic unavailable.";
       try {
-        const text5 = await cli.text(
-          ["agent", "read", binding.agentName, "--source", "recent-unwrapped", "--lines", "40"],
-          { timeoutMs: HERDR_LAUNCH_BUDGET.diagnostic, maxBuffer: 4096, signal: cleanupSignal }
-        );
+        const text5 = await host.readScreen(binding, 40, { timeoutMs: HERDR_LAUNCH_BUDGET.diagnostic, maxBuffer: 4096, signal: cleanupSignal });
         return redactPaneEvidence(text5.split("\n").slice(-40).join("\n"), env);
       } catch {
         return "Live pane diagnostic unavailable; unknown dialogs are not answered automatically.";
       }
     };
     const ready = Promise.resolve().then(async () => {
-      if (detached) throw failure("owner detached");
+      if (detached) throw herdrFailure("owner detached");
       if (!ownership) claimOwnership();
       check();
       if (reattach) {
@@ -8979,16 +9039,16 @@ var HerdrRuntime = class {
         }
         return { binding, request: request2, launchOffset: launchOffset2 };
       }
-      if (run2.runtime !== "herdr" || !core || !initialPrompt?.trim()) throw failure("missing typed launch specification");
+      if (run2.runtime !== "herdr" || !core || !initialPrompt?.trim()) throw herdrFailure("missing typed launch specification");
       const scope = childToolScope(run2);
-      if (run2.pendingAsk && (core.kind !== "resume" || core.sessionPath !== run2.sessionPath)) throw failure("answer requires the original session");
-      if (core.kind === "resume" && run2.sessionPath && core.sessionPath !== run2.sessionPath) throw failure("resume session mismatch");
+      if (run2.pendingAsk && (core.kind !== "resume" || core.sessionPath !== run2.sessionPath)) throw herdrFailure("answer requires the original session");
+      if (core.kind === "resume" && run2.sessionPath && core.sessionPath !== run2.sessionPath) throw herdrFailure("resume session mismatch");
       const sessionDir = join20(dir, "session");
       const sessionFile = core.kind === "resume" ? core.sessionPath : join20(sessionDir, `${nonce}.jsonl`);
-      if (dirname16(sessionFile) !== sessionDir) throw failure("session outside run directory");
+      if (dirname16(sessionFile) !== sessionDir) throw herdrFailure("session outside run directory");
       if (core.kind === "fresh") seedSessionFile(sessionFile, [], cwd);
       const session = SessionManager2.open(sessionFile, sessionDir);
-      if (session.getCwd() !== cwd) throw failure("session cwd mismatch");
+      if (session.getCwd() !== cwd) throw herdrFailure("session cwd mismatch");
       const invocation = { runId: run2.id, launchNonce: nonce, sessionId: session.getSessionId(), sessionFile };
       const promptPath = join20(dir, `system-prompt-${nonce}.md`);
       writeFileSync6(promptPath, core.systemPrompt ?? "", { flag: "wx", mode: 384 });
@@ -8999,49 +9059,46 @@ var HerdrRuntime = class {
         nonce
       ];
       if (previous) {
-        try {
-          const observed = await cli.json(["pane", "get", previous.paneId], { timeoutMs: 2e3, signal: abort.signal });
-          check();
-          if (run2.herdr === previous && provePaneOurs({ binding: previous, current: previous, socketPath: cli.socketPath, pane: observed.pane, requireNoAgent: true }).ok) {
-            binding = { ...previous, ...invocation, createdTab: false, childPid: void 0, childStartTime: void 0 };
-          }
-        } catch {
-          check();
-        }
+        const reused = await host.reuse(previous, invocation, abort.signal);
+        check();
+        if (run2.herdr === previous && reused) binding = reused;
       }
-      if (run2.herdr !== previous) throw failure("launch binding replaced; preserving resources");
+      if (run2.herdr !== previous) throw herdrFailure("launch binding replaced; preserving resources");
       if (run2.effort) mkdirSync11(join20(dir, "tmp"), { recursive: true });
+      const paneEnv = buildHerdrEnv(env, { runId: run2.id, runDir: dir, configCwd: run2.cwd, scope, ...run2.effort ? { tmpDir: join20(dir, "tmp") } : {} });
+      const fence = { check, current, backoff: () => sleep(HERDR_LAUNCH_BUDGET.busy, abort.signal) };
       if (!binding) {
-        const paneEnv = buildHerdrEnv(env, { runId: run2.id, runDir: dir, configCwd: run2.cwd, scope, ...run2.effort ? { tmpDir: join20(dir, "tmp") } : {} });
-        let placement;
+        let warning;
         if (run2.depth === 2) {
           const prior = await priorLeaf;
           check();
           const parentBinding = parentRun?.herdr;
-          placement = await leafPlacement(cli, {
+          const leaf = await host.placeLeaf({
             parentId: run2.parentRunId ?? "(none)",
             parentRuntime: parentRun?.runtime ?? "missing",
             parent: parentBinding,
             previous: prior,
-            current: () => !!parentRun && parentRun.herdr === parentBinding && !isTerminal(parentRun.status) && ownsHerdrRun(parentRun)
-          }, { timeoutMs: 2e3, signal: abort.signal });
-          check();
-          if ("anchor" in placement) {
-            binding = await createSplitPane(cli, { ...placement, cwd, invocation, env: paneEnv, known: [parentBinding, prior] }, { timeoutMs: 5e3, signal: abort.signal });
+            current: () => !!parentRun && parentRun.herdr === parentBinding && !isTerminal(parentRun.status) && ownsHerdrRun(parentRun),
+            cwd,
+            invocation,
+            env: paneEnv,
+            known: [parentBinding, prior]
+          }, fence, abort.signal);
+          if ("binding" in leaf) {
+            binding = leaf.binding;
             placed(binding);
-          } else placed(prior);
+          } else {
+            warning = leaf.warning;
+            placed(prior);
+          }
         }
         if (!binding) {
-          const workspace = workspaceId ?? (await cli.json(["pane", "get", env.HERDR_PANE_ID], { timeoutMs: 2e3, signal: abort.signal })).pane;
-          const targetWorkspace = typeof workspace === "string" ? workspace : isRecord(workspace) ? workspace.workspace_id : void 0;
-          if (typeof targetWorkspace !== "string") throw failure("parent workspace unavailable");
-          check();
-          binding = await createRunTab(cli, { workspaceId: targetWorkspace, cwd, invocation, env: paneEnv }, { timeoutMs: 5e3, signal: abort.signal });
-          if (placement && "warning" in placement) binding.placementWarning = placement.warning;
+          binding = await host.placeRun({ cwd, invocation, env: paneEnv }, fence, abort.signal);
+          if (warning !== void 0) binding.placementWarning = warning;
         }
         fresh = true;
       }
-      if (run2.herdr !== previous) throw failure("launch binding replaced; preserving resources");
+      if (run2.herdr !== previous) throw herdrFailure("launch binding replaced; preserving resources");
       binding.ownerGeneration = ownership.identity.generation;
       binding.agentName = alias;
       delete binding.versionWarning;
@@ -9068,23 +9125,9 @@ var HerdrRuntime = class {
       } catch (e) {
         if (e.code !== "ENOENT") throw e;
       }
-      const startArgs = ["agent", "start", alias, "--kind", "pi", "--pane", binding.paneId, "--timeout", "60000", "--", ...args];
-      let started;
       startAttempted = true;
-      try {
-        started = await cli.json(startArgs, { timeoutMs: HERDR_LAUNCH_BUDGET.start, signal: abort.signal });
-      } catch (e) {
-        check();
-        if (!(e instanceof HerdrCliError) || e.remoteCode !== "agent_pane_busy") throw failure("agent start outcome unconfirmed; no blind retry");
-        await sleep(HERDR_LAUNCH_BUDGET.busy, abort.signal);
-        check();
-        const pane2 = await getPane(abort.signal);
-        check();
-        if (!provePaneOurs({ binding, current: current(), socketPath: cli.socketPath, pane: pane2, requireNoAgent: true }).ok) throw failure("busy retry refused: pane no longer empty and owned");
-        started = await cli.json(startArgs, { timeoutMs: HERDR_LAUNCH_BUDGET.start, signal: abort.signal });
-      }
+      const started = await host.start(binding, { alias, args, cwd, env: paneEnv }, { timeoutMs: HERDR_LAUNCH_BUDGET.start, signal: abort.signal }, fence);
       check();
-      if (!isRecord(started.agent) || started.agent.name !== alias || started.agent.pane_id !== binding.paneId) throw failure("agent start registered a different agent or pane");
       const until = async (budget, name2, observe2) => {
         const deadline = now() + budget;
         for (; ; ) {
@@ -9093,23 +9136,23 @@ var HerdrRuntime = class {
           if (result !== void 0) return result;
           if (hello && provenPane) {
             const state = proof(provenPane);
-            if (!state.ok) throw failure(`${name2}: child ${state.state}`);
+            if (!state.ok) throw herdrFailure(`${name2}: child ${state.state}`);
           }
-          if (now() >= deadline) throw failure(`${name2} timeout`);
+          if (now() >= deadline) throw herdrFailure(`${name2} timeout`);
           await sleep(Math.min(250, deadline - now()), abort.signal);
         }
       };
       const claim = await until(HERDR_LAUNCH_BUDGET.hello, "child hello", readHello);
-      if (!isRecord(claim) || claim.bridgeProtocol !== 1) throw failure("bridge protocol mismatch");
+      if (!isRecord(claim) || claim.bridgeProtocol !== 1) throw herdrFailure("bridge protocol mismatch");
       hello = claim;
       let pane = await getPane(abort.signal);
       check();
       let identity = proof(pane);
       if (!identity.ok && probe(hello.pid).state === "gone") {
-        pane = started.agent;
+        pane = started;
         identity = proof(pane);
       }
-      if (!identity.ok && identity.state !== "gone") throw failure(`child identity refused: ${identity.reason}`);
+      if (!identity.ok && identity.state !== "gone") throw herdrFailure(`child identity refused: ${identity.reason}`);
       binding.childPid = hello.pid;
       binding.childStartTime = hello.pidStartTime;
       provenPane = pane;
@@ -9120,7 +9163,7 @@ var HerdrRuntime = class {
       }
       await writeRecord(run2, check);
       check();
-      if (!identity.ok) throw failure(`child ${identity.state} before its task was published; prepared request preserved, not replayed`);
+      if (!identity.ok) throw herdrFailure(`child ${identity.state} before its task was published; prepared request preserved, not replayed`);
       publishPreparedInboxRequest(dir, request);
       let offset = launchOffset, boundary = false, nativeStart = false;
       const decoder2 = createLineDecoder((line) => {
@@ -9147,11 +9190,11 @@ var HerdrRuntime = class {
         }
         try {
           const stat6 = fstatSync4(fd);
-          if (!stat6.isFile() || stat6.nlink !== 1 || stat6.size < offset || stat6.size - launchOffset > 32 * 1048576) throw failure("invalid or oversized launch transcript");
+          if (!stat6.isFile() || stat6.nlink !== 1 || stat6.size < offset || stat6.size - launchOffset > 32 * 1048576) throw herdrFailure("invalid or oversized launch transcript");
           const buffer = Buffer.alloc(65536);
           while (offset < stat6.size) {
             const count3 = readSync4(fd, buffer, 0, Math.min(buffer.length, stat6.size - offset), offset);
-            if (!count3) throw failure("launch transcript changed during read");
+            if (!count3) throw herdrFailure("launch transcript changed during read");
             offset += count3;
             decoder2.write(buffer.subarray(0, count3));
           }
@@ -9162,7 +9205,7 @@ var HerdrRuntime = class {
       await until(HERDR_LAUNCH_BUDGET.ack, "initial ack", () => {
         scan();
         const ack = readInboxAck(dir, request);
-        if (ack && !ack.accepted) throw failure(`initial request rejected: ${ack.code}`);
+        if (ack && !ack.accepted) throw herdrFailure(`initial request rejected: ${ack.code}`);
         return ack;
       });
       await until(HERDR_LAUNCH_BUDGET.agentStart, "accepted task native agent_start", () => {
@@ -9175,7 +9218,7 @@ var HerdrRuntime = class {
       check();
       let finalIdentity = proof(finalPane);
       if (!finalIdentity.ok && probe(hello.pid).state === "gone") finalIdentity = proof(provenPane);
-      if (!finalIdentity.ok && finalIdentity.state !== "gone") throw failure("child identity changed before readiness");
+      if (!finalIdentity.ok && finalIdentity.state !== "gone") throw herdrFailure("child identity changed before readiness");
       accepted = true;
       observation = { launchOffset, requestId: request.requestId };
       if (!finalIdentity.ok && finalIdentity.state === "gone") {
@@ -9323,7 +9366,7 @@ var HerdrRuntime = class {
         return false;
       }
       const status = run2.status;
-      const result = await closeEmptyPane(cli, binding, () => isCurrent() && run2.status === status ? current() : void 0, { timeoutMs: 2e3, signal: signal2 });
+      const result = await host.release(binding, () => isCurrent() && run2.status === status ? current() : void 0, { timeoutMs: 2e3, signal: signal2 });
       if (!result.ok) diagnostic(`worktree kept: ${result.reason}`);
       paneReleased = result.ok;
       return result.ok;
@@ -11794,8 +11837,8 @@ var ChiefRole = class {
     try {
       this.deps.presence.assertOwned();
     } catch (e) {
-      const failure2 = this.drop(held), g = held.claim.generation;
-      this.session?.notify(`conductor supervision: ${failure2 === void 0 ? `chief lease generation ${g} released` : `chief lease generation ${g} not released (${failure2})`} (${why(e)}); \`staff\` removed. The chief intent stays on this session and is reclaimed when the lead is eligible again and the lease is free.`, failure2 === void 0 ? "info" : "warning");
+      const failure = this.drop(held), g = held.claim.generation;
+      this.session?.notify(`conductor supervision: ${failure === void 0 ? `chief lease generation ${g} released` : `chief lease generation ${g} not released (${failure})`} (${why(e)}); \`staff\` removed. The chief intent stays on this session and is reclaimed when the lead is eligible again and the lease is free.`, failure === void 0 ? "info" : "warning");
     }
   }
   /** Every shutdown reason and session switch: release only the own claim; the branch intent is kept. */
@@ -11852,8 +11895,8 @@ var ChiefRole = class {
     const held = this.held;
     const lines = [];
     if (held) {
-      const failure2 = this.drop(held);
-      lines.push(failure2 === void 0 ? `left the chief role: lease generation ${held.claim.generation} released and \`staff\` removed; this session is an ordinary lead.` : `left the chief role: \`staff\` removed, but lease generation ${held.claim.generation} was not released (${failure2}).`);
+      const failure = this.drop(held);
+      lines.push(failure === void 0 ? `left the chief role: lease generation ${held.claim.generation} released and \`staff\` removed; this session is an ordinary lead.` : `left the chief role: \`staff\` removed, but lease generation ${held.claim.generation} was not released (${failure}).`);
     } else lines.push("not the chief: no lease held; this session's role is lead.");
     this.lastError = void 0;
     try {
@@ -11934,14 +11977,14 @@ var ChiefRole = class {
     this.held = void 0;
     if (held.timer !== void 0) this.timers.clearTimeout(held.timer);
     held.timer = void 0;
-    let failure2;
+    let failure;
     try {
       releaseChiefLease(held.claim);
     } catch (e) {
-      failure2 = message(e);
+      failure = message(e);
     }
     this.deps.presence.syncTools();
-    return failure2;
+    return failure;
   }
   /** The tick only asserts; it never rewrites the claim. */
   schedule(held) {
@@ -19353,8 +19396,8 @@ async function handleSessionShutdown(event, deps) {
   });
   if (integrations.length) {
     const results = await Promise.allSettled(integrations);
-    const failure2 = results.find((r) => r.status === "rejected");
-    if (failure2?.status === "rejected") throw failure2.reason;
+    const failure = results.find((r) => r.status === "rejected");
+    if (failure?.status === "rejected") throw failure.reason;
   }
   const settlements = deps.runs.flatMap((run2) => run2.integrationSettlement ? [run2.integrationSettlement] : []);
   if (settlements.length) await Promise.allSettled(settlements);
@@ -19900,7 +19943,7 @@ function index_default(pi) {
       handoffSessionId = selfSessionId;
       const survivors = event.reason === "reload" && selfSessionId ? claimReloadSurvivors(selfSessionId) : /* @__PURE__ */ new Map();
       for (const [id, survivor] of survivors) owedSurvivors.set(id, survivor);
-      const herdrRuntime = process.env.HERDR_SOCKET_PATH ? new HerdrRuntime({ cli: createHerdrCli({ env: process.env, socketPath: process.env.HERDR_SOCKET_PATH }), env: process.env }) : void 0;
+      const herdrRuntime = process.env.HERDR_SOCKET_PATH ? new HerdrRuntime({ host: new HerdrTuiHost({ cli: createHerdrCli({ env: process.env, socketPath: process.env.HERDR_SOCKET_PATH }), leadPaneId: process.env.HERDR_PANE_ID }), env: process.env }) : void 0;
       let reconciled;
       delegation.reconciling(new Promise((resolve7) => {
         reconciled = resolve7;

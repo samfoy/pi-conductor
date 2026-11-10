@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { sandboxPi, tmpDir } from "./helpers/tmp.ts";
 import { gitTestEnv } from "./helpers/git-env.ts";
 import { HerdrRuntime } from "../src/herdr/runtime.ts";
+import { HerdrTuiHost } from "../src/herdr/host.ts";
 import { createHerdrCli } from "../src/herdr/cli.ts";
 import { createRunPipeline } from "../src/run-pipeline.ts";
 import { RunRegistry, forceTerminate, runsRoot } from "../src/runs.ts";
@@ -33,7 +34,7 @@ for (const [outcome, previous] of [["unknown", false], ["unknown", true], ["time
     const env = { ...gitTestEnv(), HERDR_ENV: "1", HERDR_SOCKET_PATH: `${statePath}.socket`, HERDR_PANE_ID: "parent", HERDR_WORKSPACE_ID: "workspace", FAKE_HERDR_STATE: statePath, CONDUCTOR_HERDR_BIN: new URL("fixtures/fake-herdr.mjs", import.meta.url).pathname };
     const cli = createHerdrCli({ env, socketPath: env.HERDR_SOCKET_PATH });
     // "exited": the healthy child settles and exits on its own once its published task is accepted.
-    const runtime = new HerdrRuntime({ env, workspaceId: "workspace", trustArgs: () => [], cli });
+    const runtime = new HerdrRuntime({ env, host: new HerdrTuiHost({ cli, workspaceId: "workspace" }), trustArgs: () => [] });
     git(root, "init", "-b", "main"); git(root, "config", "user.name", "Fixture"); git(root, "config", "user.email", "fixture@example.test");
     mkdirSync(join(root, ".githooks")); writeFileSync(join(root, ".githooks", "pre-commit"), `#!/bin/sh\nprintf 'policy\\n' >> '${dir}/policy.log'\n`, { mode: 0o755 }); git(root, "config", "core.hooksPath", ".githooks");
     writeFileSync(join(root, ".gitignore"), ".worktrees/\n"); writeFileSync(join(root, "base"), "base"); git(root, "add", ".gitignore", "base", ".githooks"); git(root, "commit", "-m", "base");

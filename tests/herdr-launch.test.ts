@@ -17,6 +17,7 @@ const sink: RunSink = { line() { assert.fail("H6 must not own pipeline streaming
 async function fixture(mode = "healthy") {
   assert.ok(existsSync(runtimeModule), "H6 launch runtime exists");
   const { HerdrRuntime } = await import("../src/herdr/runtime.ts");
+  const { HerdrTuiHost } = await import("../src/herdr/host.ts");
   const root = tmpDir("h6-launch-"), dir = join(root, "oracle-test"); mkdirSync(dir);
   const run: Run = { id: "oracle-test", runtime: "herdr", persona: "oracle", task: "prepared", status: "running", mode: "background", cwd: root,
     startTime: 0, lastEventAt: 0, messages: [], usage: emptyUsage(), recordPath: join(dir, "record.json"), transcriptPath: join(dir, "transcript.jsonl"), finalPath: join(dir, "final.md") };
@@ -70,7 +71,7 @@ async function fixture(mode = "healthy") {
     if (mode === "prepublish-death") { gone = true; pane.agent = null; pane.agent_session = null; } // registered, then died unfed
     return { type: "agent_started", agent };
   } };
-  const runtime = new HerdrRuntime({ cli, workspaceId: pane.workspace_id, env: { HTTPS_PROXY: "https://user:proxy-secret@proxy.invalid" },
+  const runtime = new HerdrRuntime({ host: new HerdrTuiHost({ cli, workspaceId: pane.workspace_id }), env: { HTTPS_PROXY: "https://user:proxy-secret@proxy.invalid" },
     trustArgs: () => [], piVersion: "0.87.1", platform: "linux", now: () => time, sleep: async ms => { if (react?.()) return; time += ms; onSleep?.(); },
     probe: pid => ({ pid, state: gone ? "gone" : "alive", startTime: 77 }), signal: (pid, signal) => { signals.push([pid, signal]); if (mode === "stubborn" && signal === "SIGTERM") return; gone = true; pane.agent = null; pane.agent_session = null; } });
   const launch = () => runtime.launch(run, [], root, sink, "  Prepared evidence 漢🙂  ", { kind: "fresh", sessionDir: join(dir, "session"), systemPrompt: "Private system prompt", model: "provider/model", thinking: "high", skillPaths: ["/private/skills"], tools: ["read"], excludeTools: ["write"] });
@@ -302,7 +303,7 @@ test("H11 crash between registration and publication is diagnosable on reattach,
   h.run.herdr!.childPid = hello.pid; h.run.herdr!.childStartTime = hello.pidStartTime;
   h.pane.agent = "pi"; h.pane.agent_session = { kind: "path", value: h.run.herdr!.sessionFile, agent: "pi", source: "integration" };
   const { HerdrRuntime } = await import("../src/herdr/runtime.ts");
-  const runtime = new HerdrRuntime({ cli: h.runtime["options"]!.cli, env: {}, platform: "linux" });
+  const runtime = new HerdrRuntime({ host: h.runtime["options"]!.host, env: {}, platform: "linux" });
   await assert.rejects(runtime.inspect(h.run), /prepared but never published; the child never received its task; preserved, not replayed/);
   assert.equal(readInbox(h.dir, h.run.herdr!.launchNonce).length, 0);
 });

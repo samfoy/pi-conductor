@@ -1,5 +1,6 @@
 import { HerdrRuntime } from "./herdr/runtime.ts";
 import { createHerdrCli } from "./herdr/cli.ts";
+import { HerdrTuiHost } from "./herdr/host.ts";
 import { readoptHerdrRun } from "./run-pipeline.ts";
 import { buildOrphanRun } from "./reconcile-startup.ts";
 import { claimReloadSurvivors, handOffCandidate, publishReloadSurvivors, watchSurvivor, type Survivor } from "./reload-handoff.ts";
@@ -536,7 +537,7 @@ export default function (pi: ExtensionAPI): void {
       handoffSessionId = selfSessionId;
       const survivors = event.reason === "reload" && selfSessionId ? claimReloadSurvivors(selfSessionId) : new Map<string, Survivor>();
       for (const [id, survivor] of survivors) owedSurvivors.set(id, survivor);
-      const herdrRuntime = process.env.HERDR_SOCKET_PATH ? new HerdrRuntime({ cli: createHerdrCli({ env: process.env, socketPath: process.env.HERDR_SOCKET_PATH }), env: process.env }) : undefined;
+      const herdrRuntime = process.env.HERDR_SOCKET_PATH ? new HerdrRuntime({ host: new HerdrTuiHost({ cli: createHerdrCli({ env: process.env, socketPath: process.env.HERDR_SOCKET_PATH }), leadPaneId: process.env.HERDR_PANE_ID }), env: process.env }) : undefined;
       // N5: a readopted delegator's claimed calls are decided only once readoption and effort recovery are done.
       let reconciled!: () => void;
       delegation.reconciling(new Promise<void>(resolve => { reconciled = resolve; }));
