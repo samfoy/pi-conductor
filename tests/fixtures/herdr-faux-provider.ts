@@ -19,10 +19,10 @@ function observe(name: string, value: unknown): void {
   mkdirSync(join(root, "obs"), { recursive: true });
   writeFileSync(join(root, "obs", `${name}.json`), JSON.stringify(value));
 }
-async function barrier(name: string): Promise<boolean> {
+async function barrier(name: string, signal?: AbortSignal): Promise<boolean> {
   const path = join(root!, "script", `release-${name}`), end = Date.now() + 240000;
   while (!existsSync(path)) {
-    if (Date.now() > end) return false;
+    if (Date.now() > end || signal?.aborted) return false;
     await new Promise(resolve => setTimeout(resolve, 20));
   }
   return true;
@@ -38,7 +38,7 @@ function lead(messages: Message[]) {
 }
 
 const RETIRING = "retiring because of context pressure";
-async function child(messages: Message[], calls: number) {
+async function child(messages: Message[], calls: number, signal?: AbortSignal) {
   const users = messages.filter(m => m.role === "user").map(text);
   // N5 leaf (depth 2): "H11-LEAF hold <token>" holds its first call on release-<token>, then answers.
   const leafTask = users.find(t => /H11-LEAF /.test(t));
@@ -46,7 +46,7 @@ async function child(messages: Message[], calls: number) {
     const [, mode = "", token = ""] = leafTask.match(/H11-LEAF ([a-z0-9]+) ([a-z0-9]+)/) ?? [];
     if (mode === "hold" && calls === 1) {
       observe(`child-${token}-held`, { pid: process.pid, startTime: startTime(), depth: process.env.CONDUCTOR_DEPTH, runId: process.env.CONDUCTOR_RUN_ID });
-      if (!await barrier(token)) return fauxAssistantMessage("", { stopReason: "error", errorMessage: "H11 barrier expired" });
+      if (!await barrier(token, signal)) return fauxAssistantMessage("", { stopReason: "error", errorMessage: "H11 barrier expired" });
     }
     return fauxAssistantMessage(`H11 leaf ${token} done depth=${process.env.CONDUCTOR_DEPTH}`);
   }
@@ -59,12 +59,16 @@ async function child(messages: Message[], calls: number) {
   if (((scenario === "hold" || scenario === "holdwrite") && !answered && calls === 1) || (scenario === "hold2" && calls <= 2)) {
     const name = calls === 1 ? token : `${token}-${calls}`;
     observe(`child-${name}-held`, { pid: process.pid, startTime: startTime() });
-    if (!await barrier(name)) return fauxAssistantMessage("", { stopReason: "error", errorMessage: "H11 barrier expired" });
+    if (!await barrier(name, signal)) return fauxAssistantMessage("", { stopReason: "error", errorMessage: "H11 barrier expired" });
     if (scenario !== "holdwrite" && calls === 1) return fauxAssistantMessage(`H11 held turn complete ${token}`);
   }
   // N5 delegating parent: two parallel read-only leaves, then one summary of both envelopes.
-  if (scenario === "n5" && process.env.CONDUCTOR_DEPTH === "1" && process.env.CONDUCTOR_DELEGATE_ALLOW) {
+  if ((scenario === "n5" || scenario === "n5hold") && process.env.CONDUCTOR_DEPTH === "1" && process.env.CONDUCTOR_DELEGATE_ALLOW) {
     const results = messages.filter(m => m.role === "toolResult");
+    if (scenario === "n5hold" && !results.length) {
+      observe(`child-${token}-held`, { pid: process.pid, startTime: startTime() });
+      if (!await barrier(token, signal)) return fauxAssistantMessage("", { stopReason: "error", errorMessage: "H11 barrier expired" });
+    }
     if (!results.length) return fauxAssistantMessage([
       fauxToolCall("delegate", { persona: "inspector", task: `H11-LEAF hold ${token}a` }, { id: `n5_${token}_a` }),
       fauxToolCall("delegate", { persona: "critic", task: `H11-LEAF hold ${token}b` }, { id: `n5_${token}_b` }),
@@ -94,10 +98,10 @@ export default function (pi: ExtensionAPI) {
   // h11-small is a realistic small window: a few tool results reach Pi's compaction threshold.
   const faux = fauxProvider({ tokensPerSecond: Infinity, models: [{ id: "h11-offline", contextWindow: 131072, maxTokens: 1024 }, { id: "h11-small", contextWindow: 8192, maxTokens: 1024 }] });
   let calls = 0;
-  const next = async (context: { messages: Message[] }) => {
+  const next = async (context: { messages: Message[] }, options?: { signal?: AbortSignal }) => {
     faux.appendResponses([next]);
     calls++;
-    return role === "lead" ? lead(context.messages) : child(context.messages, calls);
+    return role === "lead" ? lead(context.messages) : child(context.messages, calls, options?.signal);
   };
   faux.setResponses([next]);
   pi.registerProvider(faux.provider);
@@ -109,4 +113,6 @@ export default function (pi: ExtensionAPI) {
   if (role === "lead") pi.on("tool_execution_end", event => {
     observe(`lead-tool-${event.toolCallId}`, { toolName: event.toolName, isError: event.isError, result: event.result });
   });
+  let ends = 0;
+  if (role === "lead") pi.on("agent_end", () => { observe(`lead-${process.pid}-end-${Date.now()}-${++ends}`, { pid: process.pid }); });
 }

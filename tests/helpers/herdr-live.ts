@@ -174,13 +174,16 @@ export class HerdrLiveFixture {
 export function procStartTime(pid: number): number | undefined {
   try { return Number(readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").pop()!.split(" ")[19]) || undefined; } catch { return undefined; }
 }
-function holdsSocket(pid: number, socketPath: string): boolean {
+export function listeningSockets(pid: number): string[] {
   try {
+    const held = new Set(readdirSync(`/proc/${pid}/fd`).flatMap(fd => { try { return [readlinkSync(`/proc/${pid}/fd/${fd}`).match(/^socket:\[(\d+)\]$/)?.[1] ?? ""]; } catch { return []; } }));
     // The server's own netns view: the fixture runs in a private network namespace.
-    const inodes = new Set(readFileSync(`/proc/${pid}/net/unix`, "utf8").split("\n").slice(1).map(line => line.trim().split(/\s+/))
-      .filter(f => f[7] === socketPath && f[5] === "01").map(f => f[6]));
-    return readdirSync(`/proc/${pid}/fd`).some(fd => { try { return inodes.has(readlinkSync(`/proc/${pid}/fd/${fd}`).match(/^socket:\[(\d+)\]$/)?.[1] ?? ""); } catch { return false; } });
-  } catch { return false; }
+    return readFileSync(`/proc/${pid}/net/unix`, "utf8").split("\n").slice(1).map(line => line.trim().split(/\s+/))
+      .filter(f => f[5] === "01" && f[7] !== undefined && held.has(f[6])).map(f => f[7]);
+  } catch { return []; }
+}
+function holdsSocket(pid: number, socketPath: string): boolean {
+  return listeningSockets(pid).includes(socketPath);
 }
 /**
  * Exact inventory from one procfs snapshot: processes carrying this fixture's unique
@@ -238,7 +241,7 @@ export function ambientSnapshot(root: string): string {
 }
 
 export interface LiveConfig { piRoot: string; worktree: string; herdrBin: string; integration: string }
-const PRIVATE_NET = ["unshare", "--user", "--map-root-user", "--net"];
+export const PRIVATE_NET = ["unshare", "--user", "--map-root-user", "--net"];
 /** Fails as blocked, never skipped, when unprivileged user+network namespaces are unavailable. */
 export function assertPrivateNetworkNamespace(): void {
   try { execFileSync(PRIVATE_NET[0], [...PRIVATE_NET.slice(1), "true"], { env: { PATH: "/usr/bin:/bin" }, timeout: 5000, stdio: "pipe" }); }
@@ -253,19 +256,15 @@ export function writePiWrapper(binDir: string, piRoot: string): void {
   mkdirSync(binDir, { recursive: true, mode: 0o700 });
   writeFileSync(join(binDir, "pi"), `#!/bin/sh\nexec ${process.execPath} ${piEntry(piRoot)} "$@"\n`); chmodSync(join(binDir, "pi"), 0o755);
 }
-/** Private settings: worktree package once, faux fixture, read-only installed herdr integration. */
-export function writeFixtureFiles(id: LiveIdentity, cfg: LiveConfig): void {
-  const r = id.root;
-  for (const d of ["home/.pi/agent/extensions/conductor", "c/herdr", "d", "s", "k", "r", "tmp", "bin", "work", "script", "obs", "pads"]) mkdirSync(join(r, d), { recursive: true, mode: 0o700 });
-  writeFileSync(join(r, "c/herdr/config.toml"), 'onboarding = false\n[terminal]\ndefault_shell = "/bin/sh"\nshell_mode = "non_login"\n[update]\nversion_check = false\nmanifest_check = false\n');
+export function writePiFixture(r: string, cfg: { piRoot: string; worktree: string; extensions: readonly string[] }): void {
+  for (const d of ["home/.pi/agent/extensions/conductor", "d", "s", "k", "r", "tmp", "bin", "work", "script", "obs", "pads"]) mkdirSync(join(r, d), { recursive: true, mode: 0o700 });
   writePiWrapper(join(r, "bin"), cfg.piRoot);
   symlinkSync(process.execPath, join(r, "bin/node"));
-  symlinkSync(cfg.herdrBin, join(r, "bin/herdr"));
   writeFileSync(join(r, "home/.gitconfig"), "[user]\n\tname = H11 Fixture\n\temail = h11@example.invalid\n[init]\n\tdefaultBranch = main\n");
   writeFileSync(join(r, "home/.pi/agent/settings.json"), JSON.stringify({
     defaultProvider: "faux", defaultModel: "h11-offline", quietStartup: true, enableInstallTelemetry: false,
     cacheWarming: "off", retry: { enabled: false }, compaction: { enabled: true, reserveTokens: 4096, keepRecentTokens: 1024 },
-    packages: [cfg.worktree], extensions: [join(cfg.worktree, "tests/fixtures/herdr-faux-provider.ts"), cfg.integration],
+    packages: [cfg.worktree], extensions: [join(cfg.worktree, "tests/fixtures/herdr-faux-provider.ts"), ...cfg.extensions],
   }, null, 2));
   writeFileSync(join(r, "home/.pi/agent/extensions/conductor/config.json"), JSON.stringify({
     contextRetirement: true, chains: { builder: { then: "" }, simplifier: { then: "" } },
@@ -273,6 +272,14 @@ export function writeFixtureFiles(id: LiveIdentity, cfg: LiveConfig): void {
     personaOverrides: { analyst: { model: "faux/h11-small" }, investigator: { agents: ["inspector", "critic"] } },
     efforts: { verify: "sh verify.sh", verifyTimeoutSeconds: 60, verifyRetries: 0, generated: { paths: ["gen/**"], command: "sh gen.sh" }, maxParallel: 1 },
   }, null, 2));
+}
+/** Private settings: worktree package once, faux fixture, read-only installed herdr integration. */
+export function writeFixtureFiles(id: LiveIdentity, cfg: LiveConfig): void {
+  const r = id.root;
+  mkdirSync(join(r, "c/herdr"), { recursive: true, mode: 0o700 });
+  writeFileSync(join(r, "c/herdr/config.toml"), 'onboarding = false\n[terminal]\ndefault_shell = "/bin/sh"\nshell_mode = "non_login"\n[update]\nversion_check = false\nmanifest_check = false\n');
+  writePiFixture(r, { piRoot: cfg.piRoot, worktree: cfg.worktree, extensions: [cfg.integration] });
+  symlinkSync(cfg.herdrBin, join(r, "bin/herdr"));
 }
 
 export async function startLiveFixture(cfg: LiveConfig, unique: string, parent: string): Promise<HerdrLiveFixture> {

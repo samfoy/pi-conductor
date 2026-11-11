@@ -233,6 +233,73 @@ and appears as a `<warning reason="pi-version">`. An unprovable version reads as
   scrollback, foreground Esc-detach and Ctrl+G, Esc in a child followed by resume,
   trust-prompt refusal, or the dialog card.
 
+### Isolated real-hc acceptance (Herdr 2, S5; automated only)
+
+`tests/hc-live.test.ts` is opt-in, like H11: `CONDUCTOR_LIVE_TESTS=1` and
+`CONDUCTOR_H11_PI_ROOTS=<one pi-coding-agent root>`, one root per invocation, with
+`CONDUCTOR_H11_ALT_PI_ROOT` naming the other Pi for the version case. A missing
+prerequisite fails the test; only the version case skips, with its reason, when no
+second root is given.
+
+- **The core.** Each run starts one private herdr-core with `herdr-core serve` as
+  the test's own child, inside `unshare --user --map-root-user --net`, with
+  `HC_SESSION=conductor-hc5-<id>` and a private `XDG_RUNTIME_DIR`. The socket and
+  state live under the fixture root. `hc server start` is never used: on Linux it
+  hands the core to the systemd user manager, outside the test.
+- **Ownership proof.** The harness refuses any inherited `HC_*` or `HERDR_*`. Before
+  every hc call it proves, without running hc, that the core is its own child with
+  its original start time, in the test's cgroup (not a transient service), holding
+  the private socket inode, in another network namespace. Then `hc server status`
+  must name that pid and the core id it saw first.
+- **Driving the lead.** A real lead Pi runs in a core terminal labelled
+  `herdr.space=<id>`. Its turns are test-written tool scripts, typed with `hc send`;
+  doctor and gc output is read back with `hc read`.
+- **The gate.** The fixture's `bin/hc` passes every lead call through to the real
+  hc and logs it with its target socket. Armed once, it holds one `hc run` after
+  the real run returned, which opens the crash window between `hc run` and the
+  address write.
+- **Teardown.** It stops only that core, waits for every captured process, and
+  removes the root only when clean. A `/proc` scan of the ambient `herdr-core
+  serve`/`hold` processes and their sockets must not change. The default suite runs
+  only the guard tests, on fake effects.
+
+**Automated results, herdr-core 0.1.19, offline faux model:**
+
+| Case | Pi 1.5.2 (alt 0.87.1) | Pi 0.87.1 (alt 1.5.2) |
+|---|---|---|
+| 0. the core is the test's child, holds its socket, own netns, same cgroup | pass | pass |
+| 1. `auto` picks herdr on hc; doctor names socket, core, lead and space | pass | pass |
+| 2. spawn: one new terminal; parent, name, labels, `die_with_parent: false`, `notify: false`, pid = hello pid, `CONDUCTOR_SUBAGENT=1`, no `HERDR_*` | pass, status `{app: "pi", state: "working"}` | pass, status `null` |
+| 3. live steer then follow_up acked through the inbox, run in order; one card | pass | pass |
+| 4. resume: a new terminal; the previous one `hc rm`'d | pass | pass |
+| 5. kill: SIGTERM to the proven pid; the core records `reason: "exited"`, no `hc kill` | pass | pass |
+| 6. lead `/reload` while a child runs: readopted, completes, one card | pass | pass |
+| 7. lead SIGKILL; a new lead in a new terminal takes over; one card | pass | pass |
+| 7b. crash between `hc run` and the address write: the hello's terminal is observed; the run is preserved, never replayed | pass | pass |
+| 8. delegation: leaves under the delegator's terminal and tab; an unproven delegator gives own tabs plus the warning | pass | pass |
+| 9. `/conductor gc` removes exactly the finished owned terminals; live and foreign ones stay | pass | pass |
+| 10. `HERDR_ENV=1` leaked into an hc lead: subprocess, doctor names the conflict, no hc terminal | pass | pass |
+| 11. a lead on the other Pi root: the child runs the lead's own Pi, no warning | pass | pass |
+| every lead hc call reached the private socket | pass | pass |
+| 12. teardown clean; ambient cores unchanged | pass | pass |
+
+**Observed, not changed:**
+- Pi 0.87.1 has no OSC 7501 reporter, so `hc get .status` stays `null`.
+- An hc child always runs the lead's own proven Pi entry, so the H11 lead/child
+  version warning cannot fire through hc.
+- `hc read` of a Pi 1.5.2 lead terminal took about 2.4 s after each screen change,
+  and once more than 15 s while a running child's widget redrew. Reads of child
+  terminals took 3 to 4 ms. Conductor reads only child screens (stall evidence, 2 s,
+  4 KiB).
+- In a conflict lead, doctor shows no hc context and so counts every hc record as
+  unprovable, while startup recovery still resolves the context and proves each
+  record through its own binding.
+- A finished child's terminal stays listed in `hc ls --all` until a resume
+  replaces it, its lead quits (shutdown removes the finished terminals of the runs
+  it has attached), or GC reclaims the run. With the default GC policy that is after
+  the 30-day TTL or a size cap, so in a long session finished terminals accumulate.
+- **Human acceptance in the Herdr app and on Herdr Mobile is unverified.**
+
 Prior art: pi-herdsman's herdr-pane sub-agents informed these ideas; no herdsman
 code is copied.
 
