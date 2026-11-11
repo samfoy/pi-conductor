@@ -17,9 +17,11 @@ import { readProcessStartTime } from "../reconcile-startup.ts";
 import { createLineDecoder, terminateHook } from "../subprocess-runtime.ts";
 import { boundStallText, redactPaneEvidence } from "../stall-evidence.ts";
 import { createHerdrCli, isRecord } from "./cli.ts";
-import { sameHerdrBinding, terminalRef, type HerdrBinding, type HerdrInvocation, type LaunchHello } from "./identity.ts";
+import { isHcBinding, sameHerdrBinding, terminalRef, type HerdrBinding, type HerdrInvocation, type LaunchHello } from "./identity.ts";
 import { buildHerdrEnv } from "./placement.ts";
-import { herdrFailure as failure, HerdrTuiHost, tuiIdentity, type LaunchFence, type TerminalHost } from "./host.ts";
+import { herdrFailure as failure, HerdrTuiHost, tuiIdentity, type LaunchFence, type ReleaseResult, type TerminalHost } from "./host.ts";
+import { createHcCli } from "../hc/cli.ts";
+import { HcHost, hcIdentity } from "../hc/host.ts";
 import { hasPreparedInboxRequest, prepareInboxRequest, publishPreparedInboxRequest, readControlRecord, readInboxAck, writeInboxRequest, type InboxRequest } from "./inbox.ts";
 
 export const HERDR_LAUNCH_BUDGET = { start: 65000, hello: 15000, ack: 30000, agentStart: 30000, busy: 2000, diagnostic: 2000 } as const;
@@ -61,7 +63,8 @@ export function herdrChildAbsent(run: Pick<Run, "id" | "herdr" | "recordPath">):
     const owner = readHerdrOwner(dirname(run.recordPath));
     if (owner && (owner.generation !== b.ownerGeneration || owner.launchNonce !== b.launchNonce || owner.runId !== run.id || owner.socketPath !== b.socketPath)) return false;
     const hello = readControlRecord(join(dirname(run.recordPath), "launch", `${b.launchNonce}.json`));
-    const proof = tuiIdentity.proveChild({ binding: b, current: b, socketPath: b.socketPath, hello, observation: tuiIdentity.recorded(b),
+    const identity = isHcBinding(b) ? hcIdentity(b.coreId) : tuiIdentity, bound = Object.assign({ ...b }, identity.helloFields(b, hello));
+    const proof = identity.proveChild({ binding: bound, current: bound, socketPath: b.socketPath, hello, observation: identity.recorded(bound),
       platform: process.platform, bridgeProtocol: 1, process: probeProcess(b.childPid!) });
     return !proof.ok && proof.state === "gone";
   } catch { return false; }
@@ -72,11 +75,24 @@ export async function releaseRecordedPane(run: Pick<Run, "id" | "herdr" | "recor
   const binding = run.herdr && { ...run.herdr };
   if (!binding || !sameHerdrBinding(binding, current()) || !herdrChildAbsent(run) || signal?.aborted) return false;
   try {
-    const host = new HerdrTuiHost({ cli: createHerdrCli({ env, socketPath: binding.socketPath }) });
-    const result = await host.release(binding, () =>
-      !signal?.aborted && sameHerdrBinding(binding, current()) && herdrChildAbsent(run) ? binding : undefined, { timeoutMs: 2000, signal });
+    const host = await recordedHost(binding, env, signal);
+    if (!host || signal?.aborted) return false;
+    const target = isHcBinding(binding) ? { ...binding, ...host.identity.helloFields(binding, readRecordedHello(run, binding)) } : binding;
+    const result = await host.release(target, () =>
+      !signal?.aborted && sameHerdrBinding(binding, current()) && herdrChildAbsent(run) ? target : undefined, { timeoutMs: 2000, signal });
     return result.ok;
   } catch { return false; }
+}
+
+function readRecordedHello(run: Pick<Run, "recordPath">, binding: HerdrBinding): unknown {
+  try { return readControlRecord(join(dirname(run.recordPath), "launch", `${binding.launchNonce}.json`)); } catch { return undefined; }
+}
+
+async function recordedHost(binding: HerdrBinding, env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<TerminalHost | undefined> {
+  if (!isHcBinding(binding)) return new HerdrTuiHost({ cli: createHerdrCli({ env, socketPath: binding.socketPath }) });
+  const cli = createHcCli({ env, socketPath: binding.socketPath });
+  const { coreId } = await cli.serverStatus({ timeoutMs: 2000, signal });
+  return coreId === binding.coreId ? new HcHost({ cli, coreId }) : undefined;
 }
 
 /** Readiness correlates input; only the attached tail delivers pipeline events. */
@@ -99,7 +115,7 @@ export class HerdrRuntime implements RunRuntime {
   }
   attach(run: Run, sink: RunSink): HerdrTransport { return this.connect(run, run.cwd, sink, true); }
   async inspect(run: Run) {
-    if (!this.options || !run.herdr || run.herdr.socketPath !== this.options.host.socketPath) throw failure("other-socket");
+    if (!this.options || !run.herdr || !this.options.host.owns(run.herdr)) throw failure("other-socket");
     const { host } = this.options, probe = this.options.probe ?? probeProcess;
     const binding = { ...run.herdr }, nonce = binding.launchNonce, dir = dirname(run.recordPath);
     if (binding.runId !== run.id || !/^[A-Za-z0-9_-]+$/.test(nonce) || dirname(binding.sessionFile) !== join(dir, "session")) throw failure("reattach binding mismatch");
@@ -151,7 +167,7 @@ export class HerdrRuntime implements RunRuntime {
     }
   }
   async probeRecord(run: Run): Promise<"alive" | "settled" | "gone" | "unknown" | "other-socket"> {
-    if (!this.options || run.herdr?.socketPath !== this.options.host.socketPath) return "other-socket";
+    if (!this.options || !this.options.host.owns(run.herdr)) return "other-socket";
     try { const result = await this.inspect(run); return result.settled ? "settled" : result.state; }
     catch (error) { return error instanceof Error && error.cause === "herdr-gone-before-start" ? "gone" : "unknown"; }
   }
@@ -224,6 +240,7 @@ export class HerdrRuntime implements RunRuntime {
         try { hello = readHello() as LaunchHello | undefined; } catch { /* Preserve invalid claim evidence. */ }
       }
       if (!binding || !hello) { diagnostic("pane/worktree preserved: no proven child hello"); return; }
+      Object.assign(binding, host.identity.helloFields(binding, hello));
       try {
         let pane = await getPane();
         let state = proof(pane);
@@ -295,6 +312,13 @@ export class HerdrRuntime implements RunRuntime {
         const reused = await host.reuse(previous, invocation, abort.signal);
         check();
         if (run.herdr === previous && reused) binding = reused;
+        else if (run.herdr === previous) {
+          let retired: ReleaseResult | undefined;
+          try { retired = await host.retire(previous, abort.signal); }
+          catch { retired = { ok: false, state: "unknown", reason: "release unconfirmed" }; }
+          check();
+          if (retired && !retired.ok) diagnostic(`previous ${terminalRef(previous).join(" ")} kept: ${retired.reason}`);
+        }
       }
       if (run.herdr !== previous) throw failure("launch binding replaced; preserving resources");
       if (run.effort) mkdirSync(join(dir, "tmp"), { recursive: true });

@@ -33,6 +33,8 @@ function fixture(mode: "healthy" | "no-ack" | "cancel-in-place" = "healthy") {
   let react: (() => boolean) | undefined;
   const host: TerminalHost = {
     socketPath: join(root, "stub.socket"), identity,
+    owns: binding => binding?.socketPath === join(root, "stub.socket"),
+    async retire() { calls.push("retire"); return undefined; },
     async reuse() { calls.push("reuse"); return undefined; },
     async placeLeaf() { calls.push("placeLeaf"); return { warning: "stub" }; },
     async placeRun(spec, fence) {

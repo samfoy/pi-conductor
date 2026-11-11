@@ -1,16 +1,19 @@
 import { subprocessRuntime } from "./subprocess-runtime.ts";
 import { HerdrRuntime } from "./herdr/runtime.ts";
 import { createHerdrCli } from "./herdr/cli.ts";
-import { HerdrTuiHost } from "./herdr/host.ts";
+import { HerdrTuiHost, type TerminalHost } from "./herdr/host.ts";
+import { hcHostFor, resolveHcContext } from "./hc/context.ts";
+import { hcTerminalEnv, herdrEnvironment, type HerdrHost } from "./herdr/environment.ts";
 import type { ChildProcess } from "node:child_process";
 import type { Run } from "./types.ts";
 import type { PiCoreArgsOptions } from "./runs.ts";
-import type { HerdrBinding } from "./herdr/identity.ts";
+import { isHcBinding, type HerdrBinding } from "./herdr/identity.ts";
 import type { InboxRequest } from "./herdr/inbox.ts";
 
 export type RuntimeKind = "subprocess" | "herdr";
 export type RuntimeChoice = RuntimeKind | "auto";
 export type RuntimeEnvironment = Readonly<Record<string, string | undefined>>;
+export { herdrEnvironment, type HerdrEnvironment, type HerdrHost } from "./herdr/environment.ts";
 
 export function parseRuntimeChoice(value: unknown): RuntimeChoice {
   if (value === "auto" || value === "subprocess" || value === "herdr") return value;
@@ -21,16 +24,17 @@ export function parseRuntimeChoice(value: unknown): RuntimeChoice {
 export function resolveRuntime(input: {
   perCall?: RuntimeChoice; persona?: RuntimeChoice; project?: RuntimeChoice; user?: RuntimeChoice;
   env: RuntimeEnvironment;
-}): { ok: true; kind: RuntimeKind; source: "per-call" | "persona" | "project" | "user" | "auto" }
+}): { ok: true; kind: RuntimeKind; host?: HerdrHost; source: "per-call" | "persona" | "project" | "user" | "auto" }
   | { ok: false; reason: string } {
   const layers = [["per-call", input.perCall], ["persona", input.persona], ["project", input.project], ["user", input.user]] as const;
   const [source, value] = layers.find(([, value]) => value !== undefined) ?? ["auto", "auto"];
   let choice: RuntimeChoice;
   try { choice = parseRuntimeChoice(value); }
   catch (e) { return { ok: false, reason: (e as Error).message }; }
-  const insideHerdr = input.env.HERDR_ENV === "1" && !!input.env.HERDR_SOCKET_PATH && !!input.env.HERDR_PANE_ID;
-  if (choice === "herdr" && !insideHerdr) return { ok: false, reason: "runtime herdr requested but HERDR_ENV/HERDR_SOCKET_PATH/HERDR_PANE_ID are not all set" };
-  return { ok: true, kind: choice === "auto" ? (insideHerdr ? "herdr" : "subprocess") : choice, source };
+  const where = herdrEnvironment(input.env);
+  if (choice === "herdr" && !where.ok) return { ok: false, reason: `runtime herdr requested but ${where.reason}` };
+  const kind: RuntimeKind = choice === "auto" ? (where.ok ? "herdr" : "subprocess") : choice;
+  return kind === "herdr" && where.ok ? { ok: true, kind, host: where.host, source } : { ok: true, kind, source };
 }
 
 /** Missing persisted tags are legacy subprocesses, not a new auto selection. */
@@ -112,14 +116,28 @@ export function isObservableHere(run: Run): boolean {
     : run.proc !== undefined;
 }
 
+function tuiHostFor(env: RuntimeEnvironment): TerminalHost {
+  return new HerdrTuiHost({ cli: createHerdrCli({ env: { ...env }, socketPath: env.HERDR_SOCKET_PATH! }), workspaceId: env.HERDR_WORKSPACE_ID, leadPaneId: env.HERDR_PANE_ID });
+}
+
 /** Recorded backend selects effects. Only a fresh spawn supplies launch routing. */
 export function runtimeFor(run: Run, env?: RuntimeEnvironment): RunRuntime {
   if (run.runtime === "herdr" && run.transport?.kind === "herdr" && run.transport.runtime) return run.transport.runtime;
-  if (run.runtime === "herdr") return new HerdrRuntime(env ? {
-    host: new HerdrTuiHost({ cli: createHerdrCli({ env: { ...env }, socketPath: env.HERDR_SOCKET_PATH! }),
-      workspaceId: env.HERDR_WORKSPACE_ID, leadPaneId: env.HERDR_PANE_ID }),
-    env: { ...env },
-  } : undefined);
+  if (run.runtime === "herdr") {
+    if (!env) return new HerdrRuntime(undefined);
+    const where = herdrEnvironment(env);
+    const hc = run.herdr ? isHcBinding(run.herdr) : where.ok && where.host === "hc";
+    return new HerdrRuntime({ host: hc ? hcHostFor(env) : tuiHostFor(env), env: { ...env } });
+  }
   assertSupportedRuntime(run.runtime);
   return subprocessRuntime;
+}
+
+export async function recoveryRuntimes(env: NodeJS.ProcessEnv): Promise<(binding: HerdrBinding | undefined) => HerdrRuntime | undefined> {
+  const tui = env.HERDR_SOCKET_PATH ? new HerdrRuntime({ host: new HerdrTuiHost({ cli: createHerdrCli({ env, socketPath: env.HERDR_SOCKET_PATH }), leadPaneId: env.HERDR_PANE_ID }), env }) : undefined;
+  let hc: HerdrRuntime | undefined;
+  if (hcTerminalEnv(env)) {
+    try { await resolveHcContext(env); hc = new HerdrRuntime({ host: hcHostFor(env), env }); } catch { hc = undefined; }
+  }
+  return binding => isHcBinding(binding) ? hc : tui;
 }

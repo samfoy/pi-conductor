@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SessionManager, VERSION } from "@earendil-works/pi-coding-agent";
-import { hostPiVersion, PI_LIBRARY_VERSION } from "../src/pi-host.ts";
+import { hostPiCommand, hostPiVersion, PI_LIBRARY_VERSION } from "../src/pi-host.ts";
 import { piVersionWarning } from "../src/herdr/runtime.ts";
 import { tmpDir } from "./helpers/tmp.ts";
 
@@ -28,6 +28,16 @@ test("undeclared entries, other packages and missing paths are unknown, not the 
   assert.equal(hostPiVersion({}, "/nonexistent/pi"), "unknown");
   assert.equal(hostPiVersion({}, undefined), "unknown");
   assert.equal(hostPiVersion({ sessionManager: { getSessionId: () => "look-alike" } }, "/nonexistent/pi"), "unknown", "a structural look-alike is not host evidence");
+});
+
+test("the hc pi command is node plus the realpath of the declared bin, and nothing when that is unprovable", () => {
+  const root = fakePi();
+  assert.deepEqual(hostPiCommand(join(root, "pi"), "/opt/node/bin/node"), ["/opt/node/bin/node", realpathSync(join(root, "dist", "bundle", "cli.js"))]);
+  assert.deepEqual(hostPiCommand(join(root, "pi")), [process.execPath, realpathSync(join(root, "dist", "bundle", "cli.js"))]);
+  for (const entry of [join(fakePi(), "dist", "cli.js"), join(fakePi("some-other-cli"), "pi"), "/nonexistent/pi", undefined, "pi"]) {
+    assert.equal(hostPiCommand(entry, "/opt/node/bin/node"), undefined, `${entry}: never a bare pi`);
+  }
+  assert.equal(hostPiCommand(join(root, "pi"), "node"), undefined, "a relative node is unprovable too");
 });
 
 test("the host's own session object proves the imported module is the host's", () => {

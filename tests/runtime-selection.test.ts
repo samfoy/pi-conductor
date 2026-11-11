@@ -49,7 +49,7 @@ test("H2 pure cascade: per-call > effective persona > project > user > auto", ()
     [{ user: "subprocess" }, "subprocess", "user"],
     [{}, "herdr", "auto"],
     [{ perCall: "auto", persona: "subprocess" }, "herdr", "per-call"],
-  ] as const) assert.deepEqual(runtime.resolveRuntime({ ...input, env: herdr }), { ok: true, kind, source });
+  ] as const) assert.deepEqual(runtime.resolveRuntime({ ...input, env: herdr }), { ok: true, kind, ...(kind === "herdr" ? { host: "tui" } : {}), source });
   for (const bad of ["", "rpc", "HERDR", null, 3]) {
     const result = runtime.resolveRuntime({ perCall: bad as never, env: herdr });
     assert.equal(result.ok, false, `invalid runtime ${JSON.stringify(bad)} must fail closed`);
@@ -59,13 +59,58 @@ test("H2 pure cascade: per-call > effective persona > project > user > auto", ()
 test("H2 auto requires the complete exact herdr environment", () => {
   for (let mask = 0; mask < 8; mask++) {
     const env = Object.fromEntries(Object.entries(herdr).filter((_, i) => mask & (1 << i)));
-    assert.deepEqual(runtime.resolveRuntime({ env }), { ok: true, kind: mask === 7 ? "herdr" : "subprocess", source: "auto" }, `environment mask ${mask}`);
+    assert.deepEqual(runtime.resolveRuntime({ env }), mask === 7 ? { ok: true, kind: "herdr", host: "tui", source: "auto" } : { ok: true, kind: "subprocess", source: "auto" }, `environment mask ${mask}`);
     assert.equal(runtime.resolveRuntime({ perCall: "herdr", env }).ok, mask === 7);
   }
   for (const key of Object.keys(herdr)) {
     assert.deepEqual(runtime.resolveRuntime({ env: { ...herdr, [key]: "" } }), { ok: true, kind: "subprocess", source: "auto" });
   }
   for (const HERDR_ENV of ["true", "0", "yes"]) assert.deepEqual(runtime.resolveRuntime({ env: { ...herdr, HERDR_ENV } }), { ok: true, kind: "subprocess", source: "auto" });
+});
+
+const hc = { HC_TERMINAL_ID: "t17", HC_TERMINAL_SOCKET: "/run/user/1000/herdr-core/default.sock" };
+const conflict = /both Herdr 2 \(HC_TERMINAL_ID, HC_TERMINAL_SOCKET\) and herdr TUI \(HERDR_ENV, HERDR_SOCKET_PATH, HERDR_PANE_ID\) variables are set/;
+test("hc selection matrix: hc only, TUI only, both, neither and malformed, under every explicit choice", () => {
+  const cases: [string, Record<string, string>, "hc" | "tui" | "conflict" | "none"][] = [
+    ["hc only", hc, "hc"],
+    ["hc with HERDR_TAB_ID and HERDR_WORKSPACE_ID", { ...hc, HERDR_TAB_ID: "tab", HERDR_WORKSPACE_ID: "ws" }, "hc"],
+    ["TUI only", herdr, "tui"],
+    ["TUI with a stray HC_TERMINAL_SOCKET", { ...herdr, HC_TERMINAL_SOCKET: hc.HC_TERMINAL_SOCKET }, "tui"],
+    ["both, complete", { ...hc, ...herdr }, "conflict"],
+    ["hc plus HERDR_ENV", { ...hc, HERDR_ENV: "1" }, "conflict"],
+    ["hc plus HERDR_SOCKET_PATH", { ...hc, HERDR_SOCKET_PATH: "/fake/socket" }, "conflict"],
+    ["hc plus HERDR_PANE_ID", { ...hc, HERDR_PANE_ID: "pane" }, "conflict"],
+    ["hc plus an empty HERDR_ENV", { ...hc, HERDR_ENV: "" }, "conflict"],
+    ["a malformed HC_TERMINAL_ID plus TUI", { ...herdr, HC_TERMINAL_ID: "../t1", HC_TERMINAL_SOCKET: hc.HC_TERMINAL_SOCKET }, "conflict"],
+    ["neither", {}, "none"],
+    ["HC_TERMINAL_ID without a socket", { HC_TERMINAL_ID: "t17" }, "none"],
+    ["a relative socket", { ...hc, HC_TERMINAL_SOCKET: "herdr-core/default.sock" }, "none"],
+    ["an empty terminal id", { ...hc, HC_TERMINAL_ID: "" }, "none"],
+    ["a path-shaped terminal id", { ...hc, HC_TERMINAL_ID: "../t17" }, "none"],
+    ["a terminal id with a space", { ...hc, HC_TERMINAL_ID: "t 17" }, "none"],
+    ["a socket with a NUL", { ...hc, HC_TERMINAL_SOCKET: "/run/x\0.sock" }, "none"],
+    ["a socket without a terminal id", { HC_TERMINAL_SOCKET: hc.HC_TERMINAL_SOCKET }, "none"],
+  ];
+  for (const [label, env, expected] of cases) {
+    const where = runtime.herdrEnvironment(env);
+    assert.equal(where.ok ? where.host : where.conflict ? "conflict" : "none", expected, label);
+    for (const perCall of [undefined, "auto"] as const) {
+      const source = perCall ? "per-call" : "auto";
+      assert.deepEqual(runtime.resolveRuntime({ perCall, env }), expected === "hc" || expected === "tui"
+        ? { ok: true, kind: "herdr", host: expected, source } : { ok: true, kind: "subprocess", source }, `${label}: ${perCall ?? "default"}`);
+    }
+    assert.deepEqual(runtime.resolveRuntime({ perCall: "subprocess", env }), { ok: true, kind: "subprocess", source: "per-call" }, `${label}: subprocess`);
+    const explicit = runtime.resolveRuntime({ perCall: "herdr", env });
+    if (expected === "hc" || expected === "tui") assert.deepEqual(explicit, { ok: true, kind: "herdr", host: expected, source: "per-call" }, `${label}: herdr`);
+    else {
+      assert.equal(explicit.ok, false, `${label}: herdr`);
+      assert.match((explicit as { reason: string }).reason, expected === "conflict" ? conflict : /^runtime herdr requested but /, `${label}: herdr reason`);
+    }
+  }
+  for (const layer of ["persona", "project", "user"] as const) {
+    assert.deepEqual(runtime.resolveRuntime({ [layer]: "herdr", env: hc }), { ok: true, kind: "herdr", host: "hc", source: layer });
+    assert.match((runtime.resolveRuntime({ [layer]: "herdr", env: { ...hc, ...herdr } }) as { reason: string }).reason, conflict);
+  }
 });
 
 test("H2 config and frontmatter use existing field-level persona precedence; invalid runtime is diagnosed", async () => {

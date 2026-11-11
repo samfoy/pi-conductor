@@ -10,6 +10,7 @@ import { basename } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { effortGit } from "../effort/open.ts";
 import { readProcessStartTime } from "../reconcile-startup.ts";
+import { herdrEnvironment } from "../herdr/environment.ts";
 import type { RunRegistry } from "../runs.ts";
 import {
   buildLeadRecord, createLeadRecord, leadLiveness, leadPath, readLeadRecord, removeLeadRecordIf, replaceLeadRecord, sameLeadIdentity, sameLeadVersion,
@@ -18,18 +19,20 @@ import {
 
 export const HEARTBEAT_MS = 30_000;
 export const REGISTRY_DEBOUNCE_MS = 2_000;
-const ENV_KEYS = ["CONDUCTOR_SUBAGENT", "HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"] as const;
+const ENV_KEYS = ["CONDUCTOR_SUBAGENT", "HC_TERMINAL_ID", "HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID"] as const;
 
 export interface SessionFacts { sessionId?: string; sessionFile?: string; cwd: string }
 export type Eligibility = { ok: true; socketPath: string; paneId: string; tabId?: string; workspaceId?: string } | { ok: false; reason: string };
 
 /** A lead in a herdr pane. A pi typed by hand into a managed pane inherits CONDUCTOR_SUBAGENT=1 and is not one. */
 export function herdrLeadEnv(env: NodeJS.ProcessEnv): boolean {
-  return env.CONDUCTOR_SUBAGENT !== "1" && env.HERDR_ENV === "1" && !!env.HERDR_SOCKET_PATH && !!env.HERDR_PANE_ID;
+  const where = herdrEnvironment(env);
+  return env.CONDUCTOR_SUBAGENT !== "1" && where.ok && where.host === "tui";
 }
 
 export function leadEligibility(env: NodeJS.ProcessEnv, modeOn: boolean, session: Omit<SessionFacts, "cwd">): Eligibility {
   if (env.CONDUCTOR_SUBAGENT === "1") return { ok: false, reason: "this pi is a conductor sub-agent (CONDUCTOR_SUBAGENT=1)" };
+  if (env.HC_TERMINAL_ID !== undefined) return { ok: false, reason: "a Herdr 2 terminal (HC_TERMINAL_ID is set): supervision is herdr TUI only" };
   if (env.HERDR_ENV !== "1") return { ok: false, reason: "not a herdr pane (HERDR_ENV is not 1)" };
   if (!env.HERDR_SOCKET_PATH) return { ok: false, reason: "HERDR_SOCKET_PATH is unset" };
   if (!env.HERDR_PANE_ID) return { ok: false, reason: "HERDR_PANE_ID is unset" };

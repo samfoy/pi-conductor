@@ -85,6 +85,19 @@ test("S1 eligibility: only a conductor-ON herdr lead with a saved session; a han
   assert.equal(leadEligibility({ ...HERDR, CONDUCTOR_SUBAGENT: "true" }, true, s).ok, true, "only the exact child flag marks a child");
 });
 
+test("S1 presence in a Herdr 2 terminal stays inactive and never activates peer, even with leaked HERDR_* routing", () => {
+  reset();
+  const env = { ...HERDR, HC_TERMINAL_ID: "t17", HC_TERMINAL_SOCKET: "/run/user/1000/herdr-core/default.sock" };
+  assert.match((leadEligibility(env, true, session()) as { reason: string }).reason, /a Herdr 2 terminal \(HC_TERMINAL_ID is set\): supervision is herdr TUI only/);
+  const { p, pi, notify } = presence({ env });
+  const s = session();
+  p.start(s, notify); p.refresh();
+  assert.equal(onDisk(s.sessionId), undefined, "an hc lead publishes no presence");
+  assert.equal(p.status().state, "inactive");
+  assert.match(p.status().reason ?? "", /Herdr 2 terminal/);
+  assert.deepEqual(pi.active(), ["read", "bash", "foreign_tool"], "peer stays inactive");
+});
+
 // ── Mode, tools, records ─────────────────────────────────────────────
 
 test("S1 presence: OFF publishes nothing and keeps peer inactive; ON publishes and activates; OFF removes it again", () => {

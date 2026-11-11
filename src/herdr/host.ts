@@ -42,6 +42,8 @@ export interface LaunchFence {
 export interface TerminalHost {
   readonly socketPath: string;
   readonly identity: TerminalIdentity;
+  owns(binding: HerdrBinding | undefined): boolean;
+  retire(previous: HerdrBinding, signal?: AbortSignal): Promise<ReleaseResult | undefined>;
   reuse(previous: HerdrBinding, invocation: HerdrInvocation, signal?: AbortSignal): Promise<HerdrBinding | undefined>;
   placeLeaf(spec: LeafSpec, fence: LaunchFence, signal?: AbortSignal): Promise<{ binding: HerdrBinding } | { warning: string }>;
   placeRun(spec: PlaceSpec, fence: LaunchFence, signal?: AbortSignal): Promise<HerdrBinding>;
@@ -67,6 +69,8 @@ export class HerdrTuiHost implements TerminalHost {
   readonly identity = tuiIdentity;
   constructor(private readonly options: { cli: HerdrCli; workspaceId?: string; leadPaneId?: string }) {}
   get socketPath() { return this.options.cli.socketPath; }
+  owns(binding: HerdrBinding | undefined): boolean { return isTuiBinding(binding) && binding.socketPath === this.socketPath; }
+  async retire(): Promise<ReleaseResult | undefined> { return undefined; }
 
   async reuse(previous: HerdrBinding, invocation: HerdrInvocation, signal?: AbortSignal): Promise<HerdrBinding | undefined> {
     if (!isTuiBinding(previous)) return undefined;

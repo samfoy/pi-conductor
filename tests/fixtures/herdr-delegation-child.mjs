@@ -11,7 +11,7 @@ const m = JSON.parse(readFileSync(manifestPath, "utf8"));
 const b = JSON.parse(readFileSync(join(m.runDir, "record.json"), "utf8")).herdr;
 if (b.launchNonce !== m.nonce) throw new Error("manifest/binding nonce mismatch");
 const startTime = Number(readFileSync("/proc/self/stat", "utf8").split(") ")[1].split(" ")[19]);
-const hello = { v: 1, bridgeProtocol: 1, runId: b.runId, launchNonce: b.launchNonce, sessionId: b.sessionId, sessionFile: b.sessionFile, paneId: b.paneId,
+const hello = { v: 1, bridgeProtocol: 1, runId: b.runId, launchNonce: b.launchNonce, sessionId: b.sessionId, sessionFile: b.sessionFile, paneId: m.paneId,
   pid: process.pid, pidStartTime: startTime, piVersion: "0.87.1", conductorVersion: "fixture", at: Date.now() };
 mkdirSync(join(m.runDir, "launch"), { recursive: true });
 writeFileSync(join(m.runDir, "launch", `${b.launchNonce}.json`), JSON.stringify(hello));

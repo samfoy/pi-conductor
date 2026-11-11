@@ -190,7 +190,7 @@ function resolveSpawnCwd(arg: string | undefined, base: string): CwdResolution {
   return arg === undefined ? { ok: true, cwd: base } : resolveCwdArg(arg, base);
 }
 
-const runtimeSchema = Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("subprocess"), Type.Literal("herdr")], { description: "Runtime selector: per-call > effective persona > project > user > auto. Herdr is unavailable in H2; use subprocess explicitly inside herdr." }));
+const runtimeSchema = Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("subprocess"), Type.Literal("herdr")], { description: "Runtime selector: per-call > effective persona > project > user > auto. auto picks herdr inside a Herdr 2 terminal (hc) or a herdr TUI pane, and subprocess elsewhere or when both environments are present; explicit herdr fails there instead of guessing." }));
 
 const SPAWN_CWD_DESCRIPTION =
   "Directory the sub-agent runs in; personas, config, and the git root for worktree isolation resolve from it. " +

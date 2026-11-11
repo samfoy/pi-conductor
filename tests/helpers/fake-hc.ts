@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmdirSync, writeFileSync } from "node:fs";
 import { after } from "node:test";
 import { createServer, type Server } from "node:net";
 import { dirname, join } from "node:path";
@@ -27,7 +27,15 @@ export async function fakeHc(extra: Record<string, unknown> = {}, env: Record<st
   const cliEnv = { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: root, TMPDIR: root, CONDUCTOR_HC_BIN: fakeHcBin, FAKE_HC_STATE: statePath, ...env };
   const cli = createHcCli({ env: cliEnv, socketPath });
   const read = () => JSON.parse(readFileSync(statePath, "utf8"));
-  const patch = (p: Record<string, unknown>) => writeFileSync(statePath, JSON.stringify({ ...read(), ...p }));
+  const patch = (p: Record<string, unknown>) => {
+    const lock = `${statePath}.lock`, end = Date.now() + 5000;
+    for (;;) {
+      try { mkdirSync(lock); break; }
+      catch (e) { if ((e as NodeJS.ErrnoException).code !== "EEXIST" || Date.now() > end) throw e; Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5); }
+    }
+    try { writeFileSync(`${statePath}.patch`, JSON.stringify({ ...read(), ...p })); renameSync(`${statePath}.patch`, statePath); }
+    finally { rmdirSync(lock); }
+  };
   const terminals = (): Record<string, FakeHcTerminal> => read().terminals ?? {};
   const calls = (): FakeHcCall[] => read().calls;
   const stderrOf = (address: string) => { try { return readFileSync(`${statePath}.${address}.stderr`, "utf8"); } catch { return ""; } };

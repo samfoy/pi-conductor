@@ -4,7 +4,7 @@ import { isRecord } from "../herdr/cli.ts";
 import { herdrFailure, type ChildEvidence, type ChildProof, type LaunchFence, type LaunchSpec, type LeafSpec, type PlaceSpec, type ReleaseResult,
   type TerminalHost, type TerminalIdentity } from "../herdr/host.ts";
 import { isHcBinding, type HcBinding, type HerdrBinding, type HerdrInvocation } from "../herdr/identity.ts";
-import { HcCliError, type HcCli, type HcLimits, type HcRunResult } from "./cli.ts";
+import { HcCliError, type HcCli, type HcLimits, type HcRunResult, type HcTerminal } from "./cli.ts";
 
 export const HC_UNSET_HERDR_ENV = ["HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID", "HERDR_TAB_ID", "HERDR_WORKSPACE_ID", "HERDR_SESSION", "HERDR_BIN_PATH"] as const;
 export const hcTab = (runId: string): string => `tb${createHash("sha256").update(runId).digest("hex").slice(0, 32)}`;
@@ -13,7 +13,7 @@ type Refusal = { ok: false; state: "unknown" | "gone"; reason: string };
 const unknown = (reason: string): Refusal => ({ ok: false, state: "unknown", reason });
 const INVOCATION = ["runId", "launchNonce", "sessionId", "sessionFile"] as const;
 const text = (v: unknown): v is string => typeof v === "string" && v.length > 0 && !v.includes("\0");
-const label = (v: unknown): v is string => text(v) && !/[\r\n]/.test(v) && Buffer.byteLength(v) <= 512;
+export const hcLabel = (v: unknown): v is string => text(v) && !/[\r\n]/.test(v) && Buffer.byteLength(v) <= 512;
 const positiveInteger = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
 const address = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9_/-]{0,127}$/.test(v);
 const localAddress = (v: unknown): v is string => typeof v === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(v);
@@ -27,6 +27,10 @@ function addressOf(binding: HerdrBinding): string {
   const hc = hcOnly(binding);
   if (!hc.address) throw herdrFailure("hc terminal address unknown");
   return hc.address;
+}
+
+function sameInvocation(b: HcBinding, current: HerdrInvocation | undefined): boolean {
+  return !!current && INVOCATION.every(key => text(b[key]) && b[key] === current[key]);
 }
 
 function terminalOurs(ev: { binding: unknown; current: unknown; socketPath: string; coreId: string; observation: unknown }): { ok: true } | Refusal {
@@ -72,17 +76,25 @@ export function hcIdentity(coreId: string): TerminalIdentity {
   };
 }
 
-export interface HcHostOptions { cli: HcCli; coreId: string; lead: { address: string; space?: string }; piCommand: readonly [string, string] }
+export interface HcHostOptions { cli: HcCli; coreId: string; lead?: { address: string; space?: string }; piCommand?: readonly [string, string] }
 
 export class HcHost implements TerminalHost {
   readonly identity: TerminalIdentity;
   constructor(private readonly options: HcHostOptions) {
     const { coreId, lead, piCommand } = options;
-    if (!label(coreId) || !address(lead.address) || (lead.space !== undefined && !label(lead.space)) || piCommand.length !== 2 ||
-        !piCommand.every(p => text(p) && isAbsolute(p) && !p.includes("="))) throw new HcCliError("configuration");
+    if (!hcLabel(coreId) || (lead !== undefined && (!address(lead.address) || (lead.space !== undefined && !hcLabel(lead.space)))) ||
+        (piCommand !== undefined && (piCommand.length !== 2 || !piCommand.every(p => text(p) && isAbsolute(p) && !p.includes("="))))) throw new HcCliError("configuration");
     this.identity = hcIdentity(coreId);
   }
   get socketPath() { return this.options.cli.socketPath; }
+  owns(binding: HerdrBinding | undefined): boolean {
+    return isHcBinding(binding) && binding.socketPath === this.socketPath && binding.coreId === this.options.coreId;
+  }
+
+  async retire(previous: HerdrBinding, signal?: AbortSignal): Promise<ReleaseResult> {
+    if (!this.owns(previous)) return unknown("previous invocation is not a terminal on this herdr-core");
+    return this.release(previous, () => previous, { timeoutMs: 2000, signal });
+  }
 
   private binding(invocation: HerdrInvocation, parentAddress: string, space: string | undefined, tab: string, createdTab: boolean): HcBinding {
     return { ...invocation, host: "hc", socketPath: this.socketPath, coreId: this.options.coreId, parentAddress, ...(space === undefined ? {} : { space }), tab, createdTab };
@@ -92,6 +104,7 @@ export class HcHost implements TerminalHost {
 
   async placeRun(spec: PlaceSpec): Promise<HerdrBinding> {
     const { lead } = this.options;
+    if (!lead) throw herdrFailure("hc launch refused: lead terminal unknown");
     return this.binding(spec.invocation, lead.address, lead.space, hcTab(spec.invocation.runId), true);
   }
 
@@ -116,8 +129,9 @@ export class HcHost implements TerminalHost {
   }
 
   async start(target: HerdrBinding, launch: LaunchSpec, limits: HcLimits, fence: LaunchFence): Promise<unknown> {
-    const binding = hcOnly(target), [node, entry] = this.options.piCommand;
-    const env = Object.entries(launch.env);
+    const binding = hcOnly(target), piCommand = this.options.piCommand;
+    if (!piCommand) throw herdrFailure("hc launch refused: the host Pi entry is not Pi's declared bin, and hc never runs a bare pi from the core's PATH");
+    const [node, entry] = piCommand, env = Object.entries(launch.env);
     if (binding.agentName !== launch.alias) throw herdrFailure("launch alias is not the binding's agent name");
     if (!env.every(([key]) => envName(key))) throw herdrFailure("invalid terminal environment");
     const labels = { "conductor.run": binding.runId, "conductor.nonce": binding.launchNonce, "herdr.tab": binding.tab,
@@ -147,8 +161,12 @@ export class HcHost implements TerminalHost {
 
   async release(target: HerdrBinding, current: () => HerdrInvocation | undefined, limits?: HcLimits): Promise<ReleaseResult> {
     if (!isHcBinding(target) || !target.address) return unknown("no Herdr 2 terminal to release");
+    let observed: HcTerminal;
+    try { observed = await this.options.cli.get(target.address, limits); }
+    catch (e) {
+      return e instanceof HcCliError && e.remoteKind === "not_found" && this.owns(target) && sameInvocation(target, current()) ? { ok: true } : unknown("terminal cleanup unconfirmed");
+    }
     try {
-      const observed = await this.options.cli.get(target.address, limits);
       const ours = terminalOurs({ binding: target, current: current(), socketPath: this.socketPath, coreId: this.options.coreId, observation: observed });
       if (!ours.ok) return ours;
       if (observed.state !== "finished") return unknown("terminal still live");

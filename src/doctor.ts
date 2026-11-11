@@ -5,7 +5,8 @@
  * ExtensionCommandContext.notify pipe.
  */
 
-import { resolveRuntime, type RuntimeEnvironment } from "./runtime.ts";
+import { herdrEnvironment, resolveRuntime, type RuntimeEnvironment } from "./runtime.ts";
+import { hcContextStatus } from "./hc/context.ts";
 import { existsSync, accessSync, constants } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -20,9 +21,9 @@ import type { RunRegistry } from "./runs.ts";
 import type { SpawnQueue } from "./queue.ts";
 import type { PersonaResolution } from "./types.ts";
 import { lastGcMarkerPath, readLastGcMtime } from "./gc/last-gc.ts";
-import { walkInventory } from "./gc/inventory.ts";
+import { walkInventory, type InventoryEntry } from "./gc/inventory.ts";
 import { planReclaim } from "./gc/policy.ts";
-import { terminalRef } from "./herdr/identity.ts";
+import { isHcBinding, terminalRef } from "./herdr/identity.ts";
 import type { PostStartupReconcileResult } from "./reconcile-startup.ts";
 import type { DeliveryStatus } from "./supervision/delivery.ts";
 import type { ChiefStatus } from "./supervision/lease.ts";
@@ -47,6 +48,28 @@ function supervisionLines(status: SupervisionStatus | undefined): string[] {
     if (c.lastError) lines.push(`  ⚠ chief: ${c.lastError}`);
   }
   lines.push("  · S4: presence, `peer list`, non-waking `peer message`, the chief lease (/chief), `staff list/transcript/message/reply` and `chief message/ask`; all queued and at most once; only the current chief's kinds wake");
+  return lines;
+}
+
+type Selection = ReturnType<typeof resolveRuntime>;
+const selectionText = (s: Selection) => s.ok ? `${s.kind}${s.host ? ` on ${s.host}` : ""} [${s.source}]` : s.reason;
+
+function runtimeEnvironmentLines(env: RuntimeEnvironment, inventory: readonly InventoryEntry[], selected: Selection): string[] {
+  const where = herdrEnvironment(env);
+  const lines = [`  selected: ${selectionText(selected)}`,
+    where.ok ? `  environment: ${where.host === "hc" ? "Herdr 2 terminal (hc)" : "herdr TUI pane (tui)"}`
+      : where.conflict ? `  ⚠ environment conflict: ${where.reason}` : `  environment: no herdr host (${where.reason})`];
+  const hc = where.ok && where.host === "hc" ? hcContextStatus(env) : undefined;
+  if (hc && "context" in hc) {
+    const { socketPath, coreId, lead, piCommand } = hc.context;
+    lines.push(`  hc: socket=${socketPath} core=${coreId} lead=${lead.address} space=${lead.space ?? "none"}`);
+    if (!piCommand) lines.push("  ⚠ hc launches refused: the host Pi entry is not Pi's declared bin");
+  } else if (hc) lines.push(`  hc: socket=${env.HC_TERMINAL_SOCKET} core unresolved (${hc.reason.replace(/^herdr: /, "")}); hc launches refused until it resolves`);
+  if (where.ok && where.host === "tui") lines.push(`  tui: socket=${env.HERDR_SOCKET_PATH} pane=${env.HERDR_PANE_ID}`);
+  const context = hc && "context" in hc ? hc.context : undefined;
+  const unprovable = inventory.filter(e => e.runtime === "herdr" && isHcBinding(e.herdr) && e.inMemory?.transport?.kind !== "herdr" &&
+    (!e.herdrChildAbsent || e.herdr.socketPath !== context?.socketPath || e.herdr.coreId !== context.coreId)).length;
+  lines.push(`  hc records with an unprovable terminal: ${unprovable} (not attached here, and the child is not proven gone or the terminal is on another herdr-core)`);
   return lines;
 }
 
@@ -305,6 +328,7 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
   // already surfaces gc enabled / last-gc-mtime above; this section
   // adds the operational story (how many records, how big, how many
   // pinned, how many orphaned, what the next gc pass would do).
+  let inventory: InventoryEntry[] = [];
   {
     const runsRoot = opts.runsRoot ?? join(opts.homeDir ?? homedir(), ".pi", "agent", "conductor", "runs");
     lines.push("");
@@ -312,7 +336,6 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
     if (!existsSync(runsRoot)) {
       lines.push("  (no run records)");
     } else {
-      let inventory: Awaited<ReturnType<typeof walkInventory>>;
       try {
         inventory = await walkInventory(runsRoot, opts.registry);
       } catch {
@@ -417,11 +440,11 @@ export async function buildDoctorReport(opts: DoctorReportOptions): Promise<stri
   lines.push("## Runtime");
   lines.push(`  configured: ${cfg.runtime === undefined ? "auto" : cfg.runtime} (project > user > auto; persona/per-call may override)`);
   lines.push("  legacy records without a runtime tag: subprocess; resume/retry preserve the concrete backend");
+  const env = opts.env ?? process.env;
+  lines.push(...runtimeEnvironmentLines(env, inventory, resolveRuntime({ project: project.runtime, user: user.runtime, env })));
   for (const p of resolved.personas.values()) {
-    const selected = resolveRuntime({ persona: p.runtime, project: project.runtime, user: user.runtime, env: opts.env ?? process.env });
-    lines.push(selected.ok
-      ? `  ${p.name}: ${selected.kind} [${selected.source}]`
-      : `  ${p.name}: ${selected.reason}`);
+    const selected = resolveRuntime({ persona: p.runtime, project: project.runtime, user: user.runtime, env });
+    lines.push(`  ${p.name}: ${selectionText(selected)}`);
   }
   for (const r of opts.registry.list()) {
     lines.push(`  ${r.id}: saved=${r.runtime === undefined ? "subprocess (legacy)" : r.runtime}`);

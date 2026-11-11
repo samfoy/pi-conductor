@@ -312,3 +312,24 @@ test("release refuses a foreign, replaced or unaddressed terminal", async () => 
   assert.equal((await r.host.release(r.placed, r.current, { timeoutMs: 1000 })).ok, false, "observation unavailable");
   assert.ok(!r.calls().some(c => c.args[0] === "rm"));
 });
+
+test("release reads not_found as removed only for this invocation on this host's own core and socket", async () => {
+  const r = await releaseFixture();
+  r.patch({ getFault: "not_found" });
+  for (const [label, target] of [["another core", { ...r.placed, coreId: "othercore" }], ["another socket", { ...r.placed, socketPath: "/run/other.sock" }]] as const) {
+    assert.deepEqual(await r.host.release(target, () => target), { ok: false, state: "unknown", reason: "terminal cleanup unconfirmed" }, label);
+  }
+  assert.deepEqual(await r.host.release(r.placed, () => undefined), { ok: false, state: "unknown", reason: "terminal cleanup unconfirmed" }, "invocation replaced");
+  assert.deepEqual(await r.host.release(r.placed, r.current), { ok: true }, "positive control: gone from this core");
+  assert.ok(!r.calls().some(c => c.args[0] === "rm"), "a not_found terminal needs no rm");
+});
+
+test("retire releases only a previous terminal on this core, with the previous invocation as its own current", async () => {
+  const r = await releaseFixture();
+  assert.deepEqual(await r.host.retire({ ...r.placed, coreId: "othercore" }), { ok: false, state: "unknown", reason: "previous invocation is not a terminal on this herdr-core" });
+  assert.deepEqual(await r.host.retire(tui()), { ok: false, state: "unknown", reason: "previous invocation is not a terminal on this herdr-core" });
+  assert.deepEqual(await r.host.retire(r.placed), { ok: false, state: "unknown", reason: "terminal still live" });
+  r.patch({ terminals: { ...r.terminals(), [r.placed.address!]: { ...r.terminals()[r.placed.address!], state: "finished" } } });
+  assert.deepEqual(await r.host.retire(r.placed), { ok: true });
+  assert.deepEqual(r.calls().filter(c => c.args[0] === "rm").map(c => c.args), [["rm", r.placed.address, "--json"]]);
+});

@@ -1,9 +1,17 @@
 #!/usr/bin/env node
 import {spawn} from "node:child_process";
-import {closeSync, openSync, readFileSync, writeFileSync} from "node:fs";
+import {closeSync, mkdirSync, openSync, readFileSync, renameSync, rmdirSync, writeFileSync} from "node:fs";
 import {basename, isAbsolute} from "node:path";
 const statePath = process.env.FAKE_HC_STATE;
 if (!statePath) process.exit(90);
+const sleepSync = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+const lock = `${statePath}.lock`, end = Date.now() + 5000;
+for (;;) {
+  try { mkdirSync(lock); break; } catch (e) { if (e.code !== "EEXIST" || Date.now() > end) process.exit(97); sleepSync(5); }
+}
+let held = true;
+const unlock = () => { if (held) { held = false; rmdirSync(lock); } };
+process.on("exit", unlock);
 const state = JSON.parse(readFileSync(statePath, "utf8"));
 if (process.env.HC_SOCKET !== state.socket) process.exit(90);
 const args = process.argv.slice(2);
@@ -12,7 +20,7 @@ state.calls.push({args, socket: process.env.HC_SOCKET,
 state.terminals ??= {};
 state.next ??= 1;
 state.spawned ??= {};
-const save = () => writeFileSync(statePath, JSON.stringify(state));
+const save = () => { writeFileSync(`${statePath}.${process.pid}`, JSON.stringify(state)); renameSync(`${statePath}.${process.pid}`, statePath); };
 const running = pid => {
   try { process.kill(pid, 0); } catch (e) { return e.code !== "ESRCH"; }
   try { return readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]?.[0] !== "Z"; } catch { return true; }
@@ -22,6 +30,7 @@ for (const address of Object.keys(state.spawned)) {
   if (t?.state === "live" && !running(t.pid)) Object.assign(t, {state: "finished", reason: "exited", finished_ms: Date.now()});
 }
 save();
+if (state.fault || state.runFault === "timeout" || !["run", "kill", "rm"].includes(args[0])) unlock();
 const print = value => console.log(JSON.stringify(value));
 const fail = (exit, kind, message, hint) => {
   console.error(JSON.stringify({error: {hint, kind, message}}));
@@ -88,6 +97,7 @@ else if (args[0] === "run") {
     reported: false, rm: false, rows: 120, screen: "exact", signal: null, state: "live", status: null, status_ms: null,
     template: null, title: "", turn: 0};
   save();
+  unlock();
   print({address, agent: basename(argv[0]), cwd, name, ...(parent === undefined ? {} : {parent: find(parent).address}), state: "live", turn: 0});
   if (state.runFault === "timeout-after-start") hang();
 } else if (args[0] === "get") {

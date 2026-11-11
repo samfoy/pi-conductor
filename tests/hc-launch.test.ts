@@ -1,51 +1,17 @@
-import test, { type TestContext } from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { sandboxPi, tmpDir } from "./helpers/tmp.ts";
+import { sandboxPi } from "./helpers/tmp.ts";
 import { fakeHc } from "./helpers/fake-hc.ts";
+import { coreId, fakeChild, launchFixture, realProbe, until } from "./helpers/hc-launch.ts";
 import { HcHost, hcTab } from "../src/hc/host.ts";
 import { HerdrRuntime } from "../src/herdr/runtime.ts";
-import { readProcessStartTime } from "../src/reconcile-startup.ts";
-import { emptyUsage, type Run } from "../src/types.ts";
-import type { HerdrTransport, RunSink } from "../src/runtime.ts";
+import type { Run } from "../src/types.ts";
 import type { HcBinding } from "../src/herdr/identity.ts";
+import { HcCliError } from "../src/hc/cli.ts";
 
 sandboxPi();
-const fakeChild = fileURLToPath(new URL("./fixtures/fake-hc-child.mjs", import.meta.url));
-const coreId = "fakecore0000000000000000000000000";
-const leaked = { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/leaked-herdr.sock", HERDR_PANE_ID: "leaked-pane", HERDR_TAB_ID: "leaked-tab", HERDR_WORKSPACE_ID: "leaked-ws" };
-type Probe = (pid: number) => { pid: number; state: "alive" | "gone" | "unknown"; startTime?: number };
-const realProbe: Probe = pid => {
-  try { process.kill(pid, 0); return { pid, state: "alive", startTime: readProcessStartTime(pid) }; }
-  catch (e) { return { pid, state: (e as NodeJS.ErrnoException).code === "ESRCH" ? "gone" : "unknown" }; }
-};
-
-async function launchFixture(t: TestContext, mode = "hold", probe: (h: { transport: () => HerdrTransport | undefined }) => Probe = () => realProbe) {
-  const f = await fakeHc({}, { FAKE_CHILD_MODE: mode });
-  const lead = await f.cli.run({ name: "lead", cwd: "/tmp", labels: { "herdr.space": "sp-lead" }, argv: ["pi"] });
-  f.patch({ spawn: true, coreEnv: leaked });
-  const root = tmpDir("hc-launch-"), dir = join(root, "oracle-hc"); mkdirSync(dir);
-  const run: Run = { id: "oracle-hc", runtime: "herdr", persona: "oracle", task: "hc task", status: "running", mode: "background", cwd: root,
-    startTime: Date.now(), lastEventAt: Date.now(), messages: [], usage: emptyUsage(), recordPath: join(dir, "record.json"),
-    transcriptPath: join(dir, "transcript.jsonl"), finalPath: join(dir, "final.md") };
-  const host = new HcHost({ cli: f.cli, coreId, lead: { address: lead.address, space: "sp-lead" }, piCommand: [process.execPath, fakeChild] });
-  const signals: [number, string][] = [];
-  let transport: HerdrTransport | undefined;
-  const runtime = new HerdrRuntime({ host, env: { AWS_PROFILE: "inference-only" }, trustArgs: () => [], piVersion: "fake-child", platform: "linux",
-    probe: probe({ transport: () => transport }), signal: (pid, signal) => { signals.push([pid, signal]); process.kill(pid, signal); } });
-  const sink: RunSink = { line() {}, close() {}, error() {}, initialDeliveryFailed() {} };
-  t.after(() => {
-    for (const terminal of Object.values(f.terminals())) if (terminal.name !== "lead") try { process.kill(terminal.pid, "SIGKILL"); } catch { /* already gone */ }
-  });
-  const launch = () => {
-    transport = runtime.launch(run, [], root, sink, "hc task", { kind: "fresh", sessionDir: join(dir, "session"), systemPrompt: "probe" });
-    run.transport = transport;
-    return transport;
-  };
-  return { ...f, lead: lead.address, run, dir, signals, launch };
-}
 const addressed = (h: Awaited<ReturnType<typeof launchFixture>>) =>
   h.calls().filter(c => ["get", "read", "rm"].includes(c.args[0])).every(c => /^t\d+$/.test(c.args[1]));
 
@@ -148,6 +114,89 @@ test("hc reattach of a ready run whose record lost its address recovers it and p
   assert.equal(evidence.state, "alive");
   assert.equal((evidence.binding as HcBinding).address, b.address);
   const other = new HerdrRuntime({ host: new HcHost({ cli: h.cli, coreId: "othercore", lead: { address: h.lead }, piCommand: [process.execPath, fakeChild] }), env: {}, platform: "linux" });
-  await assert.rejects(other.inspect({ ...h.run, herdr: { ...b }, transport: undefined }), /reattach identity unknown: core mismatch/);
   await transport.stop();
+});
+
+test("hc record on another herdr-core or socket is other-socket, never reattached through this host", { timeout: 60000 }, async t => {
+  const h = await launchFixture(t);
+  const transport = h.launch();
+  await transport.ready;
+  const b = h.run.herdr as HcBinding;
+  const recorded: Run = { ...h.run, herdr: { ...b }, transport: undefined };
+  const elsewhere = await fakeHc();
+  for (const host of [new HcHost({ cli: h.cli, coreId: "othercore", lead: { address: h.lead } }), new HcHost({ cli: elsewhere.cli, coreId, lead: { address: h.lead } })]) {
+    const other = new HerdrRuntime({ host, env: {}, platform: "linux" });
+    const before = h.calls().length;
+    await assert.rejects(other.inspect(recorded), /^Error: herdr: other-socket$/);
+    assert.equal(await other.probeRecord(recorded), "other-socket");
+    assert.equal(h.calls().length, before, "no hc call reaches the core for a record bound elsewhere");
+  }
+  const same = new HerdrRuntime({ host: new HcHost({ cli: h.cli, coreId, lead: { address: h.lead } }), env: {}, platform: "linux" });
+  assert.equal(await same.probeRecord(recorded), "alive", "positive control: the same socket and core reattach");
+  await transport.stop();
+});
+
+test("hc resume: the previous terminal is removed, proven finished and ours, before the fresh terminal starts", { timeout: 60000 }, async t => {
+  const h = await launchFixture(t);
+  const first = h.launch();
+  await first.ready;
+  const previous = (h.run.herdr as HcBinding).address!;
+  await first.stop(); await first.closed;
+  const before = h.calls().length;
+  const second = h.resume();
+  await second.ready;
+  const calls = h.calls().slice(before).map(c => c.args);
+  const rm = calls.findIndex(a => a[0] === "rm"), run = calls.findIndex(a => a[0] === "run");
+  assert.deepEqual(calls[rm], ["rm", previous, "--json"]);
+  assert.ok(rm >= 0 && rm < run, `the previous terminal goes before the new hc run: ${JSON.stringify(calls)}`);
+  assert.equal(h.terminals()[previous], undefined);
+  const b = h.run.herdr as HcBinding;
+  assert.notEqual(b.address, previous, "hc never reuses a finished terminal");
+  assert.equal(h.terminals()[b.address!].state, "live");
+  assert.doesNotMatch(second.stderr, /kept/);
+  await second.stop();
+});
+
+test("hc resume: a previous terminal that is not proven ours is kept with a diagnostic, and the relaunch still starts", { timeout: 60000 }, async t => {
+  const h = await launchFixture(t);
+  const first = h.launch();
+  await first.ready;
+  const previous = (h.run.herdr as HcBinding).address!;
+  await first.stop(); await first.closed;
+  h.patch({ report: { [previous]: { labels: { "conductor.run": "someone-else" } } } });
+  const before = h.calls().length;
+  const second = h.resume();
+  await second.ready;
+  assert.ok(!h.calls().slice(before).some(c => c.args[0] === "rm"), "an unproven previous terminal is never removed");
+  assert.ok(h.terminals()[previous], "the previous terminal is kept");
+  assert.match(second.stderr, new RegExp(`previous terminal ${previous} kept: terminal labels mismatch`));
+  assert.notEqual((h.run.herdr as HcBinding).address, previous);
+  await second.stop();
+});
+
+test("hc rollback after an unconfirmed hc run: a started child is proven through its hello's terminal, stopped by pid and removed", { timeout: 60000 }, async t => {
+  const hellos = (dir: string) => existsSync(join(dir, "launch")) ? readdirSync(join(dir, "launch")).filter(f => f.endsWith(".json")) : [];
+  const h = await launchFixture(t, "hold", undefined, (cli, dir) => ({ ...cli, async run(spec, limits) {
+    const abort = new AbortController();
+    const pending = cli.run(spec, { ...limits, signal: abort.signal }).catch(() => undefined);
+    await until(() => hellos(dir).length === 1, "the child's hello");
+    abort.abort(); await pending;
+    throw new HcCliError("timeout");
+  } }));
+  h.patch({ runFault: "timeout-after-start" });
+  const transport = h.launch();
+  await assert.rejects(transport.ready, /hc start outcome unconfirmed; no blind retry/);
+  const hello = JSON.parse(readFileSync(join(h.dir, "launch", hellos(h.dir)[0]!), "utf8"));
+  assert.deepEqual(h.signals, [[hello.pid, "SIGTERM"]], "the started child was stopped by its proven pid");
+  const b = h.run.herdr as HcBinding;
+  assert.equal(b.address, hello.paneId, "the address came from the child's own hello");
+  assert.equal(h.terminals()[hello.paneId], undefined, "and its finished terminal removed");
+  assert.equal(h.calls().filter(c => c.args[0] === "run" && c.args.includes(b.agentName!)).length, 1, "never retried");
+});
+
+test("hc launch without a proven host Pi entry is refused before any hc run, never retried as a bare pi", { timeout: 60000 }, async t => {
+  const h = await launchFixture(t, "hold", undefined, undefined, null);
+  const transport = h.launch();
+  await assert.rejects(transport.ready, /hc launch refused: the host Pi entry is not Pi's declared bin, and hc never runs a bare pi from the core's PATH/);
+  assert.equal(h.calls().filter(c => c.args[0] === "run").length, 1, "only the lead's own terminal was ever started");
 });

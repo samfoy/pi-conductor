@@ -50,9 +50,40 @@ each `ensemble_auto` step, persona frontmatter, and config (top-level or
 > project global > user global > auto**. Persona overrides keep the existing
 field-level project-over-user merge, above frontmatter.
 
-`auto` selects herdr only when `HERDR_ENV=1` and both `HERDR_SOCKET_PATH` and
-`HERDR_PANE_ID` are nonempty; otherwise it selects subprocess. Explicit herdr
-outside that environment fails without silent fallback. H7/H8 implement managed
+`auto` selects herdr on one of two hosts, and otherwise subprocess:
+
+- **Herdr 2 (`hc`)**: `HC_TERMINAL_ID` is token-shaped, `HC_TERMINAL_SOCKET` is
+  absolute, and none of `HERDR_ENV`, `HERDR_SOCKET_PATH` or `HERDR_PANE_ID` is set.
+- **herdr TUI (`tui`)**: `HERDR_ENV=1` and both `HERDR_SOCKET_PATH` and
+  `HERDR_PANE_ID` are nonempty, with no `HC_TERMINAL_ID`.
+- **Both sets present** (herdr nested in a Herdr 2 terminal, or the core's env leak):
+  `auto` selects subprocess, and an explicit `herdr` fails with a reason naming both
+  variable sets. Conductor never picks one of them.
+
+Explicit herdr outside both environments fails without silent fallback.
+
+On Herdr 2 each run is one `hc run --bg --outlive-parent --no-notify` terminal under
+the lead's `HC_TERMINAL_ID`, in the lead terminal's `herdr.space` label and a
+per-run `herdr.tab` label; a delegated leaf of a proven parent shares the parent's
+tab and names the parent's terminal as its parent. The terminal runs
+`env … <node> <realpath of the host pi bin>`; when the host Pi entry is not Pi's
+declared bin, an hc launch is refused, never retried with `pi` from the core's
+PATH. The core id (`hc server status`) and the lead terminal are resolved once per
+session start, or lazily before the first hc spawn; until they resolve, an hc
+launch is refused with the reason. A record picks its host from its own binding,
+never from the current environment, and an hc record reattaches only through a
+host on the same socket and core id; anything else is `other-socket`, as a TUI
+socket mismatch is. A resume always gets a fresh terminal and removes the previous
+one (`hc rm`) only when it is proven finished and ours; a failed removal is a
+diagnostic, never a launch failure. GC and explicit cleanup remove a terminal
+only after the same child-absence proof as a TUI pane, plus a matching core id;
+under another core a `not_found` is never read as removed. Doctor's `## Runtime`
+names the selected host and why, the hc socket, core, lead and space (or why they
+are unresolved), any environment conflict, and how many hc records have a terminal
+it cannot prove. Supervision (`chief`, `peer`, `staff`) stays herdr TUI only and
+never activates in a pi that has `HC_TERMINAL_ID`.
+
+H7/H8 implement managed
 pane launch, observation, live inbox controls and saved-session relaunch. This is
 backed by fake-CLI and offline native Pi 0.87.1 tests plus the H11 automated
 real-herdr matrix below (herdr 0.9.1 with Pi 0.87.1 and 0.99.1). That is **not a
