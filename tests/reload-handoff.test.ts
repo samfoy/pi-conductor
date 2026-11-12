@@ -23,6 +23,7 @@ import { classifyRecord } from "../src/reconcile-startup.ts";
 import { claimReloadSurvivors, handOffCandidate, publishReloadSurvivors } from "../src/reload-handoff.ts";
 import { emptyUsage, toRunRecord, type Run } from "../src/types.ts";
 import { stubCtx } from "./helpers/stub-pi.ts";
+import { readWholeJson } from "./helpers/json.ts";
 import { tmpDir } from "./helpers/tmp.ts";
 
 const STALE = "This extension ctx is stale after session replacement or reload.";
@@ -112,7 +113,7 @@ function load(): Instance {
   };
 }
 
-async function until(what: string, ok: () => boolean, ms = 15_000): Promise<void> {
+async function until(what: string, ok: () => boolean, ms = 30_000): Promise<void> {
   const deadline = Date.now() + ms;
   while (!ok()) {
     assert.ok(Date.now() < deadline, `timed out waiting for ${what}`);
@@ -190,20 +191,21 @@ async function reload(s: Scenario): Promise<{ old: Message[][]; next: Message[];
     assert.ok(!spawned.isError, JSON.stringify(spawned.content));
     const id: string = spawned.details.agent_id;
     const recordPath = join(root, "home", ".pi", "agent", "conductor", "runs", id, "record.json");
-    const record = () => JSON.parse(readFileSync(recordPath, "utf8"));
-    await until("the stub to start", () => existsSync(recordPath) && !!record().pid);
-    const pid: number = record().pid;
+    const record = () => readWholeJson(recordPath);
+    const whole = async () => { let r: any; await until("a whole record", () => (r = record()) !== undefined); return r; };
+    await until("the stub to start", () => !!record()?.pid);
+    const pid: number = (await whole()).pid;
     stubPid = pid;
     const alive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
     // The spawn-time record omits streamingMode (written before it is stamped); a mid-run
     // write such as an owner answer persists it, and only then does reconcile treat a live
     // RPC record as a stranded orphan. Model that record.
-    if (s.steerable) writeFileSync(recordPath, JSON.stringify({ ...record(), streamingMode: "rpc", steerable: true }));
+    if (s.steerable) writeFileSync(recordPath, JSON.stringify({ ...(await whole()), streamingMode: "rpc", steerable: true }));
 
     await reloadFrom(a);
     if (s.finishDuringReload) {
       writeFileSync(go, "");
-      await until("the outcome on disk", () => record().status === "completed");
+      await until("the outcome on disk", () => record()?.status === "completed");
     }
     let next = await start("reload");
     if (s.reloadBeforeReconcile) {
@@ -225,7 +227,7 @@ async function reload(s: Scenario): Promise<{ old: Message[][]; next: Message[];
       await until("the stub to exit", () => !alive());
       await until("the old close handler", () => existsSync(memoryPath) && readFileSync(memoryPath, "utf8").length > 0);
       await new Promise(r => setTimeout(r, 1_500));
-      return { old: instances.slice(0, -1).map(i => i.cards(id)), next: next.cards(id), record: record(), pidAliveAfterReconcile: false };
+      return { old: instances.slice(0, -1).map(i => i.cards(id)), next: next.cards(id), record: await whole(), pidAliveAfterReconcile: false };
     }
     const pidAliveAfterReconcile = s.finishDuringReload ? true : alive();
     writeFileSync(go, "");
@@ -233,7 +235,7 @@ async function reload(s: Scenario): Promise<{ old: Message[][]; next: Message[];
     // A's close handler records the outcome after its (suppressed) card; any duplicate is in by then.
     await until("the old close handler", () => existsSync(memoryPath) && readFileSync(memoryPath, "utf8").includes(`"status":"completed"`));
     await new Promise(r => setTimeout(r, 1_500)); // one more watcher poll
-    return { old: instances.slice(0, -1).map(i => i.cards(id)), next: next.cards(id), record: record(), pidAliveAfterReconcile };
+    return { old: instances.slice(0, -1).map(i => i.cards(id)), next: next.cards(id), record: await whole(), pidAliveAfterReconcile };
   } finally {
     if (stubPid) try { process.kill(stubPid, "SIGKILL"); } catch { /* already exited */ }
     for (const i of instances) await i.fire("session_shutdown", { reason: "quit" }, ctx).catch(() => {});

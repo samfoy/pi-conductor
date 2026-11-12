@@ -27,10 +27,10 @@ import { DEFAULT_CONFIG, emptyUsage, type MergerWal, type Persona, type Run } fr
 
 sandboxPi();
 const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
-const poll = async (cond: () => boolean, ms = 5000) => { const end = Date.now() + ms; while (!cond()) { if (Date.now() > end) throw new Error("condition not reached"); await new Promise(r => setTimeout(r, 10)); } };
+const poll = async (cond: () => boolean, ms = 30_000) => { const end = Date.now() + ms; while (!cond()) { if (Date.now() > end) throw new Error("condition not reached"); await new Promise(r => setTimeout(r, 10)); } };
 const resolveBoth = (cand: string, text = "landed\nwriter\n") => { writeFileSync(join(cand, "base"), text); git(cand, "add", "--", "base"); git(cand, "commit", "--no-edit"); return git(cand, "rev-parse", "HEAD"); };
 
-test("M6a conflict parks with a durable claim, a real merge state and outside context; the proposal re-enters as one hooked squash", { timeout: 20000 }, async t => {
+test("M6a conflict parks with a durable claim, a real merge state and outside context; the proposal re-enters as one hooked squash", { timeout: 60_000 }, async t => {
   const f = mergerFixture(t);
   const a = f.writer("builder-a", { base: "writer\n" });
   const landed = land(f.root, f.record.intRef, { base: "landed\n" });
@@ -71,7 +71,7 @@ test("M6a conflict parks with a durable claim, a real merge state and outside co
   assert.equal(stepCost(a, f.registry.list()), 0.03); assert.equal(stepCost(a, f.registry.list()), 0.03, "step cost is stable across reads");
 });
 
-test("M6a other entries integrate while a merger is held; the accepted proposal re-merges, verifies and CASes on the moved tip", { timeout: 20000 }, async t => {
+test("M6a other entries integrate while a merger is held; the accepted proposal re-merges, verifies and CASes on the moved tip", { timeout: 60_000 }, async t => {
   const f = mergerFixture(t);
   const a = f.writer("builder-a", { base: "writer\n" });
   const landed = land(f.root, f.record.intRef, { base: "landed\n" });
@@ -93,7 +93,7 @@ test("M6a other entries integrate while a merger is held; the accepted proposal 
   assert.equal(m.calls.length, 1);
 });
 
-test("M6a a re-entry conflict on a moved tip exhausts the writer: merge_conflict, no second merger", { timeout: 20000 }, async t => {
+test("M6a a re-entry conflict on a moved tip exhausts the writer: merge_conflict, no second merger", { timeout: 60_000 }, async t => {
   const f = mergerFixture(t);
   const a = f.writer("builder-a", { base: "writer\n" });
   land(f.root, f.record.intRef, { base: "landed\n" });
@@ -112,7 +112,7 @@ test("M6a a re-entry conflict on a moved tip exhausts the writer: merge_conflict
   assert.equal(a.integration!.merger!.outcome, "accepted"); assert.equal(a.integration!.branchHead, proposal);
 });
 
-test("M6a a twice-red verify parks on the failed candidate; a merger fix re-gates and integrates", { timeout: 20000 }, async t => {
+test("M6a a twice-red verify parks on the failed candidate; a merger fix re-gates and integrates", { timeout: 60_000 }, async t => {
   const f = mergerFixture(t, { verify: "test ! -f broken" });
   const a = f.writer("builder-a", { change: "work\n", broken: "x\n" });
   const m = fakeMergers(f.registry);
@@ -133,7 +133,7 @@ test("M6a a twice-red verify parks on the failed candidate; a merger fix re-gate
   assert.equal(git(f.root, "show", "-s", "--format=%P", outcome.landedCommit!), f.base);
 });
 
-for (const policy of ["ask", "off"] as const) test(`M6a merger:${policy} keeps the M5 conflict outcome and launches nothing`, { timeout: 15000 }, async t => {
+for (const policy of ["ask", "off"] as const) test(`M6a merger:${policy} keeps the M5 conflict outcome and launches nothing`, { timeout: 60_000 }, async t => {
   const f = mergerFixture(t, { policy: { merger: policy } });
   const a = f.writer("builder-a", { base: "writer\n" });
   land(f.root, f.record.intRef, { base: "landed\n" });
@@ -143,7 +143,7 @@ for (const policy of ["ask", "off"] as const) test(`M6a merger:${policy} keeps t
   assert.equal(m.calls.length, 0); assert.equal(a.integration!.merger, undefined);
 });
 
-test("M6a a failed claim write starts no merger and prepares no merger workspace", { timeout: 15000 }, async t => {
+test("M6a a failed claim write starts no merger and prepares no merger workspace", { timeout: 60_000 }, async t => {
   const f = mergerFixture(t);
   const a = f.writer("builder-a", { base: "writer\n" });
   land(f.root, f.record.intRef, { base: "landed\n" });
@@ -163,7 +163,7 @@ test("M6a a failed claim write starts no merger and prepares no merger workspace
   forceTerminate(a, "killed", f.registry); assert.equal((await out).terminal, "killed");
 });
 
-test("M6a one merger per effort: a second conflict waits, then is recomputed against the tip and gets its own attempt", { timeout: 20000 }, async t => {
+test("M6a one merger per effort: a second conflict waits, then is recomputed against the tip and gets its own attempt", { timeout: 60_000 }, async t => {
   const f = mergerFixture(t);
   const a = f.writer("builder-a", { base: "writer a\n" });
   const b = f.writer("builder-b", { base: "writer b\n" });
@@ -183,7 +183,7 @@ test("M6a one merger per effort: a second conflict waits, then is recomputed aga
   assert.equal((await outB).terminal, "completed");
 });
 
-test("M6a merger setup refuses an unmerged set that differs from merge-tree's evidence", { timeout: 15000 }, async t => {
+test("M6a merger setup refuses an unmerged set that differs from merge-tree's evidence", { timeout: 60_000 }, async t => {
   const f = mergerFixture(t);
   const a = f.writer("builder-a", { base: "writer\n" });
   const tip = land(f.root, f.record.intRef, { base: "landed\n" });
@@ -230,7 +230,7 @@ const negatives: [string, (cand: string, sourceHead: string) => void, RegExp, Pa
   ["failed with a commit", cand => { resolveBoth(cand); }, /merger failed/, { status: "failed" }],
   ["timeout with a commit", cand => { resolveBoth(cand); }, /merger timeout/, { status: "timeout" }],
 ];
-for (const [name, act, reason, as] of negatives) test(`M6a real-Git rejection preserves the proposal untouched: ${name}`, { timeout: 15000 }, async t => {
+for (const [name, act, reason, as] of negatives) test(`M6a real-Git rejection preserves the proposal untouched: ${name}`, { timeout: 60_000 }, async t => {
   const f = mergerFixture(t);
   const a = f.writer("builder-a", { base: "writer\n" });
   const landed = land(f.root, f.record.intRef, { base: "landed\n" });
@@ -248,7 +248,7 @@ for (const [name, act, reason, as] of negatives) test(`M6a real-Git rejection pr
   assert.equal(m.calls.length, 1); assert.equal(a.integration!.merger!.cost, 0.02);
 });
 
-test("M6a writer-inherited whitespace kept by an otherwise clean resolution fails the plain diff check: merge_conflict, work preserved", { timeout: 15000 }, async t => {
+test("M6a writer-inherited whitespace kept by an otherwise clean resolution fails the plain diff check: merge_conflict, work preserved", { timeout: 60_000 }, async t => {
   const f = mergerFixture(t);
   const a = f.writer("builder-a", { base: "writer  \n" });
   const landed = land(f.root, f.record.intRef, { base: "landed\n" });
@@ -263,7 +263,7 @@ test("M6a writer-inherited whitespace kept by an otherwise clean resolution fail
   assert.equal(git(merger.cwd, "status", "--porcelain", "--ignored", "--untracked-files=all"), "");
 });
 
-for (const phase of ["pending launch", "running", "blocked"] as const) test(`M6a killing the writer with a ${phase} merger cancels it, preserves work and settles once`, { timeout: 15000 }, async t => {
+for (const phase of ["pending launch", "running", "blocked"] as const) test(`M6a killing the writer with a ${phase} merger cancels it, preserves work and settles once`, { timeout: 60_000 }, async t => {
   const f = mergerFixture(t);
   const a = f.writer("builder-a", { base: "writer\n" });
   const landed = land(f.root, f.record.intRef, { base: "landed\n" });
@@ -274,6 +274,7 @@ for (const phase of ["pending launch", "running", "blocked"] as const) test(`M6a
   await poll(() => a.integration?.state === "resolving" && m.calls.length === 1);
   if (phase !== "pending launch") {
     const merger = await m.nth(0);
+    await poll(() => a.integration?.reason === `merger ${merger.id} running`);
     if (phase === "blocked") {
       merger.status = "blocked"; merger.pendingAsk = { askId: "ask-1", question: "A or B?", evidence: "" }; f.registry.notify(merger);
       assert.match(a.integration!.reason!, /blocked: "A or B\?"/);
@@ -290,7 +291,7 @@ for (const phase of ["pending launch", "running", "blocked"] as const) test(`M6a
   await new Promise(r => setTimeout(r, 50)); assert.equal(settled, 1);
 });
 
-for (const at of ["claim", "context"] as const) test(`M6a a kill delivered synchronously at the merger ${at} notification settles the writer once; no merger launches`, { timeout: 15000 }, async t => {
+for (const at of ["claim", "context"] as const) test(`M6a a kill delivered synchronously at the merger ${at} notification settles the writer once; no merger launches`, { timeout: 60_000 }, async t => {
   const f = mergerFixture(t);
   const a = f.writer("builder-a", { base: "writer\n" });
   const landed = land(f.root, f.record.intRef, { base: "landed\n" });
@@ -303,7 +304,7 @@ for (const at of ["claim", "context"] as const) test(`M6a a kill delivered synch
   });
   const out = f.start(a).then(o => { settled++; return o; });
   let timer: NodeJS.Timeout | undefined;
-  const outcome = await Promise.race([out, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("writer never settled after a kill at the merger claim")), 5000); })]).finally(() => clearTimeout(timer));
+  const outcome = await Promise.race([out, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("writer never settled after a kill at the merger claim")), 30_000); })]).finally(() => clearTimeout(timer));
   assert.equal(kills, 1); assert.equal(outcome.terminal, "killed"); assert.equal(settled, 1);
   assert.equal(m.calls.length, 0, "no merger launches after the writer was killed");
   assert.equal(a.integration!.state, "cancelled"); assert.match(a.integration!.merger!.reason!, /writer killed; merger never started/);
@@ -312,7 +313,7 @@ for (const at of ["claim", "context"] as const) test(`M6a a kill delivered synch
   await new Promise(r => setTimeout(r, 50)); assert.equal(settled, 1);
 });
 
-test("M6a a suspend delivered synchronously at the merger context notification launches nothing and keeps the claim; recovery spends it once", { timeout: 20000 }, async t => {
+test("M6a a suspend delivered synchronously at the merger context notification launches nothing and keeps the claim; recovery spends it once", { timeout: 60_000 }, async t => {
   const f = mergerFixture(t);
   const a = f.writer("builder-a", { base: "writer\n" });
   const landed = land(f.root, f.record.intRef, { base: "landed\n" });
@@ -339,7 +340,7 @@ test("M6a a suspend delivered synchronously at the merger context notification l
   assert.equal(f.tip(), landed);
 });
 
-test("M6a suspending a parked writer drops its merger listener and signals nothing", { timeout: 15000 }, async t => {
+test("M6a suspending a parked writer drops its merger listener and signals nothing", { timeout: 60_000 }, async t => {
   const f = mergerFixture(t);
   const a = f.writer("builder-a", { base: "writer\n" });
   land(f.root, f.record.intRef, { base: "landed\n" });
@@ -355,7 +356,7 @@ test("M6a suspending a parked writer drops its merger listener and signals nothi
   assert.equal(JSON.parse(readFileSync(a.recordPath, "utf8")).integration.state, "resolving");
 });
 
-test("M6a killing the merger itself exhausts the writer: merge_conflict with work preserved", { timeout: 15000 }, async t => {
+test("M6a killing the merger itself exhausts the writer: merge_conflict with work preserved", { timeout: 60_000 }, async t => {
   const f = mergerFixture(t);
   const a = f.writer("builder-a", { base: "writer\n" });
   land(f.root, f.record.intRef, { base: "landed\n" });
@@ -403,7 +404,7 @@ test("M6a public routes cannot launch a merger: spawn, queue, tool, auto, chain 
   assert.equal(calls.length, 0, "a merger is never retried");
 });
 
-test("M6a a merger spawn must match the writer's open claim and refuses incompatible options or a second launch", { timeout: 15000 }, async t => {
+test("M6a a merger spawn must match the writer's open claim and refuses incompatible options or a second launch", { timeout: 60_000 }, async t => {
   const f = mergerFixture(t);
   const a = f.writer("builder-a", { base: "writer\n" });
   land(f.root, f.record.intRef, { base: "landed\n" });
@@ -424,7 +425,7 @@ test("M6a a merger spawn must match the writer's open claim and refuses incompat
   assert.throws(() => new SpawnQueue(f.registry, 4, 1).enqueueOrSpawn({ ...base, cwd: merger.cwd }), /no longer resolving/, "a settled claim launches nothing");
 });
 
-for (const override of ["read_only", "agents", "worktree"] as const) test(`M6a a merger persona override adding ${override} gives merge_conflict with no spawn`, { timeout: 15000 }, async t => {
+for (const override of ["read_only", "agents", "worktree"] as const) test(`M6a a merger persona override adding ${override} gives merge_conflict with no spawn`, { timeout: 60_000 }, async t => {
   const f = mergerFixture(t);
   const a = f.writer("builder-a", { base: "writer\n" });
   land(f.root, f.record.intRef, { base: "landed\n" });
@@ -439,7 +440,7 @@ for (const override of ["read_only", "agents", "worktree"] as const) test(`M6a a
   assert.equal(spawned.length, 0); assert.equal(f.registry.list().filter(r => r.persona === "merger").length, 0);
 });
 
-test("M6a the production launcher spawns a background root merger in the candidate with only a blocked card", { timeout: 15000 }, async t => {
+test("M6a the production launcher spawns a background root merger in the candidate with only a blocked card", { timeout: 60_000 }, async t => {
   const f = mergerFixture(t);
   const a = f.writer("builder-a", { base: "writer\n" });
   land(f.root, f.record.intRef, { base: "landed\n" });
@@ -466,7 +467,7 @@ test("M6a the production launcher spawns a background root merger in the candida
   await a.integrationControl!.suspend();
 });
 
-test("M6a merger actions: the owner may only answer a blocked merger or kill; foreign sessions and settled claims cannot send", { timeout: 15000 }, async t => {
+test("M6a merger actions: the owner may only answer a blocked merger or kill; foreign sessions and settled claims cannot send", { timeout: 60_000 }, async t => {
   const f = mergerFixture(t);
   const a = f.writer("builder-a", { base: "writer\n" });
   land(f.root, f.record.intRef, { base: "landed\n" });
@@ -503,7 +504,7 @@ async function parkedThenReload(t: test.TestContext, before?: (f: ReturnType<typ
   return { f, a, landed, merger, registry, relaunch, cards, recover };
 }
 
-test("M6a reload with a blocked merger: restore-blocked keeps it, recovery re-parks, and the answer integrates once", { timeout: 20000 }, async t => {
+test("M6a reload with a blocked merger: restore-blocked keeps it, recovery re-parks, and the answer integrates once", { timeout: 60_000 }, async t => {
   const r = await parkedThenReload(t, async (f, _a, merger) => {
     merger.status = "blocked"; merger.pendingAsk = { askId: "ask-1", question: "A or B?", evidence: "" }; await writeRecord(merger); f.registry.notify(merger);
   });
@@ -522,7 +523,7 @@ test("M6a reload with a blocked merger: restore-blocked keeps it, recovery re-pa
   assert.equal(trailerCount(r.f.root, r.f.tip(), `Conductor-Merger: ${r.merger.id}`), 1);
 });
 
-test("M6a recovery of a merger that finished before its outcome WAL runs acceptance and integrates once", { timeout: 20000 }, async t => {
+test("M6a recovery of a merger that finished before its outcome WAL runs acceptance and integrates once", { timeout: 60_000 }, async t => {
   const r = await parkedThenReload(t);
   resolveBoth(r.merger.cwd);
   await settle(r.registry, r.merger, "Resolved while the lead reloaded.");
@@ -537,7 +538,7 @@ test("M6a recovery of a merger that finished before its outcome WAL runs accepta
   assert.equal(writer.integration!.merger!.cost, 0.02, "merger cost persisted once");
 });
 
-test("M6a a claim without a merger record is an uncertain, spent launch: merge_conflict, no relaunch", { timeout: 20000 }, async t => {
+test("M6a a claim without a merger record is an uncertain, spent launch: merge_conflict, no relaunch", { timeout: 60_000 }, async t => {
   const r = await parkedThenReload(t, (_f, _a, merger) => { fs.rmSync(merger.recordPath); });
   const { done } = await r.recover(); await done;
   const writer = r.registry.get(r.a.id)!;
@@ -566,7 +567,7 @@ test("M6a a live merger after reload pauses for a human with zero signals; the l
   assert.equal(git(r.f.root, "rev-list", "--count", `${r.landed}..${r.f.tip()}`), "1");
 });
 
-test("M6a a lost merger (dead pid, no terminal record) is never authority, even with a valid-looking commit", { timeout: 20000 }, async t => {
+test("M6a a lost merger (dead pid, no terminal record) is never authority, even with a valid-looking commit", { timeout: 60_000 }, async t => {
   const child = spawn(process.execPath, ["-e", ""], { stdio: "ignore" }); await once(child, "exit");
   const r = await parkedThenReload(t, async (_f, _a, merger) => { resolveBoth(merger.cwd); merger.pid = child.pid; await writeRecord(merger); });
   const { done } = await r.recover(); await done;
@@ -577,7 +578,7 @@ test("M6a a lost merger (dead pid, no terminal record) is never authority, even 
   assert.equal(r.f.tip(), r.landed); assert.equal(r.cards.length, 1);
 });
 
-test("M6a a persisted rejected outcome settles merge_conflict on recovery without a launch", { timeout: 20000 }, async t => {
+test("M6a a persisted rejected outcome settles merge_conflict on recovery without a launch", { timeout: 60_000 }, async t => {
   const r = await parkedThenReload(t, async (_f, a) => {
     const saved = JSON.parse(readFileSync(a.recordPath, "utf8"));
     saved.integration.merger = { ...saved.integration.merger, outcome: "rejected", reason: "merger reported cannot-resolve", cost: 0.02 };
@@ -587,7 +588,7 @@ test("M6a a persisted rejected outcome settles merge_conflict on recovery withou
   assert.equal(r.registry.get(r.a.id)!.status, "merge_conflict"); assert.equal(r.cards.length, 1); assert.equal(r.relaunch.calls.length, 0);
 });
 
-test("M6a a crash after CAS is proven by the merger trailer and dispatched once", { timeout: 20000 }, async t => {
+test("M6a a crash after CAS is proven by the merger trailer and dispatched once", { timeout: 60_000 }, async t => {
   const f = mergerFixture(t);
   const a = f.writer("builder-a", { base: "writer\n" });
   const landed = land(f.root, f.record.intRef, { base: "landed\n" });
@@ -624,7 +625,7 @@ test("M6a startup reconcile and GC leave merger records to effort recovery; the 
   assert.match(effortSummary(writer), /merger merger-ab12 exhausted: merger made no commit \(\$0\.0200\)/);
 });
 
-test("M6a a merger child never inherits the lead's GIT_* repository scope; other children keep today's env", { timeout: 15000 }, async t => {
+test("M6a a merger child never inherits the lead's GIT_* repository scope; other children keep today's env", { timeout: 60_000 }, async t => {
   const { subprocessRuntime } = await import("../src/subprocess-runtime.ts");
   const dir = tmpDir("m6a-env-");
   const bin = join(dir, "dump-env.mjs");

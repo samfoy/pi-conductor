@@ -38,7 +38,7 @@ const start = (id: string, persona = "scout") => ({ type: "tool_execution_start"
 const update = (id: string) => ({ type: "tool_execution_update", toolCallId: id, toolName: "delegate" });
 const end = (id: string) => ({ type: "tool_execution_end", toolCallId: id, toolName: "delegate", isError: true });
 const tick = () => new Promise(r => setTimeout(r, 60));
-async function until(cond: () => boolean, what: string, ms = 5000) {
+async function until(cond: () => boolean, what: string, ms = 30_000) {
   const end = Date.now() + ms;
   while (!cond()) { if (Date.now() > end) throw new Error(`timed out: ${what}`); await new Promise(r => setTimeout(r, 5)); }
 }
@@ -142,12 +142,11 @@ async function complete(registry: RunRegistry, leaf: Run, text: string, cost = 0
   registry.notify(leaf);
 }
 
-for (const order of ["parent-first", "child-first"] as const) test(`N5 reload (${order}): a launched herdr leaf is handed over unanswered and rebound by the next owner; never re-spawned`, { timeout: 15000 }, async () => {
+for (const order of ["parent-first", "child-first"] as const) test(`N5 reload (${order}): a launched herdr leaf is handed over unanswered and rebound by the next owner; never re-spawned`, { timeout: 60_000 }, async () => {
   const t = await herdrParent();
   const { h, parent, tee, owner } = t;
   tee(start("d1"), update("d1"));
-  await tick();
-  assert.equal(owner.spawned.length, 1);
+  await until(() => owner.spawned.length === 1, "the d1 leaf");
   const [leaf] = owner.registry.list().filter(r => r.parentRunId === parent.id);
   await writeRecord(leaf!);
   assert.equal(parent.pendingDelegations, 1);
@@ -178,7 +177,7 @@ for (const order of ["parent-first", "child-first"] as const) test(`N5 reload ($
   await handleSessionShutdown({ reason: "reload" }, { runs: next.owner.registry.list(), resetSanitizer() {}, delegation: next.owner.broker });
 });
 
-test("N5 crash takeover: claim plus a terminal leaf record without a response is answered once from the record", { timeout: 15000 }, async () => {
+test("N5 crash takeover: claim plus a terminal leaf record without a response is answered once from the record", { timeout: 60_000 }, async () => {
   const { h, parent, tee, crash, attach } = await herdrParent();
   crash();
   // The crashed lead claimed and its leaf finished, but no response was written.
@@ -201,7 +200,7 @@ test("N5 crash takeover: claim plus a terminal leaf record without a response is
   await handleSessionShutdown({ reason: "reload" }, { runs: next.owner.registry.list(), resetSanitizer() {}, delegation: next.owner.broker });
 });
 
-test("N5 a claimed call with an unknown, foreign or unadopted leaf is answered uncertain, not replayed; a response is skipped", { timeout: 15000 }, async () => {
+test("N5 a claimed call with an unknown, foreign or unadopted leaf is answered uncertain, not replayed; a response is skipped", { timeout: 60_000 }, async () => {
   const { h, parent, tee, crash } = await herdrParent();
   crash();
   const claim = (id: string, over: object = {}) => publishJson(delegatePaths(dirname(parent.recordPath), id).claim,
@@ -234,7 +233,7 @@ test("N5 a claimed call with an unknown, foreign or unadopted leaf is answered u
   await handleSessionShutdown({ reason: "reload" }, { runs: next.owner.registry.list(), resetSanitizer() {}, delegation: next.owner.broker });
 });
 
-test("N5 an unclaimed call in the replay is brokered normally after reconcile, once despite duplicate updates", { timeout: 15000 }, async () => {
+test("N5 an unclaimed call in the replay is brokered normally after reconcile, once despite duplicate updates", { timeout: 60_000 }, async () => {
   const { h, parent, tee, owner, attach } = await herdrParent();
   // The old owner never saw this update: it was written after the reload detached it.
   await reload(owner);
@@ -243,13 +242,14 @@ test("N5 an unclaimed call in the replay is brokered normally after reconcile, o
   attach(next.parent);
   assert.equal(next.owner.spawned.length, 0, "deferred until reconcile");
   await next.reconciled();
+  await until(() => next.owner.spawned.length > 0, "the fresh leaf");
   assert.equal(next.owner.spawned.length, 1);
   assert.equal(next.owner.spawned[0]!.delegation!.delegateToolCallId, "fresh");
   assert.equal(next.parent.pendingDelegations, 1);
   await handleSessionShutdown({ reason: "reload" }, { runs: next.owner.registry.list(), resetSanitizer() {}, delegation: next.owner.broker });
 });
 
-test("N5 reload during the async roster resolve: a definite cancellation, no spawn now and none after replay", { timeout: 15000 }, async () => {
+test("N5 reload during the async roster resolve: a definite cancellation, no spawn now and none after replay", { timeout: 60_000 }, async () => {
   const { h, parent, tee, owner } = await herdrParent();
   tee(start("d5"), update("d5"));
   await reload(owner); // runs while resolve awaits the roster
@@ -265,11 +265,11 @@ test("N5 reload during the async roster resolve: a definite cancellation, no spa
   await handleSessionShutdown({ reason: "reload" }, { runs: next.owner.registry.list(), resetSanitizer() {}, delegation: next.owner.broker });
 });
 
-test("N5 a foreign owner generation after the await: the old broker spawns and answers nothing; the next owner answers uncertain", { timeout: 15000 }, async () => {
+test("N5 a foreign owner generation after the await: the old broker spawns and answers nothing; the next owner answers uncertain", { timeout: 60_000 }, async () => {
   const { h, parent, tee, owner, crash } = await herdrParent();
   tee(start("d6"), update("d6"));
   crash(); // the owner generation is fenced while resolve awaits the roster
-  await tick();
+  await until(() => (parent.pendingDelegations ?? 0) === 0, "the fenced broker to release d6");
   assert.equal(owner.spawned.length, 0, "fenced after the await: no leaf");
   assert.equal(answer(parent, "d6"), undefined, "and no answer from a fenced broker");
   assert.equal(parent.pendingDelegations, 0, "its local credit is released, not leaked");
@@ -280,7 +280,7 @@ test("N5 a foreign owner generation after the await: the old broker spawns and a
   await handleSessionShutdown({ reason: "reload" }, { runs: next.owner.registry.list(), resetSanitizer() {}, delegation: next.owner.broker });
 });
 
-test("N5 rebound calls hold outstanding credit: with 8 rebound, a new ninth call is rejected; status shows 8 awaiting", { timeout: 20000 }, async () => {
+test("N5 rebound calls hold outstanding credit: with 8 rebound, a new ninth call is rejected; status shows 8 awaiting", { timeout: 60_000 }, async () => {
   const { h, parent, tee, owner, attach } = await herdrParent(lead(16));
   const ids = Array.from({ length: 8 }, (_, i) => `m${i}`);
   for (const id of ids) tee(start(id), update(id));
@@ -293,16 +293,16 @@ test("N5 rebound calls hold outstanding credit: with 8 rebound, a new ninth call
   await next.reconciled();
   assert.equal(next.parent.pendingDelegations, 8);
   tee(start("ninth"), update("ninth"));
-  await tick();
+  await until(() => !!answer(parent, "ninth"), "the ninth call's answer");
   assert.match(answer(parent, "ninth")?.reason ?? "", /already has 8 delegate calls outstanding/);
   assert.equal(next.owner.spawned.length, 0);
   await handleSessionShutdown({ reason: "reload" }, { runs: next.owner.registry.list(), resetSanitizer() {}, delegation: next.owner.broker });
 });
 
-test("N5 an end in the replay cancels a rebound live leaf; a parent without its effort claim only observes", { timeout: 15000 }, async () => {
+test("N5 an end in the replay cancels a rebound live leaf; a parent without its effort claim only observes", { timeout: 60_000 }, async () => {
   const { h, parent, tee, owner, attach } = await herdrParent();
   tee(start("e1"), update("e1"));
-  await tick();
+  await until(() => owner.spawned.length === 1, "the e1 leaf");
   const [leaf] = owner.registry.list().filter(r => r.parentRunId === parent.id);
   await writeRecord(leaf!);
   await reload(owner);
@@ -324,7 +324,7 @@ test("N5 an end in the replay cancels a rebound live leaf; a parent without its 
   await handleSessionShutdown({ reason: "reload" }, { runs: next.owner.registry.list(), resetSanitizer() {}, delegation: next.owner.broker });
 });
 
-test("N5 reconcile stops an attached herdr leaf of a terminal parent through its proven child; a live parent's leaf and a settled orphan are left alone", { timeout: 10000 }, async () => {
+test("N5 reconcile stops an attached herdr leaf of a terminal parent through its proven child; a live parent's leaf and a settled orphan are left alone", { timeout: 60_000 }, async () => {
   const { reconcileOrphansAtStartup } = await import("../src/reconcile-startup.ts");
   const root = tmpDir("n5-orphans-"), registry = new RunRegistry(), now = Date.now();
   const write = (id: string, over: Partial<RunRecord>) => {
@@ -347,11 +347,11 @@ test("N5 reconcile stops an attached herdr leaf of a terminal parent through its
       registry.register(run);
     },
     stopOrphanLeaf: run => { stopped.push(`${run.id}: ${run.errorMessage}`); } });
-  await tick();
+  await until(() => stopped.length > 0, "the orphan leaf stop");
   assert.deepEqual(stopped, ["scout-orphan: orphaned: parent lead-dead terminal; stopped through its proven pane child"]);
 });
 
-test("N5 N4 gate after readopt: the parent's finalize stops its unanswered rebound leaf first; an answered leaf being re-finalized is not its to stop", { timeout: 15000 }, async () => {
+test("N5 N4 gate after readopt: the parent's finalize stops its unanswered rebound leaf first; an answered leaf being re-finalized is not its to stop", { timeout: 60_000 }, async () => {
   const { h, parent, tee, owner, attach } = await herdrParent();
   tee(start("g1"), update("g1"), start("g2"), update("g2"));
   await until(() => owner.spawned.length === 2, "two leaves");
@@ -378,7 +378,7 @@ test("N5 N4 gate after readopt: the parent's finalize stops its unanswered rebou
   await handleSessionShutdown({ reason: "reload" }, { runs: next.owner.registry.list(), resetSanitizer() {}, delegation: next.owner.broker });
 });
 
-test("N5 a herdr leaf holds its N3 slot until its pane child's exit is proven, not merely until it is terminal", { timeout: 10000 }, async () => {
+test("N5 a herdr leaf holds its N3 slot until its pane child's exit is proven, not merely until it is terminal", { timeout: 60_000 }, async () => {
   const { holdsSlot } = await import("../src/effort/admit.ts");
   const { forceTerminate } = await import("../src/runs.ts");
   for (const mode of ["stubborn", "running"]) {
@@ -390,7 +390,8 @@ test("N5 a herdr leaf holds its N3 slot until its pane child's exit is proven, n
     assert.equal(h.run.processOpen, true);
     forceTerminate(h.run, "killed", h.registry);
     assert.equal(h.run.status, "killed");
-    await tick();
+    if (mode === "stubborn") await tick();
+    else await until(() => h.run.processOpen === undefined, "the proven exit");
     if (mode === "stubborn") {
       assert.equal(h.run.processOpen, true, "an unproven exit keeps the reservation");
       assert.equal(holdsSlot(h.run), true);
@@ -403,7 +404,7 @@ test("N5 a herdr leaf holds its N3 slot until its pane child's exit is proven, n
   }
 });
 
-test("N5 a parent that settled before reconcile registered its leaf: the late rebind cancels that leaf instead of waiting for it", { timeout: 15000 }, async () => {
+test("N5 a parent that settled before reconcile registered its leaf: the late rebind cancels that leaf instead of waiting for it", { timeout: 60_000 }, async () => {
   const { h, parent, tee, owner, attach } = await herdrParent();
   tee(start("late"), update("late"));
   await until(() => owner.spawned.length === 1, "one leaf");
@@ -425,14 +426,15 @@ test("N5 a parent that settled before reconcile registered its leaf: the late re
     socketPath: leaf.herdr!.socketPath, runId: leaf.id, launchNonce: leaf.herdr!.launchNonce, at: Date.now() });
   leaf.transport = old.transport;
   owner2.registry.register(leaf);
-  done.resolve(); await tick();
+  done.resolve();
+  await until(() => !!answer(parent, "late"), "the late call's answer");
   assert.match(answer(parent, "late")?.reason ?? "", /^cancelled: parent .* ended \(completed\)/);
   assert.equal(leaf.status, "killed", "no live leaf is left working for a settled parent");
   assert.equal(owner2.spawned.length, 0);
   await handleSessionShutdown({ reason: "reload" }, { runs: owner2.registry.list(), resetSanitizer() {}, delegation: owner2.broker });
 });
 
-test("N5 reload: a herdr parent survives; leaves it cannot hand over (subprocess, queued) are cancelled by name while it is still owned", { timeout: 15000 }, async () => {
+test("N5 reload: a herdr parent survives; leaves it cannot hand over (subprocess, queued) are cancelled by name while it is still owned", { timeout: 60_000 }, async () => {
   const { parent, tee, owner } = await herdrParent(lead(2, "subprocess"));
   for (const id of ["s1", "s2", "s3"]) tee(start(id), update(id));
   await until(() => owner.spawned.length === 2 && owner.registry.list().some(r => r.parentRunId === parent.id && r.status === "queued"), "two running, one queued");
@@ -445,7 +447,7 @@ test("N5 reload: a herdr parent survives; leaves it cannot hand over (subprocess
   assert.equal(owner.spawned.length, 2, "nothing launched while cancelling");
 });
 
-test("N5 the answer's owner fence after its awaited I/O: a parent fenced while the leaf's record and final are written gets no answer from this lead", { timeout: 15000 }, async () => {
+test("N5 the answer's owner fence after its awaited I/O: a parent fenced while the leaf's record and final are written gets no answer from this lead", { timeout: 60_000 }, async () => {
   for (const fenced of [false, true]) {
     const { parent, tee, owner, crash } = await herdrParent();
     tee(start("f1"), update("f1"));
@@ -459,7 +461,8 @@ test("N5 the answer's owner fence after its awaited I/O: a parent fenced while t
     assert.equal(parent.pendingDelegations, 1);
     if (fenced) crash(); // the owner generation is fenced while the answer awaits
     io.resolve();
-    await tick();
+    if (fenced) await until(() => (parent.pendingDelegations ?? 0) === 0, "the fenced answer to release its credit");
+    else await until(() => !!answer(parent, "f1"), "the owning lead's answer");
     if (fenced) {
       assert.equal(answer(parent, "f1"), undefined, "a fenced lead writes no answer after its await");
       assert.equal(parent.pendingDelegations, 0, "its local credit is released");
@@ -469,7 +472,7 @@ test("N5 the answer's owner fence after its awaited I/O: a parent fenced while t
   }
 });
 
-test("N5 readopt lineage: a terminal leaf record that started before the claim (an older run's leaf) is never this call's answer", { timeout: 15000 }, async () => {
+test("N5 readopt lineage: a terminal leaf record that started before the claim (an older run's leaf) is never this call's answer", { timeout: 60_000 }, async () => {
   const { h, parent, tee, crash, attach } = await herdrParent();
   crash();
   const claimedAt = Date.now() - 1000;

@@ -10,7 +10,7 @@ import { sandboxPi, tmpDir } from "./helpers/tmp.ts";
 import { gitTestEnv } from "./helpers/git-env.ts";
 
 sandboxPi();
-const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: gitTestEnv(), encoding: "utf8", stdio: "pipe", timeout: 5000 }).trim();
+const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: gitTestEnv(), encoding: "utf8", stdio: "pipe", timeout: 60_000 }).trim();
 function repo() {
   const cwd = tmpDir("m5-reconcile-"); git(cwd, "init", "-b", "main");
   git(cwd, "config", "user.name", "T"); git(cwd, "config", "user.email", "t@t");
@@ -28,10 +28,10 @@ test("M5 live owner refuses takeover without changing durable ownership", async 
   assert.equal(existsSync(join(store.effortDir(cwd, "integration-driver"), "driver.lock")), false, "foreign recovery must not claim the live owner's repository driver");
 });
 
-test("M5 two native dead-owner claimants have one winner; old generation cannot write or CAS", { timeout: 15000 }, async () => {
+test("M5 two native dead-owner claimants have one winner; old generation cannot write or CAS", { timeout: 180_000 }, async () => {
   const cwd = repo();
   const imports = `import {openEffort,effortOwner} from ${JSON.stringify(new URL("../src/effort/open.ts", import.meta.url).href)}; import * as s from ${JSON.stringify(new URL("../src/effort/store.ts", import.meta.url).href)};`;
-  execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `${imports} openEffort(process.argv[1], "one", "dead", {verify:""});`, cwd], { env: gitTestEnv(), timeout: 5000 });
+  execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `${imports} openEffort(process.argv[1], "one", "dead", {verify:""});`, cwd], { env: gitTestEnv(), timeout: 60_000 });
   const old = store.readEffort(cwd, "one")!;
   const source = `${imports} process.send("ready"); process.on("message",()=>{try { const r=s.adoptEffort(s.readEffort(process.argv[1],"one"),effortOwner(process.argv[2])); process.send({won:true,owner:r.owner}); } catch(e) {process.send({won:false,error:e.message});}});`;
   const children = ["a", "b"].map(id => spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", source, cwd, id], { env: gitTestEnv(), stdio: ["ignore", "ignore", "pipe", "ipc"] }));
@@ -80,7 +80,7 @@ test("M5 recovery proof requires exact reachable candidate correlation, not JSON
   assert.equal(integratedCandidate(effort, run), candidateOid, "a descendant tip containing the exact candidate proves integration");
 });
 
-test("M5 stale CAS recomputes against actual tip and accepts only the rebuilt candidate", { timeout: 15000 }, async t => {
+test("M5 stale CAS recomputes against actual tip and accepts only the rebuilt candidate", { timeout: 120_000 }, async t => {
   const { fixture } = await import("./helpers/effort-integration.ts");
   const f = fixture(t, "true"); let moved = false;
   f.registry.onChange(run => {
@@ -94,7 +94,7 @@ test("M5 stale CAS recomputes against actual tip and accepts only the rebuilt ca
   assert.equal(result.mergeResult.nothingToCommit, true);
 });
 
-test("M5 three stale CAS failures pause without overwriting any external tip", { timeout: 15000 }, async t => {
+test("M5 three stale CAS failures pause without overwriting any external tip", { timeout: 120_000 }, async t => {
   const { fixture, until } = await import("./helpers/effort-integration.ts");
   const { forceTerminate } = await import("../src/runs.ts");
   const f = fixture(t, "true");

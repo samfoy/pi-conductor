@@ -79,7 +79,8 @@ test("N5 herdr parent fan-out: tee -> broker -> split leaves right then down; fo
   // Quit closes each remaining own pane once; herdr drops the emptied tab itself; the lead's pane stays.
   await handleSessionShutdown({ reason: "quit" }, { runs: h.registry.list(), resetSanitizer() {}, terminateHerdr: r => forceTerminate(r, "killed", h.registry) });
   const s = h.state();
-  assert.deepEqual([...s.closed!].sort(), [(first!.herdr as TuiBinding).paneId, (second!.herdr as TuiBinding).paneId, pb.paneId].sort());
+  assert.deepEqual([...s.closed!].sort(), [(first!.herdr as TuiBinding).paneId, (second!.herdr as TuiBinding).paneId, pb.paneId].sort(),
+    JSON.stringify(h.registry.list().map(r => [r.id, r.status, r.worktreeKept, r.herdrExitUnconfirmed])));
   assert.deepEqual(s.removedTabs, [pb.tabId]);
   assert.ok(s.panes["w1:p1"], "the lead's own pane is never closed");
   assert.ok(!s.calls.some(c => c.args[0] === "tab" && c.args[1] !== "create"), "no tab close; nothing but own panes");

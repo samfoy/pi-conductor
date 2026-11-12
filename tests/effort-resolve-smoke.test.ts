@@ -119,7 +119,7 @@ test("M6b native 0.87.1: after the command returns, the merger's ask_owner block
   const c = command(n, n.cards);
   await c.resolve("builder-a", c.ctx(() => true));
   assert.match(c.notes.at(-1)!.message, /accepted/i);
-  await poll(() => n.merger()?.status === "blocked", "merger blocked");
+  await poll(() => n.merger()?.status === "blocked" && n.mergerCards.length > 0, "merger blocked and its question card sent");
   const m = n.merger()!;
   assert.equal(n.a.integration!.state, "resolving"); assert.equal(n.mergerCards.length, 1, "the merger's question reaches the owner once");
   const later: Run[] = [];

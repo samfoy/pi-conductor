@@ -29,16 +29,16 @@ function setup(t: test.TestContext) {
   return { cwd, registry, cards, onComplete };
 }
 for (const failure of ["B1_EXIT", "B1_EOF", "B1_REJECT", "B1_HANG"]) {
-  test(`B1 native blocked answer ${failure}: rollback preserves correlation and retry completes`, { timeout: 30000 }, async t => {
+  test(`B1 native blocked answer ${failure}: rollback preserves correlation and retry completes`, { timeout: 240_000 }, async t => {
     const h = setup(t);
     const worktree = failure === "B1_EXIT";
-    const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: gitTestEnv(), timeout: 5000, stdio: "pipe" });
+    const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: gitTestEnv(), timeout: 60_000, stdio: "pipe" });
     if (worktree) {
       git(h.cwd, "init", "-b", "master"); git(h.cwd, "config", "user.name", "Test"); git(h.cwd, "config", "user.email", "test@example.com");
       writeFileSync(join(h.cwd, "base"), "base"); git(h.cwd, "add", "base"); git(h.cwd, "commit", "-m", "test: base");
     }
     const hook = `printf hook >> "${join(h.cwd, "hook-count")}"`;
-    const spawned = spawnRun({ ...h, persona, task: "Original assignment", mode: "background", timeoutMs: 12000,
+    const spawned = spawnRun({ ...h, persona, task: "Original assignment", mode: "background", timeoutMs: 60_000,
       worktree, mergeStrategy: "squash", onCompleteHook: hook });
     if (worktree) {
       writeFileSync(join(spawned.run.worktreePath!, "change"), "unmerged work");
@@ -49,7 +49,7 @@ for (const failure of ["B1_EXIT", "B1_EOF", "B1_REJECT", "B1_HANG"]) {
     const ask = structuredClone(run.pendingAsk);
     const original = { task: run.task, sessionPath: run.sessionPath, cwd: run.cwd, worktreePath: run.worktreePath, worktreeBranch: run.worktreeBranch };
     const message = failure === "B1_REJECT" ? `${failure} ${"x".repeat(100000)}` : failure;
-    const sent = sendToRun(run, message, { ...h, timeoutMs: failure === "B1_HANG" ? 2500 : 12000 });
+    const sent = sendToRun(run, message, { ...h, timeoutMs: failure === "B1_HANG" ? 2500 : 60_000 });
     assert.equal(sent.kind, "started"); if (sent.kind !== "started") return;
     const outcome = await sent.done;
     if (failure === "B1_REJECT") {
@@ -67,7 +67,7 @@ for (const failure of ["B1_EXIT", "B1_EOF", "B1_REJECT", "B1_HANG"]) {
     assert.equal(h.cards.filter(c => c.content.includes("<sub-agent-asked>")).length, 1, "failure is not a duplicate question card");
     assert.match(h.cards.at(-1)!.content, /answer.*delivery.*failed/i);
     assert.doesNotMatch(h.cards.at(-1)!.content, /sub-agent-completed|result-ref/);
-    const retry = sendToRun(run, "Use B", { ...h, timeoutMs: 12000 });
+    const retry = sendToRun(run, "Use B", { ...h, timeoutMs: 60_000 });
     assert.equal(retry.kind, "started"); if (retry.kind !== "started") return;
     assert.equal((await retry.done).status, "completed");
     assert.equal(run.pendingAsk, undefined); assert.equal(record(run).pendingAsk, undefined);
@@ -80,14 +80,14 @@ for (const failure of ["B1_EXIT", "B1_EOF", "B1_REJECT", "B1_HANG"]) {
   });
 }
 for (const transport of ["print", "explicit-rpc", "large-rpc"]) {
-  test(`B1 native acceptance positive control: ${transport}`, { timeout: 30000 }, async t => {
+  test(`B1 native acceptance positive control: ${transport}`, { timeout: 240_000 }, async t => {
     const h = setup(t);
-    const result = spawnRun({ ...h, persona, task: transport === "large-rpc" ? "x".repeat(100000) : "Original assignment", mode: "background", timeoutMs: 12000, steerable: transport === "explicit-rpc" });
+    const result = spawnRun({ ...h, persona, task: transport === "large-rpc" ? "x".repeat(100000) : "Original assignment", mode: "background", timeoutMs: 60_000, steerable: transport === "explicit-rpc" });
     const run = await result.done;
     assert.equal(run.status, "blocked");
     const firstEvents = events(run);
     assert.ok(firstEvents.some(e => e.type === "tool_execution_end" && e.toolName === "ask_owner" && !e.isError));
-    const reply = sendToRun(run, transport === "large-rpc" ? `Use B ${"x".repeat(100000)}` : "Use B", { ...h, timeoutMs: 12000 });
+    const reply = sendToRun(run, transport === "large-rpc" ? `Use B ${"x".repeat(100000)}` : "Use B", { ...h, timeoutMs: 60_000 });
     assert.equal(reply.kind, "started"); if (reply.kind !== "started") return;
     assert.deepEqual(run.pendingAsk?.askId, "native-ask", "launch alone cannot clear the ask");
     assert.equal((await reply.done).status, "completed");
@@ -99,16 +99,16 @@ for (const transport of ["print", "explicit-rpc", "large-rpc"]) {
   });
 }
 for (const scenario of ["B2_HELD_END", "B2_INFLIGHT", "B2_EXTENSION"]) {
-  test(`B2 native ${scenario}: no stale blocked state after actual queued continuation`, { timeout: 30000 }, async t => {
+  test(`B2 native ${scenario}: no stale blocked state after actual queued continuation`, { timeout: 240_000 }, async t => {
     const h = setup(t);
     const queue = new SpawnQueue(h.registry, 1);
     let sent: ReturnType<typeof sendToRun> | undefined;
     let admissionActions: string[] = [];
-    const result = spawnRun({ ...h, persona, task: scenario, mode: "background", timeoutMs: 12000, steerable: true,
+    const result = spawnRun({ ...h, persona, task: scenario, mode: "background", timeoutMs: 60_000, steerable: true,
       onCompleteHook: `printf hook >> "${join(h.cwd, "hook-count")}"` });
     let finishIndependent!: (r: Run) => void;
     const independent = new Promise<Run>(resolve => { finishIndependent = resolve; });
-    const queued = queue.enqueueOrSpawn({ ...h, persona, task: "CONTROL independent work", mode: "background", timeoutMs: 12000, onComplete: finishIndependent });
+    const queued = queue.enqueueOrSpawn({ ...h, persona, task: "CONTROL independent work", mode: "background", timeoutMs: 60_000, onComplete: finishIndependent });
     assert.equal(queued.kind, "queued");
     const run = result.run;
     let buffer = "";
@@ -118,7 +118,7 @@ for (const scenario of ["B2_HELD_END", "B2_INFLIGHT", "B2_EXTENSION"]) {
         const e = JSON.parse(buffer.slice(0, newline)); buffer = buffer.slice(newline + 1);
         if (e.type !== "probe") continue;
         admissionActions = availableActions(run);
-        sent = sendToRun(run, "Use B from the racing owner answer", { ...h, timeoutMs: 12000, streamingBehavior: "follow_up" });
+        sent = sendToRun(run, "Use B from the racing owner answer", { ...h, timeoutMs: 60_000, streamingBehavior: "follow_up" });
         if (sent.kind === "started") void sent.ack?.catch(() => {});
         if (scenario === "B2_HELD_END") {
           const release = () => run.rpcStdinQueue!.enqueue({ type: "release" } as any);

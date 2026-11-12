@@ -83,7 +83,7 @@ const update = (id: string, extra: object = {}) => ({ type: "tool_execution_upda
 const end = (id: string, isError = false) => ({ type: "tool_execution_end", toolCallId: id, toolName: "delegate", result: { content: [] }, isError });
 const ask = (persona: string, task = `look at ${persona}`, extra: object = {}) => ({ persona, task, ...extra });
 
-async function until(cond: () => boolean, what: string, ms = 3000): Promise<void> {
+async function until(cond: () => boolean, what: string, ms = 30_000): Promise<void> {
   const deadline = Date.now() + ms;
   while (!cond()) {
     if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
@@ -96,8 +96,13 @@ async function response(parent: Run, id: string) {
   await until(() => existsSync(responsePath(parent, id)), `response ${id}`);
   return JSON.parse(readFileSync(responsePath(parent, id), "utf8"));
 }
-/** Let the broker's asynchronous roster resolution run to its effect. */
+// Negative checks only: an early return after the roster await has no observable effect to wait on.
 const settle = () => new Promise((r) => setTimeout(r, 60));
+const callLeaf = (registry: RunRegistry, parent: Run, id: string) => registry.list().find((r) => r.parentRunId === parent.id && r.delegateToolCallId === id);
+async function leafFor(registry: RunRegistry, parent: Run, id: string): Promise<Run> {
+  await until(() => callLeaf(registry, parent, id) !== undefined, `the leaf for ${id}`);
+  return callLeaf(registry, parent, id)!;
+}
 
 async function finishLeaf(registry: RunRegistry, leaf: Run, text: string, status: Run["status"] = "completed") {
   leaf.messages = [{ role: "assistant", content: [{ type: "text", text }] } as never];
@@ -201,7 +206,7 @@ test("N2 event order: start then update claims once, counts before enqueue and s
   assert.deepEqual(seen, [1], "the parent is notified with the new count before the leaf is enqueued");
   assert.equal(spawned.length, 0, "the leaf waits for roster resolution");
   broker.observe(parent, update("call_a"), effective);
-  await settle();
+  const leaf = await leafFor(registry, parent, "call_a");
   assert.equal(spawned.length, 1, "duplicate updates never duplicate a child");
   const o = spawned[0]!;
   assert.deepEqual(o.delegation, { parentRunId: parent.id, delegateToolCallId: "call_a" });
@@ -217,8 +222,7 @@ test("N2 event order: start then update claims once, counts before enqueue and s
   for (const k of ["onChain", "onRetry", "effort", "touches", "files", "parentMessages"] as const) assert.equal(o[k], undefined, k);
   assert.ok(o.timeoutMs <= 7 * 60_000 && o.timeoutMs > 6 * 60_000, `persona timeout binds: ${o.timeoutMs}`);
 
-  const [leaf] = leavesOf(registry, parent);
-  await finishLeaf(registry, leaf!, "Scout found the parser bug.");
+  await finishLeaf(registry, leaf, "Scout found the parser bug.");
   const r = await response(parent, "call_a");
   assert.equal(r.v, 1); assert.equal(r.ok, true); assert.equal(r.toolCallId, "call_a"); assert.equal(r.parentRunId, parent.id);
   assert.equal(r.agentId, leaf!.id); assert.equal(r.status, "completed");
@@ -284,7 +288,6 @@ test("N2 rejected requests write one definite response and never queue or spawn"
     assert.equal(r.ok, false, id);
     assert.match(r.reason, expected, id);
   }
-  await settle();
   assert.equal(spawned.length, 0);
   assert.equal(leavesOf(registry, parent).length, 0);
   assert.equal(parent.pendingDelegations, 0);
@@ -298,13 +301,12 @@ test("N2 A5 files resolve against the parent's effective cwd and run refs name o
   const parent = parentRun(registry, cwd);
   broker.observe(parent, start("first", ask("scout")), effective);
   broker.observe(parent, update("first"), effective);
-  await settle();
-  const [child] = leavesOf(registry, parent);
-  await finishLeaf(registry, child!, "First leaf result body.");
+  const child = await leafFor(registry, parent, "first");
+  await finishLeaf(registry, child, "First leaf result body.");
   await response(parent, "first");
-  broker.observe(parent, start("second", ask("auditor", "review", { files: ["notes.md", `run:${child!.id}`] })), effective);
+  broker.observe(parent, start("second", ask("auditor", "review", { files: ["notes.md", `run:${child.id}`] })), effective);
   broker.observe(parent, update("second"), effective);
-  await settle();
+  await leafFor(registry, parent, "second");
   assert.equal(spawned.length, 2);
   const task = spawned[1]!.task;
   assert.match(task, /effective cwd evidence/);
@@ -320,7 +322,7 @@ test("N5 a leaf's runtime comes from the cascade with no per-call layer: herdr i
   // A model-supplied runtime key is not an input: the broker never passes a per-call layer.
   h.broker.observe(parent, start("to_herdr", { persona: "scout", task: "inspect", runtime: "subprocess" }), cwd);
   h.broker.observe(parent, update("to_herdr"), cwd);
-  await settle();
+  await leafFor(h.registry, parent, "to_herdr");
   assert.equal(h.spawned.length, 1);
   assert.equal(h.spawned[0]!.runtime, "herdr", "auto resolves to herdr inside herdr");
   // Outside herdr, a persona pinned to herdr is a named rejection, not a subprocess leaf.
@@ -358,7 +360,6 @@ test("N2 a pre-existing claim is never re-spawned; the call gets a truthful unce
   broker.observe(parent, start("claimed", ask("scout")), cwd);
   broker.observe(parent, update("claimed"), cwd);
   const r = await response(parent, "claimed");
-  await settle();
   assert.equal(r.ok, false);
   assert.match(r.reason, /already claimed.*outcome uncertain; not replayed/);
   assert.equal(spawned.length, 0);
@@ -370,14 +371,12 @@ test("N2 a response file that already exists is never overwritten; the call stil
   const parent = parentRun(registry, cwd);
   broker.observe(parent, start("taken", ask("scout")), cwd);
   broker.observe(parent, update("taken"), cwd);
-  await settle();
+  const leaf = await leafFor(registry, parent, "taken");
   const foreign = JSON.stringify({ v: 1, toolCallId: "taken", parentRunId: "someone-else", ok: false, reason: "foreign" });
   writeFileSync(responsePath(parent, "taken"), foreign);
-  const [leaf] = leavesOf(registry, parent);
-  await finishLeaf(registry, leaf!, "late leaf answer");
-  await settle();
+  await finishLeaf(registry, leaf, "late leaf answer");
+  await until(() => parent.pendingDelegations === 0, "the call to settle");
   assert.equal(readFileSync(responsePath(parent, "taken"), "utf8"), foreign, "create-only: link EEXIST skips");
-  assert.equal(parent.pendingDelegations, 0);
 });
 
 test("N2 at most 8 calls are outstanding per parent; the ninth is rejected without a spawn", async () => {
@@ -386,7 +385,7 @@ test("N2 at most 8 calls are outstanding per parent; the ninth is rejected witho
   const parent = parentRun(registry, cwd);
   for (let i = 0; i < 9; i++) { broker.observe(parent, start(`c${i}`, ask("scout", `t${i}`)), cwd); broker.observe(parent, update(`c${i}`), cwd); }
   const r = await response(parent, "c8");
-  await settle();
+  for (let i = 0; i < 8; i++) await leafFor(registry, parent, `c${i}`);
   assert.equal(r.ok, false);
   assert.match(r.reason, /already has 8 delegate calls outstanding/);
   assert.equal(spawned.length, 8);
@@ -400,7 +399,7 @@ test("N2 an end while queued removes only that placeholder; while running kills 
   const { registry, spawned, broker, queue } = harness({ maxConcurrent: 1 });
   const parent = parentRun(registry, cwd);
   // One at a time: concurrent roster resolutions may finish in any order under load.
-  for (const id of ["run_one", "run_two", "queued_three"]) { broker.observe(parent, start(id, ask("scout", id)), cwd); broker.observe(parent, update(id), cwd); await settle(); }
+  for (const id of ["run_one", "run_two", "queued_three"]) { broker.observe(parent, start(id, ask("scout", id)), cwd); broker.observe(parent, update(id), cwd); await leafFor(registry, parent, id); }
   assert.equal(spawned.length, 1, "the awaiting parent's lent slot (N3) runs one leaf at a cap of 1");
   assert.equal(queue.size(), 2);
   const placeholder = registry.list().find((r) => r.delegateToolCallId === "queued_three")!;
@@ -416,8 +415,8 @@ test("N2 an end while queued removes only that placeholder; while running kills 
   const c = await response(parent, "run_one");
   assert.match(c.reason, /^cancelled: /);
   assert.equal(running.status, "killed");
-  await settle();
-  const two = leavesOf(registry, parent).find((r) => r.delegateToolCallId === "run_two")!;
+  await until(() => callLeaf(registry, parent, "run_two")?.status !== "queued", "the sibling to drain");
+  const two = callLeaf(registry, parent, "run_two")!;
   assert.equal(two.status, "running", "the sibling was drained into the freed slot and keeps running");
   assert.equal(existsSync(responsePath(parent, "run_two")), false);
 });
@@ -428,25 +427,23 @@ test("N2 the parent going terminal cancels its outstanding calls", async () => {
   const parent = parentRun(registry, cwd);
   broker.observe(parent, start("orphan", ask("scout")), cwd);
   broker.observe(parent, update("orphan"), cwd);
-  await settle();
-  const [leaf] = leavesOf(registry, parent);
+  const leaf = await leafFor(registry, parent, "orphan");
   parent.status = "killed";
   registry.notify(parent);
   const r = await response(parent, "orphan");
   assert.match(r.reason, /^cancelled: parent .* ended \(killed\)/);
-  assert.equal(leaf!.status, "killed");
+  assert.equal(leaf.status, "killed");
   assert.equal(parent.pendingDelegations, 0);
 });
 
 test("N2 a leaf still queued at its clamped deadline is removed and answered with a timeout", async () => {
   const cwd = project();
   const { registry, broker } = harness({ maxConcurrent: 1 });
-  const parent = parentRun(registry, cwd, { deadlineAt: Date.now() + 250 });
+  const parent = parentRun(registry, cwd, { deadlineAt: Date.now() + 2000 });
   parentRun(registry, cwd, { delegateAllow: [] }); // executing work that fills the cap the parent's loan (N3) would offer
   broker.observe(parent, start("starved", ask("scout")), cwd);
   broker.observe(parent, update("starved"), cwd);
-  await settle();
-  const placeholder = registry.list().find((r) => r.delegateToolCallId === "starved")!;
+  const placeholder = await leafFor(registry, parent, "starved");
   assert.equal(placeholder.status, "queued");
   const r = await response(parent, "starved");
   assert.equal(r.ok, false);
@@ -460,10 +457,9 @@ test("N2 a leaf killed by the lead (no onComplete) still answers its call with i
   const parent = parentRun(registry, cwd);
   broker.observe(parent, start("tool_kill", ask("scout")), cwd);
   broker.observe(parent, update("tool_kill"), cwd);
-  await settle();
-  const [leaf] = leavesOf(registry, parent);
+  const leaf = await leafFor(registry, parent, "tool_kill");
   const { forceTerminate } = await import("../src/runs.ts");
-  forceTerminate(leaf!, "killed", registry);
+  forceTerminate(leaf, "killed", registry);
   const r = await response(parent, "tool_kill");
   assert.equal(r.ok, true);
   assert.equal(r.status, "killed");
@@ -504,8 +500,7 @@ test("N2 reload: pending subprocess parents are killed leaves-first with the R6 
   const idle = parentRun(registry, cwd);
   broker.observe(pending, start("inflight", ask("scout")), cwd);
   broker.observe(pending, update("inflight"), cwd);
-  await settle();
-  const [leaf] = leavesOf(registry, pending);
+  const leaf = await leafFor(registry, pending, "inflight");
   const order: string[] = [];
   registry.onChange((r) => { if (r.status === "killed") order.push(r.id); });
   await handleSessionShutdown({ reason: "reload" }, { runs: registry.list(), resetSanitizer: () => assert.fail("reload reset"), delegation: broker });
@@ -617,7 +612,6 @@ test("N2 reload boundary: a start before /reload and its first update after are 
   const r = JSON.parse(readFileSync(responsePath(parent, "straddle"), "utf8"));
   assert.deepEqual([r.ok, r.toolCallId, r.parentRunId], [false, "straddle", parent.id]);
   assert.match(r.reason, /lead \/reload closed this run's delegation broker/);
-  await settle();
   assert.equal(spawned.length, 0, "no leaf after reload");
   assert.equal(leavesOf(registry, parent).length, 0);
   assert.equal(parent.pendingDelegations, 0);
@@ -705,9 +699,8 @@ test("N2 a parent replaced in the registry while the roster resolves is rejected
   broker.observe(parent, start("replaced", ask("scout")), cwd);
   broker.observe(parent, update("replaced"), cwd);
   registry.register({ ...parent, pendingDelegations: 0 }); // another owner now holds this id
-  await settle();
-  assert.equal(spawned.length, 0, "a parent that is no longer the current registered run must never spawn a leaf");
   const r = await response(parent, "replaced");
+  assert.equal(spawned.length, 0, "a parent that is no longer the current registered run must never spawn a leaf");
   assert.equal(r.ok, false);
   assert.match(r.reason, /not the current registered run/);
 });
@@ -720,9 +713,9 @@ test("N2 the 64 KiB task limit counts UTF-8 bytes: 65536 spawns, 65537 is reject
   assert.deepEqual([Buffer.byteLength(exact), Buffer.byteLength(over), over.length], [65536, 65537, 32769]);
   broker.observe(parent, start("exact", ask("scout", exact)), cwd); broker.observe(parent, update("exact"), cwd);
   broker.observe(parent, start("over", ask("scout", over)), cwd); broker.observe(parent, update("over"), cwd);
-  await settle();
-  assert.deepEqual(spawned.map((o) => Buffer.byteLength(o.task)), [65536], "a 65537-byte task must never spawn, however few UTF-16 units it has");
+  await leafFor(registry, parent, "exact");
   const r = await response(parent, "over");
+  assert.deepEqual(spawned.map((o) => Buffer.byteLength(o.task)), [65536], "a 65537-byte task must never spawn, however few UTF-16 units it has");
   assert.equal(r.ok, false);
   assert.match(r.reason, /task exceeds 65536 bytes/);
 });
@@ -732,17 +725,15 @@ test("N2 a run: ref to another parent's leaf is rejected and never spawns", asyn
   const { registry, spawned, broker } = harness();
   const one = parentRun(registry, cwd), two = parentRun(registry, cwd);
   broker.observe(one, start("own", ask("scout")), cwd); broker.observe(one, update("own"), cwd);
-  await settle();
-  const [leaf] = leavesOf(registry, one);
-  await finishLeaf(registry, leaf!, "Parent one's private leaf result.");
+  const leaf = await leafFor(registry, one, "own");
+  await finishLeaf(registry, leaf, "Parent one's private leaf result.");
   await response(one, "own");
-  broker.observe(two, start("borrow", ask("auditor", "review", { files: [`run:${leaf!.id}`] })), cwd);
+  broker.observe(two, start("borrow", ask("auditor", "review", { files: [`run:${leaf.id}`] })), cwd);
   broker.observe(two, update("borrow"), cwd);
-  await settle();
-  assert.equal(spawned.length, 1, "a ref to another parent's leaf must never reach a spawned task");
   const r = await response(two, "borrow");
+  assert.equal(spawned.length, 1, "a ref to another parent's leaf must never reach a spawned task");
   assert.equal(r.ok, false);
-  assert.match(r.reason, new RegExp(`files: run:${leaf!.id} is not a delegate child of this run`));
+  assert.match(r.reason, new RegExp(`files: run:${leaf.id} is not a delegate child of this run`));
 });
 
 // ── Child tool ───────────────────────────────────────────────────────

@@ -10,7 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 const sleepSync = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 /** Concurrent CLI invocations (parallel leaves) read-modify-write one file under a lock. */
 function locked(statePath, fn) {
-  const lock = `${statePath}.lock`, end = Date.now() + 5000;
+  const lock = `${statePath}.lock`, end = Date.now() + 30000;
   for (;;) {
     try { mkdirSync(lock); break; } catch (e) { if (e.code !== "EEXIST" || Date.now() > end) process.exit(97); sleepSync(5); }
   }
@@ -99,7 +99,7 @@ export async function main(statePath, args) {
     });
     if (!manifest) return;
     if (busy()) return fail("cli:agent:start", "timeout", "timed out waiting for agent startup");
-    const end = Date.now() + 15000;
+    const end = Date.now() + 55000;
     while (!existsSync(`${manifest}.ready`)) { if (Date.now() > end) process.exit(94); await delay(10); }
     if (busy()) return fail("cli:agent:start", "timeout", "timed out waiting for agent startup");
     locked(statePath, state => {

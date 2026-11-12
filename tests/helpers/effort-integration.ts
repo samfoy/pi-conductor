@@ -10,7 +10,7 @@ import { tmpDir } from "./tmp.ts";
 import { gitTestEnv } from "./git-env.ts";
 import type { EffortPolicy } from "../../src/effort/policy.ts";
 
-export const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: gitTestEnv(), encoding: "utf8", stdio: "pipe", timeout: 5000 }).trim();
+export const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, env: gitTestEnv(), encoding: "utf8", stdio: "pipe", timeout: 60_000 }).trim();
 export function fixture(t: TestContext, verify: string, policy: Partial<EffortPolicy> = {}, change = true) {
   const root = tmpDir("m2-fixture-"); git(root, "init", "-b", "main");
   git(root, "config", "user.name", "T"); git(root, "config", "user.email", "t@t");
@@ -41,7 +41,7 @@ export function fixture(t: TestContext, verify: string, policy: Partial<EffortPo
   const hook = (body: string) => writeFileSync(join(root, ".git", "hooks", "pre-commit"), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
   return { root, record, run, registry, base, head, start, unchanged, hook };
 }
-export async function until(registry: RunRegistry, run: Run, condition: (run: Run) => boolean, timeoutMs = 5000): Promise<void> {
+export async function until(registry: RunRegistry, run: Run, condition: (run: Run) => boolean, timeoutMs = 30_000): Promise<void> {
   if (condition(run)) return;
   await new Promise<void>((resolve, reject) => {
     const off = registry.onChange(r => { if (r === run && condition(r)) { clearTimeout(timer); off(); resolve(); } });

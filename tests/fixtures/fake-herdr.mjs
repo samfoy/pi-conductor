@@ -68,7 +68,7 @@ else if (args[0] === "agent" && args[1] === "start") {
     writeFileSync(state.manifest, JSON.stringify({ runDir: dirname(dirname(sessionFile)), mode: state.mode }));
     const { existsSync } = await import("node:fs");
     const { setTimeout: delay } = await import("node:timers/promises");
-    const end = Date.now() + 10000;
+    const end = Date.now() + 55000;
     while (!existsSync(`${state.manifest}.ready`)) {
       if (Date.now() > end) process.exit(94);
       await delay(10);

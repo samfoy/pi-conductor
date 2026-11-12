@@ -15,6 +15,7 @@ import { chmodSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, 
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sandboxPi, tmpDir } from "./helpers/tmp.ts";
+import { readWholeJson } from "./helpers/json.ts";
 import { ownerProvenDead, probeHerdrOwner } from "../src/herdr/ownership.ts";
 import { readProcessStartTime } from "../src/reconcile-startup.ts";
 import {
@@ -231,8 +232,9 @@ test("S3 lease: several real processes claiming one socket at once yield exactly
     for (let i = 0; i < N; i++) procs.push(spawn(process.execPath, ["--import", "tsx", child, dir, sock, String(i)], { cwd: process.cwd(), env: process.env, stdio: ["ignore", "ignore", "inherit"] }));
     await wait(() => readdirSync(dir).filter(f => f.startsWith("ready-")).length === N, "claimants ready");
     writeFileSync(join(dir, "go"), "");
-    await wait(() => readdirSync(dir).filter(f => f.startsWith("result-")).length === N, "claimants done");
-    const results = Array.from({ length: N }, (_, i) => JSON.parse(readFileSync(join(dir, `result-${i}.json`), "utf8")));
+    const read = () => Array.from({ length: N }, (_, i) => readWholeJson(join(dir, `result-${i}.json`)));
+    await wait(() => read().every(r => r !== undefined), "claimants done");
+    const results = read();
     const winners = results.filter(r => r.won);
     assert.equal(winners.length, 1, `exactly one chief: ${JSON.stringify(results)}`);
     for (const loser of results.filter(r => !r.won)) assert.match(loser.error, /EEXIST|first|changed while claiming|held by lead|invalid chief lease/, loser.error);

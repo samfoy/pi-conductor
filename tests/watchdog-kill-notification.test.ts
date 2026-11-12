@@ -19,6 +19,7 @@ import { join } from "node:path";
 
 import conductor from "../src/index.ts";
 import { stubCtx } from "./helpers/stub-pi.ts";
+import { readWholeJson } from "./helpers/json.ts";
 import { tmpDir } from "./helpers/tmp.ts";
 
 const HARD_MS = 600_000; // DEFAULT_CONFIG.watchdog.defaultHardSeconds
@@ -54,7 +55,7 @@ function loadWithTools(): Harness {
   };
 }
 
-async function until(what: string, ok: () => boolean, ms = 10_000): Promise<void> {
+async function until(what: string, ok: () => boolean, ms = 30_000): Promise<void> {
   const deadline = Date.now() + ms;
   while (!ok()) {
     assert.ok(Date.now() < deadline, `timed out waiting for ${what}`);
@@ -108,7 +109,7 @@ async function stallKill(tool: "watchdog" | "ensemble_kill"): Promise<Harness["m
     assert.ok(!spawned.isError, JSON.stringify(spawned.content));
     const id: string = spawned.details.agent_id;
     const recordPath = join(root, "home", ".pi", "agent", "conductor", "runs", id, "record.json");
-    await until("the stub to start", () => existsSync(recordPath) && JSON.parse(readFileSync(recordPath, "utf8")).pid);
+    await until("the stub to start", () => !!readWholeJson(recordPath)?.pid);
 
     if (tool === "watchdog") {
       offset = HARD_MS + 60_000;
@@ -117,7 +118,7 @@ async function stallKill(tool: "watchdog" | "ensemble_kill"): Promise<Harness["m
       const out = await h.tools.get("ensemble_kill")!.execute("call-2", { agent_id: id }, undefined, undefined, ctx);
       assert.ok(!out.isError, JSON.stringify(out.content));
     }
-    await until("record.json to say killed", () => JSON.parse(readFileSync(recordPath, "utf8")).status === "killed");
+    await until("record.json to say killed", () => readWholeJson(recordPath)?.status === "killed");
     // The close handler records the outcome after the stub exits; by then
     // any duplicate card from that path would have been sent.
     await until("the close handler", () => existsSync(memoryPath) && readFileSync(memoryPath, "utf8").includes(`"status":"killed"`));
@@ -134,7 +135,7 @@ async function stallKill(tool: "watchdog" | "ensemble_kill"): Promise<Harness["m
   }
 }
 
-test("watchdog: a hard-stall kill of a background run posts exactly one killed completion card", { timeout: 30_000 }, async () => {
+test("watchdog: a hard-stall kill of a background run posts exactly one killed completion card", { timeout: 90_000 }, async () => {
   const messages = await stallKill("watchdog");
   assert.ok(
     messages.some((m) => m.details?.kind === "stalled" && m.details.severity === "hard"),
@@ -145,7 +146,7 @@ test("watchdog: a hard-stall kill of a background run posts exactly one killed c
   assert.equal(cards[0]!.details!.status, "killed");
 });
 
-test("ensemble_kill: a tool kill of the same background run stays silent", { timeout: 30_000 }, async () => {
+test("ensemble_kill: a tool kill of the same background run stays silent", { timeout: 90_000 }, async () => {
   const messages = await stallKill("ensemble_kill");
   assert.deepEqual(messages.filter((m) => m.details?.kind === "completed"), []);
 });

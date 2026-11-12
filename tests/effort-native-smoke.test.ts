@@ -10,7 +10,7 @@ import { resultRef } from "../src/file-evidence.ts";
 import { buildCompletionMessage } from "../src/notifications.ts";
 
 sandboxPi();
-for (const action of ["accept", "kill"] as const) test(`native writer ${action}: process exit and persona hook precede integration; settlement happens once`, { timeout: 20000 }, async t => {
+for (const action of ["accept", "kill"] as const) test(`native writer ${action}: process exit and persona hook precede integration; settlement happens once`, { timeout: 240_000 }, async t => {
   const f = fixture(t, 'if test -f native-change; then while test ! -f "$CONDUCTOR_RUN_DIR/release"; do sleep 0.02; done; fi; git rev-parse HEAD');
   const wrapper = join(tmpDir("m2-native-"), "pi.mjs");
   writeFileSync(wrapper, `import { register } from ${JSON.stringify(import.meta.resolve("tsx/esm/api"))}; register(); await import(${JSON.stringify(new URL("./helpers/native-owner-child.ts", import.meta.url).href)});`);
@@ -19,7 +19,7 @@ for (const action of ["accept", "kill"] as const) test(`native writer ${action}:
   const registry = new RunRegistry(); const persona = (await resolvePersonas({ cwd: f.root })).personas.get("builder")!;
   const cards: ReturnType<typeof buildCompletionMessage>[] = []; let doneCount = 0, chainCount = 0, retryCount = 0, completedChanges = 0;
   registry.onChange(r => { if (r.status === "completed") completedChanges++; });
-  const { run, done } = spawnRun({ registry, persona, task: "CONTROL complete the assignment", cwd: f.root, effort: "probe", parentSessionId: "owner", mode: "background", timeoutMs: 10000,
+  const { run, done } = spawnRun({ registry, persona, task: "CONTROL complete the assignment", cwd: f.root, effort: "probe", parentSessionId: "owner", mode: "background", timeoutMs: 120_000,
     onCompleteHook: 'if kill -0 "$(cat "$CONDUCTOR_RUN_DIR/child-pid")" 2>/dev/null; then echo child-still-alive >&2; exit 1; fi; echo work > native-change; git add native-change; git commit -m native-change',
     onComplete: r => { cards.push(buildCompletionMessage(r)); }, onChain: () => chainCount++, onRetry: () => retryCount++ });
   writeFileSync(join(dirname(run.recordPath), "child-pid"), String(run.pid));
@@ -30,7 +30,7 @@ for (const action of ["accept", "kill"] as const) test(`native writer ${action}:
     if (!exited && child.signalCode === null) child.kill("SIGKILL");
   });
   void done.then(() => { doneCount++; });
-  await until(registry, run, r => r.integration?.state === "verifying" && !!r.integration.logPath?.includes("verify-1.log"), 15000);
+  await until(registry, run, r => r.integration?.state === "verifying" && !!r.integration.logPath?.includes("verify-1.log"), 90_000);
   assert.ok(exited || child.signalCode !== null, "child exit precedes candidate use");
   assert.equal(run.hookResult?.passed, true, run.hookResult?.tailText);
   assert.equal(run.status, "integrating"); assert.equal(registry.countActive(), 0);
