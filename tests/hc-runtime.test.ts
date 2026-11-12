@@ -190,6 +190,22 @@ test("doctor ## Runtime names the host, why, the hc core, lead and space, any co
   await transport.stop();
 });
 
+test("doctor's hc record count: counted in an hc lead and a lead with no herdr host, not checked in an environment-conflict lead", { timeout: 60000 }, async t => {
+  const done = await finishedRecord(t);
+  await resolveHcContext(done.env, [node, entry]);
+  writeFileSync(done.run.recordPath, JSON.stringify(toRunRecord({ ...done.run, herdr: { ...done.b, coreId: "othercore" } })));
+  const registry = new RunRegistry(), queue = new SpawnQueue(registry, 1);
+  const line = (env: Record<string, string | undefined>) => buildDoctorReport({ cwd: done.run.cwd, registry, queue, conductorMode: false, env, runsRoot: done.run.cwd })
+    .then(text => text.split("\n").filter(l => l.includes("hc records with an unprovable terminal")));
+  const tui = { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/run/herdr.sock", HERDR_PANE_ID: "p1" };
+  assert.deepEqual(await line(done.env), ["  hc records with an unprovable terminal: 1 (not attached here, and the child is not proven gone or the terminal is on another herdr-core)"]);
+  assert.deepEqual(await line({ ...done.env, ...tui }), ["  hc records with an unprovable terminal: not checked (environment conflict)"]);
+  assert.deepEqual(await line({ ...done.env, HERDR_ENV: "1" }), ["  hc records with an unprovable terminal: not checked (environment conflict)"], "one leaked TUI variable is a conflict too");
+  assert.deepEqual(await line({}), ["  hc records with an unprovable terminal: 1 (not attached here, and the child is not proven gone or the terminal is on another herdr-core)"],
+    "with no herdr host this lead has no hc core to prove against, so the record really is unprovable here");
+  assert.deepEqual(await line(tui), ["  hc records with an unprovable terminal: 1 (not attached here, and the child is not proven gone or the terminal is on another herdr-core)"]);
+});
+
 test("supervision stays herdr TUI only: an hc lead, even with leaked HERDR_* routing, registers no chief, peer or staff tool", () => {
   const hc = { HC_TERMINAL_ID: "t17", HC_TERMINAL_SOCKET: "/run/user/1000/herdr-core/default.sock" };
   const tui = { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/run/herdr.sock", HERDR_PANE_ID: "p1" };

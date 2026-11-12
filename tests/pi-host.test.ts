@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SessionManager, VERSION } from "@earendil-works/pi-coding-agent";
-import { hostPiCommand, hostPiVersion, PI_LIBRARY_VERSION } from "../src/pi-host.ts";
+import { captureLeadPiVersion, hostPiCommand, hostPiVersion, PI_LIBRARY_VERSION } from "../src/pi-host.ts";
 import { piVersionWarning } from "../src/herdr/runtime.ts";
 import { tmpDir } from "./helpers/tmp.ts";
 
@@ -58,4 +58,24 @@ test("version warning truth table", () => {
   assert.equal(piVersionWarning("0.99.1", "0.87.1"), "Pi version mismatch: lead 0.99.1, child 0.87.1");
   assert.equal(piVersionWarning("unknown", "0.87.1"), "Pi version unverified: lead unknown, child 0.87.1");
   assert.equal(piVersionWarning("0.87.1", "unknown"), "Pi version unverified: lead 0.87.1, child unknown");
+});
+
+test("the lead's Pi version is captured at load: an in-place update on disk after load is a mismatch with the updated child", () => {
+  const root = fakePi("@earendil-works/pi-coding-agent", "1.5.2");
+  const lead = captureLeadPiVersion(join(root, "pi"));
+  writeFileSync(join(root, "package.json"), JSON.stringify({ name: "@earendil-works/pi-coding-agent", version: "1.6.0", bin: { pi: "dist/bundle/cli.js" } }));
+  assert.equal(hostPiVersion({}, join(root, "pi")), "1.6.0", "disk now shows the update");
+  assert.equal(lead.version(), "1.5.2", "the lead still runs what it loaded");
+  assert.equal(piVersionWarning(lead.version(), "1.6.0"), "Pi version mismatch: lead 1.5.2, child 1.6.0");
+});
+
+test("the lead's own session object, once seen, makes the in-memory VERSION the lead's version; a look-alike changes nothing", () => {
+  const lead = captureLeadPiVersion("/nonexistent/pi");
+  assert.equal(lead.version(), "unknown");
+  lead.prove({ getSessionId: () => "look-alike" });
+  assert.equal(lead.version(), "unknown", "a structural look-alike is not host evidence");
+  lead.prove(SessionManager.inMemory());
+  assert.equal(lead.version(), VERSION);
+  lead.prove(undefined);
+  assert.equal(lead.version(), VERSION, "the proof is about module identity, which a later session cannot undo");
 });

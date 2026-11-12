@@ -2046,6 +2046,18 @@ function hostPiVersion(evidence = {}, entry = process.argv[1]) {
   if (evidence.sessionManager instanceof SessionManager) return VERSION;
   return declaredPiEntry(entry)?.version ?? "unknown";
 }
+function captureLeadPiVersion(entry = process.argv[1]) {
+  const loaded = hostPiVersion({}, entry);
+  let proven;
+  return {
+    version: () => proven ?? loaded,
+    prove(sessionManager) {
+      const version = hostPiVersion({ sessionManager }, void 0);
+      if (version !== "unknown") proven = version;
+    }
+  };
+}
+var leadPi = captureLeadPiVersion();
 function hostPiCommand(entry = process.argv[1], node = process.execPath) {
   const proven = declaredPiEntry(entry);
   return proven && isAbsolute3(node) ? [node, proven.script] : void 0;
@@ -9540,7 +9552,7 @@ var HerdrRuntime = class {
       binding.childPid = hello.pid;
       binding.childStartTime = hello.pidStartTime;
       provenPane = pane;
-      const versionWarning = piVersionWarning(options.piVersion ?? hostPiVersion(), hello.piVersion);
+      const versionWarning = piVersionWarning(options.piVersion ?? leadPi.version(), hello.piVersion);
       if (versionWarning) {
         binding.versionWarning = versionWarning;
         diagnostic(versionWarning);
@@ -10955,6 +10967,7 @@ function runtimeEnvironmentLines(env, inventory, selected) {
     if (!piCommand) lines.push("  \u26A0 hc launches refused: the host Pi entry is not Pi's declared bin");
   } else if (hc) lines.push(`  hc: socket=${env.HC_TERMINAL_SOCKET} core unresolved (${hc.reason.replace(/^herdr: /, "")}); hc launches refused until it resolves`);
   if (where.ok && where.host === "tui") lines.push(`  tui: socket=${env.HERDR_SOCKET_PATH} pane=${env.HERDR_PANE_ID}`);
+  if (!where.ok && where.conflict) return [...lines, "  hc records with an unprovable terminal: not checked (environment conflict)"];
   const context = hc && "context" in hc ? hc.context : void 0;
   const unprovable = inventory.filter((e) => e.runtime === "herdr" && isHcBinding(e.herdr) && e.inMemory?.transport?.kind !== "herdr" && (!e.herdrChildAbsent || e.herdr.socketPath !== context?.socketPath || e.herdr.coreId !== context.coreId)).length;
   lines.push(`  hc records with an unprovable terminal: ${unprovable} (not attached here, and the child is not proven gone or the terminal is on another herdr-core)`);
@@ -20496,6 +20509,7 @@ function index_default(pi) {
     const cwdWarning = cwdControl.restore(branch);
     if (cwdWarning) ctx.ui.notify(cwdWarning, "warning");
     ctxRef = ctx;
+    leadPi.prove(ctx.sessionManager);
     let sessionId, sessionFile;
     try {
       sessionId = ctx.sessionManager?.getSessionId();

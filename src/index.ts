@@ -1,4 +1,5 @@
 import { recoveryRuntimes } from "./runtime.ts";
+import { leadPi } from "./pi-host.ts";
 import { readoptHerdrRun } from "./run-pipeline.ts";
 import { buildOrphanRun } from "./reconcile-startup.ts";
 import { claimReloadSurvivors, handOffCandidate, publishReloadSurvivors, watchSurvivor, type Survivor } from "./reload-handoff.ts";
@@ -463,6 +464,7 @@ export default function (pi: ExtensionAPI): void {
     const cwdWarning = cwdControl.restore(branch);
     if (cwdWarning) ctx.ui.notify(cwdWarning, "warning");
     ctxRef = ctx;
+    leadPi.prove(ctx.sessionManager);
     // S1: identity is read once, here; a later getter on this ctx may be stale after reload or a switch.
     let sessionId: string | undefined, sessionFile: string | undefined;
     try { sessionId = ctx.sessionManager?.getSessionId(); sessionFile = ctx.sessionManager?.getSessionFile(); } catch { /* ineligible */ }

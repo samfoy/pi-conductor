@@ -208,7 +208,9 @@ run id and Pi session stay the same, and stall reads use only the current name.
 | lead on the other Pi version: mismatch persisted and shown on the completion card | pass |
 
 The child hello's `piVersion` is the executing host Pi, taken from host module
-identity or the package's declared CLI entry, otherwise `unknown`. Conductor's own
+identity or the package's declared CLI entry, otherwise `unknown`. The lead's side
+of the comparison is the version it loaded, captured once, so an in-place update
+of the package on disk does not hide a difference. Conductor's own
 import (0.84.3 from its package `node_modules` in these runs) is reported separately
 as `piLibraryVersion`. A lead/child difference is persisted as `herdr.versionWarning`
 and appears as a `<warning reason="pi-version">`. An unprovable version reads as
@@ -285,15 +287,18 @@ second root is given.
 
 **Observed, not changed:**
 - Pi 0.87.1 has no OSC 7501 reporter, so `hc get .status` stays `null`.
-- An hc child always runs the lead's own proven Pi entry, so the H11 lead/child
-  version warning cannot fire through hc.
+- An hc child always runs the lead's own proven Pi entry, so through hc the H11
+  lead/child version warning fires only after an in-place Pi update while the lead
+  runs. The lead's version is captured when conductor loads (proven at
+  session_start from the host's own session object when it can be), not read from
+  disk at each launch.
 - `hc read` of a Pi 1.5.2 lead terminal took about 2.4 s after each screen change,
   and once more than 15 s while a running child's widget redrew. Reads of child
   terminals took 3 to 4 ms. Conductor reads only child screens (stall evidence, 2 s,
   4 KiB).
-- In a conflict lead, doctor shows no hc context and so counts every hc record as
-  unprovable, while startup recovery still resolves the context and proves each
-  record through its own binding.
+- In a conflict lead, doctor prints `hc records with an unprovable terminal: not
+  checked (environment conflict)` instead of a count, while startup recovery still
+  resolves the context and proves each record through its own binding.
 - A finished child's terminal stays listed in `hc ls --all` until a resume
   replaces it, its lead quits (shutdown removes the finished terminals of the runs
   it has attached), or GC reclaims the run. With the default GC policy that is after

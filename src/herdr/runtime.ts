@@ -5,7 +5,7 @@ import { closeSync, constants, fstatSync, openSync, readSync, statSync, writeFil
 import { dirname, isAbsolute, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { getAgentDir, hasTrustRequiringProjectResources, ProjectTrustStore, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
-import { hostPiVersion } from "../pi-host.ts";
+import { leadPi } from "../pi-host.ts";
 import type { Delivery, DeliveryAck, HerdrTransport, RunRuntime, RunSink } from "../runtime.ts";
 import { isTerminal, type Run } from "../types.ts";
 import { HerdrTail } from "./tail.ts";
@@ -376,7 +376,7 @@ export class HerdrRuntime implements RunRuntime {
       if (!identity.ok && identity.state !== "gone") throw failure(`child identity refused: ${identity.reason}`);
       binding.childPid = hello.pid; binding.childStartTime = hello.pidStartTime;
       provenPane = pane;
-      const versionWarning = piVersionWarning(options.piVersion ?? hostPiVersion(), hello.piVersion);
+      const versionWarning = piVersionWarning(options.piVersion ?? leadPi.version(), hello.piVersion);
       if (versionWarning) { binding.versionWarning = versionWarning; diagnostic(versionWarning); }
       await writeRecord(run, check); check();
       // Publish only to the proven, registered child; a gone child never gets the task.

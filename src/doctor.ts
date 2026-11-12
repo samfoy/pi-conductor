@@ -66,6 +66,7 @@ function runtimeEnvironmentLines(env: RuntimeEnvironment, inventory: readonly In
     if (!piCommand) lines.push("  ⚠ hc launches refused: the host Pi entry is not Pi's declared bin");
   } else if (hc) lines.push(`  hc: socket=${env.HC_TERMINAL_SOCKET} core unresolved (${hc.reason.replace(/^herdr: /, "")}); hc launches refused until it resolves`);
   if (where.ok && where.host === "tui") lines.push(`  tui: socket=${env.HERDR_SOCKET_PATH} pane=${env.HERDR_PANE_ID}`);
+  if (!where.ok && where.conflict) return [...lines, "  hc records with an unprovable terminal: not checked (environment conflict)"];
   const context = hc && "context" in hc ? hc.context : undefined;
   const unprovable = inventory.filter(e => e.runtime === "herdr" && isHcBinding(e.herdr) && e.inMemory?.transport?.kind !== "herdr" &&
     (!e.herdrChildAbsent || e.herdr.socketPath !== context?.socketPath || e.herdr.coreId !== context.coreId)).length;

@@ -32,6 +32,22 @@ export function hostPiVersion(evidence: { sessionManager?: unknown } = {}, entry
   return declaredPiEntry(entry)?.version ?? "unknown";
 }
 
+export interface LeadPiVersion { version(): string; prove(sessionManager: unknown): void }
+
+export function captureLeadPiVersion(entry: string | undefined = process.argv[1]): LeadPiVersion {
+  const loaded = hostPiVersion({}, entry);
+  let proven: string | undefined;
+  return {
+    version: () => proven ?? loaded,
+    prove(sessionManager) {
+      const version = hostPiVersion({ sessionManager }, undefined);
+      if (version !== "unknown") proven = version;
+    },
+  };
+}
+
+export const leadPi = captureLeadPiVersion();
+
 export function hostPiCommand(entry: string | undefined = process.argv[1], node: string = process.execPath): readonly [string, string] | undefined {
   const proven = declaredPiEntry(entry);
   return proven && isAbsolute(node) ? [node, proven.script] : undefined;

@@ -26,7 +26,7 @@ export async function until(cond: () => boolean, what: string, ms = 30000) {
 }
 
 export async function launchFixture(t: TestContext, mode = "hold", probe: (h: { transport: () => HerdrTransport | undefined }) => Probe = () => realProbe,
-  wrap: (cli: HcCli, dir: string) => HcCli = cli => cli, piCommand: readonly [string, string] | null = [process.execPath, fakeChild]) {
+  wrap: (cli: HcCli, dir: string) => HcCli = cli => cli, piCommand: readonly [string, string] | null = [process.execPath, fakeChild], piVersion: string | null = "fake-child") {
   const f = await fakeHc({}, { FAKE_CHILD_MODE: mode });
   const lead = await f.cli.run({ name: "lead", cwd: "/tmp", labels: { "herdr.space": "sp-lead" }, argv: ["pi"] });
   f.patch({ spawn: true, coreEnv: leaked });
@@ -37,7 +37,7 @@ export async function launchFixture(t: TestContext, mode = "hold", probe: (h: { 
   const host = new HcHost({ cli: wrap(f.cli, dir), coreId, lead: { address: lead.address, space: "sp-lead" }, ...(piCommand ? { piCommand } : {}) });
   const signals: [number, string][] = [];
   let transport: HerdrTransport | undefined;
-  const runtime = new HerdrRuntime({ host, env: { AWS_PROFILE: "inference-only" }, trustArgs: () => [], piVersion: "fake-child", platform: "linux",
+  const runtime = new HerdrRuntime({ host, env: { AWS_PROFILE: "inference-only" }, trustArgs: () => [], ...(piVersion === null ? {} : { piVersion }), platform: "linux",
     probe: probe({ transport: () => transport }), signal: (pid, signal) => { signals.push([pid, signal]); process.kill(pid, signal); } });
   const sink: RunSink = { line() {}, close() {}, error() {}, initialDeliveryFailed() {} };
   t.after(() => {
