@@ -663,6 +663,7 @@ A stopped old owner cannot write a new generation's records or CAS its ref.
 Integration teardown is independent of shell exit: TERM-resistant descendants
 with closed stdio still get SIGKILL after the two-second TERM grace. Linux procfs
 membership, session IDs and observed PID/start-time anchors guard each signal.
+A scan with no anchored member never authorizes a signal, but it can still confirm completion.
 Completion requires a vanished group or two stable zombie/dead-only observations;
 conductor cannot reap orphan zombies, but they cannot execute further work. There
 is a one-second confirmation deadline after escalation, not an indefinite wait.

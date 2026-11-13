@@ -964,28 +964,35 @@ async function stopOwnedProcessGroup(group, deps = {}) {
       throw new Error(`group ${group.pid} signal ${sig} unconfirmed: ${error.message}`);
     }
   };
+  const lost = () => new Error(`group ${group.pid} identity continuity lost; refusing signal`);
   const observe = () => {
-    if (!send(0)) return [];
+    if (!send(0)) return { members: [], proven: false };
     if (!Number.isSafeInteger(group.startTime) || group.startTime <= 0) throw new Error("missing owned group start identity");
     const members = processes().filter((p) => p.pgid === group.pid);
     if (!members.length) {
-      if (!send(0)) return [];
+      if (!send(0)) return { members: [], proven: false };
       throw new Error(`group ${group.pid} exists but membership is unknown`);
     }
-    if (members.some((p) => p.sid !== group.pid || p.pid === group.pid && p.startTime !== group.startTime) || !members.some((p) => known.get(p.pid) === p.startTime)) throw new Error(`group ${group.pid} identity continuity lost; refusing signal`);
+    if (members.some((p) => p.sid !== group.pid || p.pid === group.pid && p.startTime !== group.startTime)) throw lost();
+    if (!members.some((p) => known.get(p.pid) === p.startTime)) return { members, proven: false };
     for (const p of members) known.set(p.pid, p.startTime);
-    return members;
+    return { members, proven: true };
+  };
+  const signalProven = (scan, sig) => {
+    if (!scan.proven) throw lost();
+    return send(sig);
   };
   const active = (members) => members.some((p) => p.state !== "Z" && p.state !== "X");
   const initial = observe();
-  if (!initial.length) return;
-  if (active(initial) && !send("SIGTERM")) return;
+  if (!initial.members.length) return;
+  if (active(initial.members) && !signalProven(initial, "SIGTERM")) return;
   const escalationAt = now() + 2e3;
   const deadline = escalationAt + 1e3;
   let escalated = false;
   let zombies;
   for (; ; ) {
-    const members = observe();
+    const scan = observe();
+    const { members } = scan;
     if (!members.length) return;
     if (!active(members)) {
       const identities = members.map((p) => `${p.pid}:${p.startTime}`).sort().join(",");
@@ -994,7 +1001,7 @@ async function stopOwnedProcessGroup(group, deps = {}) {
     } else {
       zombies = void 0;
       if (!escalated && now() >= escalationAt) {
-        if (!send("SIGKILL")) return;
+        if (!signalProven(scan, "SIGKILL")) return;
         escalated = true;
       }
     }

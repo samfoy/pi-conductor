@@ -79,6 +79,46 @@ for (const replacement of [
   assert.deepEqual(h.signals.filter(s => s !== 0), ["SIGTERM"]);
 });
 
+const late: GroupProcess = { ...child, pid: 103, startTime: 1002 };
+function afterTerm(h: ReturnType<typeof harness>, scans: GroupProcess[][]) {
+  let scan = -1;
+  const rows = () => scans[Math.min(scan, scans.length - 1)]!;
+  return { ...h.deps,
+    signal: (pid: number, sig: NodeJS.Signals | 0) => {
+      h.deps.signal(pid, sig);
+      if (sig === "SIGTERM") { scan = 0; h.setRows(rows()); }
+      if (sig === 0 && scan >= 0 && !rows().length) throw gone();
+    },
+    wait: async (n: number) => { await h.deps.wait(n); scan++; h.setRows(rows()); } };
+}
+
+for (const [name, scans] of [
+  ["a zombie reparented after its forking leader was reaped", [[{ ...late, state: "Z" }]]],
+  ["a late fork still exiting under the first TERM", [[{ ...late, state: "R" }], [{ ...late, state: "R" }], [{ ...late, state: "Z" }]]],
+  ["a late fork that is reaped before the next scan", [[{ ...late, state: "R" }], []]],
+] as const) test(`late fork during teardown: ${name} is waited out, never signalled`, async () => {
+  const h = harness();
+  await stopOwnedProcessGroup(owner, afterTerm(h, scans.map(rows => [...rows])));
+  assert.deepEqual(h.signals.filter(s => s !== 0), ["SIGTERM"]);
+  assert.ok(h.elapsed() < 2000);
+});
+
+for (const [name, scans] of [
+  ["a different session", [[{ ...late, sid: 999, state: "Z" }]]],
+  ["a reused leader start", [[{ ...leader, startTime: 2000, state: "Z" }]]],
+  ["an unproven member that keeps executing past escalation", [[{ ...late, state: "Z" }], [{ ...late, state: "Z" }, { ...late, pid: 104 }]]],
+] as const) test(`late fork impostor: ${name} is refused and never SIGKILLed`, async () => {
+  const h = harness();
+  await assert.rejects(stopOwnedProcessGroup(owner, afterTerm(h, scans.map(rows => [...rows]))), /identity continuity lost/);
+  assert.deepEqual(h.signals.filter(s => s !== 0), ["SIGTERM"]);
+});
+
+test("a first scan with only unproven executing members is never signalled", async () => {
+  const h = harness([child]);
+  await assert.rejects(stopOwnedProcessGroup(owner, h.deps), /identity continuity lost/);
+  assert.ok(h.signals.every(s => s === 0));
+});
+
 test("unknown membership, missing fingerprint and unavailable process evidence fail closed", async () => {
   for (const rows of [[], [{ ...leader, startTime: 2000 }]]) {
     const h = harness(rows);
